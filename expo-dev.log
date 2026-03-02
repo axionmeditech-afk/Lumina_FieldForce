@@ -1,0 +1,226 @@
+Starting project at D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro
+React Compiler enabled
+Starting Metro Bundler
+Waiting on http://localhost:8081
+Logs for your project will appear below.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  1.0% (1/1)
+Android node_modules\expo-router\entry.js ▓▓▓░░░░░░░░░░░░░ 20.0% ( 44/194)
+Android node_modules\expo-router\entry.js ▓▓▓░░░░░░░░░░░░░ 20.0% (123/303)
+Android node_modules\expo-router\entry.js ▓▓▓▓░░░░░░░░░░░░ 28.2% (203/382)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓░░░░░░░░░░░ 34.7% (277/470)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓░░░░░░░░░ 47.5% (403/585)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓░░░░░░░ 58.7% (479/672)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓░░░░░░░ 58.7% (527/705)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 70.5% (626/782)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 70.5% (654/819)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 70.5% (660/832)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 70.5% (669/834)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 70.5% (715/859)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 71.7% (754/895)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 73.4% ( 822/1015)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 73.4% ( 961/1193)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 73.4% (1029/1299)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 73.4% (1133/1385)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 73.4% (1225/1460)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 74.4% (1307/1515)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 82.9% (1441/1599)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓░░░ 82.9% (1478/1623)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 90.1% (1550/1633)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 93.7% (1665/1720)
+Android Bundling failed 86469ms node_modules\expo-router\entry.js (1789 modules)
+Unable to resolve "@/components/RouteMapNative" from "app\route-tracking.tsx"
+[0m [90m 14 |[39m [36mimport[39m [33mAnimated[39m[33m,[39m { [33mFadeInDown[39m } [36mfrom[39m [32m"react-native-reanimated"[39m[33m;[39m
+ [90m 15 |[39m [36mimport[39m { [33mAppCanvas[39m } [36mfrom[39m [32m"@/components/AppCanvas"[39m[33m;[39m
+[31m[1m>[22m[39m[90m 16 |[39m [36mimport[39m { [33mRouteMapNative[39m } [36mfrom[39m [32m"@/components/RouteMapNative"[39m[33m;[39m
+ [90m    |[39m                                 [31m[1m^[22m[39m
+ [90m 17 |[39m [36mimport[39m { useAuth } [36mfrom[39m [32m"@/contexts/AuthContext"[39m[33m;[39m
+ [90m 18 |[39m [36mimport[39m { useAppTheme } [36mfrom[39m [32m"@/contexts/ThemeContext"[39m[33m;[39m
+ [90m 19 |[39m [36mimport[39m {[0m
+
+Import stack:
+
+ app\route-tracking.tsx
+ | import "@/components/RouteMapNative"
+
+ app (require.context)
+
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓░░░░░░░░░ 46.9% (485/708)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓░░░░░░░ 57.1% ( 996/1318)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 78.7% (1458/1643)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 97.7% (1844/1917)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.9% (1938/1938)
+Android Bundled 21958ms node_modules\expo-router\entry.js (1938 modules)
+Android node_modules\expo-router\entry.js ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.9% (1938/1938)
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ WARN  Background location is limited in Expo Go:
+On Android, it is not available at all.
+On iOS, it works when running in the Simulator.
+You can use this API, and all others, in a development build. Learn more: https://expo.fyi/dev-client.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 1984ms node_modules\expo-router\entry.js (1 module)
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ WARN  Background location is limited in Expo Go:
+On Android, it is not available at all.
+On iOS, it works when running in the Simulator.
+You can use this API, and all others, in a development build. Learn more: https://expo.fyi/dev-client.
+Android node_modules\mappls-map-react-native\src\index.ts ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundling failed 232ms node_modules\mappls-map-react-native\src\index.ts (1 module)
+Unable to resolve "./utils/animated/Animated" from "node_modules\mappls-map-react-native\src\MapplsGL.ts"
+[0m [90m 85 |[39m [36mexport[39m type { [33mOnPressEvent[39m } [36mfrom[39m [32m"./types/OnPressEvent"[39m[33m;[39m
+ [90m 86 |[39m
+[31m[1m>[22m[39m[90m 87 |[39m [36mexport[39m { [33mAnimated[39m } [36mfrom[39m [32m"./utils/animated/Animated"[39m[33m;[39m
+ [90m    |[39m                           [31m[1m^[22m[39m
+ [90m 88 |[39m [36mexport[39m { [33mLogger[39m[33m,[39m type [33mLogLevel[39m } [36mfrom[39m [32m"./utils/Logger"[39m[33m;[39m
+ [90m 89 |[39m
+ [90m 90 |[39m [36mexport[39m {[0m
+
+Import stack:
+
+ node_modules\mappls-map-react-native\src\MapplsGL.ts
+ | import "./utils/animated/Animated"
+
+ node_modules\mappls-map-react-native\src\index.ts
+ | import "./MapplsGL"
+
+ components\RouteMapNative.tsx
+ | import "mappls-map-react-native"
+
+ app\route-tracking.tsx
+ | import "@/components/RouteMapNative"
+
+ app (require.context)
+
+Android node_modules\mappls-tracking-react-native\src\index.tsx ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android node_modules\mappls-tracking-react-native\src\index.tsx ░░░░░░░░░░░░░░░░  4.0% (2/2)
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\rewind contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\rewind" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\rewind\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\shortest-path contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\shortest-path" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\shortest-path\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\simplify contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\simplify" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\simplify\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\tesselate contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\tesselate" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\tesselate\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-rotate contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-rotate" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-rotate\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-scale contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-scale" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-scale\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\truncate contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\truncate" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\truncate\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓░░░░░░ 64.1% (470/587)
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-rotate contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-rotate" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\transform-rotate\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\truncate contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\truncate" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\truncate\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+ WARN  The package D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing contains an invalid package.json configuration. Consider raising this issue with the package maintainer(s).
+Reason: The resolution for "D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing" defined in "exports" is D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\@turf\bearing\dist\esm\index.js, however this file does not exist. Falling back to file-based resolution.
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 81.0% (648/720)
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 93.2% (721/749)
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 96.9% (753/765)
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.7% (765/766)
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 99.9% (766/766)
+Android Bundling failed 28832ms node_modules\mappls-tracking-react-native\src\index.tsx (766 modules)
+Unable to resolve "./utils/animated/Animated" from "node_modules\mappls-map-react-native\src\MapplsGL.ts"
+[0m [90m 85 |[39m [36mexport[39m type { [33mOnPressEvent[39m } [36mfrom[39m [32m"./types/OnPressEvent"[39m[33m;[39m
+ [90m 86 |[39m
+[31m[1m>[22m[39m[90m 87 |[39m [36mexport[39m { [33mAnimated[39m } [36mfrom[39m [32m"./utils/animated/Animated"[39m[33m;[39m
+ [90m    |[39m                           [31m[1m^[22m[39m
+ [90m 88 |[39m [36mexport[39m { [33mLogger[39m[33m,[39m type [33mLogLevel[39m } [36mfrom[39m [32m"./utils/Logger"[39m[33m;[39m
+ [90m 89 |[39m
+ [90m 90 |[39m [36mexport[39m {[0m
+
+Import stack:
+
+ node_modules\mappls-map-react-native\src\MapplsGL.ts
+ | import "./utils/animated/Animated"
+
+ node_modules\mappls-map-react-native\src\index.ts
+ | import "./MapplsGL"
+
+ components\RouteMapNative.tsx
+ | import "mappls-map-react-native"
+
+ app\route-tracking.tsx
+ | import "@/components/RouteMapNative"
+
+ app (require.context)
+
+Android node_modules\mappls-tracking-react-native\src\index.tsx ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android node_modules\mappls-tracking-react-native\src\index.tsx ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 90.1% (601/633)
+Android Bundling failed 4600ms node_modules\mappls-tracking-react-native\src\index.tsx (759 modules)
+Unable to resolve "./utils/animated/Animated" from "node_modules\mappls-map-react-native\src\MapplsGL.ts"
+[0m [90m 85 |[39m [36mexport[39m type { [33mOnPressEvent[39m } [36mfrom[39m [32m"./types/OnPressEvent"[39m[33m;[39m
+ [90m 86 |[39m
+[31m[1m>[22m[39m[90m 87 |[39m [36mexport[39m { [33mAnimated[39m } [36mfrom[39m [32m"./utils/animated/Animated"[39m[33m;[39m
+ [90m    |[39m                           [31m[1m^[22m[39m
+ [90m 88 |[39m [36mexport[39m { [33mLogger[39m[33m,[39m type [33mLogLevel[39m } [36mfrom[39m [32m"./utils/Logger"[39m[33m;[39m
+ [90m 89 |[39m
+ [90m 90 |[39m [36mexport[39m {[0m
+
+Import stack:
+
+ node_modules\mappls-map-react-native\src\MapplsGL.ts
+ | import "./utils/animated/Animated"
+
+ node_modules\mappls-map-react-native\src\index.ts
+ | import "./MapplsGL"
+
+ components\RouteMapNative.tsx
+ | import "mappls-map-react-native"
+
+ app\route-tracking.tsx
+ | import "@/components/RouteMapNative"
+
+ app (require.context)
+
+Android node_modules\mappls-tracking-react-native\src\index.tsx ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 62ms node_modules\mappls-tracking-react-native\src\index.tsx (1 module)
+Android Bundled 98ms node_modules\mappls-map-react-native\src\index.ts (1 module)
+ ERROR  [Error: Requiring unknown module "1941". If you are sure the module exists, try restarting Metro. You may also want to run `yarn` or `npm install`.] 
+
+Call Stack
+  unknownModuleError (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  loadModuleImplementation (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  guardedLoadModule (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  metroRequire (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  <global> (node_modules\mappls-map-react-native\src\index.ts)
+  loadModuleImplementation (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  guardedLoadModule (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  metroRequire (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  metroImportAll (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  unstable_createWorker (node_modules\expo\src\async-require\asyncRequireModule.ts)
+  tryCallOne (address at (InternalBytecode.js:1:1180)
+  anonymous (address at (InternalBytecode.js:1:1874)
+ ERROR  [Error: Requiring unknown module "1940". If you are sure the module exists, try restarting Metro. You may also want to run `yarn` or `npm install`.] 
+
+Call Stack
+  unknownModuleError (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  loadModuleImplementation (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  guardedLoadModule (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  metroRequire (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  <global> (node_modules\mappls-tracking-react-native\src\index.tsx)
+  loadModuleImplementation (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  guardedLoadModule (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  metroRequire (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  metroImportAll (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js)
+  unstable_createWorker (node_modules\expo\src\async-require\asyncRequireModule.ts)
+  tryCallOne (address at (InternalBytecode.js:1:1180)
+  anonymous (address at (InternalBytecode.js:1:1874)
+[metro-file-map] Cache write error
+: Error: ENOSPC: no space left on device, write
+    at write (node:internal/fs/promises:742:8)
+    at writeFileHandle (node:internal/fs/promises:499:7)
+    at D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\metro-file-map\src\cache\DiskCacheManager.js:80:11 {
+  errno: -4055,
+  code: 'ENOSPC',
+  syscall: 'write'
+}

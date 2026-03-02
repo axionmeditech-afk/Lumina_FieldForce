@@ -1,0 +1,16 @@
+  --non-interactive is not supported, use $CI=1 instead
+D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\expo\node_modules\@expo\cli\build\src\utils\errors.js:130
+    throw error;
+    ^
+
+Error: EPERM: operation not permitted, open 'D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\.gitignore'
+    at Object.readFileSync (node:fs:439:20)
+    at upsertGitIgnoreContents (D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\expo\node_modules\@expo\cli\src\utils\mergeGitIgnorePaths.ts:121:30)
+    at startTypescriptTypeGenerationAsync (D:\Enterprise-Suite-Prozip\Enterprise-Suite-Pro\node_modules\expo\node_modules\@expo\cli\src\start\server\type-generation\startTypescriptTypeGeneration.ts:46:30) {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'open',
+  path: 'D:\\Enterprise-Suite-Prozip\\Enterprise-Suite-Pro\\.gitignore'
+}
+
+Node.js v24.13.0

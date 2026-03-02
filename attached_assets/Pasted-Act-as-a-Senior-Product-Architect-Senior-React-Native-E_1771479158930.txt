@@ -1,0 +1,398 @@
+Act as a Senior Product Architect, Senior React Native Engineer, Senior Node.js Backend Engineer, AI/ML Engineer and UI/UX Designer with 10+ years of experience building enterprise SaaS apps.
+
+Build a production-ready, App Store & Play Store level React Native application called:
+
+TrackForce AI
+
+An enterprise employee tracking + AI sales intelligence platform integrated with Dolibarr ERP.
+
+The UI must be stunning, minimal, modern SaaS style (Stripe + Linear + Notion inspired), with subtle animations and professional micro-interactions.
+
+🏗️ TECH STACK
+Mobile App
+
+React Native (Expo or CLI)
+
+TypeScript
+
+Redux Toolkit or Zustand
+
+React Navigation
+
+React Native Reanimated (subtle animations)
+
+Lottie animations
+
+Native Camera API
+
+Background Location Tracking
+
+Secure Storage (JWT tokens)
+
+Backend
+
+Node.js + Express
+
+PostgreSQL
+
+Redis (for realtime updates)
+
+WebSockets (live tracking updates)
+
+Multer (file uploads)
+
+FFmpeg (audio processing)
+
+OpenAI Whisper or Deepgram (transcription with diarization)
+
+GPT-4/LLM for conversation analysis
+
+Dolibarr REST API Integration
+
+Cloud
+
+AWS / GCP
+
+S3 for media storage
+
+Dockerized backend
+
+Role-based authentication
+
+📱 APP MODULES
+1️⃣ AUTHENTICATION SYSTEM
+Features:
+
+Role-based login:
+
+Admin
+
+HR
+
+Salesperson
+
+Manager
+
+JWT Authentication
+
+Biometric login
+
+Secure token refresh
+
+Device binding for security
+
+2️⃣ EMPLOYEE TRACKING SYSTEM
+📍 Geo-Fencing
+
+Admin can define geo zones
+
+If employee enters zone → auto check-in suggestion
+
+If leaves zone → auto checkout suggestion
+
+Real-time GPS tracking (with battery optimization)
+
+Background tracking every X minutes
+
+📸 Photo Attendance
+
+On check-in:
+
+Capture real-time selfie
+
+Timestamp overlay
+
+GPS coordinates
+
+AI Face detection validation
+
+Store image in S3
+
+Save data in Dolibarr attendance module
+
+⏱ Time Tracking
+
+Working hours auto calculation
+
+Break tracking
+
+Late detection
+
+Overtime calculation
+
+📊 Admin Dashboard
+
+Live map with active employees
+
+Color indicators:
+
+Green = Active
+
+Yellow = Idle
+
+Red = Offline
+
+Weekly attendance heatmap
+
+3️⃣ DOLIBARR ERP INTEGRATION
+Sync Data:
+
+Employees list
+
+Salary structure
+
+Sales targets
+
+Customer data
+
+Attendance logs
+
+Sales orders
+
+Show inside app:
+
+Pull Dolibarr fields dynamically
+
+Reflect updates in real time
+
+Push tracking data to Dolibarr modules:
+
+Attendance
+
+Timesheets
+
+CRM notes
+
+Sales visit reports
+
+Create a Dolibarr integration service layer.
+
+4️⃣ SALARY MODULE
+Employee Side:
+
+View monthly salary breakdown
+
+Basic
+
+Allowances
+
+Deductions
+
+Bonus
+
+Overtime
+
+Salary Slip
+
+Generate PDF
+
+Download
+
+Share
+
+Print
+
+Digitally signed
+
+Admin:
+
+Payroll approval flow
+
+Auto salary calculation based on attendance
+
+5️⃣ SALES CONVERSATION INTELLIGENCE MODULE
+
+This is the premium AI feature.
+
+🎙 Recording System
+
+Record conversation in-app
+
+Background noise reduction
+
+Auto upload after call
+
+Show recording timeline UI
+
+📝 Transcription System
+
+Word-to-word transcription
+
+Speaker diarization:
+
+Speaker 1 → Salesperson
+
+Speaker 2 → Customer
+
+Timestamps per sentence
+
+Highlight key phrases
+
+Store transcript in DB
+
+🧠 Conversation Analysis Engine
+
+After transcription:
+
+Analyze:
+Customer:
+
+Interest Level Score (0-100)
+
+Buying intent detection
+
+Objection detection
+
+Sentiment score
+
+Price sensitivity detection
+
+Competitor mentions
+
+Salesperson:
+
+Pitch clarity score
+
+Confidence level (based on language)
+
+Talk-to-listen ratio
+
+Question quality score
+
+Closing attempt detection
+
+Missed opportunity suggestions
+
+📊 AI Output UI
+
+Create a premium analytics screen:
+
+Radar chart (skills breakdown)
+
+Interest meter (animated gauge)
+
+Objection list
+
+Improvement suggestions
+
+Summary paragraph
+
+Auto-generated CRM summary for Dolibarr
+
+6️⃣ ADVANCED PROFESSIONAL FEATURES
+
+Leaderboard for salespeople
+
+Daily visit log
+
+Route history map
+
+Productivity score
+
+AI-based sales coaching tips
+
+Push notifications:
+
+Target reminder
+
+Low activity alert
+
+Admin export reports (CSV / PDF)
+
+7️⃣ UI/UX REQUIREMENTS
+
+Make UI:
+
+Clean white + dark mode
+
+Soft shadows
+
+Rounded corners (16px+)
+
+Gradient buttons
+
+Glassmorphism in dashboard cards
+
+Smooth tab transitions
+
+Skeleton loaders
+
+Pull to refresh
+
+Animated graphs
+
+Floating action buttons
+
+Subtle animations:
+
+Page fade in
+
+Button press scale
+
+Success animation after check-in
+
+AI analysis loading animation
+
+Make it feel:
+
+Enterprise
+
+Trustworthy
+
+Premium
+
+Smooth
+
+8️⃣ DATABASE SCHEMA
+
+Design tables:
+
+users
+
+roles
+
+attendance
+
+geofences
+
+salaries
+
+recordings
+
+transcripts
+
+analysis_results
+
+sales_metrics
+
+dolibarr_sync_logs
+
+9️⃣ SECURITY
+
+HTTPS only
+
+Encrypted audio storage
+
+Role-based data access
+
+Device fingerprinting
+
+Admin approval for sensitive edits
+
+🔟 ADMIN WEB DASHBOARD
+
+Create web panel:
+
+Built in React
+
+Analytics charts
+
+Map view
+
+Employee filter
+
+Conversation review section
+
+Payroll approval system
+
+Settings for AI sensitivity tuning

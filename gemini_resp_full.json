@@ -1,0 +1,30 @@
+{
+    "candidates":  [
+                       {
+                           "content":  {
+                                           "parts":  [
+                                                         {
+                                                             "text":  "{\n  \"interestScore\": 0.95,\n  \"pitchScore\": 0.75,\n  \"summary\": \"customer asked pricing and proposal.\"\n}"
+                                                         }
+                                                     ],
+                                           "role":  "model"
+                                       },
+                           "finishReason":  "STOP",
+                           "index":  0
+                       }
+                   ],
+    "usageMetadata":  {
+                          "promptTokenCount":  21,
+                          "candidatesTokenCount":  39,
+                          "totalTokenCount":  295,
+                          "promptTokensDetails":  [
+                                                      {
+                                                          "modality":  "TEXT",
+                                                          "tokenCount":  21
+                                                      }
+                                                  ],
+                          "thoughtsTokenCount":  235
+                      },
+    "modelVersion":  "gemini-2.5-flash",
+    "responseId":  "LqSeaavnCpHb4-EPk_qX2Qs"
+}
