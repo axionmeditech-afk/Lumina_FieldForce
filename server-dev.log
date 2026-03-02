@@ -1,4 +1,0 @@
-Serving static Expo files with dynamic manifest routing
-Expo routing: Checking expo-platform header on / and /manifest
-express server serving on port 5000
-POST /api/auth/token 200 in 8ms :: {"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVC…
