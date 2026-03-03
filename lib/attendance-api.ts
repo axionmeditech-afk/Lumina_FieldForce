@@ -76,8 +76,8 @@ function toApiBaseUrls(rawUrl: string): string[] {
   const protocols: Array<"http:" | "https:"> = isPrivateHost
     ? ["http:", "https:"]
     : allowedProtocol === "http:"
-      ? ["http:", "https:"]
-      : ["https:", "http:"];
+      ? ["http:"]
+      : ["https:"];
 
   const candidates = new Set<string>();
   for (const protocol of protocols) {
@@ -90,6 +90,17 @@ function toApiBaseUrls(rawUrl: string): string[] {
   }
 
   return Array.from(candidates);
+}
+
+function isPrivateApiBaseUrl(value: string): boolean {
+  const cleaned = value.trim();
+  if (!cleaned) return false;
+  try {
+    const parsed = new URL(cleaned);
+    return isPrivateOrLocalHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function getExpoLanApiBaseUrl(): string | null {
@@ -124,10 +135,23 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
     __DEV__ ||
     Constants.appOwnership === "expo" ||
     Boolean(Constants.expoConfig?.hostUri);
+  const envApiBases = envUrl ? toApiBaseUrls(envUrl) : [];
+
+  // Production hard-pin: if env API URL exists, use only that HTTPS endpoint.
+  if (!isExpoDevRuntime && envApiBases.length > 0) {
+    return envApiBases.filter((base) => {
+      try {
+        return new URL(base).protocol === "https:";
+      } catch {
+        return false;
+      }
+    });
+  }
 
   if (settingsUrl) {
     const settingsApiBases = toApiBaseUrls(settingsUrl);
     for (const settingsApiBase of settingsApiBases) {
+      if (!isExpoDevRuntime && isPrivateApiBaseUrl(settingsApiBase)) continue;
       candidates.add(settingsApiBase);
     }
   }
@@ -136,18 +160,14 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
     candidates.add(expoLanApiBase);
   }
 
-  if (envUrl) {
-    const envApiBases = toApiBaseUrls(envUrl);
-    for (const envApiBase of envApiBases) {
-      candidates.add(envApiBase);
-    }
+  for (const envApiBase of envApiBases) {
+    if (!isExpoDevRuntime && isPrivateApiBaseUrl(envApiBase)) continue;
+    candidates.add(envApiBase);
   }
 
-  if (!isExpoDevRuntime && expoLanApiBase) {
-    candidates.add(expoLanApiBase);
+  if (isExpoDevRuntime) {
+    candidates.add(FALLBACK_API_BASE);
   }
-
-  candidates.add(FALLBACK_API_BASE);
   return Array.from(candidates);
 }
 
@@ -169,6 +189,7 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const apiBases = await getApiBaseUrlCandidates();
   const headers = await buildHeaders(init.headers);
   const networkFailures: string[] = [];
+  const applicationFailures: string[] = [];
 
   for (const apiBase of apiBases) {
     if (init.signal?.aborted) {
@@ -182,6 +203,20 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
       });
       if (!response.ok) {
         const text = await response.text();
+        const normalized = (text || "").toLowerCase();
+        const shouldTryNextBase =
+          (response.status === 401 &&
+            /invalid or expired token|missing authorization bearer token|missing authorization/i.test(
+              normalized
+            )) ||
+          response.status === 404 ||
+          response.status === 502 ||
+          response.status === 503 ||
+          response.status === 504;
+        if (shouldTryNextBase) {
+          applicationFailures.push(`${apiBase} -> HTTP ${response.status}: ${text || "empty body"}`);
+          continue;
+        }
         throw new Error(text || `HTTP ${response.status}`);
       }
       return response.json() as Promise<T>;
@@ -200,7 +235,11 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (networkFailures.length > 0) {
-    throw new Error(`Backend request failed. Tried: ${networkFailures.join(" | ")}`);
+    const appPart = applicationFailures.length ? ` | API: ${applicationFailures.join(" | ")}` : "";
+    throw new Error(`Backend request failed. Tried: ${networkFailures.join(" | ")}${appPart}`);
+  }
+  if (applicationFailures.length > 0) {
+    throw new Error(`Backend request rejected across API bases. Tried: ${applicationFailures.join(" | ")}`);
   }
   throw new Error("Backend request failed.");
 }
