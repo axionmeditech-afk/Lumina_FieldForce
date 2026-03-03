@@ -30,6 +30,7 @@ import {
 } from "@/server/services/speech2text";
 import {
   getMySqlStateValue,
+  getMySqlPool,
   isMySqlStateEnabled,
   setMySqlStateValue,
 } from "@/server/services/mysql-state";
@@ -286,6 +287,157 @@ interface AuthUserRecord {
 const authUsersByEmail = new Map<string, AuthUserRecord>();
 const accessRequestsById = new Map<string, UserAccessRequest>();
 const inMemoryStateStore = new Map<string, string>();
+
+async function ensureCompanyExistsInMySql(companyId: string, companyName: string): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_companies (
+      id, name, legal_name, industry, headquarters, primary_branch, support_email, support_phone,
+      attendance_zone_label, created_at, updated_at
+    ) VALUES (?, ?, ?, 'General', 'India', 'Primary', 'support@axionmeditech.com', '', 'Main Zone', NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+      name = VALUES(name),
+      legal_name = VALUES(legal_name),
+      updated_at = NOW()`,
+    [companyId, companyName, companyName]
+  );
+}
+
+async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyName?: string | null): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  const user = record.user;
+  const companyId = user.companyId || DEFAULT_COMPANY_ID;
+  const companyName = user.companyName || DEFAULT_COMPANY_NAME;
+  await ensureCompanyExistsInMySql(companyId, companyName);
+  await conn.execute(
+    `INSERT INTO lff_users (
+      id, name, email, password_hash, role, company_id, company_name, company_ids_json,
+      department, branch, phone, join_date, avatar, manager_id, manager_name, approval_status,
+      requested_company_name, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      name = VALUES(name),
+      password_hash = VALUES(password_hash),
+      role = VALUES(role),
+      company_id = VALUES(company_id),
+      company_name = VALUES(company_name),
+      company_ids_json = VALUES(company_ids_json),
+      department = VALUES(department),
+      branch = VALUES(branch),
+      phone = VALUES(phone),
+      join_date = VALUES(join_date),
+      avatar = VALUES(avatar),
+      manager_id = VALUES(manager_id),
+      manager_name = VALUES(manager_name),
+      approval_status = VALUES(approval_status),
+      requested_company_name = VALUES(requested_company_name),
+      updated_at = VALUES(updated_at)`,
+    [
+      user.id,
+      user.name,
+      user.email,
+      record.passwordHash,
+      user.role,
+      companyId,
+      companyName,
+      JSON.stringify(user.companyIds || [companyId]),
+      user.department,
+      user.branch,
+      user.phone || "",
+      user.joinDate || new Date().toISOString().slice(0, 10),
+      user.avatar || null,
+      user.managerId || null,
+      user.managerName || null,
+      resolveApprovalStatus(record),
+      requestedCompanyName || null,
+      record.createdAt.slice(0, 19).replace("T", " "),
+      record.updatedAt.slice(0, 19).replace("T", " "),
+    ]
+  );
+}
+
+async function insertAccessRequestInMySql(entry: UserAccessRequest): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_access_requests (
+      id, name, email, requested_role, approved_role, requested_department, requested_branch,
+      requested_company_name, status, requested_at, reviewed_at, reviewed_by_id, reviewed_by_name,
+      review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      approved_role = VALUES(approved_role),
+      status = VALUES(status),
+      reviewed_at = VALUES(reviewed_at),
+      reviewed_by_id = VALUES(reviewed_by_id),
+      reviewed_by_name = VALUES(reviewed_by_name),
+      review_comment = VALUES(review_comment),
+      assigned_company_ids_json = VALUES(assigned_company_ids_json),
+      assigned_manager_id = VALUES(assigned_manager_id),
+      assigned_manager_name = VALUES(assigned_manager_name)`,
+    [
+      entry.id,
+      entry.name,
+      entry.email,
+      entry.requestedRole,
+      entry.approvedRole,
+      entry.requestedDepartment,
+      entry.requestedBranch,
+      entry.requestedCompanyName || null,
+      entry.status,
+      entry.requestedAt.slice(0, 19).replace("T", " "),
+      entry.reviewedAt ? entry.reviewedAt.slice(0, 19).replace("T", " ") : null,
+      entry.reviewedById,
+      entry.reviewedByName,
+      entry.reviewComment,
+      JSON.stringify(entry.assignedCompanyIds || []),
+      entry.assignedManagerId,
+      entry.assignedManagerName,
+    ]
+  );
+}
+
+async function listAccessRequestsFromMySql(
+  status: UserAccessRequest["status"] | null
+): Promise<UserAccessRequest[]> {
+  const conn = await getMySqlPool();
+  const params: unknown[] = [];
+  let sql = `SELECT * FROM lff_access_requests`;
+  if (status) {
+    sql += ` WHERE status = ?`;
+    params.push(status);
+  }
+  sql += ` ORDER BY requested_at DESC`;
+  const [rows] = await conn.query<any[]>(sql, params);
+  return rows.map((row) => ({
+    id: String(row.id),
+    name: String(row.name || ""),
+    email: String(row.email || ""),
+    requestedRole: (row.requested_role || "salesperson") as UserRole,
+    approvedRole: row.approved_role ? (row.approved_role as UserRole) : null,
+    requestedDepartment: String(row.requested_department || ""),
+    requestedBranch: String(row.requested_branch || ""),
+    requestedCompanyName: row.requested_company_name ? String(row.requested_company_name) : null,
+    status: row.status as UserAccessRequest["status"],
+    requestedAt: new Date(row.requested_at).toISOString(),
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    reviewedById: row.reviewed_by_id ? String(row.reviewed_by_id) : null,
+    reviewedByName: row.reviewed_by_name ? String(row.reviewed_by_name) : null,
+    reviewComment: row.review_comment ? String(row.review_comment) : null,
+    assignedCompanyIds: (() => {
+      try {
+        const parsed = JSON.parse(String(row.assigned_company_ids_json || "[]"));
+        return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+      } catch {
+        return [];
+      }
+    })(),
+    assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
+    assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+  }));
+}
 
 function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
@@ -994,6 +1146,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
     accessRequestsById.set(pendingRequest.id, pendingRequest);
 
+    void (async () => {
+      try {
+        const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
+        if (latestAuthRecord) {
+          await upsertAuthUserInMySql(
+            latestAuthRecord,
+            pendingRequest.requestedCompanyName
+          );
+        }
+        await insertAccessRequestInMySql(pendingRequest);
+      } catch (error) {
+        console.error("Failed to persist access request in MySQL", error);
+      }
+    })();
+
     res.status(202).json({
       ok: true,
       message: "Signup request submitted. Wait for admin approval before signing in.",
@@ -1012,10 +1179,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
 
-      const requests = Array.from(accessRequestsById.values())
-        .filter((entry) => !parsedStatus || entry.status === parsedStatus)
-        .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
-      res.json(requests);
+      void (async () => {
+        if (isMySqlStateEnabled()) {
+          try {
+            const requests = await listAccessRequestsFromMySql(parsedStatus);
+            res.json(requests);
+            return;
+          } catch (error) {
+            console.error("Failed to read access requests from MySQL", error);
+          }
+        }
+        const requests = Array.from(accessRequestsById.values())
+          .filter((entry) => !parsedStatus || entry.status === parsedStatus)
+          .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+        res.json(requests);
+      })();
     }
   );
 
@@ -1137,6 +1315,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         assignedManagerName,
       };
       accessRequestsById.set(requestId, reviewedRequest);
+      void (async () => {
+        try {
+          const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
+          if (latestAuthRecord) {
+            await upsertAuthUserInMySql(
+              latestAuthRecord,
+              reviewedRequest.requestedCompanyName
+            );
+          }
+          await insertAccessRequestInMySql(reviewedRequest);
+        } catch (error) {
+          console.error("Failed to persist reviewed access request in MySQL", error);
+        }
+      })();
       res.json(reviewedRequest);
     }
   );

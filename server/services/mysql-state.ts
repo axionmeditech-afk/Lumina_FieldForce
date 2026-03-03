@@ -70,7 +70,7 @@ export function isMySqlStateEnabled(): boolean {
   return buildPoolConfig() !== null;
 }
 
-async function getPool(): Promise<Pool> {
+export async function getMySqlPool(): Promise<Pool> {
   if (pool) return pool;
 
   const config = buildPoolConfig();
@@ -84,7 +84,7 @@ async function getPool(): Promise<Pool> {
 
 async function ensureStateTable(): Promise<void> {
   if (tableEnsured) return;
-  const conn = await getPool();
+  const conn = await getMySqlPool();
   await conn.execute(
     `CREATE TABLE IF NOT EXISTS \`${TABLE_NAME}\` (
       \`state_key\` VARCHAR(191) NOT NULL,
@@ -99,7 +99,7 @@ async function ensureStateTable(): Promise<void> {
 export async function getMySqlStateValue(key: string): Promise<string | null> {
   if (!isMySqlStateEnabled()) return null;
   await ensureStateTable();
-  const conn = await getPool();
+  const conn = await getMySqlPool();
   const [rows] = await conn.execute<StateRow[]>(
     `SELECT state_key, json_value, updated_at FROM \`${TABLE_NAME}\` WHERE state_key = ? LIMIT 1`,
     [key]
@@ -113,7 +113,7 @@ export async function setMySqlStateValue(key: string, jsonValue: string): Promis
     throw new Error("MySQL state store is not configured.");
   }
   await ensureStateTable();
-  const conn = await getPool();
+  const conn = await getMySqlPool();
   await conn.execute(
     `INSERT INTO \`${TABLE_NAME}\` (state_key, json_value, updated_at)
      VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -123,4 +123,3 @@ export async function setMySqlStateValue(key: string, jsonValue: string): Promis
     [key, jsonValue]
   );
 }
-
