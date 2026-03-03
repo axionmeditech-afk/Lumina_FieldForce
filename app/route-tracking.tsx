@@ -166,7 +166,7 @@ export default function RouteTrackingScreen() {
   const [error, setError] = useState<string | null>(null);
   const [placeNameByLocationKey, setPlaceNameByLocationKey] = useState<Record<string, string>>({});
   const resolvingLocationKeysRef = useRef(new Set<string>());
-  const LIVE_REFRESH_INTERVAL_MS = 30_000;
+  const LIVE_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
   const ROUTE_POINT_MIN_MOVE_METERS = 22;
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (
@@ -217,27 +217,59 @@ export default function RouteTrackingScreen() {
       if (!user || !selectedEmployee) return false;
       const todayKey = toLocalDateKey(new Date());
       if (selectedDate !== todayKey) return false;
-      if (!aliases.has(user.id)) return false;
+      const canUseDeviceLocation = selectedUserId === user.id || aliases.has(user.id);
+      if (!canUseDeviceLocation) return false;
 
       const permission = await getLocationPermissionSnapshot();
-      if (!permission.foreground) return false;
+      let hasForegroundPermission = permission.foreground;
+      if (!hasForegroundPermission && permission.foregroundCanAskAgain) {
+        const request = await Location.requestForegroundPermissionsAsync();
+        hasForegroundPermission = request.granted;
+      }
+      if (!hasForegroundPermission) return false;
       const gpsEnabled = await ensureLocationServicesEnabled();
       if (!gpsEnabled) return false;
 
-      let evidence;
+      let coords:
+        | {
+            latitude: number;
+            longitude: number;
+            accuracy: number | null;
+            speed: number | null;
+            heading: number | null;
+          }
+        | null = null;
       try {
-        evidence = await getVerifiedLocationEvidence({
+        const evidence = await getVerifiedLocationEvidence({
           minAccuracyMeters: 260,
           maxAttempts: 2,
           requiredStableSamples: 1,
           sampleWaitMs: 500,
           maxDriftMeters: 220,
         });
+        coords = {
+          latitude: evidence.location.coords.latitude,
+          longitude: evidence.location.coords.longitude,
+          accuracy: evidence.location.coords.accuracy ?? null,
+          speed: evidence.location.coords.speed ?? null,
+          heading: evidence.location.coords.heading ?? null,
+        };
       } catch {
-        return false;
+        const lastKnown = await Location.getLastKnownPositionAsync({
+          maxAge: 10 * 60 * 1000,
+          requiredAccuracy: 350,
+        });
+        if (!lastKnown) return false;
+        coords = {
+          latitude: lastKnown.coords.latitude,
+          longitude: lastKnown.coords.longitude,
+          accuracy: lastKnown.coords.accuracy ?? null,
+          speed: lastKnown.coords.speed ?? null,
+          heading: lastKnown.coords.heading ?? null,
+        };
       }
 
-      const coords = evidence.location.coords;
+      if (!coords) return false;
       const lastPoint = existingDayPoints[existingDayPoints.length - 1];
       if (lastPoint) {
         const movedDistance = haversineDistanceMeters(
@@ -260,9 +292,9 @@ export default function RouteTrackingScreen() {
         userId: userIdForLog,
         latitude: coords.latitude,
         longitude: coords.longitude,
-        accuracy: coords.accuracy ?? null,
-        speed: coords.speed ?? null,
-        heading: coords.heading ?? null,
+        accuracy: coords.accuracy,
+        speed: coords.speed,
+        heading: coords.heading,
         batteryLevel,
         geofenceId: null,
         geofenceName: selectedEmployee.branch || null,
@@ -274,9 +306,9 @@ export default function RouteTrackingScreen() {
         userId: userIdForLog,
         latitude: coords.latitude,
         longitude: coords.longitude,
-        accuracy: coords.accuracy ?? null,
-        speed: coords.speed ?? null,
-        heading: coords.heading ?? null,
+        accuracy: coords.accuracy,
+        speed: coords.speed,
+        heading: coords.heading,
         batteryLevel,
         capturedAt,
       }).catch(() => {
