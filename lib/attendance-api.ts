@@ -136,16 +136,32 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
     Constants.appOwnership === "expo" ||
     Boolean(Constants.expoConfig?.hostUri);
   const envApiBases = envUrl ? toApiBaseUrls(envUrl) : [];
+  const publicHttpsEnvApiBases = envApiBases.filter((base) => {
+    try {
+      const parsed = new URL(base);
+      return parsed.protocol === "https:" && !isPrivateApiBaseUrl(base);
+    } catch {
+      return false;
+    }
+  });
 
-  // Production hard-pin: if env API URL exists, use only that HTTPS endpoint.
+  // Hard-pin to public HTTPS env API URL when provided (works for dev and production).
+  if (publicHttpsEnvApiBases.length > 0) {
+    return publicHttpsEnvApiBases;
+  }
+
+  // Production hard-pin fallback: if env API URL exists, use only HTTPS variants.
   if (!isExpoDevRuntime && envApiBases.length > 0) {
-    return envApiBases.filter((base) => {
+    const httpsOnly = envApiBases.filter((base) => {
       try {
         return new URL(base).protocol === "https:";
       } catch {
         return false;
       }
     });
+    if (httpsOnly.length > 0) {
+      return httpsOnly;
+    }
   }
 
   if (settingsUrl) {
