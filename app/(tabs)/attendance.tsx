@@ -56,11 +56,11 @@ import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns } from "@/lib/role-access";
 
-const LOCATION_REFRESH_MS = 60 * 1000;
+const LOCATION_REFRESH_MS = 2 * 60 * 1000;
 const STRICT_LOCATION_ACCURACY_METERS = 180;
 const RELAXED_LOCATION_ACCURACY_METERS = 220;
-const TRACKING_TIME_INTERVAL_MS = 30_000;
-const TRACKING_DISTANCE_INTERVAL_METERS = 20;
+const TRACKING_TIME_INTERVAL_MS = 2 * 60 * 1000;
+const TRACKING_DISTANCE_INTERVAL_METERS = 75;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 const AHMEDABAD_TEST_EMAIL = "ahmedabad@trackforce.ai";
@@ -155,6 +155,19 @@ function makeLocalAttendanceRecord(
   };
 }
 
+function resolveCheckedInFromRecords(records: AttendanceRecord[], userId: string, userName?: string): boolean | null {
+  const normalizedUserName = (userName || "").trim().toLowerCase();
+  const latest = records
+    .filter(
+      (entry) =>
+        entry.userId === userId ||
+        ((entry.userName || "").trim().toLowerCase() === normalizedUserName && normalizedUserName.length > 0)
+    )
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
+  if (!latest) return null;
+  return latest.type === "checkin";
+}
+
 export default function AttendanceScreen() {
   const { user, company } = useAuth();
   const insets = useSafeAreaInsets();
@@ -242,7 +255,10 @@ export default function AttendanceScreen() {
   const loadBaseData = useCallback(async () => {
     if (!user?.id) return;
     const [localAttendance, currentCheckIn] = await Promise.all([getAttendance(), isCheckedIn()]);
-    setRecords(localAttendance.filter((entry) => entry.userId === user.id || entry.userName === user.name));
+    const userRecords = localAttendance.filter(
+      (entry) => entry.userId === user.id || entry.userName === user.name
+    );
+    setRecords(userRecords);
     if (canReviewSignIns) {
       const employees = await getEmployees();
       const roleByEmployeeId = new Map(employees.map((employee) => [employee.id, employee.role]));
@@ -260,7 +276,12 @@ export default function AttendanceScreen() {
     } else {
       setPendingSignIns([]);
     }
-    setCheckedInState(currentCheckIn);
+    const derivedCheckIn = resolveCheckedInFromRecords(localAttendance, user.id, user.name);
+    const resolvedCheckIn = derivedCheckIn ?? currentCheckIn;
+    setCheckedInState(resolvedCheckIn);
+    if (resolvedCheckIn !== currentCheckIn) {
+      await setCheckedIn(resolvedCheckIn);
+    }
   }, [canReviewSignIns, user?.id, user?.name]);
 
   const loadGeofenceAssignments = useCallback(async () => {

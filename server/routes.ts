@@ -1043,7 +1043,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.status(201).json({ token, user });
   });
 
-  app.post("/api/auth/access-request", (req, res) => {
+  app.post("/api/auth/access-request", async (req, res) => {
     const {
       name,
       email,
@@ -1145,21 +1145,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
       assignedManagerName: null,
     };
     accessRequestsById.set(pendingRequest.id, pendingRequest);
-
-    void (async () => {
-      try {
-        const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
-        if (latestAuthRecord) {
-          await upsertAuthUserInMySql(
-            latestAuthRecord,
-            pendingRequest.requestedCompanyName
-          );
-        }
-        await insertAccessRequestInMySql(pendingRequest);
-      } catch (error) {
-        console.error("Failed to persist access request in MySQL", error);
+    try {
+      const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
+      if (latestAuthRecord) {
+        await upsertAuthUserInMySql(
+          latestAuthRecord,
+          pendingRequest.requestedCompanyName
+        );
       }
-    })();
+      await insertAccessRequestInMySql(pendingRequest);
+    } catch (error) {
+      console.error("Failed to persist access request in MySQL", error);
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Failed to save access request in database: ${error.message}`
+            : "Failed to save access request in database.",
+      });
+      return;
+    }
 
     res.status(202).json({
       ok: true,
@@ -1172,7 +1176,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/admin/access-requests",
     requireAuth,
     requireRoles("admin", "hr", "manager"),
-    (req, res) => {
+    async (req, res) => {
       const parsedStatus = parseRequestStatus(firstString(req.query.status));
       if (firstString(req.query.status) && !parsedStatus) {
         res.status(400).json({ message: "Invalid access request status filter." });
@@ -1201,7 +1205,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "/api/admin/access-requests/:id/review",
     requireAuth,
     requireRoles("admin", "hr", "manager"),
-    (req, res) => {
+    async (req, res) => {
       const requestId = firstString(req.params.id);
       if (!requestId) {
         res.status(400).json({ message: "Access request id is required." });
@@ -1315,20 +1319,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
         assignedManagerName,
       };
       accessRequestsById.set(requestId, reviewedRequest);
-      void (async () => {
-        try {
-          const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
-          if (latestAuthRecord) {
-            await upsertAuthUserInMySql(
-              latestAuthRecord,
-              reviewedRequest.requestedCompanyName
-            );
-          }
-          await insertAccessRequestInMySql(reviewedRequest);
-        } catch (error) {
-          console.error("Failed to persist reviewed access request in MySQL", error);
+      try {
+        const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
+        if (latestAuthRecord) {
+          await upsertAuthUserInMySql(
+            latestAuthRecord,
+            reviewedRequest.requestedCompanyName
+          );
         }
-      })();
+        await insertAccessRequestInMySql(reviewedRequest);
+      } catch (error) {
+        console.error("Failed to persist reviewed access request in MySQL", error);
+        res.status(500).json({
+          message:
+            error instanceof Error
+              ? `Approval saved locally, but database sync failed: ${error.message}`
+              : "Approval saved locally, but database sync failed.",
+        });
+        return;
+      }
       res.json(reviewedRequest);
     }
   );

@@ -28,7 +28,7 @@ function getJwtSecret(): string {
   return process.env.JWT_SECRET || "trackforce_dev_secret_change_me";
 }
 
-export function signJwt(payload: Omit<JwtPayload, "iat" | "exp">, expiresInSec = 60 * 60 * 12): string {
+export function signJwt(payload: Omit<JwtPayload, "iat" | "exp">, expiresInSec = 60 * 60 * 24 * 7): string {
   const now = Math.floor(Date.now() / 1000);
   const fullPayload: JwtPayload = {
     ...payload,

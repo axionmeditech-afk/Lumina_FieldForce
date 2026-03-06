@@ -206,6 +206,7 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = await buildHeaders(init.headers);
   const networkFailures: string[] = [];
   const applicationFailures: string[] = [];
+  const isAuthRoute = /^\/auth\/(login|token|register|access-request)\b/i.test(path);
 
   for (const apiBase of apiBases) {
     if (init.signal?.aborted) {
@@ -220,11 +221,20 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (!response.ok) {
         const text = await response.text();
         const normalized = (text || "").toLowerCase();
+        const isTokenError =
+          response.status === 401 &&
+          /invalid or expired token|missing authorization bearer token|missing authorization/i.test(
+            normalized
+          );
+
+        if (isTokenError) {
+          if (!isAuthRoute) {
+            await setApiToken(null);
+          }
+          throw new Error("Session expired. Please log out and sign in again.");
+        }
+
         const shouldTryNextBase =
-          (response.status === 401 &&
-            /invalid or expired token|missing authorization bearer token|missing authorization/i.test(
-              normalized
-            )) ||
           response.status === 404 ||
           response.status === 502 ||
           response.status === 503 ||

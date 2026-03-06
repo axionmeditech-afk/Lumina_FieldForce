@@ -164,6 +164,7 @@ export default function RouteTrackingScreen() {
   const [loading, setLoading] = useState(false);
   const [timeline, setTimeline] = useState<AdminRouteTimelineResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [authExpired, setAuthExpired] = useState(false);
   const [placeNameByLocationKey, setPlaceNameByLocationKey] = useState<Record<string, string>>({});
   const resolvingLocationKeysRef = useRef(new Set<string>());
   const LIVE_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
@@ -321,7 +322,7 @@ export default function RouteTrackingScreen() {
   );
 
   const loadTimeline = useCallback(async () => {
-    if (!selectedUserId || !canViewTracking) return;
+    if (!selectedUserId || !canViewTracking || authExpired) return;
     setLoading(true);
     setError(null);
     try {
@@ -459,11 +460,19 @@ export default function RouteTrackingScreen() {
 
       throw remoteFailure instanceof Error ? remoteFailure : new Error("Unable to load route timeline.");
     } catch (routeError) {
-      setError(routeError instanceof Error ? routeError.message : "Unable to load route timeline.");
+      const message =
+        routeError instanceof Error ? routeError.message : "Unable to load route timeline.";
+      if (/session expired|invalid or expired token|missing authorization bearer token/i.test(message)) {
+        setAuthExpired(true);
+        setError("Session expired. Please log out and sign in again.");
+      } else {
+        setError(message);
+      }
     } finally {
       setLoading(false);
     }
   }, [
+    authExpired,
     canViewTracking,
     dataSource,
     persistCurrentLocationPointIfMoved,
@@ -478,12 +487,12 @@ export default function RouteTrackingScreen() {
   }, [loadTimeline]);
 
   useEffect(() => {
-    if (!selectedUserId || !canViewTracking) return undefined;
+    if (!selectedUserId || !canViewTracking || authExpired) return undefined;
     const timer = setInterval(() => {
       void loadTimeline();
     }, LIVE_REFRESH_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [canViewTracking, loadTimeline, selectedUserId, LIVE_REFRESH_INTERVAL_MS]);
+  }, [authExpired, canViewTracking, loadTimeline, selectedUserId, LIVE_REFRESH_INTERVAL_MS]);
 
   useEffect(() => {
     if (mapMode === "tracking" && (timeline?.points?.length ?? 0) < 2) {
