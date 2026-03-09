@@ -19,7 +19,6 @@ import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNati
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import {
-  getAdminDemoRouteTimeline,
   getAdminLiveMapPoints,
   getAdminLiveMapRoutes,
   getAdminRouteTimeline,
@@ -28,7 +27,6 @@ import {
 } from "@/lib/attendance-api";
 import { getBatteryLevelPercent } from "@/lib/battery";
 import { flushBackgroundLocationQueue, queueLocationPoint } from "@/lib/background-location";
-import { buildDemoRoutePoints } from "@/lib/demo-route";
 import {
   formatMumbaiDateKey,
   formatMumbaiDateTime,
@@ -275,7 +273,6 @@ export default function RouteTrackingScreen() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>("");
   const [dayOffset, setDayOffset] = useState(0);
-  const [dataSource, setDataSource] = useState<"live" | "demo">("live");
   const [mapMode, setMapMode] = useState<"tracking" | "polyline">("tracking");
   const [loading, setLoading] = useState(false);
   const [timeline, setTimeline] = useState<AdminRouteTimelineResponse | null>(null);
@@ -485,7 +482,7 @@ export default function RouteTrackingScreen() {
         batteryLevel,
         capturedAt,
       });
-      void flushBackgroundLocationQueue().catch(() => {
+      void flushBackgroundLocationQueue({ force: true }).catch(() => {
         // offline/API failure: queued point will be retried later.
       });
 
@@ -547,46 +544,6 @@ export default function RouteTrackingScreen() {
           status: getVisitStatus(task),
         }));
       setPlannedStops(plannedStopsForDay);
-
-      if (dataSource === "demo") {
-        try {
-          const remoteDemo = await getAdminDemoRouteTimeline(selectedUserId, selectedDate);
-          setTimeline(remoteDemo);
-          return;
-        } catch {
-          const demoPoints = buildDemoRoutePoints(selectedUserId, selectedDate);
-          const demoTimeline = buildRouteTimeline(
-            selectedUserId,
-            selectedDate,
-            normalizePointsForInterval(demoPoints, ROUTE_POINT_INTERVAL_MINUTES)
-          );
-          const firstPoint = demoPoints[0];
-          const lastPoint = demoPoints[demoPoints.length - 1];
-          setTimeline({
-            ...demoTimeline,
-            attendanceEvents: [
-              {
-                id: `demo_checkin_local_${selectedUserId}_${selectedDate}`,
-                type: "checkin",
-                at: firstPoint?.capturedAt ?? new Date(`${selectedDate}T09:00:00+05:30`).toISOString(),
-                geofenceName: firstPoint?.geofenceName ?? "Route Start",
-                latitude: firstPoint?.latitude ?? null,
-                longitude: firstPoint?.longitude ?? null,
-              },
-              {
-                id: `demo_checkout_local_${selectedUserId}_${selectedDate}`,
-                type: "checkout",
-                at: lastPoint?.capturedAt ?? new Date(`${selectedDate}T12:05:00+05:30`).toISOString(),
-                geofenceName: lastPoint?.geofenceName ?? "Route End",
-                latitude: lastPoint?.latitude ?? null,
-                longitude: lastPoint?.longitude ?? null,
-              },
-            ],
-          });
-          setError("Demo API unreachable, using local dummy route.");
-          return;
-        }
-      }
 
       const [logsSnapshot, attendanceSnapshot] = await Promise.all([getLocationLogs(), getAttendance()]);
       const aliases = buildSelectedUserAliases(
@@ -786,7 +743,6 @@ export default function RouteTrackingScreen() {
   }, [
     authExpired,
     canViewTracking,
-    dataSource,
     persistCurrentLocationPointIfMoved,
     isPrivilegedViewer,
     selectedDate,
@@ -1039,66 +995,6 @@ export default function RouteTrackingScreen() {
               <Text style={styles.todayText}>Today</Text>
             </Pressable>
           </View>
-
-          <View style={styles.sourceRow}>
-            <Pressable
-              onPress={() => setDataSource("live")}
-              style={[
-                styles.sourceChip,
-                {
-                  backgroundColor:
-                    dataSource === "live" ? colors.primary : colors.backgroundElevated,
-                  borderColor: dataSource === "live" ? colors.primary : colors.border,
-                },
-              ]}
-            >
-              <Ionicons
-                name="cloud-outline"
-                size={14}
-                color={dataSource === "live" ? "#FFFFFF" : colors.textSecondary}
-              />
-              <Text
-                style={[
-                  styles.sourceChipText,
-                  {
-                    color: dataSource === "live" ? "#FFFFFF" : colors.textSecondary,
-                    fontFamily: "Inter_500Medium",
-                  },
-                ]}
-              >
-                Live API
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => setDataSource("demo")}
-              style={[
-                styles.sourceChip,
-                {
-                  backgroundColor:
-                    dataSource === "demo" ? colors.secondary : colors.backgroundElevated,
-                  borderColor: dataSource === "demo" ? colors.secondary : colors.border,
-                },
-              ]}
-            >
-              <Ionicons
-                name="map-outline"
-                size={14}
-                color={dataSource === "demo" ? "#FFFFFF" : colors.textSecondary}
-              />
-              <Text
-                style={[
-                  styles.sourceChipText,
-                  {
-                    color: dataSource === "demo" ? "#FFFFFF" : colors.textSecondary,
-                    fontFamily: "Inter_500Medium",
-                  },
-                ]}
-              >
-                Demo API Route
-              </Text>
-            </Pressable>
-          </View>
         </Animated.View>
 
         {loading ? (
@@ -1114,15 +1010,6 @@ export default function RouteTrackingScreen() {
           <View style={[styles.errorWrap, { backgroundColor: colors.warning + "14", borderColor: colors.warning + "55" }]}>
             <Ionicons name="warning-outline" size={16} color={colors.warning} />
             <Text style={[styles.errorText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>{error}</Text>
-          </View>
-        ) : null}
-
-        {dataSource === "demo" ? (
-          <View style={[styles.infoWrap, { backgroundColor: colors.secondary + "16", borderColor: colors.secondary + "55" }]}>
-            <Ionicons name="information-circle-outline" size={16} color={colors.secondary} />
-            <Text style={[styles.infoText, { color: colors.secondary, fontFamily: "Inter_500Medium" }]}>
-              Demo route is active. In this mode, the map and halt timeline are rendered using dummy API data.
-            </Text>
           </View>
         ) : null}
 

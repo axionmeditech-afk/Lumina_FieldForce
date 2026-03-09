@@ -25,6 +25,38 @@ interface QueueItem {
   payload: AttendanceCheckPayload;
 }
 
+const PUBLIC_API_PATH_PATTERNS = [
+  /^\/health\b/i,
+  /^\/auth\/(login|token|register|access-request)\b/i,
+];
+
+export class ApiAuthRequiredError extends Error {
+  readonly code = "api_auth_required" as const;
+
+  constructor(message = "API session token is missing. Sign in online to enable backend sync.") {
+    super(message);
+    this.name = "ApiAuthRequiredError";
+  }
+}
+
+export function isApiAuthRequiredError(error: unknown): error is ApiAuthRequiredError {
+  return (
+    error instanceof ApiAuthRequiredError ||
+    (error instanceof Error &&
+      (error.name === "ApiAuthRequiredError" ||
+        (typeof (error as { code?: unknown }).code === "string" &&
+          (error as { code?: string }).code === "api_auth_required")))
+  );
+}
+
+function isPublicApiPath(path: string): boolean {
+  return PUBLIC_API_PATH_PATTERNS.some((pattern) => pattern.test(path));
+}
+
+function isProtectedApiPath(path: string): boolean {
+  return !isPublicApiPath(path);
+}
+
 function isPrivateOrLocalHost(hostname: string): boolean {
   const host = hostname.trim().toLowerCase();
   if (!host) return false;
@@ -198,8 +230,7 @@ export async function getApiBaseUrl(): Promise<string> {
   return candidates[0] || FALLBACK_API_BASE;
 }
 
-async function buildHeaders(extra?: HeadersInit): Promise<HeadersInit> {
-  const token = await getApiToken();
+function buildHeaders(token: string | null, extra?: HeadersInit): HeadersInit {
   return {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -209,10 +240,14 @@ async function buildHeaders(extra?: HeadersInit): Promise<HeadersInit> {
 
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const apiBases = await getApiBaseUrlCandidates();
-  const headers = await buildHeaders(init.headers);
+  const token = await getApiToken();
+  const headers = buildHeaders(token, init.headers);
   const networkFailures: string[] = [];
   const applicationFailures: string[] = [];
   const isAuthRoute = /^\/auth\/(login|token|register|access-request)\b/i.test(path);
+  if (!token && !isAuthRoute && isProtectedApiPath(path)) {
+    throw new ApiAuthRequiredError();
+  }
 
   for (const apiBase of apiBases) {
     if (init.signal?.aborted) {
@@ -234,10 +269,13 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
           );
 
         if (isTokenError) {
-          if (!isAuthRoute) {
+          if (token && !isAuthRoute) {
             await setApiToken(null);
           }
-          throw new Error("Session expired. Please log out and sign in again.");
+          if (token) {
+            throw new Error("Session expired. Please log out and sign in again.");
+          }
+          throw new ApiAuthRequiredError();
         }
 
         const shouldTryNextBase =
@@ -1218,15 +1256,20 @@ export async function flushAttendanceQueue(): Promise<void> {
   if (!queue.length) return;
 
   const remaining: QueueItem[] = [];
-  for (const entry of queue) {
+  for (let index = 0; index < queue.length; index += 1) {
+    const entry = queue[index];
     try {
       if (entry.type === "checkin") {
         await attendanceCheckIn(entry.payload);
       } else {
         await attendanceCheckOut(entry.payload);
       }
-    } catch {
+    } catch (error) {
       remaining.push(entry);
+      if (isApiAuthRequiredError(error)) {
+        remaining.push(...queue.slice(index + 1));
+        break;
+      }
     }
   }
   await setAttendanceQueue(remaining);

@@ -15,7 +15,7 @@
     "stt:python:diarization:setup": "python -m pip install -r server/python/requirements-stt-diarization-optional.txt",
     "expo:start:static:build": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start --no-dev --minify --localhost",
     "expo:static:build": "node scripts/build.js",
-    "server:build": "esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=server_dist",
+    "server:build": "esbuild server/index.ts --platform=node --packages=external --bundle --format=cjs --outdir=server_dist",
     "server:prod": "node --env-file=.env server_dist/index.js",
     "db:push": "drizzle-kit push",
     "start": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start",

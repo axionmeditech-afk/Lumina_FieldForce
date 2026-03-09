@@ -65,10 +65,6 @@ const TRACKING_DISTANCE_INTERVAL_METERS = 0;
 const ROUTE_POINT_PERSIST_INTERVAL_MS = 1 * 60 * 1000;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
-const AHMEDABAD_TEST_EMAIL = "ahmedabad@trackforce.ai";
-const AHMEDABAD_OFFICE_LATITUDE = 23.0252;
-const AHMEDABAD_OFFICE_LONGITUDE = 72.5713;
-const AHMEDABAD_OFFICE_LOCK_ACCURACY_METERS = 25;
 
 type BannerType = "inside" | "outside" | "weak" | "boundary";
 
@@ -214,34 +210,14 @@ export default function AttendanceScreen() {
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
   const isSalespersonFieldCheckIn = user?.role === "salesperson";
   const todayHeading = "Today's Log";
-  const isAhmedabadOfficeLockUser = useMemo(
-    () => (user?.email || "").trim().toLowerCase() === AHMEDABAD_TEST_EMAIL,
-    [user?.email]
-  );
 
   const openAppSettings = useCallback(() => {
     void Linking.openSettings();
   }, []);
 
   const applyAhmedabadOfficeLocationLock = useCallback(
-    (location: LocationObject): LocationObject => {
-      if (!isAhmedabadOfficeLockUser) return location;
-      const incomingAccuracy = location.coords.accuracy;
-      const normalizedAccuracy =
-        typeof incomingAccuracy === "number" && Number.isFinite(incomingAccuracy)
-          ? Math.min(incomingAccuracy, AHMEDABAD_OFFICE_LOCK_ACCURACY_METERS)
-          : AHMEDABAD_OFFICE_LOCK_ACCURACY_METERS;
-      return {
-        ...location,
-        coords: {
-          ...location.coords,
-          latitude: AHMEDABAD_OFFICE_LATITUDE,
-          longitude: AHMEDABAD_OFFICE_LONGITUDE,
-          accuracy: normalizedAccuracy,
-        },
-      };
-    },
-    [isAhmedabadOfficeLockUser]
+    (location: LocationObject): LocationObject => location,
+    []
   );
 
   const showPermissionBlockedAlert = useCallback(() => {
@@ -378,7 +354,7 @@ export default function AttendanceScreen() {
               batteryLevel,
               capturedAt,
             });
-            await flushBackgroundLocationQueue();
+            await flushBackgroundLocationQueue({ force: true });
           } catch {
             // offline/API failure: point is persisted in queue for retry.
           }
@@ -429,35 +405,15 @@ export default function AttendanceScreen() {
 
       try {
         const evidence = await getVerifiedLocationEvidence({
-          minAccuracyMeters: isAhmedabadOfficeLockUser
-            ? strict
-              ? 350
-              : 450
-            : strict
-              ? STRICT_LOCATION_ACCURACY_METERS
-              : RELAXED_LOCATION_ACCURACY_METERS,
-          maxAttempts: isAhmedabadOfficeLockUser ? (strict ? 3 : 2) : strict ? 8 : 5,
-          requiredStableSamples: isAhmedabadOfficeLockUser
-            ? 1
-            : strict
-              ? MIN_STABLE_LOCATION_SAMPLES
-              : 1,
-          maxDriftMeters: isAhmedabadOfficeLockUser
-            ? 250
-            : strict
-              ? Math.max(STABLE_LOCATION_MAX_DRIFT_METERS, 120)
-              : 180,
+          minAccuracyMeters: strict ? STRICT_LOCATION_ACCURACY_METERS : RELAXED_LOCATION_ACCURACY_METERS,
+          maxAttempts: strict ? 8 : 5,
+          requiredStableSamples: strict ? MIN_STABLE_LOCATION_SAMPLES : 1,
+          maxDriftMeters: strict ? Math.max(STABLE_LOCATION_MAX_DRIFT_METERS, 120) : 180,
         });
         const effectiveLocation = applyAhmedabadOfficeLocationLock(evidence.location);
-        const bestAccuracyMeters = isAhmedabadOfficeLockUser
-          ? typeof evidence.bestAccuracyMeters === "number"
-            ? Math.min(evidence.bestAccuracyMeters, AHMEDABAD_OFFICE_LOCK_ACCURACY_METERS)
-            : AHMEDABAD_OFFICE_LOCK_ACCURACY_METERS
-          : evidence.bestAccuracyMeters;
         const effectiveEvidence = {
           ...evidence,
           location: effectiveLocation,
-          bestAccuracyMeters,
         };
         latestEvidenceRef.current = {
           sampleCount: effectiveEvidence.sampleCount,
@@ -470,9 +426,7 @@ export default function AttendanceScreen() {
             Math.round(effectiveEvidence.sampleWindowMs / 1000)
           )}s | best +/-${effectiveEvidence.bestAccuracyMeters ?? "?"}m | avg +/-${
             effectiveEvidence.averageAccuracyMeters ?? "?"
-          }m${
-            isAhmedabadOfficeLockUser ? " | office-pinned" : ""
-          }`
+          }m`
         );
         await handleLocationUpdate(effectiveEvidence.location, options);
         return effectiveEvidence;
@@ -509,7 +463,7 @@ export default function AttendanceScreen() {
           setGpsEvidence(
             `GPS fallback: ${
               fallbackAccuracy !== null ? `+/-${fallbackAccuracy}m` : "accuracy unknown"
-            }${isAhmedabadOfficeLockUser ? " | office-pinned" : ""}`
+            }`
           );
           await handleLocationUpdate(effectiveFallbackLocation, options);
           return {
@@ -537,7 +491,7 @@ export default function AttendanceScreen() {
         return null;
       }
     },
-    [applyAhmedabadOfficeLocationLock, handleLocationUpdate, isAhmedabadOfficeLockUser]
+    [applyAhmedabadOfficeLocationLock, handleLocationUpdate]
   );
 
   const beginTracking = useCallback(async () => {
@@ -820,7 +774,7 @@ export default function AttendanceScreen() {
               batteryLevel,
               capturedAt: capturedAtClient,
             });
-            void flushBackgroundLocationQueue().catch(() => {
+            void flushBackgroundLocationQueue({ force: true }).catch(() => {
               // queue will retry sync on next heartbeat/background flush.
             });
             const seededAtMs = new Date(capturedAtClient).getTime();
@@ -992,11 +946,6 @@ export default function AttendanceScreen() {
             ? `${company?.name || "Company"} time-based check-in with live GPS + battery tracking`
             : `${company?.name || "Company"} fingerprint-based secure check-in with live location tracking`}
         </Text>
-        {isAhmedabadOfficeLockUser ? (
-          <Text style={[styles.gpsEvidenceText, { color: colors.success }]}>
-            Ahmedabad demo account is pinned to office location for biometric testing.
-          </Text>
-        ) : null}
 
         <View style={[styles.banner, { backgroundColor: banner.bg, borderColor: banner.border }]}>
           <Ionicons name={banner.icon as never} size={18} color={banner.text} />

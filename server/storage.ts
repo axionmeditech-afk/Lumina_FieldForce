@@ -8,7 +8,6 @@ import type {
   LocationLog,
 } from "@/lib/types";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
-import { demoGeofences } from "@/lib/seedData";
 
 export interface EmployeeSession {
   userId: string;
@@ -65,12 +64,6 @@ class MemStorage implements IStorage {
   private deviceBindings = new Map<string, string>();
   private dolibarrSyncLogs: DolibarrSyncLog[] = [];
   private dolibarrConfigByUser = new Map<string, DolibarrIntegrationConfig>();
-
-  constructor() {
-    for (const zone of demoGeofences) {
-      this.geofences.set(zone.id, zone);
-    }
-  }
 
   async listGeofences(): Promise<Geofence[]> {
     return Array.from(this.geofences.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

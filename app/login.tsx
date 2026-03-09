@@ -22,15 +22,8 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import type { UserRole } from "@/lib/types";
 
-const DEMO_ACCOUNTS = [
-  { label: "Admin", email: "admin@trackforce.ai", password: "admin123", icon: "shield-checkmark" as const },
-  { label: "HR", email: "hr@trackforce.ai", password: "hr123", icon: "people" as const },
-  { label: "Manager", email: "manager@trackforce.ai", password: "manager123", icon: "briefcase" as const },
-  { label: "Sales", email: "sales@trackforce.ai", password: "sales123", icon: "trending-up" as const },
-  { label: "Ahmedabad", email: "ahmedabad@trackforce.ai", password: "ahmed123", icon: "location" as const },
-];
-
 const SIGNUP_ROLES: { label: string; value: UserRole }[] = [
+  { label: "Admin", value: "admin" },
   { label: "Sales", value: "salesperson" },
   { label: "Manager", value: "manager" },
   { label: "HR", value: "hr" },
@@ -47,6 +40,7 @@ export default function LoginScreen() {
   const [companyName, setCompanyName] = useState("");
   const [branch, setBranch] = useState("");
   const [role, setRole] = useState<UserRole>("salesperson");
+  const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -58,6 +52,10 @@ export default function LoginScreen() {
     }
     return `Join ${AUTH_BRAND_NAME}. Submit account request for admin approval and company access.`;
   }, [mode]);
+  const selectedRoleLabel = useMemo(
+    () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "Sales",
+    [role]
+  );
 
   const handleAuthAction = async () => {
     if (!email.trim() || !password.trim()) {
@@ -79,7 +77,7 @@ export default function LoginScreen() {
         const success = await login(email.trim().toLowerCase(), password);
         if (!success) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          Alert.alert("Login Failed", "Invalid email or password. Try demo access or create account.");
+          Alert.alert("Login Failed", "Invalid email or password. Please try again or create an account.");
           return;
         }
       } else {
@@ -112,19 +110,6 @@ export default function LoginScreen() {
       router.replace("/(tabs)");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleDemoLogin = async (demoEmail: string, demoPassword: string) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setEmail(demoEmail);
-    setPassword(demoPassword);
-    setLoading(true);
-    const success = await login(demoEmail, demoPassword);
-    setLoading(false);
-    if (success) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.replace("/(tabs)");
     }
   };
 
@@ -163,7 +148,10 @@ export default function LoginScreen() {
           >
             <View style={[styles.modeSwitch, { backgroundColor: colors.surfaceSecondary, borderColor: colors.border }]}>
               <Pressable
-                onPress={() => setMode("signin")}
+                onPress={() => {
+                  setMode("signin");
+                  setRoleDropdownOpen(false);
+                }}
                 style={[
                   styles.modeChip,
                   {
@@ -181,7 +169,10 @@ export default function LoginScreen() {
                 </Text>
               </Pressable>
               <Pressable
-                onPress={() => setMode("signup")}
+                onPress={() => {
+                  setMode("signup");
+                  setRoleDropdownOpen(false);
+                }}
                 style={[
                   styles.modeChip,
                   {
@@ -228,29 +219,65 @@ export default function LoginScreen() {
                 />
                 <View style={styles.inputWrapper}>
                   <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>Role</Text>
-                  <View style={styles.roleRow}>
-                    {SIGNUP_ROLES.map((entry) => (
-                      <Pressable
-                        key={entry.value}
-                        onPress={() => setRole(entry.value)}
+                  <View style={styles.roleSelectWrap}>
+                    <Pressable
+                      onPress={() => setRoleDropdownOpen((current) => !current)}
+                      style={[
+                        styles.roleSelectButton,
+                        {
+                          backgroundColor: colors.backgroundElevated,
+                          borderColor: colors.border,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.roleSelectText, { color: colors.text }]}>
+                        {selectedRoleLabel}
+                      </Text>
+                      <Ionicons
+                        name={roleDropdownOpen ? "chevron-up-outline" : "chevron-down-outline"}
+                        size={18}
+                        color={colors.textSecondary}
+                      />
+                    </Pressable>
+                    {roleDropdownOpen ? (
+                      <View
                         style={[
-                          styles.roleChip,
+                          styles.roleDropdown,
                           {
-                            backgroundColor: role === entry.value ? colors.primary : colors.surfaceSecondary,
-                            borderColor: role === entry.value ? colors.primary : colors.border,
+                            backgroundColor: colors.backgroundElevated,
+                            borderColor: colors.border,
                           },
                         ]}
                       >
-                        <Text
-                          style={[
-                            styles.roleChipText,
-                            { color: role === entry.value ? "#FFFFFF" : colors.textSecondary },
-                          ]}
-                        >
-                          {entry.label}
-                        </Text>
-                      </Pressable>
-                    ))}
+                        {SIGNUP_ROLES.map((entry) => (
+                          <Pressable
+                            key={entry.value}
+                            onPress={() => {
+                              setRole(entry.value);
+                              setRoleDropdownOpen(false);
+                            }}
+                            style={[
+                              styles.roleDropdownItem,
+                              {
+                                backgroundColor:
+                                  role === entry.value ? colors.surfaceSecondary : "transparent",
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.roleDropdownText,
+                                {
+                                  color: role === entry.value ? colors.primary : colors.textSecondary,
+                                },
+                              ]}
+                            >
+                              {entry.label}
+                            </Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               </>
@@ -321,35 +348,6 @@ export default function LoginScreen() {
               </LinearGradient>
             </Pressable>
           </Animated.View>
-
-          {mode === "signin" ? (
-            <Animated.View entering={FadeInDown.duration(600).delay(400)} style={styles.demoSection}>
-              <View style={styles.dividerContainer}>
-                <View style={[styles.divider, { backgroundColor: colors.border }]} />
-                <Text style={[styles.demoTitle, { color: colors.textTertiary }]}>Demo Access</Text>
-                <View style={[styles.divider, { backgroundColor: colors.border }]} />
-              </View>
-              <View style={styles.demoGrid}>
-                {DEMO_ACCOUNTS.map((acc) => (
-                  <Pressable
-                    key={acc.email}
-                    onPress={() => void handleDemoLogin(acc.email, acc.password)}
-                    style={({ pressed }) => [
-                      styles.demoCard,
-                      {
-                        backgroundColor: colors.backgroundElevated,
-                        borderColor: colors.border,
-                        opacity: pressed ? 0.8 : 1,
-                      },
-                    ]}
-                  >
-                    <Ionicons name={acc.icon} size={20} color={colors.primary} />
-                    <Text style={[styles.demoLabel, { color: colors.text }]}>{acc.label}</Text>
-                  </Pressable>
-                ))}
-              </View>
-            </Animated.View>
-          ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </AppCanvas>
@@ -476,21 +474,36 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 15,
   },
-  roleRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
+  roleSelectWrap: {
     gap: 8,
   },
-  roleChip: {
-    minHeight: 32,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-    justifyContent: "center",
+  roleSelectButton: {
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1.2,
+    paddingHorizontal: 14,
+    flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
   },
-  roleChipText: {
-    fontSize: 11.5,
+  roleSelectText: {
+    fontSize: 14,
+    fontFamily: "Inter_500Medium",
+  },
+  roleDropdown: {
+    borderRadius: 14,
+    borderWidth: 1.2,
+    padding: 6,
+    gap: 4,
+  },
+  roleDropdownItem: {
+    minHeight: 36,
+    borderRadius: 10,
+    justifyContent: "center",
+    paddingHorizontal: 12,
+  },
+  roleDropdownText: {
+    fontSize: 13.5,
     fontFamily: "Inter_500Medium",
   },
   loginButton: {
@@ -512,45 +525,5 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
     letterSpacing: 0.2,
     color: "#FFFFFF",
-  },
-  demoSection: {
-    marginTop: 28,
-  },
-  dividerContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 22,
-    gap: 12,
-  },
-  divider: {
-    flex: 1,
-    height: 1,
-  },
-  demoTitle: {
-    fontSize: 11,
-    fontFamily: "Inter_600SemiBold",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-  },
-  demoGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 12,
-    justifyContent: "center",
-  },
-  demoCard: {
-    flex: 1,
-    minWidth: "47%",
-    height: 58,
-    borderRadius: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    borderWidth: 1.2,
-    gap: 12,
-  },
-  demoLabel: {
-    fontSize: 14,
-    fontFamily: "Inter_500Medium",
   },
 });

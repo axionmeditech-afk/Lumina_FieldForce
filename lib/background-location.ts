@@ -91,9 +91,9 @@ export async function queueLocationPoint(payload: LocationQueuePointPayload): Pr
   ]);
 }
 
-export async function flushBackgroundLocationQueue(): Promise<void> {
+export async function flushBackgroundLocationQueue(options?: { force?: boolean }): Promise<void> {
   const settings = await getSettings();
-  if (settings.offlineMode === "true" || settings.autoSync === "false") {
+  if (!options?.force && (settings.offlineMode === "true" || settings.autoSync === "false")) {
     return;
   }
 

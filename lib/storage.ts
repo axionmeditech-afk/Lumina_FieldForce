@@ -25,19 +25,6 @@ import type {
   UserAccessRequest,
 } from "./types";
 import {
-  demoUsers,
-  demoPasswords,
-  demoEmployees,
-  demoAttendance,
-  demoSalaries,
-  demoTasks,
-  demoExpenses,
-  demoConversations,
-  demoAuditLogs,
-  demoGeofences,
-  demoTeams,
-  demoNotifications,
-  demoSupportThreads,
   DEFAULT_COMPANY_ID,
   DEFAULT_COMPANY_NAME,
 } from "./seedData";
@@ -72,14 +59,11 @@ const KEYS = {
   SEED_VERSION: "@trackforce_seed_version",
 };
 
-const SEED_VERSION = "8";
+const SEED_VERSION = "9";
 const MAHAKANT_BRANCH_NAME = "Ahmedabad - Mahakant Complex";
 const MAHAKANT_HEADQUARTERS =
   "Mahakant Complex, Paldi, Ashram Road, Ahmedabad, Gujarat, India";
-const MAHAKANT_LATITUDE = 23.0252;
-const MAHAKANT_LONGITUDE = 72.5713;
-const MAHAKANT_GEOFENCE_RADIUS_METERS = 800;
-const DHRUV_EMAIL = "ahmedabad@trackforce.ai";
+const DEMO_EMAIL_SUFFIX = "@trackforce.ai";
 
 type ThemePreference = "system" | "light" | "dark";
 type CompanyScoped = { companyId?: string | null };
@@ -144,6 +128,7 @@ const DOLIBARR_ENV_DEFAULTS = {
 
 const REMOTE_STATE_SYNC_DISABLED = readTrimmedEnv("EXPO_PUBLIC_REMOTE_STATE_SYNC") === "false";
 const REMOTE_STATE_TIMEOUT_MS = 3200;
+const REMOTE_STATE_PENDING_WRITES_KEY = "@trackforce_remote_state_pending_writes";
 const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
   KEYS.COMPANIES,
   KEYS.EMPLOYEES,
@@ -163,6 +148,12 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
   KEYS.NOTIFICATIONS,
   KEYS.SUPPORT_THREADS,
 ]);
+
+interface PendingRemoteStateWrite {
+  key: string;
+  value: unknown;
+  updatedAt: string;
+}
 
 function isPrivateOrLocalHost(hostname: string): boolean {
   const host = hostname.trim().toLowerCase();
@@ -243,11 +234,65 @@ function getExpoLanApiBaseUrl(): string | null {
   return null;
 }
 
-function getRemoteStateApiCandidates(): string[] {
+async function getLocalSettingsApiBaseUrl(): Promise<string> {
+  const [settingsRaw, userRaw] = await Promise.all([
+    AsyncStorage.getItem(KEYS.SETTINGS),
+    AsyncStorage.getItem(KEYS.USER),
+  ]);
+  if (!settingsRaw) return "";
+
+  let companyId = DEFAULT_COMPANY_ID;
+  if (userRaw) {
+    try {
+      const parsedUser = JSON.parse(userRaw) as { companyId?: unknown } | null;
+      if (parsedUser && typeof parsedUser.companyId === "string" && parsedUser.companyId.trim()) {
+        companyId = parsedUser.companyId.trim();
+      }
+    } catch {
+      // ignore parse errors and keep default company id fallback
+    }
+  }
+
+  try {
+    const parsedSettings = JSON.parse(settingsRaw) as Record<string, unknown>;
+    if (!parsedSettings || typeof parsedSettings !== "object" || Array.isArray(parsedSettings)) {
+      return "";
+    }
+    const values = Object.values(parsedSettings);
+    const isLegacy = values.some((value) => typeof value === "string");
+    if (isLegacy) {
+      const directUrl = parsedSettings.backendApiUrl;
+      return typeof directUrl === "string" ? directUrl.trim() : "";
+    }
+
+    const companySettings = parsedSettings[companyId];
+    if (companySettings && typeof companySettings === "object" && !Array.isArray(companySettings)) {
+      const companyUrl = (companySettings as Record<string, unknown>).backendApiUrl;
+      if (typeof companyUrl === "string" && companyUrl.trim()) {
+        return companyUrl.trim();
+      }
+    }
+
+    for (const value of values) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const fallbackUrl = (value as Record<string, unknown>).backendApiUrl;
+      if (typeof fallbackUrl === "string" && fallbackUrl.trim()) {
+        return fallbackUrl.trim();
+      }
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+async function getRemoteStateApiCandidates(): Promise<string[]> {
   const candidates = new Set<string>();
+  const settingsApiUrl = await getLocalSettingsApiBaseUrl();
   const envUrl = BACKEND_ENV_DEFAULTS.apiBaseUrl;
-  if (envUrl) {
-    for (const apiBase of toApiBaseUrls(envUrl)) {
+  for (const rawUrl of [settingsApiUrl, envUrl]) {
+    if (!rawUrl) continue;
+    for (const apiBase of toApiBaseUrls(rawUrl)) {
       candidates.add(apiBase);
     }
   }
@@ -261,6 +306,57 @@ function getRemoteStateApiCandidates(): string[] {
   return Array.from(candidates);
 }
 
+async function readPendingRemoteStateWrites(): Promise<PendingRemoteStateWrite[]> {
+  const raw = await AsyncStorage.getItem(REMOTE_STATE_PENDING_WRITES_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as PendingRemoteStateWrite[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writePendingRemoteStateWrites(entries: PendingRemoteStateWrite[]): Promise<void> {
+  if (!entries.length) {
+    await AsyncStorage.removeItem(REMOTE_STATE_PENDING_WRITES_KEY);
+    return;
+  }
+  await AsyncStorage.setItem(REMOTE_STATE_PENDING_WRITES_KEY, JSON.stringify(entries.slice(-120)));
+}
+
+async function enqueuePendingRemoteStateWrite(key: string, value: unknown): Promise<void> {
+  const queue = await readPendingRemoteStateWrites();
+  const withoutCurrentKey = queue.filter((entry) => entry.key !== key);
+  withoutCurrentKey.push({
+    key,
+    value,
+    updatedAt: new Date().toISOString(),
+  });
+  await writePendingRemoteStateWrites(withoutCurrentKey);
+}
+
+async function removePendingRemoteStateWrite(key: string): Promise<void> {
+  const queue = await readPendingRemoteStateWrites();
+  if (!queue.length) return;
+  const next = queue.filter((entry) => entry.key !== key);
+  if (next.length === queue.length) return;
+  await writePendingRemoteStateWrites(next);
+}
+
+async function flushPendingRemoteStateWrites(): Promise<void> {
+  const queue = await readPendingRemoteStateWrites();
+  if (!queue.length) return;
+  const remaining: PendingRemoteStateWrite[] = [];
+  for (const entry of queue) {
+    const pushed = await pushStateRemote(entry.key, entry.value);
+    if (!pushed) {
+      remaining.push(entry);
+    }
+  }
+  await writePendingRemoteStateWrites(remaining);
+}
+
 function shouldSyncRemoteStateKey(key: string): boolean {
   if (REMOTE_STATE_SYNC_DISABLED) return false;
   return REMOTE_STATE_ALLOWED_KEYS.has(key);
@@ -271,7 +367,8 @@ async function fetchStateRemote<T>(key: string): Promise<T | null | undefined> {
   if (!token) return undefined;
   const encodedKey = encodeURIComponent(key);
 
-  for (const apiBase of getRemoteStateApiCandidates()) {
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
     try {
@@ -304,7 +401,8 @@ async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
   const encodedKey = encodeURIComponent(key);
   const body = JSON.stringify({ value });
 
-  for (const apiBase of getRemoteStateApiCandidates()) {
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
     try {
@@ -363,6 +461,22 @@ function normalizeEmail(value: string): string {
 
 function normalizeWhitespace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function isLegacyDemoEmail(value: string | null | undefined): boolean {
+  return normalizeEmail(value || "").endsWith(DEMO_EMAIL_SUFFIX);
+}
+
+function hasAnyLegacyDemoProfile(
+  authUsers: StoredAuthUser[],
+  employees: Employee[],
+  accessRequests: UserAccessRequest[]
+): boolean {
+  return (
+    authUsers.some((entry) => isLegacyDemoEmail(entry.user.email)) ||
+    employees.some((entry) => isLegacyDemoEmail(entry.email)) ||
+    accessRequests.some((entry) => isLegacyDemoEmail(entry.email))
+  );
 }
 
 function normalizePhone(value?: string): string {
@@ -483,10 +597,6 @@ function withCompanyId<T extends CompanyScoped>(item: T, companyId: string | nul
   return { ...item, companyId } as T;
 }
 
-function withDefaultCompanyId<T extends CompanyScoped>(items: T[]): T[] {
-  return items.map((item) => withCompanyId(item, DEFAULT_COMPANY_ID));
-}
-
 function matchesCompany(item: CompanyScoped, companyId: string | null): boolean {
   if (!companyId) return true;
   if (!item.companyId) return true;
@@ -499,6 +609,7 @@ async function getItem<T>(key: string): Promise<T | null> {
   if (!shouldSyncRemoteStateKey(key)) {
     return localValue;
   }
+  void flushPendingRemoteStateWrites();
 
   const remoteValue = await fetchStateRemote<T>(key);
   if (typeof remoteValue === "undefined") {
@@ -523,7 +634,13 @@ async function getItem<T>(key: string): Promise<T | null> {
 async function setItem<T>(key: string, value: T): Promise<void> {
   await AsyncStorage.setItem(key, JSON.stringify(value));
   if (shouldSyncRemoteStateKey(key)) {
-    await pushStateRemote(key, value);
+    const pushed = await pushStateRemote(key, value);
+    if (!pushed) {
+      await enqueuePendingRemoteStateWrite(key, value);
+    } else {
+      await removePendingRemoteStateWrite(key);
+      void flushPendingRemoteStateWrites();
+    }
   }
   const event: StorageUpdateEvent = {
     key,
@@ -609,42 +726,20 @@ async function hashPassword(password: string): Promise<string> {
   );
 }
 
-async function buildDemoAuthUsers(): Promise<StoredAuthUser[]> {
-  const now = new Date().toISOString();
-  const result: StoredAuthUser[] = [];
-  for (const user of demoUsers) {
-    const password = demoPasswords[user.email] ?? "demo123";
-    const passwordHash = await hashPassword(password);
-    result.push({
-      user: normalizeUserProfile(user),
-      passwordHash,
-      createdAt: now,
-      updatedAt: now,
-      approvalStatus: "approved",
-    });
-  }
-  return result;
-}
-
 async function ensureCompanyProfilesSeeded(): Promise<void> {
   const existing = (await getItem<CompanyProfile[]>(KEYS.COMPANIES)) || [];
   if (!existing.length) {
-    await setItem(KEYS.COMPANIES, [buildDefaultCompanyProfile()]);
+    await setItem(KEYS.COMPANIES, []);
     return;
   }
-
   const normalized = existing.map((profile) => normalizeCompanyProfile(profile));
-  const hasDefault = normalized.some((profile) => profile.id === DEFAULT_COMPANY_ID);
-  if (!hasDefault) {
-    normalized.unshift(buildDefaultCompanyProfile());
-  }
   await setItem(KEYS.COMPANIES, normalized);
 }
 
 async function ensureAuthUsersSeeded(): Promise<void> {
   const existing = await getAuthUsersRaw();
   if (!existing.length) {
-    await setAuthUsersRaw(await buildDemoAuthUsers());
+    await setAuthUsersRaw([]);
     return;
   }
 
@@ -653,8 +748,7 @@ async function ensureAuthUsersSeeded(): Promise<void> {
     const user = normalizeUserProfile(entry.user);
     let passwordHash = entry.passwordHash;
     if (!passwordHash) {
-      const knownPassword = demoPasswords[user.email];
-      passwordHash = await hashPassword(knownPassword ?? "changeme123");
+      passwordHash = await hashPassword("changeme123");
     }
     normalized.push({
       user,
@@ -673,27 +767,118 @@ async function ensureAuthUsersSeeded(): Promise<void> {
   await setAuthUsersRaw(normalized);
 }
 
+async function purgeLegacyDemoProfiles(): Promise<void> {
+  const [authUsers, employees, accessRequests] = await Promise.all([
+    getAuthUsersRaw(),
+    getItem<Employee[]>(KEYS.EMPLOYEES).then((value) => value || []),
+    getAccessRequestsRaw(),
+  ]);
+  if (!hasAnyLegacyDemoProfile(authUsers, employees, accessRequests)) {
+    return;
+  }
+
+  const removedUserIds = new Set<string>();
+  const removedNames = new Set<string>();
+
+  const filteredAuthUsers = authUsers.filter((entry) => {
+    const isDemo = isLegacyDemoEmail(entry.user.email);
+    if (!isDemo) return true;
+    if (entry.user.id) removedUserIds.add(entry.user.id);
+    if (entry.user.name) removedNames.add(normalizeWhitespace(entry.user.name).toLowerCase());
+    return false;
+  });
+  if (filteredAuthUsers.length !== authUsers.length) {
+    await setAuthUsersRaw(filteredAuthUsers);
+  }
+
+  const filteredEmployees = employees.filter((entry) => {
+    const normalizedName = normalizeWhitespace(entry.name).toLowerCase();
+    const isDemo =
+      isLegacyDemoEmail(entry.email) ||
+      removedUserIds.has(entry.id) ||
+      removedNames.has(normalizedName);
+    if (!isDemo) return true;
+    removedUserIds.add(entry.id);
+    removedNames.add(normalizedName);
+    return false;
+  });
+  if (filteredEmployees.length !== employees.length) {
+    await setItem(KEYS.EMPLOYEES, filteredEmployees);
+  }
+
+  const filteredAccessRequests = accessRequests.filter((entry) => !isLegacyDemoEmail(entry.email));
+  if (filteredAccessRequests.length !== accessRequests.length) {
+    await setAccessRequestsRaw(filteredAccessRequests);
+  }
+
+  const currentUser = await getItem<AppUser>(KEYS.USER);
+  if (currentUser && isLegacyDemoEmail(currentUser.email)) {
+    await Promise.all([
+      AsyncStorage.removeItem(KEYS.USER),
+      AsyncStorage.removeItem(KEYS.API_TOKEN),
+      AsyncStorage.removeItem(KEYS.CHECKED_IN),
+    ]);
+  }
+
+  const idKeys = ["userId", "employeeId", "ownerId", "assignedTo", "createdById", "leadId"];
+  const nameKeys = ["userName", "employeeName", "ownerName", "assignedToName", "createdByName", "leadName"];
+  const emailKeys = ["email", "ownerEmail", "assignedToEmail", "createdByEmail"];
+  const arrayIdKeys = ["memberIds", "assignedEmployeeIds", "participantIds", "audienceUserIds"];
+  const pruneByUserIdentity = <T extends Record<string, unknown>>(entries: T[]): T[] =>
+    entries.filter((entry) => {
+      for (const key of idKeys) {
+        const value = entry[key];
+        if (typeof value === "string" && removedUserIds.has(value)) return false;
+      }
+      for (const key of nameKeys) {
+        const value = entry[key];
+        if (typeof value === "string" && removedNames.has(normalizeWhitespace(value).toLowerCase())) {
+          return false;
+        }
+      }
+      for (const key of emailKeys) {
+        const value = entry[key];
+        if (typeof value === "string" && isLegacyDemoEmail(value)) return false;
+      }
+      for (const key of arrayIdKeys) {
+        const value = entry[key];
+        if (!Array.isArray(value)) continue;
+        if (value.some((item) => typeof item === "string" && removedUserIds.has(item))) return false;
+      }
+      return true;
+    });
+
+  const pruneKeys = [
+    KEYS.ATTENDANCE,
+    KEYS.SALARIES,
+    KEYS.TASKS,
+    KEYS.EXPENSES,
+    KEYS.CONVERSATIONS,
+    KEYS.AUDIT_LOGS,
+    KEYS.TEAMS,
+    KEYS.ATTENDANCE_PHOTOS,
+    KEYS.ATTENDANCE_ANOMALIES,
+    KEYS.LOCATION_LOGS,
+    KEYS.DOLIBARR_SYNC_LOGS,
+    KEYS.NOTIFICATIONS,
+    KEYS.SUPPORT_THREADS,
+  ];
+
+  for (const key of pruneKeys) {
+    const existing = (await getItem<Record<string, unknown>[]>(key)) || [];
+    if (!existing.length) continue;
+    const filtered = pruneByUserIdentity(existing);
+    if (filtered.length !== existing.length) {
+      await setItem(key, filtered);
+    }
+  }
+}
+
 async function ensureCurrentUserShape(): Promise<void> {
   const currentUser = await getItem<AppUser>(KEYS.USER);
   if (!currentUser) return;
   const normalized = normalizeUserProfile(currentUser);
   await setItem(KEYS.USER, normalized);
-}
-
-async function ensureSeedItems<T extends { id: string }>(key: string, items: T[]): Promise<void> {
-  if (!items.length) return;
-  const existing = (await getItem<T[]>(key)) || [];
-  const existingIds = new Set(existing.map((entry) => entry.id));
-  let changed = false;
-  for (const item of items) {
-    if (!existingIds.has(item.id)) {
-      existing.push(item);
-      changed = true;
-    }
-  }
-  if (changed) {
-    await setItem(key, existing);
-  }
 }
 
 async function migrateCompanyIdOnCollection<T extends CompanyScoped>(key: string): Promise<void> {
@@ -710,138 +895,6 @@ async function migrateCompanyIdOnCollection<T extends CompanyScoped>(key: string
   }
 }
 
-async function alignDhruvMahakantWorkspace(): Promise<void> {
-  const now = new Date().toISOString();
-
-  const companies = (await getItem<CompanyProfile[]>(KEYS.COMPANIES)) || [];
-  if (companies.length) {
-    let companyChanged = false;
-    const nextCompanies = companies.map((company) => {
-      if (company.id !== DEFAULT_COMPANY_ID) return company;
-      const nextCompany = normalizeCompanyProfile({
-        ...company,
-        headquarters: MAHAKANT_HEADQUARTERS,
-        primaryBranch: MAHAKANT_BRANCH_NAME,
-        attendanceZoneLabel: MAHAKANT_BRANCH_NAME,
-        updatedAt: now,
-      });
-      if (JSON.stringify(nextCompany) !== JSON.stringify(company)) {
-        companyChanged = true;
-      }
-      return nextCompany;
-    });
-    if (companyChanged) {
-      await setItem(KEYS.COMPANIES, nextCompanies);
-      await propagateCompanyName(DEFAULT_COMPANY_ID, DEFAULT_COMPANY_NAME);
-    }
-  }
-
-  const authUsers = await getAuthUsersRaw();
-  if (authUsers.length) {
-    let authChanged = false;
-    const nextAuthUsers = authUsers.map((entry) => {
-      if (normalizeEmail(entry.user.email) !== DHRUV_EMAIL) return entry;
-      if (entry.user.branch === MAHAKANT_BRANCH_NAME) return entry;
-      authChanged = true;
-      return {
-        ...entry,
-        user: normalizeUserProfile({
-          ...entry.user,
-          branch: MAHAKANT_BRANCH_NAME,
-        }),
-        updatedAt: now,
-      };
-    });
-    if (authChanged) {
-      await setAuthUsersRaw(nextAuthUsers);
-    }
-  }
-
-  const currentUser = await getItem<AppUser>(KEYS.USER);
-  if (
-    currentUser &&
-    normalizeEmail(currentUser.email) === DHRUV_EMAIL &&
-    currentUser.branch !== MAHAKANT_BRANCH_NAME
-  ) {
-    await setItem(KEYS.USER, {
-      ...currentUser,
-      branch: MAHAKANT_BRANCH_NAME,
-    });
-  }
-
-  const employees = await getRawList<Employee>(KEYS.EMPLOYEES);
-  if (employees.length) {
-    let employeeChanged = false;
-    const nextEmployees = employees.map((employee) => {
-      const isDhruv = employee.id === "e11" || normalizeEmail(employee.email) === DHRUV_EMAIL;
-      if (!isDhruv || employee.branch === MAHAKANT_BRANCH_NAME) return employee;
-      employeeChanged = true;
-      return {
-        ...employee,
-        branch: MAHAKANT_BRANCH_NAME,
-      };
-    });
-    if (employeeChanged) {
-      await setItem(KEYS.EMPLOYEES, nextEmployees);
-    }
-  }
-
-  const geofences = await getRawList<Geofence>(KEYS.GEOFENCES);
-  if (geofences.length) {
-    let geofenceChanged = false;
-    const nextGeofences = geofences.map((zone) => {
-      const isDhruvZone =
-        zone.id === "g4" ||
-        zone.assignedEmployeeIds.includes("u5") ||
-        zone.assignedEmployeeIds.includes("e11");
-      if (!isDhruvZone) return zone;
-      const nextAssigned = Array.from(new Set([...zone.assignedEmployeeIds, "u5", "e11"]));
-      const nextZone: Geofence = {
-        ...zone,
-        name: MAHAKANT_BRANCH_NAME,
-        latitude: MAHAKANT_LATITUDE,
-        longitude: MAHAKANT_LONGITUDE,
-        radiusMeters: Math.max(zone.radiusMeters || 0, MAHAKANT_GEOFENCE_RADIUS_METERS),
-        assignedEmployeeIds: nextAssigned,
-        isActive: true,
-        updatedAt: now,
-      };
-      if (JSON.stringify(nextZone) !== JSON.stringify(zone)) {
-        geofenceChanged = true;
-      }
-      return nextZone;
-    });
-    if (geofenceChanged) {
-      await setItem(KEYS.GEOFENCES, nextGeofences);
-    }
-  }
-
-  const attendance = await getRawList<AttendanceRecord>(KEYS.ATTENDANCE);
-  if (attendance.length) {
-    let attendanceChanged = false;
-    const nextAttendance = attendance.map((entry) => {
-      if (entry.id !== "a9") return entry;
-      const currentLat = entry.location?.lat;
-      const currentLng = entry.location?.lng;
-      if (currentLat === MAHAKANT_LATITUDE && currentLng === MAHAKANT_LONGITUDE) {
-        return entry;
-      }
-      attendanceChanged = true;
-      return {
-        ...entry,
-        geofenceName: MAHAKANT_BRANCH_NAME,
-        location: {
-          lat: MAHAKANT_LATITUDE,
-          lng: MAHAKANT_LONGITUDE,
-        },
-      };
-    });
-    if (attendanceChanged) {
-      await setItem(KEYS.ATTENDANCE, nextAttendance);
-    }
-  }
-}
-
 async function runSeedMigrations(): Promise<void> {
   await ensureCompanyProfilesSeeded();
   await ensureAuthUsersSeeded();
@@ -852,25 +905,6 @@ async function runSeedMigrations(): Promise<void> {
   if (appliedVersion === SEED_VERSION) return;
 
   await Promise.all([
-    ensureSeedItems(
-      KEYS.EMPLOYEES,
-      withDefaultCompanyId(demoEmployees.filter((employee) => employee.id === "e11"))
-    ),
-    ensureSeedItems(
-      KEYS.ATTENDANCE,
-      withDefaultCompanyId(demoAttendance.filter((record) => record.id === "a9"))
-    ),
-    ensureSeedItems(
-      KEYS.AUDIT_LOGS,
-      withDefaultCompanyId(demoAuditLogs.filter((log) => log.id === "al9"))
-    ),
-    ensureSeedItems(
-      KEYS.GEOFENCES,
-      withDefaultCompanyId(demoGeofences.filter((zone) => zone.id === "g4"))
-    ),
-    ensureSeedItems(KEYS.TEAMS, withDefaultCompanyId(demoTeams)),
-    ensureSeedItems(KEYS.NOTIFICATIONS, withDefaultCompanyId(demoNotifications)),
-    ensureSeedItems(KEYS.SUPPORT_THREADS, withDefaultCompanyId(demoSupportThreads)),
     migrateCompanyIdOnCollection<Employee>(KEYS.EMPLOYEES),
     migrateCompanyIdOnCollection<AttendanceRecord>(KEYS.ATTENDANCE),
     migrateCompanyIdOnCollection<SalaryRecord>(KEYS.SALARIES),
@@ -887,7 +921,7 @@ async function runSeedMigrations(): Promise<void> {
     migrateCompanyIdOnCollection<AppNotification>(KEYS.NOTIFICATIONS),
     migrateCompanyIdOnCollection<SupportThread>(KEYS.SUPPORT_THREADS),
   ]);
-  await alignDhruvMahakantWorkspace();
+  await purgeLegacyDemoProfiles();
 
   await AsyncStorage.setItem(KEYS.SEED_VERSION, SEED_VERSION);
 }
@@ -899,29 +933,26 @@ async function seedDataIfNeededInternal(): Promise<void> {
     return;
   }
 
-  const defaultCompanyProfile = buildDefaultCompanyProfile();
-  const demoAuthUsers = await buildDemoAuthUsers();
-
   await Promise.all([
-    setItem(KEYS.EMPLOYEES, withDefaultCompanyId(demoEmployees)),
-    setItem(KEYS.ATTENDANCE, withDefaultCompanyId(demoAttendance)),
-    setItem(KEYS.SALARIES, withDefaultCompanyId(demoSalaries)),
-    setItem(KEYS.TASKS, withDefaultCompanyId(demoTasks)),
-    setItem(KEYS.EXPENSES, withDefaultCompanyId(demoExpenses)),
-    setItem(KEYS.CONVERSATIONS, withDefaultCompanyId(demoConversations)),
-    setItem(KEYS.AUDIT_LOGS, withDefaultCompanyId(demoAuditLogs)),
-    setItem(KEYS.GEOFENCES, withDefaultCompanyId(demoGeofences)),
-    setItem(KEYS.TEAMS, withDefaultCompanyId(demoTeams)),
+    setItem(KEYS.EMPLOYEES, []),
+    setItem(KEYS.ATTENDANCE, []),
+    setItem(KEYS.SALARIES, []),
+    setItem(KEYS.TASKS, []),
+    setItem(KEYS.EXPENSES, []),
+    setItem(KEYS.CONVERSATIONS, []),
+    setItem(KEYS.AUDIT_LOGS, []),
+    setItem(KEYS.GEOFENCES, []),
+    setItem(KEYS.TEAMS, []),
     setItem(KEYS.ATTENDANCE_PHOTOS, []),
     setItem(KEYS.ATTENDANCE_ANOMALIES, []),
     setItem(KEYS.LOCATION_LOGS, []),
     setItem(KEYS.DOLIBARR_SYNC_LOGS, []),
-    setItem(KEYS.NOTIFICATIONS, withDefaultCompanyId(demoNotifications)),
-    setItem(KEYS.SUPPORT_THREADS, withDefaultCompanyId(demoSupportThreads)),
+    setItem(KEYS.NOTIFICATIONS, []),
+    setItem(KEYS.SUPPORT_THREADS, []),
     setItem(KEYS.ACCESS_REQUESTS, []),
     setItem(KEYS.ATTENDANCE_QUEUE, []),
-    setItem(KEYS.COMPANIES, [defaultCompanyProfile]),
-    setItem(KEYS.AUTH_USERS, demoAuthUsers),
+    setItem(KEYS.COMPANIES, []),
+    setItem(KEYS.AUTH_USERS, []),
   ]);
 
   await AsyncStorage.setItem(KEYS.SEEDED, "true");
@@ -1178,6 +1209,43 @@ async function upsertEmployeeForCompany(user: AppUser, company: CompanyProfile):
   await setItem(KEYS.EMPLOYEES, employees);
 }
 
+function resolveStoredAuthApprovalStatus(entry: StoredAuthUser): "pending" | "approved" | "rejected" {
+  if (entry.approvalStatus === "pending" || entry.approvalStatus === "rejected") {
+    return entry.approvalStatus;
+  }
+  if (entry.user.approvalStatus === "pending" || entry.user.approvalStatus === "rejected") {
+    return entry.user.approvalStatus;
+  }
+  return "approved";
+}
+
+function hasApprovedAdminForCompanyName(
+  authUsers: StoredAuthUser[],
+  companyName: string
+): boolean {
+  const requestedName = sanitizeCompanyName(companyName).toLowerCase();
+  return authUsers.some((entry) => {
+    if (resolveStoredAuthApprovalStatus(entry) !== "approved") return false;
+    if (entry.user.role !== "admin") return false;
+    const userCompanyName = sanitizeCompanyName(entry.user.companyName).toLowerCase();
+    return userCompanyName === requestedName;
+  });
+}
+
+async function resolveCompanyForSignupRequest(companyName: string): Promise<CompanyProfile> {
+  const requestedName = sanitizeCompanyName(companyName);
+  const companies = await getCompanyProfiles();
+  const existing =
+    companies.find(
+      (company) => sanitizeCompanyName(company.name).toLowerCase() === requestedName.toLowerCase()
+    ) || null;
+  if (existing) return existing;
+
+  const created = await createCompanyProfile({ name: requestedName });
+  if (created) return created;
+  return companies[0] || buildDefaultCompanyProfile();
+}
+
 export async function registerUser(input: RegisterUserInput): Promise<RegisterUserResult> {
   await seedDataIfNeeded();
 
@@ -1203,12 +1271,51 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
   }
 
   const role = normalizeRole(input.role);
-  if (role === "admin") {
-    return { ok: false, message: "Admin signup is disabled. Contact an existing admin." };
-  }
   const now = new Date().toISOString();
+  const adminAlreadyExistsForCompany = hasApprovedAdminForCompanyName(
+    authUsers,
+    requestedCompanyName
+  );
+  if (role === "admin" && !adminAlreadyExistsForCompany) {
+    const adminCompany = await resolveCompanyForSignupRequest(requestedCompanyName);
+    const adminUser = normalizeUserProfile({
+      id: makeId("u"),
+      name,
+      email,
+      role: "admin",
+      companyId: adminCompany.id,
+      companyName: adminCompany.name,
+      companyIds: [adminCompany.id],
+      department: normalizeWhitespace(input.department ?? "") || roleToDepartment("admin"),
+      branch: normalizeWhitespace(input.branch ?? "") || adminCompany.primaryBranch,
+      phone: normalizePhone(input.phone),
+      joinDate: now.slice(0, 10),
+      approvalStatus: "approved",
+    });
+    authUsers.unshift({
+      user: adminUser,
+      passwordHash: await hashPassword(password),
+      createdAt: now,
+      updatedAt: now,
+      approvalStatus: "approved",
+      requestedCompanyName,
+    });
+    await setAuthUsersRaw(authUsers);
+    await upsertEmployeeForCompany(adminUser, adminCompany);
+    await setItem(KEYS.USER, adminUser);
+    return {
+      ok: true,
+      message: "Admin account created successfully.",
+      user: adminUser,
+      company: adminCompany,
+    };
+  }
   const companies = await getCompanyProfiles();
-  const fallbackCompany = companies[0] || buildDefaultCompanyProfile();
+  const matchingCompany =
+    companies.find(
+      (company) => sanitizeCompanyName(company.name).toLowerCase() === requestedCompanyName.toLowerCase()
+    ) || null;
+  const fallbackCompany = matchingCompany || companies[0] || buildDefaultCompanyProfile();
 
   const pendingUser = normalizeUserProfile({
     id: makeId("u"),
@@ -1479,6 +1586,7 @@ export async function getCurrentUser(): Promise<AppUser | null> {
 
 export async function syncBackendAuthenticatedUser(user: AppUser): Promise<AppUser> {
   await seedDataIfNeeded();
+  const previousUser = await getCurrentUser();
   const normalizedUser = normalizeUserProfile({
     ...user,
     approvalStatus: "approved",
@@ -1516,6 +1624,21 @@ export async function syncBackendAuthenticatedUser(user: AppUser): Promise<AppUs
 
   await upsertEmployeeForCompany(hydratedUser, activeCompany);
   await setItem(KEYS.USER, hydratedUser);
+
+  if (previousUser?.id && previousUser.id !== hydratedUser.id) {
+    const tokenStore = await readApiTokenStore(previousUser);
+    const fallbackToken =
+      tokenStore[hydratedUser.id] ||
+      tokenStore[previousUser.id] ||
+      tokenStore[GLOBAL_API_TOKEN_KEY] ||
+      null;
+    if (fallbackToken && !tokenStore[hydratedUser.id]) {
+      tokenStore[hydratedUser.id] = fallbackToken;
+      tokenStore[GLOBAL_API_TOKEN_KEY] = fallbackToken;
+      await writeApiTokenStore(tokenStore);
+    }
+  }
+
   return hydratedUser;
 }
 
@@ -1615,6 +1738,7 @@ async function writeCheckedInMap(map: Record<string, boolean>): Promise<void> {
 }
 
 type ApiTokenStore = Record<string, string>;
+const GLOBAL_API_TOKEN_KEY = "__global__";
 
 async function readApiTokenStore(currentUser?: AppUser | null): Promise<ApiTokenStore> {
   const raw = await AsyncStorage.getItem(KEYS.API_TOKEN);
@@ -1630,9 +1754,16 @@ async function readApiTokenStore(currentUser?: AppUser | null): Promise<ApiToken
     // fallback handled below
   }
 
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
   const user = currentUser || (await getItem<AppUser>(KEYS.USER));
-  if (!user) return {};
-  return { [user.id]: raw };
+  if (!user?.id) {
+    return { [GLOBAL_API_TOKEN_KEY]: trimmed };
+  }
+  return {
+    [user.id]: trimmed,
+    [GLOBAL_API_TOKEN_KEY]: trimmed,
+  };
 }
 
 async function writeApiTokenStore(store: ApiTokenStore): Promise<void> {
@@ -1654,7 +1785,19 @@ export async function logoutUser(): Promise<void> {
 
   const tokenStore = await readApiTokenStore(current);
   if (current?.id) {
+    const removedToken = tokenStore[current.id];
     delete tokenStore[current.id];
+    if (removedToken && tokenStore[GLOBAL_API_TOKEN_KEY] === removedToken) {
+      const nextToken = Object.entries(tokenStore).find(
+        ([key, value]) =>
+          key !== GLOBAL_API_TOKEN_KEY && typeof value === "string" && value.trim().length > 0
+      )?.[1];
+      if (nextToken) {
+        tokenStore[GLOBAL_API_TOKEN_KEY] = nextToken;
+      } else {
+        delete tokenStore[GLOBAL_API_TOKEN_KEY];
+      }
+    }
   }
   await writeApiTokenStore(tokenStore);
 
@@ -2445,27 +2588,59 @@ export async function getOrCreateDeviceId(): Promise<string> {
 
 export async function getApiToken(): Promise<string | null> {
   const currentUser = await getCurrentUser();
-  if (!currentUser?.id) return null;
   const tokenStore = await readApiTokenStore(currentUser);
-  return tokenStore[currentUser.id] ?? null;
+  if (currentUser?.id) {
+    const currentToken = tokenStore[currentUser.id];
+    if (typeof currentToken === "string" && currentToken.trim()) {
+      return currentToken;
+    }
+  }
+
+  const globalToken = tokenStore[GLOBAL_API_TOKEN_KEY];
+  if (typeof globalToken === "string" && globalToken.trim()) {
+    return globalToken;
+  }
+
+  const fallbackTokens = Object.entries(tokenStore)
+    .filter(([key, value]) => key !== GLOBAL_API_TOKEN_KEY && typeof value === "string" && value.trim())
+    .map(([, value]) => value);
+  return fallbackTokens.length === 1 ? fallbackTokens[0] : null;
 }
 
 export async function setApiToken(token: string | null): Promise<void> {
   const currentUser = await getCurrentUser();
   if (!currentUser?.id) {
+    const tokenStore = await readApiTokenStore(null);
     if (!token) {
-      await AsyncStorage.removeItem(KEYS.API_TOKEN);
+      delete tokenStore[GLOBAL_API_TOKEN_KEY];
     } else {
-      await AsyncStorage.setItem(KEYS.API_TOKEN, token);
+      tokenStore[GLOBAL_API_TOKEN_KEY] = token;
     }
+    await writeApiTokenStore(tokenStore);
     return;
   }
 
   const tokenStore = await readApiTokenStore(currentUser);
   if (!token) {
+    const removedToken = tokenStore[currentUser.id];
     delete tokenStore[currentUser.id];
+    if (removedToken && tokenStore[GLOBAL_API_TOKEN_KEY] === removedToken) {
+      const nextToken = Object.entries(tokenStore).find(
+        ([key, value]) =>
+          key !== GLOBAL_API_TOKEN_KEY && typeof value === "string" && value.trim().length > 0
+      )?.[1];
+      if (nextToken) {
+        tokenStore[GLOBAL_API_TOKEN_KEY] = nextToken;
+      } else {
+        delete tokenStore[GLOBAL_API_TOKEN_KEY];
+      }
+    }
   } else {
     tokenStore[currentUser.id] = token;
+    tokenStore[GLOBAL_API_TOKEN_KEY] = token;
   }
   await writeApiTokenStore(tokenStore);
+  if (token) {
+    void flushPendingRemoteStateWrites();
+  }
 }

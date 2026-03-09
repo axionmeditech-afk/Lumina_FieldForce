@@ -59,10 +59,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ): Promise<void> => {
       try {
         const normalizedEmail = email.trim().toLowerCase();
-        const isBuiltInDemoUser = normalizedEmail.endsWith("@trackforce.ai");
 
         const token = await issueApiToken(normalizedEmail, password, { timeoutMs: 1200 });
-        if (token || !allowRegistration || isBuiltInDemoUser) {
+        if (token || !allowRegistration) {
           return;
         }
 

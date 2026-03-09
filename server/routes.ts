@@ -10,8 +10,7 @@ import type {
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
-import { buildDemoRoutePoints } from "@/lib/demo-route";
-import { demoPasswords, demoUsers, DEFAULT_COMPANY_ID, DEFAULT_COMPANY_NAME } from "@/lib/seedData";
+import { DEFAULT_COMPANY_ID, DEFAULT_COMPANY_NAME } from "@/lib/seedData";
 import { buildRouteTimeline } from "@/lib/route-analytics";
 import { requireAuth, requireRoles, signJwt } from "@/server/auth";
 import { storage } from "@/server/storage";
@@ -456,19 +455,19 @@ async function insertAccessRequestInMySql(entry: UserAccessRequest): Promise<voi
       entry.name,
       entry.email,
       entry.requestedRole,
-      entry.approvedRole,
-      entry.requestedDepartment,
-      entry.requestedBranch,
-      entry.requestedCompanyName || null,
+      entry.approvedRole ?? null,
+      entry.requestedDepartment ?? "",
+      entry.requestedBranch ?? "",
+      entry.requestedCompanyName ?? null,
       entry.status,
       entry.requestedAt.slice(0, 19).replace("T", " "),
       entry.reviewedAt ? entry.reviewedAt.slice(0, 19).replace("T", " ") : null,
-      entry.reviewedById,
-      entry.reviewedByName,
-      entry.reviewComment,
+      entry.reviewedById ?? null,
+      entry.reviewedByName ?? null,
+      entry.reviewComment ?? null,
       JSON.stringify(entry.assignedCompanyIds || []),
-      entry.assignedManagerId,
-      entry.assignedManagerName,
+      entry.assignedManagerId ?? null,
+      entry.assignedManagerName ?? null,
     ]
   );
 }
@@ -493,7 +492,7 @@ async function listAccessRequestsFromMySql(
     approvedRole: row.approved_role ? (row.approved_role as UserRole) : null,
     requestedDepartment: String(row.requested_department || ""),
     requestedBranch: String(row.requested_branch || ""),
-    requestedCompanyName: row.requested_company_name ? String(row.requested_company_name) : null,
+    requestedCompanyName: row.requested_company_name ? String(row.requested_company_name) : undefined,
     status: row.status as UserAccessRequest["status"],
     requestedAt: new Date(row.requested_at).toISOString(),
     reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
@@ -632,28 +631,115 @@ function getCompanyIdFromName(companyName: string): string {
   return slug ? `cmp_${slug}` : DEFAULT_COMPANY_ID;
 }
 
-function initAuthUsersStore() {
-  if (authUsersByEmail.size > 0) return;
-  const now = new Date().toISOString();
-  for (const user of demoUsers) {
-    const normalizedUser: AppUser = {
-      ...user,
-      companyId: user.companyId || DEFAULT_COMPANY_ID,
-      companyName: user.companyName || DEFAULT_COMPANY_NAME,
-      email: normalizeEmail(user.email),
-      name: normalizeWhitespace(user.name),
-      department: normalizeWhitespace(user.department),
-      branch: normalizeWhitespace(user.branch),
+function hasApprovedAdminForCompany(companyName: string): boolean {
+  const normalizedCompanyName = normalizeCompanyName(companyName);
+  const companyNameKey = normalizedCompanyName.toLowerCase();
+  const companyId = getCompanyIdFromName(normalizedCompanyName);
+  for (const record of authUsersByEmail.values()) {
+    if (resolveApprovalStatus(record) !== "approved") continue;
+    if (record.user.role !== "admin") continue;
+    const userCompanyId = normalizeWhitespace(record.user.companyId || "");
+    const userCompanyName = normalizeCompanyName(record.user.companyName || "").toLowerCase();
+    if (userCompanyId === companyId || userCompanyName === companyNameKey) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function toIsoTimestamp(value: unknown, fallbackIso: string): string {
+  if (typeof value === "string") {
+    const parsed = parseIsoDate(value);
+    if (parsed) return parsed.toISOString();
+  }
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.toISOString();
+  }
+  return fallbackIso;
+}
+
+function normalizeApprovalStatusValue(value: unknown): "pending" | "approved" | "rejected" {
+  if (value === "pending" || value === "approved" || value === "rejected") return value;
+  return "approved";
+}
+
+function parseCompanyIdsFromJson(value: unknown, fallbackCompanyId: string): string[] {
+  if (typeof value !== "string" || !value.trim()) return [fallbackCompanyId];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [fallbackCompanyId];
+    const normalized = parsed
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => normalizeWhitespace(entry))
+      .filter(Boolean);
+    return normalized.length ? Array.from(new Set(normalized)) : [fallbackCompanyId];
+  } catch {
+    return [fallbackCompanyId];
+  }
+}
+
+let authUsersStoreInitPromise: Promise<void> | null = null;
+
+async function hydrateAuthUsersFromMySql(): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT
+      id, name, email, password_hash, role, company_id, company_name, company_ids_json,
+      department, branch, phone, join_date, avatar, manager_id, manager_name, approval_status,
+      created_at, updated_at
+    FROM lff_users`
+  );
+
+  for (const row of rows) {
+    const emailValue = normalizeEmailKey(typeof row?.email === "string" ? row.email : "");
+    const passwordHashValue =
+      typeof row?.password_hash === "string" ? row.password_hash.trim() : "";
+    if (!emailValue || !passwordHashValue) continue;
+
+    const role = normalizeRole(row?.role);
+    const companyId = normalizeWhitespace(String(row?.company_id || DEFAULT_COMPANY_ID)) || DEFAULT_COMPANY_ID;
+    const companyName = normalizeCompanyName(String(row?.company_name || DEFAULT_COMPANY_NAME));
+    const nowIso = new Date().toISOString();
+    const user: AppUser = {
+      id: normalizeWhitespace(String(row?.id || randomUUID())),
+      name: normalizeWhitespace(String(row?.name || emailValue)),
+      email: normalizeEmail(emailValue),
+      role,
+      companyId,
+      companyName,
+      companyIds: parseCompanyIdsFromJson(row?.company_ids_json, companyId),
+      department: normalizeWhitespace(String(row?.department || roleToDepartment(role))),
+      branch: normalizeWhitespace(String(row?.branch || "Main Branch")),
+      phone: normalizeWhitespace(String(row?.phone || "+91 00000 00000")),
+      joinDate: String(row?.join_date || new Date().toISOString().slice(0, 10)),
+      avatar: row?.avatar ? String(row.avatar) : undefined,
+      managerId: row?.manager_id ? String(row.manager_id) : undefined,
+      managerName: row?.manager_name ? String(row.manager_name) : undefined,
+      approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
     };
-    const password = demoPasswords[normalizedUser.email] ?? "demo123";
-    authUsersByEmail.set(normalizedUser.email, {
-      user: normalizedUser,
-      passwordHash: hashPassword(password),
-      createdAt: now,
-      updatedAt: now,
-      approvalStatus: "approved",
+
+    authUsersByEmail.set(user.email, {
+      user,
+      passwordHash: passwordHashValue,
+      createdAt: toIsoTimestamp(row?.created_at, nowIso),
+      updatedAt: toIsoTimestamp(row?.updated_at, nowIso),
+      approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
     });
   }
+}
+
+async function initAuthUsersStore(): Promise<void> {
+  if (authUsersByEmail.size > 0) return;
+  if (!isMySqlStateEnabled()) return;
+  if (!authUsersStoreInitPromise) {
+    authUsersStoreInitPromise = (async () => {
+      await hydrateAuthUsersFromMySql();
+    })().finally(() => {
+      authUsersStoreInitPromise = null;
+    });
+  }
+  await authUsersStoreInitPromise;
 }
 
 function createAuthToken(user: AppUser): string {
@@ -664,8 +750,8 @@ function createAuthToken(user: AppUser): string {
   });
 }
 
-function authenticateCredentials(email: string, password: string): AppUser | null {
-  initAuthUsersStore();
+async function authenticateCredentials(email: string, password: string): Promise<AppUser | null> {
+  await initAuthUsersStore();
   const record = authUsersByEmail.get(normalizeEmail(email));
   if (!record) return null;
   if (record.passwordHash !== hashPassword(password)) return null;
@@ -703,7 +789,7 @@ function buildUserFromRegistration(payload: {
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  initAuthUsersStore();
+  await initAuthUsersStore();
 
   app.get("/api/health", (_req, res) => {
     res.json({
@@ -1073,7 +1159,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   );
 
-  app.post("/api/auth/register", (req, res) => {
+  app.post("/api/auth/register", async (req, res) => {
     const {
       name,
       email,
@@ -1113,28 +1199,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    if (normalizeRole(role) === "admin") {
-      res.status(403).json({ message: "Admin signup is disabled. Contact an existing admin." });
+    const normalizedRole = normalizeRole(role);
+    const normalizedCompanyName = normalizeCompanyName(companyName);
+    const companyAlreadyHasAdmin = hasApprovedAdminForCompany(normalizedCompanyName);
+    if (normalizedRole === "admin" && companyAlreadyHasAdmin) {
+      res.status(403).json({
+        message:
+          "Admin already exists for this company. Ask an existing admin to approve additional admin access.",
+      });
       return;
     }
 
     const user = buildUserFromRegistration({
       name,
       email: normalizedEmail,
-      companyName,
-      role: normalizeRole(role),
+      companyName: normalizedCompanyName,
+      role: normalizedRole,
       department,
       branch,
       phone,
     });
     const now = new Date().toISOString();
-    authUsersByEmail.set(user.email, {
+    const authRecord: AuthUserRecord = {
       user,
       passwordHash: hashPassword(password),
       createdAt: now,
       updatedAt: now,
       approvalStatus: "approved",
-    });
+    };
+    authUsersByEmail.set(user.email, authRecord);
+    try {
+      await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
+    } catch (error) {
+      authUsersByEmail.delete(user.email);
+      console.error("Failed to persist registered user in MySQL", error);
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Failed to save user in database: ${error.message}`
+            : "Failed to save user in database.",
+      });
+      return;
+    }
 
     const token = createAuthToken(user);
     res.status(201).json({ token, user });
@@ -1177,15 +1283,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     const normalizedRole = normalizeRole(role);
-    if (normalizedRole === "admin") {
-      res.status(403).json({ message: "Admin signup is disabled. Contact an existing admin." });
-      return;
-    }
+    const normalizedCompanyName = normalizeCompanyName(companyName);
+    const companyAlreadyHasAdmin = hasApprovedAdminForCompany(normalizedCompanyName);
 
     const existingRecord = authUsersByEmail.get(normalizedEmail);
     const existingStatus = existingRecord ? resolveApprovalStatus(existingRecord) : null;
     if (existingRecord && existingStatus === "approved") {
       res.status(409).json({ message: "User already exists for this email" });
+      return;
+    }
+
+    if (normalizedRole === "admin" && !companyAlreadyHasAdmin) {
+      const now = new Date().toISOString();
+      const bootstrapAdmin = buildUserFromRegistration({
+        name,
+        email: normalizedEmail,
+        companyName: normalizedCompanyName,
+        role: "admin",
+        department,
+        branch,
+        phone,
+      });
+      const authRecord: AuthUserRecord = {
+        user: bootstrapAdmin,
+        passwordHash: hashPassword(password),
+        createdAt: existingRecord?.createdAt || now,
+        updatedAt: now,
+        approvalStatus: "approved",
+      };
+      authUsersByEmail.set(normalizedEmail, authRecord);
+      try {
+        await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
+      } catch (error) {
+        authUsersByEmail.delete(normalizedEmail);
+        console.error("Failed to persist bootstrap admin in MySQL", error);
+        res.status(500).json({
+          message:
+            error instanceof Error
+              ? `Failed to save admin in database: ${error.message}`
+              : "Failed to save admin in database.",
+        });
+        return;
+      }
+      const token = createAuthToken(bootstrapAdmin);
+      res.status(201).json({
+        ok: true,
+        autoApproved: true,
+        message: "First admin account created and approved for this company.",
+        token,
+        user: bootstrapAdmin,
+      });
       return;
     }
 
@@ -1205,7 +1352,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ...buildUserFromRegistration({
         name,
         email: normalizedEmail,
-        companyName,
+        companyName: normalizedCompanyName,
         role: normalizedRole,
         department,
         branch,
@@ -1230,7 +1377,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       approvedRole: null,
       requestedDepartment: pendingUser.department,
       requestedBranch: pendingUser.branch,
-      requestedCompanyName: normalizeCompanyName(companyName),
+      requestedCompanyName: normalizedCompanyName,
       status: "pending",
       requestedAt: now,
       reviewedAt: null,
@@ -1439,13 +1586,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   );
 
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body as { email?: string; password?: string };
     if (!email || !password) {
       res.status(400).json({ message: "Email and password are required" });
       return;
     }
 
+    await initAuthUsersStore();
     const normalizedEmail = normalizeEmail(email);
     const authRecord = authUsersByEmail.get(normalizedEmail);
     if (authRecord && authRecord.passwordHash === hashPassword(password)) {
@@ -1459,7 +1607,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
     }
-    const user = authenticateCredentials(normalizedEmail, password);
+    const user = await authenticateCredentials(normalizedEmail, password);
     if (!user) {
       res.status(401).json({ message: "Invalid credentials" });
       return;
@@ -1469,12 +1617,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ token, user });
   });
 
-  app.post("/api/auth/token", (req, res) => {
+  app.post("/api/auth/token", async (req, res) => {
     const { email, password } = req.body as { email?: string; password?: string };
     if (!email || !password) {
       res.status(400).json({ message: "Email and password are required" });
       return;
     }
+    await initAuthUsersStore();
     const normalizedEmail = normalizeEmail(email);
     const authRecord = authUsersByEmail.get(normalizedEmail);
     if (authRecord && authRecord.passwordHash === hashPassword(password)) {
@@ -1488,7 +1637,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
     }
-    const user = authenticateCredentials(normalizedEmail, password);
+    const user = await authenticateCredentials(normalizedEmail, password);
     if (!user) {
       res.status(401).json({ message: "Invalid credentials" });
       return;
@@ -1497,12 +1646,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ token });
   });
 
-  app.get("/api/auth/me", requireAuth, (req, res) => {
+  app.get("/api/auth/me", requireAuth, async (req, res) => {
     const email = req.auth?.email;
     if (!email) {
       res.status(401).json({ message: "Not authenticated" });
       return;
     }
+    await initAuthUsersStore();
     const record = authUsersByEmail.get(normalizeEmail(email));
     if (!record) {
       res.status(404).json({ message: "User not found" });
@@ -1794,116 +1944,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   );
 
   app.get(
-    "/api/admin/route/:id/demo",
-    requireAuth,
-    requireRoles("admin", "hr", "manager", "salesperson"),
-    async (req, res) => {
-      const userId = firstString(req.params.id);
-      if (!userId) {
-        res.status(400).json({ message: "User id is required" });
-        return;
-      }
-      if (!ensureUserMatch(req, userId)) {
-        res.status(403).json({ message: "Token user mismatch" });
-        return;
-      }
-      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
-      if (!isIsoDateString(requestedDate)) {
-        res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
-        return;
-      }
-
-      const points = buildDemoRoutePoints(userId, requestedDate);
-      const timeline = buildRouteTimeline(userId, requestedDate, points);
-      const pointByTime = new Map(points.map((point) => [point.capturedAt, point]));
-      const haltById = new Map(timeline.halts.map((halt) => [halt.id, halt]));
-      const directions = await getMapplsDirectionsForLogs(points, {
-        resource: firstString(req.query.routing_resource) || null,
-        profile: firstString(req.query.routing_profile) || null,
-        overview: firstString(req.query.routing_overview) || null,
-        geometries: firstString(req.query.routing_geometries) || null,
-        alternatives: parseBooleanQuery(req.query.routing_alternatives, false),
-        steps: parseBooleanQuery(req.query.routing_steps, true),
-        region: firstString(req.query.routing_region) || null,
-        routeType: parseOptionalInteger(req.query.routing_rtype),
-      });
-      const firstPoint = points[0];
-      const lastPoint = points[points.length - 1];
-      const attendanceEvents = [
-        {
-          id: `demo_checkin_${userId}_${requestedDate}`,
-          type: "checkin" as const,
-          at: firstPoint?.capturedAt ?? new Date(`${requestedDate}T09:00:00`).toISOString(),
-          geofenceName: firstPoint?.geofenceName ?? "Route Start",
-          latitude: firstPoint?.latitude ?? null,
-          longitude: firstPoint?.longitude ?? null,
-        },
-        {
-          id: `demo_checkout_${userId}_${requestedDate}`,
-          type: "checkout" as const,
-          at: lastPoint?.capturedAt ?? new Date(`${requestedDate}T12:05:00`).toISOString(),
-          geofenceName: lastPoint?.geofenceName ?? "Route End",
-          latitude: lastPoint?.latitude ?? null,
-          longitude: lastPoint?.longitude ?? null,
-        },
-      ];
-
-      const demoTimelinePreview = timeline.segments.map((segment) => {
-        if (segment.type === "halt") {
-          const halt = segment.haltId ? haltById.get(segment.haltId) : null;
-          return {
-            id: segment.id,
-            type: segment.type,
-            startAt: segment.startAt,
-            endAt: segment.endAt,
-            durationMinutes: segment.durationMinutes,
-            label: segment.fromLabel,
-            battery: {
-              start: halt?.startBatteryLevel ?? null,
-              end: halt?.endBatteryLevel ?? null,
-              average: halt?.averageBatteryLevel ?? null,
-            },
-          };
-        }
-        const startPoint = pointByTime.get(segment.startAt);
-        const endPoint = pointByTime.get(segment.endAt);
-        return {
-          id: segment.id,
-          type: segment.type,
-          startAt: segment.startAt,
-          endAt: segment.endAt,
-          durationMinutes: segment.durationMinutes,
-          label: `${segment.fromLabel} -> ${segment.toLabel}`,
-          battery: {
-            start: startPoint?.batteryLevel ?? null,
-            end: endPoint?.batteryLevel ?? null,
-            average: null,
-          },
-        };
-      });
-      const demoRoutePoints = points.map((point) => ({
-        id: point.id,
-        at: point.capturedAt,
-        latitude: point.latitude,
-        longitude: point.longitude,
-        speed: point.speed ?? null,
-        geofenceName: point.geofenceName ?? null,
-        batteryLevel: point.batteryLevel ?? null,
-      }));
-
-      res.json({
-        ...timeline,
-        directions,
-        attendanceEvents,
-        demoData: {
-          routePoints: demoRoutePoints,
-          timeline: demoTimelinePreview,
-        },
-      });
-    }
-  );
-
-  app.get(
     "/api/admin/route/:id",
     requireAuth,
     requireRoles("admin", "hr", "manager", "salesperson"),
@@ -1983,10 +2023,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
 
-      const useDemoData = parseBooleanQuery(req.query.demo, false);
-      const points = useDemoData
-        ? buildDemoRoutePoints(userId, requestedDate)
-        : await storage.getLocationLogsForUserDate(userId, requestedDate);
+      const points = await storage.getLocationLogsForUserDate(userId, requestedDate);
 
       if (points.length < 2) {
         res.status(400).json({ message: "At least 2 route points are required for matrix" });
