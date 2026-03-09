@@ -7,6 +7,7 @@ import {
   Pressable,
   TextInput,
   Modal,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -26,6 +27,7 @@ import type { Employee, Task, Team, UserRole } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
+import { toMumbaiDateKey } from "@/lib/ist-time";
 
 const LEAD_ROLES: UserRole[] = ["admin", "hr", "manager"];
 
@@ -139,10 +141,17 @@ export default function TasksScreen() {
   const [showAdd, setShowAdd] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [newTaskType, setNewTaskType] = useState<Task["taskType"]>("general");
   const [newDueDays, setNewDueDays] = useState("7");
   const [newPriority, setNewPriority] = useState<Task["priority"]>("medium");
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [selectedAssigneeId, setSelectedAssigneeId] = useState<string | null>(null);
+  const [visitDate, setVisitDate] = useState(() => toMumbaiDateKey(new Date()));
+  const [visitSequence, setVisitSequence] = useState("1");
+  const [visitLocationLabel, setVisitLocationLabel] = useState("");
+  const [visitLocationAddress, setVisitLocationAddress] = useState("");
+  const [visitLatitude, setVisitLatitude] = useState("");
+  const [visitLongitude, setVisitLongitude] = useState("");
   const [filter, setFilter] = useState<"all" | "pending" | "in_progress" | "completed">("all");
 
   const canManage = isLeadRole(user?.role);
@@ -273,13 +282,35 @@ export default function TasksScreen() {
     const selectedTeam = selectedTeamId ? manageableTeams.find((team) => team.id === selectedTeamId) : null;
 
     const dueInDays = Math.max(1, Number.parseInt(newDueDays, 10) || 7);
-    const dueDate = new Date(Date.now() + dueInDays * 86400000).toISOString().split("T")[0];
+    const normalizedVisitDate = visitDate.trim();
+    const isFieldVisit = newTaskType === "field_visit";
+    const visitLat = Number.parseFloat(visitLatitude);
+    const visitLng = Number.parseFloat(visitLongitude);
+    if (isFieldVisit) {
+      if (!visitLocationLabel.trim()) {
+        Alert.alert("Location Missing", "Please enter a location label for this field visit.");
+        return;
+      }
+      const isValidVisitDate = /^\d{4}-\d{2}-\d{2}$/.test(normalizedVisitDate);
+      if (!isValidVisitDate) {
+        Alert.alert("Date Format", "Visit date must be in YYYY-MM-DD format.");
+        return;
+      }
+      if (!Number.isFinite(visitLat) || !Number.isFinite(visitLng)) {
+        Alert.alert("Coordinates Missing", "Please enter valid latitude and longitude.");
+        return;
+      }
+    }
+    const dueDate = isFieldVisit
+      ? normalizedVisitDate
+      : new Date(Date.now() + dueInDays * 86400000).toISOString().split("T")[0];
     const nowISO = new Date().toISOString();
 
     const task: Task = {
       id: Crypto.randomUUID(),
       title,
       description: newDesc.trim(),
+      taskType: isFieldVisit ? "field_visit" : "general",
       assignedTo: member.id,
       assignedToName: member.name,
       assignedBy: assignerId,
@@ -289,6 +320,15 @@ export default function TasksScreen() {
       priority: newPriority,
       dueDate,
       createdAt: nowISO.split("T")[0],
+      visitPlanDate: isFieldVisit ? normalizedVisitDate : null,
+      visitSequence: isFieldVisit ? Math.max(1, Number.parseInt(visitSequence, 10) || 1) : null,
+      visitLatitude: isFieldVisit ? visitLat : null,
+      visitLongitude: isFieldVisit ? visitLng : null,
+      visitLocationLabel: isFieldVisit ? visitLocationLabel.trim() : null,
+      visitLocationAddress: isFieldVisit ? visitLocationAddress.trim() || null : null,
+      arrivalAt: null,
+      departureAt: null,
+      autoCaptureConversationId: null,
     };
     await addTask(task);
     await addAuditLog({
@@ -303,8 +343,15 @@ export default function TasksScreen() {
 
     setNewTitle("");
     setNewDesc("");
+    setNewTaskType("general");
     setNewDueDays("7");
     setNewPriority("medium");
+    setVisitDate(toMumbaiDateKey(new Date()));
+    setVisitSequence("1");
+    setVisitLocationLabel("");
+    setVisitLocationAddress("");
+    setVisitLatitude("");
+    setVisitLongitude("");
     setShowAdd(false);
     await loadData();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -315,11 +362,18 @@ export default function TasksScreen() {
     loadData,
     manageableTeams,
     newDesc,
+    newTaskType,
     newDueDays,
     newPriority,
     newTitle,
     selectedAssigneeId,
     selectedTeamId,
+    visitDate,
+    visitLatitude,
+    visitLocationAddress,
+    visitLocationLabel,
+    visitLongitude,
+    visitSequence,
     user,
   ]);
 
@@ -491,6 +545,42 @@ export default function TasksScreen() {
               value={newTitle}
               onChangeText={setNewTitle}
             />
+            <View style={styles.selectorWrap}>
+              <Text style={[styles.selectorLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                Task Type
+              </Text>
+              <View style={styles.selectorRow}>
+                {([
+                  { value: "general", label: "General" },
+                  { value: "field_visit", label: "Field Visit" },
+                ] as const).map((entry) => (
+                  <Pressable
+                    key={entry.value}
+                    onPress={() => setNewTaskType(entry.value)}
+                    style={[
+                      styles.selectorChip,
+                      {
+                        backgroundColor:
+                          newTaskType === entry.value ? colors.primary : colors.surfaceSecondary,
+                        borderColor: newTaskType === entry.value ? colors.primary : colors.border,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.selectorChipText,
+                        {
+                          color: newTaskType === entry.value ? "#FFFFFF" : colors.textSecondary,
+                          fontFamily: "Inter_500Medium",
+                        },
+                      ]}
+                    >
+                      {entry.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
             <TextInput
               style={[styles.modalInput, styles.modalTextarea, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
               placeholder="Description (optional)"
@@ -500,6 +590,78 @@ export default function TasksScreen() {
               multiline
               numberOfLines={3}
             />
+
+            {newTaskType === "field_visit" ? (
+              <>
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  placeholder="Visit date (YYYY-MM-DD)"
+                  placeholderTextColor={colors.textTertiary}
+                  value={visitDate}
+                  onChangeText={setVisitDate}
+                />
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  placeholder="Visit sequence (1,2,3...)"
+                  placeholderTextColor={colors.textTertiary}
+                  value={visitSequence}
+                  onChangeText={setVisitSequence}
+                  keyboardType="number-pad"
+                />
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  placeholder="Location label (e.g., Client A Office)"
+                  placeholderTextColor={colors.textTertiary}
+                  value={visitLocationLabel}
+                  onChangeText={setVisitLocationLabel}
+                />
+                <TextInput
+                  style={[styles.modalInput, styles.modalTextarea, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  placeholder="Location address (optional)"
+                  placeholderTextColor={colors.textTertiary}
+                  value={visitLocationAddress}
+                  onChangeText={setVisitLocationAddress}
+                  multiline
+                  numberOfLines={2}
+                />
+                <View style={styles.coordinateRow}>
+                  <TextInput
+                    style={[
+                      styles.modalInput,
+                      {
+                        flex: 1,
+                        color: colors.text,
+                        backgroundColor: colors.surfaceSecondary,
+                        borderColor: colors.border,
+                        fontFamily: "Inter_400Regular",
+                      },
+                    ]}
+                    placeholder="Latitude"
+                    placeholderTextColor={colors.textTertiary}
+                    value={visitLatitude}
+                    onChangeText={setVisitLatitude}
+                    keyboardType="decimal-pad"
+                  />
+                  <TextInput
+                    style={[
+                      styles.modalInput,
+                      {
+                        flex: 1,
+                        color: colors.text,
+                        backgroundColor: colors.surfaceSecondary,
+                        borderColor: colors.border,
+                        fontFamily: "Inter_400Regular",
+                      },
+                    ]}
+                    placeholder="Longitude"
+                    placeholderTextColor={colors.textTertiary}
+                    value={visitLongitude}
+                    onChangeText={setVisitLongitude}
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+              </>
+            ) : null}
 
             <View style={styles.priorityRow}>
               {(["low", "medium", "high"] as const).map((value) => (
@@ -529,14 +691,16 @@ export default function TasksScreen() {
               ))}
             </View>
 
-            <TextInput
-              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-              placeholder="Due in days (default 7)"
-              placeholderTextColor={colors.textTertiary}
-              value={newDueDays}
-              onChangeText={setNewDueDays}
-              keyboardType="number-pad"
-            />
+            {newTaskType === "general" ? (
+              <TextInput
+                style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                placeholder="Due in days (default 7)"
+                placeholderTextColor={colors.textTertiary}
+                value={newDueDays}
+                onChangeText={setNewDueDays}
+                keyboardType="number-pad"
+              />
+            ) : null}
 
             <Pressable
               onPress={() => void handleAddTask()}
@@ -672,6 +836,10 @@ const styles = StyleSheet.create({
   priorityRow: {
     flexDirection: "row",
     gap: 8,
+  },
+  coordinateRow: {
+    flexDirection: "row",
+    gap: 10,
   },
   priorityChip: {
     flex: 1,

@@ -206,6 +206,9 @@ export default function ConversationDetailScreen() {
 
   const runAiAnalysis = useCallback(
     async (mode: "auto" | "manual") => {
+      if (user?.role !== "admin") {
+        return;
+      }
       if (!convo?.transcript?.trim()) {
         if (mode === "manual") {
           Alert.alert("Transcript Missing", "A conversation transcript is required first.");
@@ -358,12 +361,13 @@ export default function ConversationDetailScreen() {
 
   useEffect(() => {
     if (!convo) return;
+    if (user?.role !== "admin") return;
     if (analysisBusy) return;
     if (autoAttemptedRef.current) return;
     if (convo.analysisProvider === "ai") return;
     autoAttemptedRef.current = true;
     void runAiAnalysis("auto");
-  }, [analysisBusy, convo, runAiAnalysis]);
+  }, [analysisBusy, convo, runAiAnalysis, user?.role]);
 
   const unloadAudio = useCallback(async () => {
     const sound = audioSoundRef.current;
@@ -399,18 +403,17 @@ export default function ConversationDetailScreen() {
     );
   }
 
-  const canViewAll = user?.role === "admin";
-  const isOwner = Boolean(user && (convo.salespersonId === user.id || convo.salespersonName === user.name));
-  if (!canViewAll && !isOwner) {
+  const canViewAnalysis = user?.role === "admin";
+  if (!canViewAnalysis) {
     return (
       <AppCanvas>
         <View style={[styles.loadingContainer, { justifyContent: "center", alignItems: "center", paddingHorizontal: 24 }]}>
           <Ionicons name="lock-closed-outline" size={34} color={colors.warning} />
           <Text style={[styles.restrictedTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            Restricted Conversation
+            Admin Access Only
           </Text>
           <Text style={[styles.restrictedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-            You can only view your own conversations. Full access is available to admins.
+            Transcript and AI analysis are visible only to admin users.
           </Text>
           <Pressable onPress={() => router.back()} style={[styles.backButton, { backgroundColor: colors.primary }]}>
             <Text style={styles.backButtonText}>Go Back</Text>
@@ -502,7 +505,9 @@ export default function ConversationDetailScreen() {
           <Pressable onPress={() => router.back()} hitSlop={12}>
             <Ionicons name="arrow-back" size={24} color={colors.text} />
           </Pressable>
-          <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Analysis</Text>
+          <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+            {canViewAnalysis ? "Analysis" : "Conversation"}
+          </Text>
           <View style={{ width: 24 }} />
         </View>
 
@@ -520,64 +525,70 @@ export default function ConversationDetailScreen() {
                 <Text style={styles.heroSalesperson}>{convo.salespersonName} - {convo.duration}</Text>
               </View>
             </View>
-            <View style={styles.heroMetrics}>
-              <View style={styles.heroMetric}>
-                <Text style={styles.heroMetricValue}>{convo.interestScore}</Text>
-                <Text style={styles.heroMetricLabel}>Interest</Text>
+            {canViewAnalysis ? (
+              <View style={styles.heroMetrics}>
+                <View style={styles.heroMetric}>
+                  <Text style={styles.heroMetricValue}>{convo.interestScore}</Text>
+                  <Text style={styles.heroMetricLabel}>Interest</Text>
+                </View>
+                <View style={styles.heroMetricDivider} />
+                <View style={styles.heroMetric}>
+                  <Text style={styles.heroMetricValue}>{convo.pitchScore}</Text>
+                  <Text style={styles.heroMetricLabel}>Pitch</Text>
+                </View>
+                <View style={styles.heroMetricDivider} />
+                <View style={styles.heroMetric}>
+                  <Text style={styles.heroMetricValue}>{convo.confidenceScore}</Text>
+                  <Text style={styles.heroMetricLabel}>Confidence</Text>
+                </View>
               </View>
-              <View style={styles.heroMetricDivider} />
-              <View style={styles.heroMetric}>
-                <Text style={styles.heroMetricValue}>{convo.pitchScore}</Text>
-                <Text style={styles.heroMetricLabel}>Pitch</Text>
-              </View>
-              <View style={styles.heroMetricDivider} />
-              <View style={styles.heroMetric}>
-                <Text style={styles.heroMetricValue}>{convo.confidenceScore}</Text>
-                <Text style={styles.heroMetricLabel}>Confidence</Text>
-              </View>
-            </View>
+            ) : null}
           </LinearGradient>
         </Animated.View>
 
-        <Animated.View entering={FadeInDown.duration(400).delay(100)} style={styles.overviewSection}>
-          <View style={styles.overviewRow}>
-            <View style={[styles.overviewCard, { backgroundColor: sentimentColor + "15" }]}>
-              <Ionicons name="happy-outline" size={20} color={sentimentColor} />
-              <Text style={[styles.overviewLabel, { color: sentimentColor, fontFamily: "Inter_500Medium" }]}>
-                {convo.sentiment.toUpperCase()}
-              </Text>
-              <Text style={[styles.overviewSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>Sentiment</Text>
-            </View>
-            <View style={[styles.overviewCard, { backgroundColor: colors.primary + "15" }]}>
-              <Ionicons name="trending-up" size={20} color={colors.primary} />
-              <Text style={[styles.overviewLabel, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
-                {convo.buyingIntent.toUpperCase()}
-              </Text>
-              <Text style={[styles.overviewSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>Buying Intent</Text>
-            </View>
-            <View style={[styles.overviewCard, { backgroundColor: colors.warning + "15" }]}>
-              <Ionicons name="mic-outline" size={20} color={colors.warning} />
-              <Text style={[styles.overviewLabel, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
-                {convo.talkListenRatio}%
-              </Text>
-              <Text style={[styles.overviewSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>Talk Ratio</Text>
-            </View>
-          </View>
-        </Animated.View>
+        {canViewAnalysis ? (
+          <>
+            <Animated.View entering={FadeInDown.duration(400).delay(100)} style={styles.overviewSection}>
+              <View style={styles.overviewRow}>
+                <View style={[styles.overviewCard, { backgroundColor: sentimentColor + "15" }]}>
+                  <Ionicons name="happy-outline" size={20} color={sentimentColor} />
+                  <Text style={[styles.overviewLabel, { color: sentimentColor, fontFamily: "Inter_500Medium" }]}>
+                    {convo.sentiment.toUpperCase()}
+                  </Text>
+                  <Text style={[styles.overviewSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>Sentiment</Text>
+                </View>
+                <View style={[styles.overviewCard, { backgroundColor: colors.primary + "15" }]}>
+                  <Ionicons name="trending-up" size={20} color={colors.primary} />
+                  <Text style={[styles.overviewLabel, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
+                    {convo.buyingIntent.toUpperCase()}
+                  </Text>
+                  <Text style={[styles.overviewSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>Buying Intent</Text>
+                </View>
+                <View style={[styles.overviewCard, { backgroundColor: colors.warning + "15" }]}>
+                  <Ionicons name="mic-outline" size={20} color={colors.warning} />
+                  <Text style={[styles.overviewLabel, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
+                    {convo.talkListenRatio}%
+                  </Text>
+                  <Text style={[styles.overviewSub, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>Talk Ratio</Text>
+                </View>
+              </View>
+            </Animated.View>
 
-        <View style={[styles.scoresCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-          <Text style={[styles.scoresTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            Performance Breakdown
-          </Text>
-          <ScoreGauge label="Interest Level" score={convo.interestScore} colors={colors} delay={200} />
-          <ScoreGauge label="Pitch Clarity" score={convo.pitchScore} colors={colors} delay={250} />
-          <ScoreGauge label="Confidence" score={convo.confidenceScore} colors={colors} delay={300} />
-          <ScoreGauge label="Talk-to-Listen" score={convo.talkListenRatio} colors={colors} delay={350} />
-        </View>
+            <View style={[styles.scoresCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+              <Text style={[styles.scoresTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                Performance Breakdown
+              </Text>
+              <ScoreGauge label="Interest Level" score={convo.interestScore} colors={colors} delay={200} />
+              <ScoreGauge label="Pitch Clarity" score={convo.pitchScore} colors={colors} delay={250} />
+              <ScoreGauge label="Confidence" score={convo.confidenceScore} colors={colors} delay={300} />
+              <ScoreGauge label="Talk-to-Listen" score={convo.talkListenRatio} colors={colors} delay={350} />
+            </View>
+          </>
+        ) : null}
 
         <Animated.View entering={FadeInDown.duration(400).delay(400)}>
           <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            Summary
+            {canViewAnalysis ? "Summary" : "Conversation Notes"}
           </Text>
           <View style={[styles.textCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <Text style={[styles.summaryText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
@@ -616,7 +627,7 @@ export default function ConversationDetailScreen() {
                   </Text>
                 </View>
               ) : null}
-              {convo.analysisProvider ? (
+              {canViewAnalysis && convo.analysisProvider ? (
                 <View style={[styles.metaPill, { backgroundColor: colors.primary + "15" }]}>
                   <Text style={[styles.metaPillText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
                     {convo.analysisProvider.toUpperCase()} ANALYSIS
@@ -625,88 +636,90 @@ export default function ConversationDetailScreen() {
               ) : null}
             </View>
 
-            <View style={styles.analysisActionsWrap}>
-              {analysisError ? (
-                <View
-                  style={[
-                    styles.analysisBanner,
-                    {
-                      backgroundColor: colors.danger + "12",
-                      borderColor: colors.danger + "40",
-                    },
-                  ]}
-                >
-                  <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
-                  <Text
+            {canViewAnalysis ? (
+              <View style={styles.analysisActionsWrap}>
+                {analysisError ? (
+                  <View
                     style={[
-                      styles.analysisBannerText,
-                      { color: colors.danger, fontFamily: "Inter_500Medium" },
+                      styles.analysisBanner,
+                      {
+                        backgroundColor: colors.danger + "12",
+                        borderColor: colors.danger + "40",
+                      },
                     ]}
                   >
-                    {analysisError}
-                  </Text>
-                </View>
-              ) : null}
+                    <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
+                    <Text
+                      style={[
+                        styles.analysisBannerText,
+                        { color: colors.danger, fontFamily: "Inter_500Medium" },
+                      ]}
+                    >
+                      {analysisError}
+                    </Text>
+                  </View>
+                ) : null}
 
-              {!aiConfigured ? (
-                <View
-                  style={[
-                    styles.analysisBanner,
-                    {
-                      backgroundColor: colors.warning + "12",
-                      borderColor: colors.warning + "40",
-                    },
-                  ]}
-                >
-                  <Ionicons name="key-outline" size={15} color={colors.warning} />
-                  <Text
+                {!aiConfigured ? (
+                  <View
                     style={[
-                      styles.analysisBannerText,
-                      { color: colors.warning, fontFamily: "Inter_500Medium" },
+                      styles.analysisBanner,
+                      {
+                        backgroundColor: colors.warning + "12",
+                        borderColor: colors.warning + "40",
+                      },
                     ]}
                   >
-                    AI env key missing.
-                  </Text>
-                </View>
-              ) : (
-                <Text
-                  style={[
-                    styles.aiMetaText,
-                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                  ]}
-                >
-                  Model: {aiModel}
-                </Text>
-              )}
-
-              <Pressable
-                onPress={() => void runAiAnalysis("manual")}
-                disabled={analysisBusy}
-                style={({ pressed }) => [
-                  styles.aiButton,
-                  {
-                    backgroundColor: colors.primary,
-                    opacity: pressed || analysisBusy ? 0.8 : 1,
-                  },
-                ]}
-              >
-                {analysisBusy ? (
-                  <>
-                    <ActivityIndicator size="small" color="#FFFFFF" />
-                    <Text style={styles.aiButtonText}>Analyzing...</Text>
-                  </>
+                    <Ionicons name="key-outline" size={15} color={colors.warning} />
+                    <Text
+                      style={[
+                        styles.analysisBannerText,
+                        { color: colors.warning, fontFamily: "Inter_500Medium" },
+                      ]}
+                    >
+                      AI env key missing.
+                    </Text>
+                  </View>
                 ) : (
-                  <>
-                  <Ionicons name="sparkles-outline" size={16} color="#FFFFFF" />
-                  <Text style={styles.aiButtonText}>
-                      {convo.analysisProvider === "ai"
-                        ? "Re-run AI Analysis"
-                        : "Run AI Analysis"}
+                  <Text
+                    style={[
+                      styles.aiMetaText,
+                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                    ]}
+                  >
+                    Model: {aiModel}
                   </Text>
-                </>
-              )}
-              </Pressable>
-            </View>
+                )}
+
+                <Pressable
+                  onPress={() => void runAiAnalysis("manual")}
+                  disabled={analysisBusy}
+                  style={({ pressed }) => [
+                    styles.aiButton,
+                    {
+                      backgroundColor: colors.primary,
+                      opacity: pressed || analysisBusy ? 0.8 : 1,
+                    },
+                  ]}
+                >
+                  {analysisBusy ? (
+                    <>
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                      <Text style={styles.aiButtonText}>Analyzing...</Text>
+                    </>
+                  ) : (
+                    <>
+                    <Ionicons name="sparkles-outline" size={16} color="#FFFFFF" />
+                    <Text style={styles.aiButtonText}>
+                        {convo.analysisProvider === "ai"
+                          ? "Re-run AI Analysis"
+                          : "Run AI Analysis"}
+                    </Text>
+                  </>
+                )}
+                </Pressable>
+              </View>
+            ) : null}
           </View>
         </Animated.View>
 
@@ -723,20 +736,22 @@ export default function ConversationDetailScreen() {
           </Animated.View>
         ) : null}
 
-        <Animated.View entering={FadeInDown.duration(400).delay(450)}>
-          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            Key Phrases
-          </Text>
-          <View style={styles.tagsRow}>
-            {convo.keyPhrases.map((phrase, idx) => (
-              <View key={idx} style={[styles.tag, { backgroundColor: colors.primary + "15" }]}>
-                <Text style={[styles.tagText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>{phrase}</Text>
-              </View>
-            ))}
-          </View>
-        </Animated.View>
+        {canViewAnalysis ? (
+          <Animated.View entering={FadeInDown.duration(400).delay(450)}>
+            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+              Key Phrases
+            </Text>
+            <View style={styles.tagsRow}>
+              {convo.keyPhrases.map((phrase, idx) => (
+                <View key={idx} style={[styles.tag, { backgroundColor: colors.primary + "15" }]}>
+                  <Text style={[styles.tagText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>{phrase}</Text>
+                </View>
+              ))}
+            </View>
+          </Animated.View>
+        ) : null}
 
-        {convo.objections.length > 0 && (
+        {canViewAnalysis && convo.objections.length > 0 && (
           <Animated.View entering={FadeInDown.duration(400).delay(500)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               Objections Detected
@@ -752,7 +767,7 @@ export default function ConversationDetailScreen() {
           </Animated.View>
         )}
 
-        {convo.improvements.length > 0 && (
+        {canViewAnalysis && convo.improvements.length > 0 && (
           <Animated.View entering={FadeInDown.duration(400).delay(550)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               AI Coaching Tips

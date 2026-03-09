@@ -118,6 +118,7 @@ export interface Task {
   companyId?: string;
   title: string;
   description: string;
+  taskType?: "general" | "field_visit";
   assignedTo: string;
   assignedToName: string;
   assignedBy: string;
@@ -127,6 +128,18 @@ export interface Task {
   priority: "low" | "medium" | "high";
   dueDate: string;
   createdAt: string;
+  visitPlanDate?: string | null;
+  visitSequence?: number | null;
+  visitLatitude?: number | null;
+  visitLongitude?: number | null;
+  visitLocationLabel?: string | null;
+  visitLocationAddress?: string | null;
+  arrivalAt?: string | null;
+  departureAt?: string | null;
+  autoCaptureRecordingActive?: boolean;
+  autoCaptureRecordingStartedAt?: string | null;
+  autoCaptureRecordingStoppedAt?: string | null;
+  autoCaptureConversationId?: string | null;
 }
 
 export interface Team {

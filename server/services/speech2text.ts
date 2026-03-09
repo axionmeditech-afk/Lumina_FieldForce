@@ -1,4 +1,5 @@
-import { promises as fs } from "node:fs";
+import axios, { isAxiosError } from "axios";
+import fs from "fs-extra";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -7,21 +8,41 @@ const HF_INFERENCE_BASE_URL = (
   process.env.HF_INFERENCE_BASE_URL?.trim() ||
   "https://router.huggingface.co/hf-inference/models"
 ).replace(/\/+$/, "");
+const ASSEMBLYAI_API_BASE_URL = (
+  process.env.ASSEMBLYAI_API_BASE_URL?.trim() || "https://api.assemblyai.com"
+).replace(/\/+$/, "");
+const REVUP_API_BASE_URL = (
+  process.env.REVUP_API_BASE_URL?.trim() || "https://revapi.reverieinc.com"
+).replace(/\/+$/, "");
 const GEMINI_API_BASE_URL = (
   process.env.GEMINI_API_BASE_URL?.trim() ||
-  process.env.GEMINI_API_BASE?.trim() ||
+  process.env.EXPO_PUBLIC_GEMINI_API_BASE_URL?.trim() ||
   "https://generativelanguage.googleapis.com"
 ).replace(/\/+$/, "");
-const DEFAULT_FAIRSEQ_S2T_MODEL =
-  process.env.HF_S2T_MODEL?.trim() || "facebook/s2t-small-librispeech-asr";
-const DEFAULT_FALLBACK_MODEL =
-  process.env.HF_STT_FALLBACK_MODEL?.trim() || "distil-whisper/distil-small.en";
-const DEFAULT_GEMINI_STT_MODEL =
+const REVUP_APP_NAME = process.env.REVUP_APP_NAME?.trim() || "stt_file";
+const REVUP_DEFAULT_SOURCE_LANG = process.env.REVUP_SOURCE_LANG?.trim() || "en";
+const REVUP_DEFAULT_DOMAIN = process.env.REVUP_DOMAIN?.trim() || "generic";
+const DEFAULT_GEMINI_STT_MODEL = (
   process.env.GEMINI_STT_MODEL?.trim() ||
   process.env.GEMINI_MODEL?.trim() ||
-  "gemini-2.5-flash";
+  process.env.EXPO_PUBLIC_GEMINI_MODEL?.trim() ||
+  "gemini-2.5-flash-lite"
+).trim();
+const DEFAULT_FAIRSEQ_S2T_MODEL =
+  process.env.HF_S2T_MODEL?.trim() || "openai/whisper-large-v3-turbo";
+const DEFAULT_FALLBACK_MODEL =
+  process.env.HF_STT_FALLBACK_MODEL?.trim() || "openai/whisper-large-v3";
+const DEFAULT_ASSEMBLYAI_SPEECH_MODELS = (
+  process.env.ASSEMBLYAI_SPEECH_MODELS?.trim() ||
+  process.env.ASSEMBLYAI_SPEECH_MODEL?.trim() ||
+  "universal-3-pro,universal-2"
+)
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 const DEFAULT_PROVIDER_ORDER = (
-  process.env.SPEECH_TO_TEXT_PROVIDER_ORDER?.trim() || "gemini,local_python,huggingface"
+  process.env.SPEECH_TO_TEXT_PROVIDER_ORDER?.trim() ||
+  "gemini,revup,assemblyai,local_python,huggingface"
 ).toLowerCase();
 const LOCAL_STT_ENABLED =
   (process.env.LOCAL_STT_ENABLED?.trim() || "true").toLowerCase() !== "false";
@@ -42,8 +63,24 @@ const TRANSCRIBE_RETRY_DELAY_MS = Math.max(
   200,
   Number(process.env.SPEECH_TRANSCRIBE_RETRY_DELAY_MS || 900)
 );
+const ASSEMBLYAI_POLL_INTERVAL_MS = Math.max(
+  1_000,
+  Number(process.env.ASSEMBLYAI_POLL_INTERVAL_MS || 3_000)
+);
+const ASSEMBLYAI_TIMEOUT_MS = Math.max(
+  30_000,
+  Number(process.env.ASSEMBLYAI_TIMEOUT_MS || 300_000)
+);
+const REVUP_TIMEOUT_MS = Math.max(
+  20_000,
+  Number(process.env.REVUP_TIMEOUT_MS || 120_000)
+);
+const GEMINI_TIMEOUT_MS = Math.max(
+  20_000,
+  Number(process.env.GEMINI_TIMEOUT_MS || 120_000)
+);
 
-type SpeechProvider = "local_python" | "huggingface" | "gemini";
+type SpeechProvider = "gemini" | "revup" | "assemblyai" | "local_python" | "huggingface";
 
 export interface DiarizedTranscriptEntry {
   transcript: string;
@@ -81,6 +118,9 @@ interface TranscribeRequest {
   fallbackModel?: string | null;
   huggingFaceToken?: string | null;
   geminiApiKey?: string | null;
+  assemblyAiApiKey?: string | null;
+  revupApiKey?: string | null;
+  revupAppId?: string | null;
   provider?: string | null;
   mode?: string | null;
   languageCode?: string | null;
@@ -104,6 +144,48 @@ function isLikelyHuggingFaceModel(value: string | null | undefined): boolean {
   return candidate.includes("/");
 }
 
+function isLikelyGeminiModel(value: string | null | undefined): boolean {
+  const candidate = value?.trim().toLowerCase();
+  if (!candidate) return false;
+  return candidate.startsWith("gemini");
+}
+
+function appendUniqueKey(target: string[], value: string | null | undefined): void {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return;
+  if (!target.includes(trimmed)) {
+    target.push(trimmed);
+  }
+}
+
+function appendKeyList(target: string[], value: string | null | undefined): void {
+  const raw = (value || "").trim();
+  if (!raw) return;
+  for (const chunk of raw.split(",")) {
+    appendUniqueKey(target, chunk);
+  }
+}
+
+function getGeminiApiKeyPool(explicitKey?: string | null): string[] {
+  const keys: string[] = [];
+  appendKeyList(keys, explicitKey);
+  appendKeyList(keys, process.env.GEMINI_API_KEYS);
+  appendKeyList(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEYS);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY_1);
+  appendUniqueKey(keys, process.env.GEMINI_API);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY_2);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY_3);
+  appendUniqueKey(keys, process.env.GEMINI_SECONDARY_API_KEY);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY_BACKUP);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY_1);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY_2);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY_3);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API);
+  return keys;
+}
+
 function resolveLocalModel(value: string | null | undefined): string {
   const candidate = value?.trim() || "";
   if (!candidate) return LOCAL_STT_MODEL;
@@ -123,6 +205,26 @@ function parseProviderOrder(input: string): SpeechProvider[] {
       !providers.includes("gemini")
     ) {
       providers.push("gemini");
+      continue;
+    }
+    if (
+      (chunk === "revup" ||
+        chunk === "reverie" ||
+        chunk === "reverieinc" ||
+        chunk === "revup_asr" ||
+        chunk === "reverie_asr") &&
+      !providers.includes("revup")
+    ) {
+      providers.push("revup");
+      continue;
+    }
+    if (
+      (chunk === "assemblyai" ||
+        chunk === "assembly_ai" ||
+        chunk === "assembly") &&
+      !providers.includes("assemblyai")
+    ) {
+      providers.push("assemblyai");
     }
     if (
       (chunk === "local" || chunk === "python" || chunk === "local_python") &&
@@ -138,10 +240,16 @@ function parseProviderOrder(input: string): SpeechProvider[] {
     }
   }
   if (!providers.length) {
-    providers.push("gemini", "local_python", "huggingface");
+    providers.push("gemini", "revup", "assemblyai", "local_python", "huggingface");
   }
   if (providers.includes("gemini")) {
     return ["gemini", ...providers.filter((provider) => provider !== "gemini")];
+  }
+  if (providers.includes("revup")) {
+    return ["revup", ...providers.filter((provider) => provider !== "revup")];
+  }
+  if (providers.includes("assemblyai")) {
+    return ["assemblyai", ...providers.filter((provider) => provider !== "assemblyai")];
   }
   return providers;
 }
@@ -270,6 +378,90 @@ function extractDiarizedEntries(payload: unknown): DiarizedTranscriptEntry[] {
   return normalized;
 }
 
+function toRevupTimeSeconds(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (value < 0) return null;
+  return value > 1000 ? value / 1000 : value;
+}
+
+function extractRevupTranscript(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const row = payload as Record<string, unknown>;
+
+  if (typeof row.text === "string" && row.text.trim()) {
+    return row.text.trim();
+  }
+  if (typeof row.display_text === "string" && row.display_text.trim()) {
+    return row.display_text.trim();
+  }
+
+  const textObjects = Array.isArray(row.text) ? row.text : [];
+  if (textObjects.length) {
+    const combined = textObjects
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const transcript = (item as Record<string, unknown>).transcript;
+        return typeof transcript === "string" ? transcript.trim() : "";
+      })
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    if (combined) return combined;
+  }
+
+  return extractTranscript(payload);
+}
+
+function extractRevupDiarizedEntries(payload: unknown): DiarizedTranscriptEntry[] {
+  if (!payload || typeof payload !== "object") return [];
+  const row = payload as Record<string, unknown>;
+  const textObjects = Array.isArray(row.text) ? row.text : [];
+  const entries: DiarizedTranscriptEntry[] = [];
+
+  for (const item of textObjects) {
+    if (!item || typeof item !== "object") continue;
+    const segment = item as Record<string, unknown>;
+    const transcript =
+      typeof segment.transcript === "string" ? segment.transcript.trim() : "";
+    if (!transcript) continue;
+
+    const speakerRaw =
+      typeof segment.channel_number === "number"
+        ? String(segment.channel_number)
+        : typeof segment.channel_number === "string"
+          ? segment.channel_number.trim()
+          : typeof segment.speaker === "string"
+            ? segment.speaker.trim()
+            : "";
+
+    const words = Array.isArray(segment.words) ? segment.words : [];
+    const firstWord =
+      words.length && words[0] && typeof words[0] === "object"
+        ? (words[0] as Record<string, unknown>)
+        : null;
+    const lastWord =
+      words.length && words[words.length - 1] && typeof words[words.length - 1] === "object"
+        ? (words[words.length - 1] as Record<string, unknown>)
+        : null;
+
+    const startTimeSeconds =
+      toRevupTimeSeconds(segment.start_time) ??
+      toRevupTimeSeconds(firstWord?.start_time);
+    const endTimeSeconds =
+      toRevupTimeSeconds(segment.end_time) ??
+      toRevupTimeSeconds(lastWord?.end_time);
+
+    entries.push({
+      transcript,
+      speakerId: speakerRaw || null,
+      startTimeSeconds,
+      endTimeSeconds,
+    });
+  }
+
+  return entries;
+}
+
 function parseBody(text: string): unknown {
   if (!text.trim()) return null;
   try {
@@ -311,11 +503,17 @@ function combineWarnings(...warnings: (string | undefined | null)[]): string | u
 }
 
 function getModelWarning(provider: SpeechProvider, model: string): string | undefined {
+  if (provider === "gemini") {
+    return "Gemini STT quality varies with accent/noise and may not always include speaker separation.";
+  }
+  if (provider === "revup") {
+    return "Revup STT response quality depends on selected source language and uploaded audio quality.";
+  }
   if (provider === "local_python") {
     return "Local Python STT running on-device/server CPU. Accuracy and speed depend on model size and hardware.";
   }
-  if (provider === "gemini") {
-    return "Gemini multimodal transcription quality depends on model/audio clarity; results may vary on noisy calls.";
+  if (provider === "assemblyai") {
+    return "AssemblyAI diarization labels depend on speaker separation quality and can vary for overlapping speech.";
   }
   if (provider === "huggingface" && model === "facebook/s2t-small-librispeech-asr") {
     return "HF model is optimized for English ASR; multilingual/Indian speech accuracy may vary.";
@@ -484,7 +682,6 @@ async function callHuggingFaceModel({
   token?: string | null;
 }): Promise<{ transcript: string; latencyMs: number }> {
   const url = new URL(`${HF_INFERENCE_BASE_URL}/${encodeURIComponent(model)}`);
-  url.searchParams.set("wait_for_model", "true");
 
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -542,99 +739,324 @@ async function callHuggingFaceModel({
   throw new Speech2TextError("HuggingFace speech-to-text request timed out", 504);
 }
 
-async function callGeminiModel(params: {
-  model: string;
+async function callRevupModel(params: {
+  audio: Buffer;
+  mimeType: string;
+  apiKey: string;
+  appId: string;
+  languageCode?: string;
+  withDiarization?: boolean;
+}): Promise<{
+  transcript: string;
+  latencyMs: number;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
+  const startedAt = Date.now();
+  const endpoint = `${REVUP_API_BASE_URL}/`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REVUP_TIMEOUT_MS);
+
+  try {
+    const form = new FormData();
+    const audioExt = guessFileExtension(params.mimeType);
+    form.append(
+      "audio_file",
+      new Blob([toBlobCompatiblePart(params.audio)], {
+        type: params.mimeType || "application/octet-stream",
+      }),
+      `speech${audioExt}`
+    );
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "REV-API-KEY": params.apiKey,
+        "REV-APP-ID": params.appId,
+        "REV-APPNAME": REVUP_APP_NAME,
+        src_lang: params.languageCode?.trim() || REVUP_DEFAULT_SOURCE_LANG,
+        domain: REVUP_DEFAULT_DOMAIN,
+      },
+      body: form,
+      signal: controller.signal,
+    });
+    const bodyText = await response.text();
+    const payload = parseBody(bodyText);
+
+    if (!response.ok) {
+      throw new Speech2TextError(
+        getErrorMessage(response.status, payload) || "Revup STT request failed.",
+        response.status
+      );
+    }
+
+    const successFlag =
+      typeof (payload as Record<string, unknown> | null)?.success === "boolean"
+        ? Boolean((payload as Record<string, unknown>).success)
+        : true;
+    if (!successFlag) {
+      throw new Speech2TextError(getErrorMessage(502, payload) || "Revup STT request failed.", 502);
+    }
+
+    const transcript = extractRevupTranscript(payload);
+    if (!transcript) {
+      throw new Speech2TextError("Revup STT returned empty transcript.", 422);
+    }
+
+    const diarizedEntries = params.withDiarization
+      ? extractRevupDiarizedEntries(payload)
+      : [];
+    const normalizedEntries =
+      diarizedEntries.length > 0
+        ? diarizedEntries
+        : params.withDiarization
+          ? [{ transcript, speakerId: null, startTimeSeconds: null, endTimeSeconds: null }]
+          : [];
+
+    return {
+      transcript,
+      latencyMs: Date.now() - startedAt,
+      ...(normalizedEntries.length
+        ? { diarizedTranscript: { entries: normalizedEntries } }
+        : {}),
+    };
+  } catch (error) {
+    if (error instanceof Speech2TextError) {
+      throw error;
+    }
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Speech2TextError("Revup STT request timed out.", 504);
+    }
+    const message =
+      error instanceof Error ? error.message : "Revup STT failed unexpectedly.";
+    throw new Speech2TextError(message, 502);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function getAssemblySpeechModels(): string[] {
+  const values = Array.from(new Set(DEFAULT_ASSEMBLYAI_SPEECH_MODELS));
+  if (values.length) return values;
+  return ["universal-2"];
+}
+
+function extractAssemblyDiarizedEntries(payload: unknown): DiarizedTranscriptEntry[] {
+  if (!payload || typeof payload !== "object") return [];
+  const row = payload as Record<string, unknown>;
+  const utterances = Array.isArray(row.utterances) ? row.utterances : [];
+  const entries: DiarizedTranscriptEntry[] = [];
+  for (const item of utterances) {
+    if (!item || typeof item !== "object") continue;
+    const utterance = item as Record<string, unknown>;
+    const transcript = typeof utterance.text === "string" ? utterance.text.trim() : "";
+    if (!transcript) continue;
+    const speakerId =
+      typeof utterance.speaker === "string"
+        ? utterance.speaker.trim()
+        : typeof utterance.speaker === "number"
+          ? String(utterance.speaker)
+          : null;
+    const startTimeSeconds =
+      typeof utterance.start === "number"
+        ? Math.max(0, utterance.start / 1000)
+        : typeof utterance.start_time === "number"
+          ? Math.max(0, utterance.start_time / 1000)
+          : null;
+    const endTimeSeconds =
+      typeof utterance.end === "number"
+        ? Math.max(0, utterance.end / 1000)
+        : typeof utterance.end_time === "number"
+          ? Math.max(0, utterance.end_time / 1000)
+          : null;
+    entries.push({
+      transcript,
+      speakerId,
+      startTimeSeconds,
+      endTimeSeconds,
+    });
+  }
+  return entries;
+}
+
+function getAssemblyErrorMessage(error: unknown, fallback: string): {
+  message: string;
+  statusCode: number;
+} {
+  if (isAxiosError(error)) {
+    const statusCode = Number(error.response?.status) || 502;
+    const payload = error.response?.data;
+    if (typeof payload !== "undefined") {
+      return {
+        message: getErrorMessage(statusCode, payload),
+        statusCode,
+      };
+    }
+    if (typeof error.message === "string" && error.message.trim()) {
+      return {
+        message: error.message.trim(),
+        statusCode,
+      };
+    }
+  }
+  if (error instanceof Speech2TextError) {
+    return {
+      message: error.message,
+      statusCode: error.statusCode,
+    };
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return {
+      message: error.message.trim(),
+      statusCode: 502,
+    };
+  }
+  return {
+    message: fallback,
+    statusCode: 502,
+  };
+}
+
+async function callAssemblyAiModel(params: {
   audio: Buffer;
   mimeType: string;
   token: string;
   languageCode?: string;
-  withTimestamps?: boolean;
   withDiarization?: boolean;
-}): Promise<{ transcript: string; latencyMs: number }> {
+  numSpeakers?: number;
+}): Promise<{
+  transcript: string;
+  latencyMs: number;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
   const startedAt = Date.now();
-  const endpoint =
-    `${GEMINI_API_BASE_URL}/v1beta/models/${encodeURIComponent(params.model)}` +
-    `:generateContent?key=${encodeURIComponent(params.token)}`;
-  const base64Audio = params.audio.toString("base64");
-  const promptLines = [
-    "Transcribe this audio accurately.",
-    "Return only the transcript text.",
-    "Do not add commentary, markdown, or extra labels unless speakers are very clearly distinguishable.",
-  ];
-  if (params.languageCode?.trim()) {
-    promptLines.push(`Prefer language code/context: ${params.languageCode.trim()}.`);
-  }
-  if (params.withTimestamps) {
-    promptLines.push("Include lightweight timestamps inline when clearly available.");
-  }
-  if (params.withDiarization) {
-    promptLines.push("If speakers are clearly separable, use speaker labels.");
-  }
+  const authHeaders = {
+    authorization: params.token,
+  };
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DEFAULT_REQUEST_TIMEOUT_MS);
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
+  let uploadUrl = "";
+  try {
+    const uploadResponse = await axios.post(
+      `${ASSEMBLYAI_API_BASE_URL}/v2/upload`,
+      params.audio,
+      {
         headers: {
-          "Content-Type": "application/json",
+          ...authHeaders,
+          "content-type": params.mimeType || "application/octet-stream",
         },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                { text: promptLines.join(" ") },
-                {
-                  inlineData: {
-                    mimeType: params.mimeType,
-                    data: base64Audio,
-                  },
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            temperature: 0,
-          },
-        }),
-      });
-
-      const bodyText = await response.text();
-      const payload = parseBody(bodyText);
-      if (!response.ok) {
-        const message = getErrorMessage(response.status, payload);
-        if (attempt === 0 && shouldRetry(response.status, message)) {
-          await sleep(TRANSCRIBE_RETRY_DELAY_MS);
-          continue;
-        }
-        throw new Speech2TextError(message, response.status);
+        timeout: DEFAULT_REQUEST_TIMEOUT_MS,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
       }
-
-      const transcript = extractTranscript(payload);
-      if (!transcript) {
-        throw new Speech2TextError("Gemini STT returned empty transcript", 422);
-      }
-      return {
-        transcript,
-        latencyMs: Date.now() - startedAt,
-      };
-    } catch (error) {
-      if (attempt === 0 && error instanceof DOMException && error.name === "AbortError") {
-        continue;
-      }
-      if (error instanceof Speech2TextError) throw error;
-      const message =
-        error instanceof Error ? error.message : "Gemini speech-to-text request failed";
-      throw new Speech2TextError(message, 502);
-    } finally {
-      clearTimeout(timeout);
-    }
+    );
+    uploadUrl =
+      typeof uploadResponse.data?.upload_url === "string"
+        ? uploadResponse.data.upload_url.trim()
+        : "";
+  } catch (error) {
+    const parsed = getAssemblyErrorMessage(error, "AssemblyAI upload failed.");
+    throw new Speech2TextError(parsed.message, parsed.statusCode);
   }
 
-  throw new Speech2TextError("Gemini speech-to-text request timed out", 504);
+  if (!uploadUrl) {
+    throw new Speech2TextError("AssemblyAI upload failed: missing upload URL.", 502);
+  }
+
+  const transcriptPayload: Record<string, unknown> = {
+    audio_url: uploadUrl,
+    language_detection: !params.languageCode?.trim(),
+    speech_models: getAssemblySpeechModels(),
+    speaker_labels: Boolean(params.withDiarization),
+  };
+  if (params.languageCode?.trim()) {
+    transcriptPayload.language_code = params.languageCode.trim().toLowerCase();
+  }
+  if (
+    params.withDiarization &&
+    typeof params.numSpeakers === "number" &&
+    Number.isFinite(params.numSpeakers) &&
+    params.numSpeakers > 0
+  ) {
+    transcriptPayload.speakers_expected = Math.max(1, Math.floor(params.numSpeakers));
+  }
+
+  let transcriptId = "";
+  try {
+    const response = await axios.post(
+      `${ASSEMBLYAI_API_BASE_URL}/v2/transcript`,
+      transcriptPayload,
+      {
+        headers: {
+          ...authHeaders,
+          "content-type": "application/json",
+        },
+        timeout: DEFAULT_REQUEST_TIMEOUT_MS,
+      }
+    );
+    transcriptId = typeof response.data?.id === "string" ? response.data.id.trim() : "";
+  } catch (error) {
+    const parsed = getAssemblyErrorMessage(error, "AssemblyAI transcript request failed.");
+    throw new Speech2TextError(parsed.message, parsed.statusCode);
+  }
+
+  if (!transcriptId) {
+    throw new Speech2TextError("AssemblyAI transcript request failed: missing transcript id.", 502);
+  }
+
+  const pollDeadline = Date.now() + ASSEMBLYAI_TIMEOUT_MS;
+
+  while (Date.now() < pollDeadline) {
+    try {
+      const pollingResponse = await axios.get(
+        `${ASSEMBLYAI_API_BASE_URL}/v2/transcript/${encodeURIComponent(transcriptId)}`,
+        {
+          headers: authHeaders,
+          timeout: DEFAULT_REQUEST_TIMEOUT_MS,
+        }
+      );
+      const payload = pollingResponse.data;
+      const status = typeof payload?.status === "string" ? payload.status.trim() : "";
+      if (status === "completed") {
+        const transcript =
+          typeof payload?.text === "string" ? payload.text.trim() : extractTranscript(payload);
+        if (!transcript) {
+          throw new Speech2TextError("AssemblyAI STT returned empty transcript.", 422);
+        }
+
+        const diarizedEntries = params.withDiarization
+          ? extractAssemblyDiarizedEntries(payload)
+          : [];
+        const normalizedDiarizedEntries = diarizedEntries.length
+          ? diarizedEntries
+          : params.withDiarization
+            ? extractDiarizedEntries(payload)
+            : [];
+
+        return {
+          transcript,
+          latencyMs: Date.now() - startedAt,
+          ...(normalizedDiarizedEntries.length
+            ? { diarizedTranscript: { entries: normalizedDiarizedEntries } }
+            : {}),
+        };
+      }
+      if (status === "error") {
+        const errorMessage =
+          typeof payload?.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : "AssemblyAI transcript job failed.";
+        throw new Speech2TextError(errorMessage, 502);
+      }
+    } catch (error) {
+      if (error instanceof Speech2TextError) {
+        throw error;
+      }
+      const parsed = getAssemblyErrorMessage(error, "AssemblyAI transcript polling failed.");
+      throw new Speech2TextError(parsed.message, parsed.statusCode);
+    }
+    await sleep(ASSEMBLYAI_POLL_INTERVAL_MS);
+  }
+
+  throw new Speech2TextError("AssemblyAI transcription timed out while polling.", 504);
 }
 
 async function runHuggingFaceWithFallback(params: {
@@ -683,6 +1105,198 @@ async function runHuggingFaceWithFallback(params: {
   }
 }
 
+async function callGeminiModel(params: {
+  model: string;
+  audio: Buffer;
+  mimeType: string;
+  apiKey: string;
+  languageCode?: string;
+  withDiarization?: boolean;
+  withTimestamps?: boolean;
+}): Promise<{
+  transcript: string;
+  latencyMs: number;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
+  const startedAt = Date.now();
+  const endpoint =
+    `${GEMINI_API_BASE_URL}/v1beta/models/${encodeURIComponent(params.model)}` +
+    `:generateContent?key=${encodeURIComponent(params.apiKey)}`;
+  const base64Audio = params.audio.toString("base64");
+  const promptLines = [
+    "Transcribe this audio accurately.",
+    "Return only transcript text.",
+    "Do not include markdown or explanations.",
+  ];
+  if (params.languageCode?.trim()) {
+    promptLines.push(`Preferred language: ${params.languageCode.trim()}.`);
+  }
+  if (params.withTimestamps) {
+    promptLines.push("If reliable, include lightweight timestamps inline.");
+  }
+  if (params.withDiarization) {
+    promptLines.push("If speakers are clearly separable, include speaker labels.");
+  }
+
+  const bodyWithInlineData = (snakeCase = false) => ({
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: promptLines.join(" ") },
+          snakeCase
+            ? {
+                inline_data: {
+                  mime_type: params.mimeType,
+                  data: base64Audio,
+                },
+              }
+            : {
+                inlineData: {
+                  mimeType: params.mimeType,
+                  data: base64Audio,
+                },
+              },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+    },
+  });
+
+  for (const useSnakeCase of [false, true]) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(bodyWithInlineData(useSnakeCase)),
+          signal: controller.signal,
+        });
+        const text = await response.text();
+        const payload = parseBody(text);
+
+        if (!response.ok) {
+          const message = getErrorMessage(response.status, payload);
+          if (attempt === 0 && shouldRetry(response.status, message)) {
+            await sleep(TRANSCRIBE_RETRY_DELAY_MS);
+            continue;
+          }
+          throw new Speech2TextError(message, response.status);
+        }
+
+        const transcript = extractTranscript(payload);
+        if (!transcript) {
+          throw new Speech2TextError("Gemini STT returned empty transcript.", 422);
+        }
+
+        const extractedDiarization = params.withDiarization
+          ? extractDiarizedEntries(payload)
+          : [];
+        const normalizedDiarization =
+          extractedDiarization.length > 0
+            ? extractedDiarization
+            : params.withDiarization
+              ? [{ transcript, speakerId: null, startTimeSeconds: null, endTimeSeconds: null }]
+              : [];
+        return {
+          transcript,
+          latencyMs: Date.now() - startedAt,
+          ...(normalizedDiarization.length
+            ? { diarizedTranscript: { entries: normalizedDiarization } }
+            : {}),
+        };
+      } catch (error) {
+        if (attempt === 0 && error instanceof DOMException && error.name === "AbortError") {
+          continue;
+        }
+        if (error instanceof Speech2TextError) throw error;
+        const message =
+          error instanceof Error ? error.message : "Gemini STT request failed.";
+        throw new Speech2TextError(message, 502);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  throw new Speech2TextError("Gemini speech-to-text request timed out.", 504);
+}
+
+function shouldRotateGeminiKey(error: unknown): boolean {
+  if (!(error instanceof Speech2TextError)) return false;
+  const message = error.message.toLowerCase();
+  if ([401, 403, 429].includes(error.statusCode)) return true;
+  if (/\bquota\b|\brate\b|resource.*exhausted|billing|api key|permission|unauthorized/.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+async function runGeminiWithKeyRotation(params: {
+  model: string;
+  audio: Buffer;
+  mimeType: string;
+  apiKeys: string[];
+  languageCode?: string;
+  withDiarization?: boolean;
+  withTimestamps?: boolean;
+}): Promise<{
+  transcript: string;
+  model: string;
+  fallbackUsed: boolean;
+  latencyMs: number;
+  warning?: string;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
+  const failures: string[] = [];
+  for (let index = 0; index < params.apiKeys.length; index += 1) {
+    const key = params.apiKeys[index];
+    try {
+      const result = await callGeminiModel({
+        model: params.model,
+        audio: params.audio,
+        mimeType: params.mimeType,
+        apiKey: key,
+        languageCode: params.languageCode,
+        withDiarization: params.withDiarization,
+        withTimestamps: params.withTimestamps,
+      });
+      return {
+        transcript: result.transcript,
+        model: params.model,
+        fallbackUsed: index > 0,
+        latencyMs: result.latencyMs,
+        warning:
+          index > 0
+            ? `Gemini backup key #${index + 1} activated after primary key failure.`
+            : undefined,
+        ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Gemini STT failed unexpectedly.";
+      failures.push(`key#${index + 1}: ${message}`);
+      if (index < params.apiKeys.length - 1 && shouldRotateGeminiKey(error)) {
+        continue;
+      }
+      if (index < params.apiKeys.length - 1 && !shouldRotateGeminiKey(error)) {
+        continue;
+      }
+    }
+  }
+
+  throw new Speech2TextError(
+    failures.join(" | ") || "Gemini STT failed for all configured API keys.",
+    502
+  );
+}
+
 export async function transcribeSpeechWithFairseqS2T(
   request: TranscribeRequest
 ): Promise<Speech2TextResult> {
@@ -690,13 +1304,23 @@ export async function transcribeSpeechWithFairseqS2T(
     throw new Speech2TextError("Audio payload is empty", 400);
   }
 
-  const mimeType = request.mimeType?.trim() || "audio/webm";
-  const geminiToken =
-    request.geminiApiKey?.trim() ||
-    process.env.GEMINI_API_KEY?.trim() ||
-    process.env.GEMINI_API?.trim() ||
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY?.trim() ||
-    process.env.EXPO_PUBLIC_GEMINI_API?.trim() ||
+  const rawMimeType = request.mimeType?.trim().toLowerCase() || "audio/webm";
+  const mimeType = rawMimeType === "audio/mp4" ? "audio/m4a" : rawMimeType;
+  const geminiApiKeys = getGeminiApiKeyPool(request.geminiApiKey);
+  const revupApiKey =
+    request.revupApiKey?.trim() ||
+    process.env.REVUP_API_KEY?.trim() ||
+    process.env.EXPO_PUBLIC_REVUP_API_KEY?.trim() ||
+    "";
+  const revupAppId =
+    request.revupAppId?.trim() ||
+    process.env.REVUP_APP_ID?.trim() ||
+    process.env.EXPO_PUBLIC_REVUP_APP_ID?.trim() ||
+    "";
+  const assemblyAiToken =
+    request.assemblyAiApiKey?.trim() ||
+    process.env.ASSEMBLYAI_API_KEY?.trim() ||
+    process.env.EXPO_PUBLIC_ASSEMBLYAI_API_KEY?.trim() ||
     "";
   const hfToken =
     request.huggingFaceToken?.trim() ||
@@ -705,55 +1329,136 @@ export async function transcribeSpeechWithFairseqS2T(
     "";
 
   const requestedModel = request.model?.trim() || "";
-  const localModel = resolveLocalModel(requestedModel);
-  const geminiModel = requestedModel.toLowerCase().startsWith("gemini-")
+  const geminiModel = isLikelyGeminiModel(requestedModel)
     ? requestedModel
     : DEFAULT_GEMINI_STT_MODEL;
+  const localModel = resolveLocalModel(requestedModel);
   const hfPrimaryModel =
-    requestedModel &&
-    isLikelyHuggingFaceModel(requestedModel) &&
-    !requestedModel.toLowerCase().startsWith("gemini-")
+    requestedModel && isLikelyHuggingFaceModel(requestedModel)
       ? requestedModel
       : DEFAULT_FAIRSEQ_S2T_MODEL;
   const hfFallbackModel = toModelId(request.fallbackModel, DEFAULT_FALLBACK_MODEL);
   const providerOrder = parseProviderOrder(request.provider?.trim() || DEFAULT_PROVIDER_ORDER);
 
   let geminiFailure: string | null = null;
+  let revupFailure: string | null = null;
+  let assemblyFailure: string | null = null;
   let localFailure: string | null = null;
   let huggingFaceFailure: string | null = null;
 
   for (const provider of providerOrder) {
     if (provider === "gemini") {
-      if (!geminiToken) {
+      if (!geminiApiKeys.length) {
         geminiFailure = "Gemini API key missing.";
         continue;
       }
       try {
-        const result = await callGeminiModel({
+        const result = await runGeminiWithKeyRotation({
           model: geminiModel,
           audio: request.audio,
           mimeType,
-          token: geminiToken,
+          apiKeys: geminiApiKeys,
           languageCode: request.languageCode?.trim() || "",
-          withTimestamps: request.withTimestamps ?? true,
           withDiarization: Boolean(request.withDiarization),
+          withTimestamps: request.withTimestamps ?? true,
         });
         return {
           transcript: result.transcript,
           provider: "gemini",
-          model: geminiModel,
-          fallbackUsed: false,
+          model: result.model,
+          fallbackUsed: result.fallbackUsed,
           warning: combineWarnings(
+            revupFailure,
+            assemblyFailure,
             localFailure,
             huggingFaceFailure,
-            getModelWarning("gemini", geminiModel)
+            result.warning,
+            getModelWarning("gemini", result.model)
           ),
           latencyMs: result.latencyMs,
+          ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
         };
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Gemini STT failed unexpectedly.";
         geminiFailure = message;
+      }
+      continue;
+    }
+
+    if (provider === "revup") {
+      if (!revupApiKey || !revupAppId) {
+        revupFailure = "Revup API key or app id missing.";
+        continue;
+      }
+      try {
+        const result = await callRevupModel({
+          audio: request.audio,
+          mimeType,
+          apiKey: revupApiKey,
+          appId: revupAppId,
+          languageCode: request.languageCode?.trim() || "",
+          withDiarization: Boolean(request.withDiarization),
+        });
+        return {
+          transcript: result.transcript,
+          provider: "revup",
+          model: REVUP_APP_NAME,
+          fallbackUsed: false,
+          warning: combineWarnings(
+            geminiFailure,
+            assemblyFailure,
+            localFailure,
+            huggingFaceFailure,
+            getModelWarning("revup", REVUP_APP_NAME)
+          ),
+          latencyMs: result.latencyMs,
+          ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Revup STT failed unexpectedly.";
+        revupFailure = message;
+      }
+      continue;
+    }
+
+    if (provider === "assemblyai") {
+      if (!assemblyAiToken) {
+        assemblyFailure = "AssemblyAI API key missing.";
+        continue;
+      }
+      try {
+        const result = await callAssemblyAiModel({
+          audio: request.audio,
+          mimeType,
+          token: assemblyAiToken,
+          languageCode: request.languageCode?.trim() || "",
+          withDiarization: Boolean(request.withDiarization),
+          numSpeakers:
+            typeof request.numSpeakers === "number" && Number.isFinite(request.numSpeakers)
+              ? request.numSpeakers
+              : undefined,
+        });
+        return {
+          transcript: result.transcript,
+          provider: "assemblyai",
+          model: getAssemblySpeechModels().join(","),
+          fallbackUsed: false,
+          warning: combineWarnings(
+            geminiFailure,
+            revupFailure,
+            localFailure,
+            huggingFaceFailure,
+            getModelWarning("assemblyai", getAssemblySpeechModels().join(","))
+          ),
+          latencyMs: result.latencyMs,
+          ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "AssemblyAI STT failed unexpectedly.";
+        assemblyFailure = message;
       }
       continue;
     }
@@ -777,7 +1482,12 @@ export async function transcribeSpeechWithFairseqS2T(
           provider: "local_python",
           model: localModel,
           fallbackUsed: false,
-          warning: combineWarnings(geminiFailure, getModelWarning("local_python", localModel)),
+          warning: combineWarnings(
+            geminiFailure,
+            revupFailure,
+            assemblyFailure,
+            getModelWarning("local_python", localModel)
+          ),
           latencyMs: localResult.latencyMs,
           ...(localResult.diarizedTranscript
             ? { diarizedTranscript: localResult.diarizedTranscript }
@@ -801,7 +1511,13 @@ export async function transcribeSpeechWithFairseqS2T(
       });
       return {
         ...hfResult,
-        warning: combineWarnings(geminiFailure, localFailure, hfResult.warning),
+        warning: combineWarnings(
+          geminiFailure,
+          revupFailure,
+          assemblyFailure,
+          localFailure,
+          hfResult.warning
+        ),
       };
     } catch (error) {
       const message =
@@ -811,7 +1527,7 @@ export async function transcribeSpeechWithFairseqS2T(
   }
 
   throw new Speech2TextError(
-    combineWarnings(geminiFailure, localFailure, huggingFaceFailure) ||
+    combineWarnings(geminiFailure, revupFailure, assemblyFailure, localFailure, huggingFaceFailure) ||
       "All speech-to-text providers failed.",
     502
   );

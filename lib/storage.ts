@@ -1782,6 +1782,31 @@ export async function updateTaskStatus(
   }
 }
 
+export async function updateTask(taskId: string, updates: Partial<Task>): Promise<Task | null> {
+  const companyId = await getActiveCompanyId();
+  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const idx = tasks.findIndex((task) => task.id === taskId && matchesCompany(task, companyId));
+  if (idx === -1) return null;
+  const updatedTask: Task = {
+    ...tasks[idx],
+    ...updates,
+  };
+  tasks[idx] = updatedTask;
+  await setItem(KEYS.TASKS, tasks);
+  return updatedTask;
+}
+
+export async function removeTask(taskId: string): Promise<boolean> {
+  const companyId = await getActiveCompanyId();
+  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const nextTasks = tasks.filter(
+    (task) => !(task.id === taskId && matchesCompany(task, companyId))
+  );
+  if (nextTasks.length === tasks.length) return false;
+  await setItem(KEYS.TASKS, nextTasks);
+  return true;
+}
+
 export async function getExpenses(): Promise<Expense[]> {
   const companyId = await getActiveCompanyId();
   const expenses = await getRawList<Expense>(KEYS.EXPENSES);

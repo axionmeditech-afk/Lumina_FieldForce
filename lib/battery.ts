@@ -14,20 +14,36 @@ export function normalizeBatteryLevelPercent(value: number | null | undefined): 
 let lastResolvedAt = 0;
 let lastResolvedValue: number | null = null;
 
+async function readBatteryLevelFromDevice(): Promise<number | null> {
+  try {
+    const rawLevel = await Battery.getBatteryLevelAsync();
+    const normalized = normalizeBatteryLevelPercent(rawLevel);
+    if (normalized !== null) {
+      return normalized;
+    }
+  } catch {
+    // fall through to power state fallback
+  }
+
+  try {
+    const powerState = await Battery.getPowerStateAsync();
+    return normalizeBatteryLevelPercent(powerState?.batteryLevel);
+  } catch {
+    return null;
+  }
+}
+
 export async function getBatteryLevelPercent(options?: { maxAgeMs?: number }): Promise<number | null> {
   const maxAgeMs = Math.max(0, options?.maxAgeMs ?? 30_000);
   const now = Date.now();
   if (maxAgeMs > 0 && now - lastResolvedAt <= maxAgeMs) {
     return lastResolvedValue;
   }
-  try {
-    const rawLevel = await Battery.getBatteryLevelAsync();
-    const normalized = normalizeBatteryLevelPercent(rawLevel);
+  const normalized = await readBatteryLevelFromDevice();
+  if (normalized !== null) {
     lastResolvedAt = Date.now();
     lastResolvedValue = normalized;
     return normalized;
-  } catch {
-    return lastResolvedValue;
   }
+  return lastResolvedValue;
 }
-

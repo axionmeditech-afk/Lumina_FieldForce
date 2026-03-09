@@ -3,8 +3,8 @@ import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useCallback, useEffect } from "react";
 import { StatusBar } from "expo-status-bar";
+import { Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
@@ -31,6 +31,18 @@ import {
 } from "@expo-google-fonts/inter";
 
 SplashScreen.preventAutoHideAsync();
+
+const KeyboardProviderSafe: React.ComponentType<{ children: React.ReactNode }> =
+  Platform.OS === "android"
+    ? ({ children }) => <>{children}</>
+    : (() => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          return require("react-native-keyboard-controller").KeyboardProvider;
+        } catch {
+          return ({ children }: { children: React.ReactNode }) => <>{children}</>;
+        }
+      })();
 
 function RootLayoutNav() {
   return (
@@ -114,10 +126,10 @@ function AppShell() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
-      <KeyboardProvider>
+      <KeyboardProviderSafe>
         <StatusBar style={isDark ? "light" : "dark"} />
         <RootLayoutNav />
-      </KeyboardProvider>
+      </KeyboardProviderSafe>
     </GestureHandlerRootView>
   );
 }

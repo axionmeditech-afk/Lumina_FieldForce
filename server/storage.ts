@@ -7,6 +7,7 @@ import type {
   Geofence,
   LocationLog,
 } from "@/lib/types";
+import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { demoGeofences } from "@/lib/seedData";
 
 export interface EmployeeSession {
@@ -39,6 +40,7 @@ export interface IStorage {
   addAnomaly(anomaly: AttendanceAnomaly): Promise<void>;
   addLocationLog(log: LocationLog): Promise<void>;
   getLocationLogsForUserDate(userId: string, date: string): Promise<LocationLog[]>;
+  getLocationLogsForDate(date: string): Promise<LocationLog[]>;
   getLocationLogsLatest(): Promise<LocationLog[]>;
   bindDevice(userId: string, deviceId: string): Promise<{ ok: boolean; mismatch: boolean }>;
   addDolibarrSyncLog(log: DolibarrSyncLog): Promise<void>;
@@ -142,9 +144,9 @@ class MemStorage implements IStorage {
   }
 
   async getAttendanceToday(userId: string): Promise<AttendanceRecord[]> {
-    const day = new Date().toISOString().slice(0, 10);
+    const day = toMumbaiDateKey(new Date());
     return Array.from(this.attendance.values())
-      .filter((record) => record.userId === userId && record.timestamp.startsWith(day))
+      .filter((record) => record.userId === userId && isMumbaiDateKey(record.timestamp, day))
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
 
@@ -164,14 +166,31 @@ class MemStorage implements IStorage {
     this.anomalies = this.anomalies.slice(0, 5000);
   }
 
+  private hasDuplicateLocationLog(next: LocationLog): boolean {
+    return this.locationLogs.some((existing) => {
+      if (existing.userId !== next.userId) return false;
+      if (existing.capturedAt !== next.capturedAt) return false;
+      const latDelta = Math.abs(existing.latitude - next.latitude);
+      const lngDelta = Math.abs(existing.longitude - next.longitude);
+      return latDelta <= 0.000001 && lngDelta <= 0.000001;
+    });
+  }
+
   async addLocationLog(log: LocationLog): Promise<void> {
+    if (this.hasDuplicateLocationLog(log)) return;
     this.locationLogs.unshift(log);
     this.locationLogs = this.locationLogs.slice(0, 10000);
   }
 
   async getLocationLogsForUserDate(userId: string, date: string): Promise<LocationLog[]> {
     return this.locationLogs
-      .filter((log) => log.userId === userId && log.capturedAt.startsWith(date))
+      .filter((log) => log.userId === userId && isMumbaiDateKey(log.capturedAt, date))
+      .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  }
+
+  async getLocationLogsForDate(date: string): Promise<LocationLog[]> {
+    return this.locationLogs
+      .filter((log) => isMumbaiDateKey(log.capturedAt, date))
       .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
   }
 

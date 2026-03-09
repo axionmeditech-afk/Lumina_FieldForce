@@ -3,6 +3,7 @@ import type {
   AttendanceCheckPayload,
   AttendanceRecord,
   Geofence,
+  LocationLog,
   RouteDistanceMatrix,
   RouteTimeline,
   UserAccessRequest,
@@ -145,9 +146,14 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
     }
   });
 
-  // Hard-pin to public HTTPS env API URL when provided (works for dev and production).
-  if (publicHttpsEnvApiBases.length > 0) {
+  // Hard-pin to public HTTPS env API URL in production.
+  if (!isExpoDevRuntime && publicHttpsEnvApiBases.length > 0) {
     return publicHttpsEnvApiBases;
+  }
+
+  // In dev runtime keep env URL first, but still allow LAN/localhost fallback.
+  for (const publicApiBase of publicHttpsEnvApiBases) {
+    candidates.add(publicApiBase);
   }
 
   // Production hard-pin fallback: if env API URL exists, use only HTTPS variants.
@@ -164,16 +170,16 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
     }
   }
 
+  if (isExpoDevRuntime && expoLanApiBase) {
+    candidates.add(expoLanApiBase);
+  }
+
   if (settingsUrl) {
     const settingsApiBases = toApiBaseUrls(settingsUrl);
     for (const settingsApiBase of settingsApiBases) {
       if (!isExpoDevRuntime && isPrivateApiBaseUrl(settingsApiBase)) continue;
       candidates.add(settingsApiBase);
     }
-  }
-
-  if (isExpoDevRuntime && expoLanApiBase) {
-    candidates.add(expoLanApiBase);
   }
 
   for (const envApiBase of envApiBases) {
@@ -527,6 +533,33 @@ export interface LiveMapPoint {
 
 export async function getAdminLiveMapPoints(): Promise<LiveMapPoint[]> {
   return fetchJson<LiveMapPoint[]>("/admin/live-map", { method: "GET" });
+}
+
+export interface AdminLiveMapRoute {
+  userId: string;
+  intervalMinutes: number;
+  pointCount: number;
+  points: LocationLog[];
+  latestPoint: LocationLog | null;
+}
+
+export interface AdminLiveMapRoutesResponse {
+  date: string;
+  intervalMinutes: number;
+  routes: AdminLiveMapRoute[];
+}
+
+export async function getAdminLiveMapRoutes(
+  date: string,
+  intervalMinutes = 1
+): Promise<AdminLiveMapRoutesResponse> {
+  const query = new URLSearchParams({
+    date,
+    interval_minutes: String(Math.max(1, Math.floor(intervalMinutes))),
+  });
+  return fetchJson<AdminLiveMapRoutesResponse>(`/admin/live-map/routes?${query.toString()}`, {
+    method: "GET",
+  });
 }
 
 export interface RouteAttendanceEvent {
@@ -957,10 +990,15 @@ async function syncApprovedEmployeeToDolibarrDirect(
 
 export async function getAdminRouteTimeline(
   userId: string,
-  date: string
+  date: string,
+  intervalMinutes = 1
 ): Promise<AdminRouteTimelineResponse> {
+  const query = new URLSearchParams({
+    date,
+    interval_minutes: String(Math.max(1, Math.floor(intervalMinutes))),
+  });
   return fetchJson<AdminRouteTimelineResponse>(
-    `/admin/route/${encodeURIComponent(userId)}?date=${encodeURIComponent(date)}`,
+    `/admin/route/${encodeURIComponent(userId)}?${query.toString()}`,
     { method: "GET" }
   );
 }
@@ -1193,3 +1231,4 @@ export async function flushAttendanceQueue(): Promise<void> {
   }
   await setAttendanceQueue(remaining);
 }
+

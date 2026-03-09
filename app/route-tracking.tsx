@@ -15,45 +15,44 @@ import * as Location from "expo-location";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { AppCanvas } from "@/components/AppCanvas";
-import { RouteMapNative } from "@/components/RouteMapNative";
+import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNative";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import {
   getAdminDemoRouteTimeline,
+  getAdminLiveMapPoints,
+  getAdminLiveMapRoutes,
   getAdminRouteTimeline,
-  postLocationLog,
+  type LiveMapPoint,
   type AdminRouteTimelineResponse,
 } from "@/lib/attendance-api";
 import { getBatteryLevelPercent } from "@/lib/battery";
+import { flushBackgroundLocationQueue, queueLocationPoint } from "@/lib/background-location";
 import { buildDemoRoutePoints } from "@/lib/demo-route";
-import { haversineDistanceMeters } from "@/lib/geofence";
+import {
+  formatMumbaiDateKey,
+  formatMumbaiDateTime,
+  formatMumbaiTime,
+  getMumbaiDateKeyByOffset,
+  isMumbaiDateKey,
+  MUMBAI_TIMEZONE_LABEL,
+  toMumbaiDateKey,
+} from "@/lib/ist-time";
 import {
   ensureLocationServicesEnabled,
   getLocationPermissionSnapshot,
   getVerifiedLocationEvidence,
 } from "@/lib/location-service";
 import { buildRouteTimeline } from "@/lib/route-analytics";
-import { addLocationLog, getAttendance, getEmployees, getLocationLogs } from "@/lib/storage";
-import type { AttendanceRecord, Employee, LocationLog } from "@/lib/types";
-
-function toLocalDateKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+import { addLocationLog, getAttendance, getEmployees, getLocationLogs, getTasks } from "@/lib/storage";
+import type { AttendanceRecord, Employee, LocationLog, Task } from "@/lib/types";
 
 function toShortDate(dateKey: string): string {
-  const parsed = new Date(`${dateKey}T00:00:00`);
-  return parsed.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  return formatMumbaiDateKey(dateKey);
 }
 
 function toTime(value: string): string {
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatMumbaiTime(value);
 }
 
 function toBatteryLabel(value: number | null | undefined): string | null {
@@ -104,7 +103,6 @@ function buildSelectedUserAliases(
   const aliases = new Set<string>();
   if (selectedUserId) aliases.add(selectedUserId);
   if (selectedEmployee?.id) aliases.add(selectedEmployee.id);
-
   const employeeName = normalizeIdentity(selectedEmployee?.name);
   const employeeEmail = normalizeIdentity(selectedEmployee?.email);
 
@@ -131,6 +129,124 @@ function buildSelectedUserAliases(
   }
 
   return aliases;
+}
+
+const ROUTE_POINT_INTERVAL_MINUTES = 1;
+
+interface RouteSessionWindow {
+  startAt: string | null;
+  endAt: string | null;
+}
+
+function toMs(value: string): number {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function resolveRouteSessionWindow(attendanceEvents: AttendanceRecord[]): RouteSessionWindow {
+  const ordered = [...attendanceEvents].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const firstCheckIn = ordered.find((entry) => entry.type === "checkin");
+  if (!firstCheckIn) return { startAt: null, endAt: null };
+  const firstCheckOut = ordered.find(
+    (entry) => entry.type === "checkout" && entry.timestamp >= firstCheckIn.timestamp
+  );
+  return {
+    startAt: firstCheckIn.timestamp,
+    endAt: firstCheckOut?.timestamp ?? null,
+  };
+}
+
+function filterPointsToSessionWindow(
+  points: LocationLog[],
+  sessionWindow: RouteSessionWindow
+): LocationLog[] {
+  if (!sessionWindow.startAt && !sessionWindow.endAt) return points;
+  return points.filter((point) => {
+    if (sessionWindow.startAt && point.capturedAt < sessionWindow.startAt) return false;
+    if (sessionWindow.endAt && point.capturedAt > sessionWindow.endAt) return false;
+    return true;
+  });
+}
+
+function downsamplePointsByInterval(points: LocationLog[], intervalMinutes: number): LocationLog[] {
+  if (points.length <= 1) return points;
+  const sorted = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  const intervalMs = Math.max(1, intervalMinutes) * 60_000;
+  const sampled: LocationLog[] = [];
+  let lastIncludedMs = Number.NaN;
+
+  for (const point of sorted) {
+    const pointMs = toMs(point.capturedAt);
+    if (!Number.isFinite(pointMs)) continue;
+    if (!sampled.length) {
+      sampled.push(point);
+      lastIncludedMs = pointMs;
+      continue;
+    }
+    if (pointMs - lastIncludedMs >= intervalMs) {
+      sampled.push(point);
+      lastIncludedMs = pointMs;
+    }
+  }
+  return sampled;
+}
+
+function normalizePointsForInterval(points: LocationLog[], intervalMinutes: number): LocationLog[] {
+  if (points.length <= 1) return points;
+  const sorted = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  const deduped: LocationLog[] = [];
+  const seen = new Set<string>();
+
+  for (const point of sorted) {
+    const ms = toMs(point.capturedAt);
+    if (!Number.isFinite(ms)) continue;
+    const key = `${Math.round(ms / 1000)}_${point.latitude.toFixed(6)}_${point.longitude.toFixed(6)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(point);
+  }
+
+  return downsamplePointsByInterval(deduped, intervalMinutes);
+}
+
+function normalizeTimelineForInterval(
+  timeline: AdminRouteTimelineResponse,
+  intervalMinutes: number
+): AdminRouteTimelineResponse {
+  const normalizedPoints = normalizePointsForInterval(timeline.points || [], intervalMinutes);
+  const rebuilt = buildRouteTimeline(timeline.userId, timeline.date, normalizedPoints);
+  return {
+    ...timeline,
+    ...rebuilt,
+    attendanceEvents: timeline.attendanceEvents || [],
+  };
+}
+
+function mapLivePointToLocationLog(point: LiveMapPoint): LocationLog {
+  return {
+    id: point.id,
+    userId: point.userId,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    accuracy: null,
+    speed: null,
+    heading: null,
+    batteryLevel: point.batteryLevel ?? null,
+    geofenceId: null,
+    geofenceName: point.geofenceName ?? null,
+    isInsideGeofence: point.isInsideGeofence,
+    capturedAt: point.capturedAt,
+  };
+}
+
+function getVisitStatus(task: Task): "pending" | "in_progress" | "completed" {
+  if (task.departureAt || task.status === "completed") return "completed";
+  if (task.arrivalAt || task.status === "in_progress") return "in_progress";
+  return "pending";
+}
+
+function getVisitLabel(task: Task): string {
+  return task.visitLocationLabel?.trim() || task.title.trim() || "Field Visit";
 }
 
 type TimelineRow =
@@ -163,12 +279,15 @@ export default function RouteTrackingScreen() {
   const [mapMode, setMapMode] = useState<"tracking" | "polyline">("tracking");
   const [loading, setLoading] = useState(false);
   const [timeline, setTimeline] = useState<AdminRouteTimelineResponse | null>(null);
+  const [plannedStops, setPlannedStops] = useState<PlannedStopPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [authExpired, setAuthExpired] = useState(false);
   const [placeNameByLocationKey, setPlaceNameByLocationKey] = useState<Record<string, string>>({});
+  const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
+    formatMumbaiDateTime(new Date(), { withSeconds: true })
+  );
   const resolvingLocationKeysRef = useRef(new Set<string>());
-  const LIVE_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
-  const ROUTE_POINT_MIN_MOVE_METERS = 22;
+  const LIVE_REFRESH_INTERVAL_MS = 1 * 60 * 1000;
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (
     process.env.EXPO_PUBLIC_MAP_PROVIDER || (isExpoGo ? "google" : "mappls")
@@ -178,15 +297,42 @@ export default function RouteTrackingScreen() {
   const mapProvider =
     configuredMapProvider === "mappls" && isExpoGo ? "google" : configuredMapProvider;
 
-  const canViewTracking = user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
-  const selectedDate = useMemo(() => {
-    const date = new Date();
-    date.setDate(date.getDate() + dayOffset);
-    return toLocalDateKey(date);
-  }, [dayOffset]);
+  const isPrivilegedViewer =
+    user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
+  const canViewTracking = isPrivilegedViewer || user?.role === "salesperson";
+  const selectedDate = useMemo(() => getMumbaiDateKeyByOffset(dayOffset), [dayOffset]);
+  const visibleEmployees = useMemo(() => {
+    if (!user) return [];
+    if (isPrivilegedViewer) {
+      const salesEmployees = employees.filter((entry) => entry.role === "salesperson");
+      return salesEmployees.length ? salesEmployees : employees;
+    }
+
+    const selfById = employees.find((entry) => entry.id === user.id);
+    if (selfById) return [selfById];
+
+    const selfByEmail = employees.find(
+      (entry) => normalizeIdentity(entry.email) === normalizeIdentity(user.email)
+    );
+    if (selfByEmail) return [selfByEmail];
+
+    const fallbackEmployee: Employee = {
+      id: user.id,
+      companyId: user.companyId,
+      name: user.name,
+      role: user.role,
+      department: user.department,
+      status: "active",
+      email: user.email,
+      phone: user.phone,
+      branch: user.branch,
+      joinDate: user.joinDate,
+    };
+    return [fallbackEmployee];
+  }, [employees, isPrivilegedViewer, user]);
   const selectedEmployee = useMemo(
-    () => employees.find((entry) => entry.id === selectedUserId) ?? null,
-    [employees, selectedUserId]
+    () => visibleEmployees.find((entry) => entry.id === selectedUserId) ?? null,
+    [selectedUserId, visibleEmployees]
   );
 
   useEffect(() => {
@@ -198,9 +344,6 @@ export default function RouteTrackingScreen() {
       for (const item of employeeData) dedup.set(item.id, item);
       const merged = Array.from(dedup.values()).sort((a, b) => a.name.localeCompare(b.name));
       setEmployees(merged);
-      if (merged.length > 0) {
-        setSelectedUserId((current) => current || merged[0].id);
-      }
     })();
     return () => {
       mounted = false;
@@ -208,15 +351,32 @@ export default function RouteTrackingScreen() {
   }, []);
 
   useEffect(() => {
+    if (!visibleEmployees.length) {
+      setSelectedUserId("");
+      return;
+    }
+    setSelectedUserId((current) =>
+      visibleEmployees.some((entry) => entry.id === current) ? current : visibleEmployees[0].id
+    );
+  }, [visibleEmployees]);
+
+  useEffect(() => {
     if (mapProvider !== "mappls") {
       setMapMode("polyline");
     }
   }, [mapProvider]);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setMumbaiNowLabel(formatMumbaiDateTime(new Date(), { withSeconds: true }));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   const persistCurrentLocationPointIfMoved = useCallback(
     async (existingDayPoints: LocationLog[], aliases: Set<string>): Promise<boolean> => {
       if (!user || !selectedEmployee) return false;
-      const todayKey = toLocalDateKey(new Date());
+      const todayKey = toMumbaiDateKey(new Date());
       if (selectedDate !== todayKey) return false;
       const canUseDeviceLocation = selectedUserId === user.id || aliases.has(user.id);
       if (!canUseDeviceLocation) return false;
@@ -256,37 +416,49 @@ export default function RouteTrackingScreen() {
           heading: evidence.location.coords.heading ?? null,
         };
       } catch {
-        const lastKnown = await Location.getLastKnownPositionAsync({
-          maxAge: 10 * 60 * 1000,
-          requiredAccuracy: 350,
-        });
-        if (!lastKnown) return false;
-        coords = {
-          latitude: lastKnown.coords.latitude,
-          longitude: lastKnown.coords.longitude,
-          accuracy: lastKnown.coords.accuracy ?? null,
-          speed: lastKnown.coords.speed ?? null,
-          heading: lastKnown.coords.heading ?? null,
-        };
+        try {
+          const current = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
+            mayShowUserSettingsDialog: true,
+          });
+          coords = {
+            latitude: current.coords.latitude,
+            longitude: current.coords.longitude,
+            accuracy: current.coords.accuracy ?? null,
+            speed: current.coords.speed ?? null,
+            heading: current.coords.heading ?? null,
+          };
+        } catch {
+          const lastKnown = await Location.getLastKnownPositionAsync({
+            maxAge: 20 * 60 * 1000,
+            requiredAccuracy: 1000,
+          });
+          if (!lastKnown) return false;
+          coords = {
+            latitude: lastKnown.coords.latitude,
+            longitude: lastKnown.coords.longitude,
+            accuracy: lastKnown.coords.accuracy ?? null,
+            speed: lastKnown.coords.speed ?? null,
+            heading: lastKnown.coords.heading ?? null,
+          };
+        }
       }
 
       if (!coords) return false;
       const lastPoint = existingDayPoints[existingDayPoints.length - 1];
       if (lastPoint) {
-        const movedDistance = haversineDistanceMeters(
-          lastPoint.latitude,
-          lastPoint.longitude,
-          coords.latitude,
-          coords.longitude
-        );
-        if (movedDistance < ROUTE_POINT_MIN_MOVE_METERS) {
+        const nowMs = Date.now();
+        const lastPointMs = toMs(lastPoint.capturedAt);
+        const elapsedMs =
+          Number.isFinite(lastPointMs) && lastPointMs > 0 ? Math.max(0, nowMs - lastPointMs) : Number.POSITIVE_INFINITY;
+        if (elapsedMs < ROUTE_POINT_INTERVAL_MINUTES * 60_000) {
           return false;
         }
       }
 
       const capturedAt = new Date().toISOString();
-      const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 25_000 });
-      const userIdForLog = selectedEmployee.id || user.id;
+      const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
+      const userIdForLog = user.id;
 
       await addLocationLog({
         id: `route_point_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -303,7 +475,7 @@ export default function RouteTrackingScreen() {
         capturedAt,
       });
 
-      void postLocationLog({
+      await queueLocationPoint({
         userId: userIdForLog,
         latitude: coords.latitude,
         longitude: coords.longitude,
@@ -312,20 +484,70 @@ export default function RouteTrackingScreen() {
         heading: coords.heading,
         batteryLevel,
         capturedAt,
-      }).catch(() => {
-        // Keep route UI responsive even when API sync fails.
+      });
+      void flushBackgroundLocationQueue().catch(() => {
+        // offline/API failure: queued point will be retried later.
       });
 
       return true;
     },
-    [selectedDate, selectedEmployee, user]
+    [selectedDate, selectedEmployee, selectedUserId, user]
   );
 
   const loadTimeline = useCallback(async () => {
-    if (!selectedUserId || !canViewTracking || authExpired) return;
+    if (!selectedUserId || !canViewTracking || authExpired) {
+      if (!selectedUserId) {
+        setPlannedStops([]);
+      }
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
+      const taskSnapshot = await getTasks();
+      const selectedEmployeeName = normalizeIdentity(selectedEmployee?.name);
+      const currentUserName = normalizeIdentity(user?.name);
+      const plannedStopsForDay: PlannedStopPoint[] = taskSnapshot
+        .filter((task) => task.taskType === "field_visit")
+        .filter(
+          (task) =>
+            typeof task.visitLatitude === "number" && typeof task.visitLongitude === "number"
+        )
+        .filter((task) => (task.visitPlanDate || task.dueDate) === selectedDate)
+        .filter((task) => {
+          const assignedToName = normalizeIdentity(task.assignedToName);
+          if (isPrivilegedViewer) {
+            return (
+              task.assignedTo === selectedUserId ||
+              (selectedEmployeeName && assignedToName === selectedEmployeeName)
+            );
+          }
+          return (
+            task.assignedTo === selectedUserId ||
+            (user?.id ? task.assignedTo === user.id : false) ||
+            (selectedEmployee?.id ? task.assignedTo === selectedEmployee.id : false) ||
+            (selectedEmployeeName && assignedToName === selectedEmployeeName) ||
+            (currentUserName && assignedToName === currentUserName)
+          );
+        })
+        .sort((a, b) => {
+          const seqA = typeof a.visitSequence === "number" ? a.visitSequence : Number.POSITIVE_INFINITY;
+          const seqB = typeof b.visitSequence === "number" ? b.visitSequence : Number.POSITIVE_INFINITY;
+          if (seqA !== seqB) return seqA - seqB;
+          return a.createdAt.localeCompare(b.createdAt);
+        })
+        .map((task) => ({
+          id: task.id,
+          label:
+            typeof task.visitSequence === "number"
+              ? `#${task.visitSequence} ${getVisitLabel(task)}`
+              : getVisitLabel(task),
+          latitude: task.visitLatitude as number,
+          longitude: task.visitLongitude as number,
+          status: getVisitStatus(task),
+        }));
+      setPlannedStops(plannedStopsForDay);
+
       if (dataSource === "demo") {
         try {
           const remoteDemo = await getAdminDemoRouteTimeline(selectedUserId, selectedDate);
@@ -333,7 +555,11 @@ export default function RouteTrackingScreen() {
           return;
         } catch {
           const demoPoints = buildDemoRoutePoints(selectedUserId, selectedDate);
-          const demoTimeline = buildRouteTimeline(selectedUserId, selectedDate, demoPoints);
+          const demoTimeline = buildRouteTimeline(
+            selectedUserId,
+            selectedDate,
+            normalizePointsForInterval(demoPoints, ROUTE_POINT_INTERVAL_MINUTES)
+          );
           const firstPoint = demoPoints[0];
           const lastPoint = demoPoints[demoPoints.length - 1];
           setTimeline({
@@ -342,7 +568,7 @@ export default function RouteTrackingScreen() {
               {
                 id: `demo_checkin_local_${selectedUserId}_${selectedDate}`,
                 type: "checkin",
-                at: firstPoint?.capturedAt ?? new Date(`${selectedDate}T09:00:00`).toISOString(),
+                at: firstPoint?.capturedAt ?? new Date(`${selectedDate}T09:00:00+05:30`).toISOString(),
                 geofenceName: firstPoint?.geofenceName ?? "Route Start",
                 latitude: firstPoint?.latitude ?? null,
                 longitude: firstPoint?.longitude ?? null,
@@ -350,7 +576,7 @@ export default function RouteTrackingScreen() {
               {
                 id: `demo_checkout_local_${selectedUserId}_${selectedDate}`,
                 type: "checkout",
-                at: lastPoint?.capturedAt ?? new Date(`${selectedDate}T12:05:00`).toISOString(),
+                at: lastPoint?.capturedAt ?? new Date(`${selectedDate}T12:05:00+05:30`).toISOString(),
                 geofenceName: lastPoint?.geofenceName ?? "Route End",
                 latitude: lastPoint?.latitude ?? null,
                 longitude: lastPoint?.longitude ?? null,
@@ -369,12 +595,21 @@ export default function RouteTrackingScreen() {
         attendanceSnapshot,
         selectedUserId
       );
+      const selectedUserAttendance = attendanceSnapshot
+        .filter((entry) => aliases.has(entry.userId))
+        .filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate))
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      const sessionWindow = resolveRouteSessionWindow(selectedUserAttendance);
 
       let allLocalLogsForAliases = logsSnapshot
         .filter((log) => aliases.has(log.userId))
         .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
-      let dayLocalPoints = allLocalLogsForAliases.filter((log) =>
-        log.capturedAt.startsWith(selectedDate)
+      let dayLocalPointsRaw = allLocalLogsForAliases.filter((log) =>
+        isMumbaiDateKey(log.capturedAt, selectedDate)
+      );
+      let dayLocalPoints = normalizePointsForInterval(
+        filterPointsToSessionWindow(dayLocalPointsRaw, sessionWindow),
+        ROUTE_POINT_INTERVAL_MINUTES
       );
 
       const createdCurrentPoint = await persistCurrentLocationPointIfMoved(dayLocalPoints, aliases);
@@ -383,24 +618,33 @@ export default function RouteTrackingScreen() {
         allLocalLogsForAliases = refreshedLogs
           .filter((log) => aliases.has(log.userId))
           .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
-        dayLocalPoints = allLocalLogsForAliases.filter((log) =>
-          log.capturedAt.startsWith(selectedDate)
+        dayLocalPointsRaw = allLocalLogsForAliases.filter((log) =>
+          isMumbaiDateKey(log.capturedAt, selectedDate)
+        );
+        dayLocalPoints = normalizePointsForInterval(
+          filterPointsToSessionWindow(dayLocalPointsRaw, sessionWindow),
+          ROUTE_POINT_INTERVAL_MINUTES
         );
       }
 
-      if (!dayLocalPoints.length && selectedDate === toLocalDateKey(new Date()) && allLocalLogsForAliases.length) {
+      if (
+        !dayLocalPoints.length &&
+        selectedDate === toMumbaiDateKey(new Date()) &&
+        allLocalLogsForAliases.length
+      ) {
         // Show at least latest known user location on today's map even before movement timeline forms.
         dayLocalPoints = [allLocalLogsForAliases[allLocalLogsForAliases.length - 1]];
       }
 
       const localTimeline = buildRouteTimeline(selectedUserId, selectedDate, dayLocalPoints);
-      const selectedEmployeeName = normalizeIdentity(selectedEmployee?.name);
+      const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
       const localAttendanceEvents = attendanceSnapshot
-        .filter((entry) => entry.timestamp.startsWith(selectedDate))
+        .filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate))
         .filter(
           (entry) =>
             aliases.has(entry.userId) ||
-            (selectedEmployeeName && normalizeIdentity(entry.userName) === selectedEmployeeName)
+            (selectedEmployeeNameForAttendance &&
+              normalizeIdentity(entry.userName) === selectedEmployeeNameForAttendance)
         )
         .map((entry) => ({
           id: entry.id,
@@ -425,7 +669,11 @@ export default function RouteTrackingScreen() {
       let remoteFailure: unknown = null;
       for (const candidateUserId of remoteCandidates) {
         try {
-          const currentRemote = await getAdminRouteTimeline(candidateUserId, selectedDate);
+          const currentRemote = await getAdminRouteTimeline(
+            candidateUserId,
+            selectedDate,
+            ROUTE_POINT_INTERVAL_MINUTES
+          );
           if (!remoteTimeline) {
             remoteTimeline = currentRemote;
           }
@@ -439,7 +687,7 @@ export default function RouteTrackingScreen() {
       }
 
       if (remoteTimeline && (remoteTimeline.points?.length ?? 0) > 0) {
-        setTimeline(remoteTimeline);
+        setTimeline(normalizeTimelineForInterval(remoteTimeline, ROUTE_POINT_INTERVAL_MINUTES));
         return;
       }
 
@@ -448,9 +696,73 @@ export default function RouteTrackingScreen() {
         (localResolvedTimeline.attendanceEvents?.length ?? 0) > 0;
 
       if (hasLocalData) {
-        setTimeline(localResolvedTimeline);
+        setTimeline(normalizeTimelineForInterval(localResolvedTimeline, ROUTE_POINT_INTERVAL_MINUTES));
         setError("Showing current/local route points while live API catches up.");
         return;
+      }
+
+      if (isPrivilegedViewer) {
+        const fallbackAttendanceEvents =
+          remoteTimeline && remoteTimeline.attendanceEvents.length > 0
+            ? remoteTimeline.attendanceEvents
+            : localAttendanceEvents;
+
+        // Fallback for alias mismatch or delayed route timeline API hydration:
+        // resolve selected salesperson route from all admin routes for selected date.
+        try {
+          const liveRoutes = await getAdminLiveMapRoutes(selectedDate, ROUTE_POINT_INTERVAL_MINUTES);
+          const matchingRoute = (liveRoutes.routes || [])
+            .filter((route) => aliases.has(route.userId) && (route.points?.length ?? 0) > 0)
+            .sort((a, b) => {
+              const aTime = a.latestPoint?.capturedAt || "";
+              const bTime = b.latestPoint?.capturedAt || "";
+              return bTime.localeCompare(aTime);
+            })[0];
+          if (matchingRoute && matchingRoute.points.length > 0) {
+            const normalizedRoutePoints = normalizePointsForInterval(
+              matchingRoute.points,
+              ROUTE_POINT_INTERVAL_MINUTES
+            );
+            const fallbackTimeline = buildRouteTimeline(
+              selectedUserId,
+              selectedDate,
+              normalizedRoutePoints
+            );
+            setTimeline({
+              ...fallbackTimeline,
+              attendanceEvents: fallbackAttendanceEvents,
+            });
+            setError("Showing synced route points from admin live map feed.");
+            return;
+          }
+        } catch {
+          // best-effort fallback, continue to latest point fallback below
+        }
+
+        if (selectedDate === toMumbaiDateKey(new Date())) {
+          try {
+            const livePoints = await getAdminLiveMapPoints();
+            const latestPoint = livePoints
+              .filter((point) => aliases.has(point.userId))
+              .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+            if (latestPoint) {
+              const mappedPoint = mapLivePointToLocationLog(latestPoint);
+              const fallbackTimeline = buildRouteTimeline(
+                selectedUserId,
+                selectedDate,
+                normalizePointsForInterval([mappedPoint], ROUTE_POINT_INTERVAL_MINUTES)
+              );
+              setTimeline({
+                ...fallbackTimeline,
+                attendanceEvents: fallbackAttendanceEvents,
+              });
+              setError("Showing latest current GPS point while route history syncs.");
+              return;
+            }
+          } catch {
+            // continue with remote timeline fallback/error handling
+          }
+        }
       }
 
       if (remoteTimeline) {
@@ -476,6 +788,7 @@ export default function RouteTrackingScreen() {
     canViewTracking,
     dataSource,
     persistCurrentLocationPointIfMoved,
+    isPrivilegedViewer,
     selectedDate,
     selectedEmployee,
     selectedUserId,
@@ -633,7 +946,7 @@ export default function RouteTrackingScreen() {
             Access restricted
           </Text>
           <Text style={[styles.deniedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-            Route tracking dashboard is available for Admin/Manager roles.
+            Route tracking dashboard is available for Admin, Manager, HR and Sales roles.
           </Text>
           <Pressable onPress={() => router.back()} style={[styles.backButton, { backgroundColor: colors.primary }]}>
             <Text style={styles.backButtonText}>Go Back</Text>
@@ -653,9 +966,14 @@ export default function RouteTrackingScreen() {
           <Pressable onPress={() => router.back()} hitSlop={12}>
             <Ionicons name="arrow-back" size={24} color={colors.text} />
           </Pressable>
-          <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-            Route & Halt Tracking
-          </Text>
+          <View style={styles.headerCenter}>
+            <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+              Route & Halt Tracking
+            </Text>
+            <Text style={[styles.headerClock, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+              {MUMBAI_TIMEZONE_LABEL}: {mumbaiNowLabel}
+            </Text>
+          </View>
           <Pressable onPress={() => void loadTimeline()} hitSlop={12}>
             <Ionicons name="refresh-outline" size={22} color={colors.primary} />
           </Pressable>
@@ -663,10 +981,10 @@ export default function RouteTrackingScreen() {
 
         <Animated.View entering={FadeInDown.duration(350)} style={styles.controlsCard}>
           <Text style={[styles.label, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-            Employee
+            {isPrivilegedViewer ? "Salesperson" : "Your Route"}
           </Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-            {employees.map((employee) => {
+            {visibleEmployees.map((employee) => {
               const active = employee.id === selectedUserId;
               return (
                 <Pressable
@@ -899,6 +1217,7 @@ export default function RouteTrackingScreen() {
           <RouteMapNative
             points={timeline?.points ?? []}
             halts={timeline?.halts ?? []}
+            plannedStops={plannedStops}
             routePath={timeline?.directions?.path ?? undefined}
             mapMode={mapMode}
             colors={colors}
@@ -1052,9 +1371,19 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 8,
   },
+  headerCenter: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 2,
+    paddingHorizontal: 10,
+  },
   headerTitle: {
     fontSize: 19,
     letterSpacing: -0.25,
+  },
+  headerClock: {
+    fontSize: 11,
   },
   controlsCard: {
     gap: 10,
@@ -1277,4 +1606,5 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
   },
 });
+
 

@@ -239,6 +239,8 @@ function buildQuickLinks(
   userRole: UserRole | undefined,
   colors: ReturnType<typeof useAppTheme>["colors"]
 ): QuickLink[] {
+  const canTrackRoutes =
+    userRole === "admin" || userRole === "manager" || userRole === "hr" || userRole === "salesperson";
   const links: QuickLink[] = [
     {
       id: "attendance",
@@ -302,13 +304,16 @@ function buildQuickLinks(
       color: colors.accent,
       route: "/(tabs)/admin-controls",
     });
+  }
+
+  if (canTrackRoutes) {
     links.push({
       id: "route",
       title: "Route Track",
-      subtitle: "Movement and halt timeline",
+      subtitle: userRole === "salesperson" ? "Your movement and halts" : "Sales movement and halts",
       icon: "navigate-outline",
       color: colors.primary,
-      route: "/(tabs)/route-tracking-admin",
+      route: userRole === "admin" ? "/(tabs)/route-tracking-admin" : "/route-tracking",
     });
   }
 

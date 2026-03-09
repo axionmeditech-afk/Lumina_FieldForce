@@ -6,6 +6,7 @@ import type {
   AttendanceCheckPayload,
   AttendanceRecord,
   Geofence,
+  LocationLog,
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
@@ -35,6 +36,7 @@ import {
   setMySqlStateValue,
 } from "@/server/services/mysql-state";
 import { analyzeConversationWithAI } from "@/lib/ai-sales-analysis";
+import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 
 const MAX_LOCATION_ACCURACY_METERS = 120;
 const MAX_EVIDENCE_AGE_MS = 2 * 60 * 1000;
@@ -222,6 +224,78 @@ function parseLocationSample(value: unknown): {
     ),
     capturedAt,
   };
+}
+
+function parseIntervalMinutes(value: unknown, fallback = 2): number {
+  const parsed = parseOptionalInteger(value);
+  if (typeof parsed !== "number" || !Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(30, Math.floor(parsed)));
+}
+
+function toTimestampMs(value: string): number {
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function downsampleLocationLogsByInterval(
+  points: LocationLog[],
+  intervalMinutes: number
+): LocationLog[] {
+  if (points.length <= 1) return points;
+  const intervalMs = Math.max(1, intervalMinutes) * 60_000;
+  const sorted = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  const sampled: LocationLog[] = [];
+  let lastIncludedMs = Number.NaN;
+
+  for (const point of sorted) {
+    const pointMs = toTimestampMs(point.capturedAt);
+    if (!Number.isFinite(pointMs)) continue;
+    if (!sampled.length) {
+      sampled.push(point);
+      lastIncludedMs = pointMs;
+      continue;
+    }
+    if (pointMs - lastIncludedMs >= intervalMs) {
+      sampled.push(point);
+      lastIncludedMs = pointMs;
+    }
+  }
+  return sampled;
+}
+
+interface RouteAttendanceEventLike {
+  type: "checkin" | "checkout";
+  at: string;
+}
+
+interface RouteSessionWindow {
+  startAt: string | null;
+  endAt: string | null;
+}
+
+function resolveRouteSessionWindow(events: RouteAttendanceEventLike[]): RouteSessionWindow {
+  const ordered = [...events].sort((a, b) => a.at.localeCompare(b.at));
+  const firstCheckIn = ordered.find((entry) => entry.type === "checkin");
+  if (!firstCheckIn) return { startAt: null, endAt: null };
+  const firstCheckOut = ordered.find(
+    (entry) => entry.type === "checkout" && entry.at >= firstCheckIn.at
+  );
+  return {
+    startAt: firstCheckIn.at,
+    endAt: firstCheckOut?.at ?? null,
+  };
+}
+
+function filterLocationLogsToSessionWindow(
+  points: LocationLog[],
+  sessionWindow: RouteSessionWindow
+): LocationLog[] {
+  if (!sessionWindow.startAt && !sessionWindow.endAt) return points;
+  return points.filter((point) => {
+    if (sessionWindow.startAt && point.capturedAt < sessionWindow.startAt) return false;
+    if (sessionWindow.endAt && point.capturedAt > sessionWindow.endAt) return false;
+    return true;
+  });
 }
 
 function parseCheckPayload(req: Request): AttendanceCheckPayload | null {
@@ -937,6 +1011,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const withDiarizationRaw = firstString(req.query.with_diarization) || null;
       const withTimestampsRaw = firstString(req.query.with_timestamps) || null;
       const numSpeakersRaw = firstString(req.query.num_speakers) || null;
+      const geminiApiKeysHeader = firstString(req.header("x-gemini-api-keys"));
+      const geminiApiKeyHeader = firstString(req.header("x-gemini-api-key"));
+      const revupApiKeyHeader = firstString(req.header("x-revup-api-key"));
+      const revupAppIdHeader = firstString(req.header("x-revup-app-id"));
+      const assemblyAiApiKeyHeader = firstString(req.header("x-assemblyai-api-key"));
+      const hfTokenHeader = firstString(req.header("x-hf-token"));
       const withDiarization =
         withDiarizationRaw === null
           ? null
@@ -962,6 +1042,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           withDiarization,
           withTimestamps,
           numSpeakers,
+          geminiApiKey:
+            geminiApiKeysHeader ||
+            geminiApiKeyHeader ||
+            firstString(req.query.gemini_api_keys) ||
+            firstString(req.query.gemini_api_key) ||
+            null,
+          revupApiKey:
+            revupApiKeyHeader || firstString(req.query.revup_api_key) || null,
+          revupAppId:
+            revupAppIdHeader || firstString(req.query.revup_app_id) || null,
+          assemblyAiApiKey:
+            assemblyAiApiKeyHeader || firstString(req.query.assemblyai_api_key) || null,
+          huggingFaceToken:
+            hfTokenHeader ||
+            firstString(req.query.hf_token) ||
+            firstString(req.query.huggingface_token) ||
+            null,
         });
         res.json(result);
       } catch (error) {
@@ -1653,16 +1750,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get(
-    "/api/admin/route/:id/demo",
+    "/api/admin/live-map/routes",
     requireAuth,
     requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
+      if (!isIsoDateString(requestedDate)) {
+        res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
+        return;
+      }
+      const intervalMinutes = parseIntervalMinutes(req.query.interval_minutes, 1);
+      const allPoints = await storage.getLocationLogsForDate(requestedDate);
+      const byUser = new Map<string, LocationLog[]>();
+      for (const point of allPoints) {
+        const bucket = byUser.get(point.userId) ?? [];
+        bucket.push(point);
+        byUser.set(point.userId, bucket);
+      }
+
+      const routes = Array.from(byUser.entries())
+        .map(([userId, userPoints]) => {
+          const sampled = downsampleLocationLogsByInterval(userPoints, intervalMinutes);
+          return {
+            userId,
+            intervalMinutes,
+            pointCount: sampled.length,
+            points: sampled,
+            latestPoint: sampled.length ? sampled[sampled.length - 1] : null,
+          };
+        })
+        .sort((a, b) => {
+          const aTime = a.latestPoint?.capturedAt || "";
+          const bTime = b.latestPoint?.capturedAt || "";
+          return bTime.localeCompare(aTime);
+        });
+
+      res.json({
+        date: requestedDate,
+        intervalMinutes,
+        routes,
+      });
+    }
+  );
+
+  app.get(
+    "/api/admin/route/:id/demo",
+    requireAuth,
+    requireRoles("admin", "hr", "manager", "salesperson"),
     async (req, res) => {
       const userId = firstString(req.params.id);
       if (!userId) {
         res.status(400).json({ message: "User id is required" });
         return;
       }
-      const requestedDate = firstString(req.query.date) || new Date().toISOString().slice(0, 10);
+      if (!ensureUserMatch(req, userId)) {
+        res.status(403).json({ message: "Token user mismatch" });
+        return;
+      }
+      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
       if (!isIsoDateString(requestedDate)) {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
@@ -1761,21 +1906,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get(
     "/api/admin/route/:id",
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
+    requireRoles("admin", "hr", "manager", "salesperson"),
     async (req, res) => {
       const userId = firstString(req.params.id);
       if (!userId) {
         res.status(400).json({ message: "User id is required" });
         return;
       }
+      if (!ensureUserMatch(req, userId)) {
+        res.status(403).json({ message: "Token user mismatch" });
+        return;
+      }
 
-      const requestedDate = firstString(req.query.date) || new Date().toISOString().slice(0, 10);
+      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
       if (!isIsoDateString(requestedDate)) {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
       }
 
-      const points = await storage.getLocationLogsForUserDate(userId, requestedDate);
+      const intervalMinutes = parseIntervalMinutes(req.query.interval_minutes, 1);
+      const rawPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
+      const attendance = await storage.getAttendanceHistory(userId);
+      const attendanceEvents = attendance
+        .filter((record) => isMumbaiDateKey(record.timestamp, requestedDate))
+        .map((record) => ({
+          id: record.id,
+          type: record.type,
+          at: record.timestamp,
+          geofenceName: record.geofenceName ?? null,
+          latitude: record.location?.lat ?? null,
+          longitude: record.location?.lng ?? null,
+        }))
+        .sort((a, b) => a.at.localeCompare(b.at));
+      const sessionWindow = resolveRouteSessionWindow(attendanceEvents);
+      const windowedPoints = filterLocationLogsToSessionWindow(rawPoints, sessionWindow);
+      const points = downsampleLocationLogsByInterval(windowedPoints, intervalMinutes);
       const timeline = buildRouteTimeline(userId, requestedDate, points);
       const directions = await getMapplsDirectionsForLogs(points, {
         resource: firstString(req.query.routing_resource) || null,
@@ -1787,21 +1952,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         region: firstString(req.query.routing_region) || null,
         routeType: parseOptionalInteger(req.query.routing_rtype),
       });
-      const attendance = await storage.getAttendanceHistory(userId);
-      const attendanceEvents = attendance
-        .filter((record) => record.timestamp.startsWith(requestedDate))
-        .map((record) => ({
-          id: record.id,
-          type: record.type,
-          at: record.timestamp,
-          geofenceName: record.geofenceName ?? null,
-          latitude: record.location?.lat ?? null,
-          longitude: record.location?.lng ?? null,
-        }))
-        .sort((a, b) => a.at.localeCompare(b.at));
 
       res.json({
         ...timeline,
+        intervalMinutes,
         directions,
         attendanceEvents,
       });
@@ -1811,15 +1965,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get(
     "/api/admin/route/:id/matrix",
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
+    requireRoles("admin", "hr", "manager", "salesperson"),
     async (req, res) => {
       const userId = firstString(req.params.id);
       if (!userId) {
         res.status(400).json({ message: "User id is required" });
         return;
       }
+      if (!ensureUserMatch(req, userId)) {
+        res.status(403).json({ message: "Token user mismatch" });
+        return;
+      }
 
-      const requestedDate = firstString(req.query.date) || new Date().toISOString().slice(0, 10);
+      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
       if (!isIsoDateString(requestedDate)) {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
@@ -2254,3 +2412,4 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
   return httpServer;
 }
+

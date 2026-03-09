@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Circle, Rect } from "react-native-svg";
 import type { LiveMapPoint } from "@/lib/attendance-api";
 import type { ThemePalette } from "@/constants/colors";
+import { formatMumbaiTime } from "@/lib/ist-time";
 
 interface LiveMapPanelProps {
   points: LiveMapPoint[];
@@ -76,7 +77,7 @@ export function LiveMapPanel({ points, colors, onPointPress }: LiveMapPanelProps
             <View style={{ flex: 1 }}>
               <Text style={[styles.itemTitle, { color: colors.text }]}>{point.userId}</Text>
               <Text style={[styles.itemSub, { color: colors.textSecondary }]}>
-                {point.geofenceName ?? "No zone"} • {new Date(point.capturedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                {point.geofenceName ?? "No zone"} | {formatMumbaiTime(point.capturedAt)}
               </Text>
             </View>
           </Pressable>
@@ -133,3 +134,4 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
   },
 });
+

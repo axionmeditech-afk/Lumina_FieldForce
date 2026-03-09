@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
+import * as ExpoLocation from "expo-location";
 import type { LocationObject } from "expo-location";
 import { LinearGradient } from "expo-linear-gradient";
 import { useAuth } from "@/contexts/AuthContext";
@@ -38,10 +39,10 @@ import {
   attendanceCheckIn,
   attendanceCheckOut,
   flushAttendanceQueue,
-  postLocationLog,
   getUserGeofences,
   queueAttendanceRequest,
 } from "@/lib/attendance-api";
+import { flushBackgroundLocationQueue, queueLocationPoint } from "@/lib/background-location";
 import {
   ensureLocationServicesEnabled,
   getVerifiedLocationEvidence,
@@ -56,11 +57,12 @@ import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns } from "@/lib/role-access";
 
-const LOCATION_REFRESH_MS = 2 * 60 * 1000;
+const LOCATION_REFRESH_MS = 1 * 60 * 1000;
 const STRICT_LOCATION_ACCURACY_METERS = 180;
 const RELAXED_LOCATION_ACCURACY_METERS = 220;
-const TRACKING_TIME_INTERVAL_MS = 2 * 60 * 1000;
-const TRACKING_DISTANCE_INTERVAL_METERS = 75;
+const TRACKING_TIME_INTERVAL_MS = 1 * 60 * 1000;
+const TRACKING_DISTANCE_INTERVAL_METERS = 0;
+const ROUTE_POINT_PERSIST_INTERVAL_MS = 1 * 60 * 1000;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 const AHMEDABAD_TEST_EMAIL = "ahmedabad@trackforce.ai";
@@ -197,6 +199,7 @@ export default function AttendanceScreen() {
   const prevInsideRef = useRef(false);
   const locationWatchRef = useRef<{ remove: () => void } | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const routePersistLastAtMsRef = useRef<number>(0);
   const latestEvidenceRef = useRef<{
     sampleCount: number;
     sampleWindowMs: number;
@@ -316,6 +319,10 @@ export default function AttendanceScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    routePersistLastAtMsRef.current = 0;
+  }, [user?.id]);
+
   const handleLocationUpdate = useCallback(
     async (location: LocationObject, options?: { skipRoutePersistence?: boolean }) => {
       if (!user?.id) return;
@@ -326,15 +333,22 @@ export default function AttendanceScreen() {
         effectiveLocation.coords.longitude,
         effectiveLocation.coords.accuracy ?? undefined
       );
-      const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 25_000 });
+      const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
       setEvaluation(nextEvaluation);
       setGpsLoading(false);
       setLocationReady(true);
 
       const shouldPersistRoutePoint =
         (!isSalespersonFieldCheckIn || checkedInState) && !options?.skipRoutePersistence;
-      if (shouldPersistRoutePoint) {
+      const nowMs = Date.now();
+      const canPersistRoutePoint =
+        shouldPersistRoutePoint &&
+        (routePersistLastAtMsRef.current <= 0 ||
+          nowMs - routePersistLastAtMsRef.current >= ROUTE_POINT_PERSIST_INTERVAL_MS);
+      if (canPersistRoutePoint) {
+        routePersistLastAtMsRef.current = nowMs;
         void (async () => {
+          const capturedAt = new Date(nowMs).toISOString();
           try {
             await addLocationLog({
               id: `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -348,26 +362,25 @@ export default function AttendanceScreen() {
               geofenceId: nextEvaluation.activeZone?.id ?? null,
               geofenceName: nextEvaluation.activeZone?.name ?? null,
               isInsideGeofence: nextEvaluation.inside,
-              capturedAt: new Date().toISOString(),
+              capturedAt,
             });
           } catch {
             // never fail active session because local location persistence failed
           }
           try {
-            const online = await isBackendReachable();
-            if (online) {
-              await postLocationLog({
-                userId: user.id,
-                latitude: effectiveLocation.coords.latitude,
-                longitude: effectiveLocation.coords.longitude,
-                accuracy: effectiveLocation.coords.accuracy ?? null,
-                speed: effectiveLocation.coords.speed ?? null,
-                heading: effectiveLocation.coords.heading ?? null,
-                batteryLevel,
-              });
-            }
+            await queueLocationPoint({
+              userId: user.id,
+              latitude: effectiveLocation.coords.latitude,
+              longitude: effectiveLocation.coords.longitude,
+              accuracy: effectiveLocation.coords.accuracy ?? null,
+              speed: effectiveLocation.coords.speed ?? null,
+              heading: effectiveLocation.coords.heading ?? null,
+              batteryLevel,
+              capturedAt,
+            });
+            await flushBackgroundLocationQueue();
           } catch {
-            // offline or API unavailable; local logs already persisted.
+            // offline/API failure: point is persisted in queue for retry.
           }
         })();
       }
@@ -464,6 +477,50 @@ export default function AttendanceScreen() {
         await handleLocationUpdate(effectiveEvidence.location, options);
         return effectiveEvidence;
       } catch {
+        let fallbackLocation: LocationObject | null = null;
+        try {
+          fallbackLocation = await ExpoLocation.getCurrentPositionAsync({
+            accuracy: strict ? ExpoLocation.Accuracy.Balanced : ExpoLocation.Accuracy.Low,
+            mayShowUserSettingsDialog: true,
+          });
+        } catch {
+          // fall through to last-known fallback
+        }
+
+        if (!fallbackLocation) {
+          fallbackLocation = await ExpoLocation.getLastKnownPositionAsync({
+            maxAge: 20 * 60 * 1000,
+            requiredAccuracy: strict ? 450 : 1200,
+          });
+        }
+
+        if (fallbackLocation) {
+          const effectiveFallbackLocation = applyAhmedabadOfficeLocationLock(fallbackLocation);
+          const fallbackAccuracy =
+            typeof effectiveFallbackLocation.coords.accuracy === "number" &&
+            Number.isFinite(effectiveFallbackLocation.coords.accuracy)
+              ? Math.round(effectiveFallbackLocation.coords.accuracy)
+              : null;
+          latestEvidenceRef.current = {
+            sampleCount: 1,
+            sampleWindowMs: 0,
+            bestAccuracyMeters: fallbackAccuracy,
+          };
+          setGpsEvidence(
+            `GPS fallback: ${
+              fallbackAccuracy !== null ? `+/-${fallbackAccuracy}m` : "accuracy unknown"
+            }${isAhmedabadOfficeLockUser ? " | office-pinned" : ""}`
+          );
+          await handleLocationUpdate(effectiveFallbackLocation, options);
+          return {
+            location: effectiveFallbackLocation,
+            sampleCount: 1,
+            sampleWindowMs: 0,
+            averageAccuracyMeters: fallbackAccuracy,
+            bestAccuracyMeters: fallbackAccuracy,
+          };
+        }
+
         latestEvidenceRef.current = null;
         setGpsEvidence("");
         setLocationReady(false);
@@ -738,7 +795,7 @@ export default function AttendanceScreen() {
         if (type === "checkin") {
           try {
             // Seed first route point from the same check-in coordinates for admin route timeline.
-            const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 25_000 });
+            const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
             await addLocationLog({
               id: `loc_checkin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
               userId: user.id,
@@ -753,7 +810,7 @@ export default function AttendanceScreen() {
               isInsideGeofence: payload.isInsideGeofence,
               capturedAt: capturedAtClient,
             });
-            void postLocationLog({
+            await queueLocationPoint({
               userId: user.id,
               latitude: payload.latitude,
               longitude: payload.longitude,
@@ -762,9 +819,14 @@ export default function AttendanceScreen() {
               heading: null,
               batteryLevel,
               capturedAt: capturedAtClient,
-            }).catch(() => {
-              // Non-blocking backend sync; local tracking point is already saved.
             });
+            void flushBackgroundLocationQueue().catch(() => {
+              // queue will retry sync on next heartbeat/background flush.
+            });
+            const seededAtMs = new Date(capturedAtClient).getTime();
+            if (Number.isFinite(seededAtMs)) {
+              routePersistLastAtMsRef.current = seededAtMs;
+            }
           } catch {
             // Route seeding must never block attendance check-in completion.
           }
@@ -1398,3 +1460,4 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 });
+

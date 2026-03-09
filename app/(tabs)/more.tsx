@@ -44,6 +44,7 @@ const EMPLOYEE_MENU_ITEMS: MenuItem[] = [
   { title: "Support", subtitle: "Ask for help", icon: "help-buoy-outline", iconLib: "ion", color: "#14B8A6", route: "/(tabs)/support" },
   { title: "Salary", subtitle: "Your payslips", icon: "wallet-outline", iconLib: "ion", color: "#22C55E", route: "/salary" },
   { title: "Expenses", subtitle: "Your claims", icon: "receipt-outline", iconLib: "ion", color: "#F59E0B", route: "/expenses" },
+  { title: "Route Tracking", subtitle: "Your live route & halts", icon: "map-outline", iconLib: "ion", color: "#0EA5E9", route: "/route-tracking" },
   { title: "Settings", subtitle: "App & profile", icon: "settings-outline", iconLib: "ion", color: "#64748B", route: "/settings" },
 ];
 

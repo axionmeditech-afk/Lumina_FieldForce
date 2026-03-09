@@ -21,6 +21,17 @@ interface QueuedLocationPoint {
   capturedAt: string;
 }
 
+export interface LocationQueuePointPayload {
+  userId: string;
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+  speed?: number | null;
+  heading?: number | null;
+  batteryLevel?: number | null;
+  capturedAt?: string | null;
+}
+
 async function readQueue(): Promise<QueuedLocationPoint[]> {
   const raw = await AsyncStorage.getItem(BACKGROUND_QUEUE_KEY);
   if (!raw) return [];
@@ -59,6 +70,25 @@ export async function enqueueBackgroundLocationPoints(entries: QueuedLocationPoi
   queue.push(...entries);
   const bounded = queue.slice(-1500);
   await writeQueue(bounded);
+}
+
+export async function queueLocationPoint(payload: LocationQueuePointPayload): Promise<void> {
+  const capturedAt =
+    typeof payload.capturedAt === "string" && payload.capturedAt.trim()
+      ? payload.capturedAt
+      : new Date().toISOString();
+  await enqueueBackgroundLocationPoints([
+    {
+      userId: payload.userId,
+      latitude: payload.latitude,
+      longitude: payload.longitude,
+      accuracy: payload.accuracy ?? null,
+      speed: payload.speed ?? null,
+      heading: payload.heading ?? null,
+      batteryLevel: payload.batteryLevel ?? null,
+      capturedAt,
+    },
+  ]);
 }
 
 export async function flushBackgroundLocationQueue(): Promise<void> {
@@ -106,7 +136,7 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
   const locations = Array.isArray(payload?.locations) ? payload.locations : [];
   if (!locations.length) return;
 
-  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 30_000 });
+  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
   const queuePoints = locations.map((location) =>
     toQueuePoint(currentUser.id, location, batteryLevel)
   );
@@ -170,10 +200,10 @@ export async function ensureBackgroundLocationTracking(): Promise<{
   if (!alreadyStarted) {
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.Balanced,
-      timeInterval: 90_000,
-      distanceInterval: 45,
+      timeInterval: 120_000,
+      distanceInterval: 0,
       deferredUpdatesInterval: 120_000,
-      deferredUpdatesDistance: 110,
+      deferredUpdatesDistance: 0,
       pausesUpdatesAutomatically: true,
       showsBackgroundLocationIndicator: false,
       activityType: Location.ActivityType.OtherNavigation,
