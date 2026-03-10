@@ -491,3 +491,58 @@ export async function getMapplsDistanceMatrixForLogs(
     return failed;
   }
 }
+
+export interface MapplsCoordinatePoint {
+  latitude: number;
+  longitude: number;
+}
+
+function toSyntheticLocationLogs(points: MapplsCoordinatePoint[], prefix: string): LocationLog[] {
+  const baseTs = Date.now();
+  return points.map((point, index) => ({
+    id: `${prefix}_${index}`,
+    userId: prefix,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    accuracy: null,
+    speed: null,
+    heading: null,
+    batteryLevel: null,
+    geofenceId: null,
+    geofenceName: null,
+    isInsideGeofence: false,
+    capturedAt: new Date(baseTs + index * 1000).toISOString(),
+  }));
+}
+
+export async function getMapplsDirectionsForCoordinates(
+  points: MapplsCoordinatePoint[],
+  options?: {
+    resource?: string | null;
+    profile?: string | null;
+    overview?: string | null;
+    geometries?: string | null;
+    alternatives?: boolean;
+    steps?: boolean;
+    region?: string | null;
+    routeType?: number | null;
+  }
+): Promise<RouteDirections | null> {
+  if (!Array.isArray(points) || points.length < 2) return null;
+  const logs = toSyntheticLocationLogs(points, "mappls_preview");
+  return getMapplsDirectionsForLogs(logs, options);
+}
+
+export async function getMapplsDistanceMatrixForCoordinates(
+  points: MapplsCoordinatePoint[],
+  options?: {
+    resource?: string | null;
+    profile?: string | null;
+    region?: string | null;
+    routeType?: number | null;
+  }
+): Promise<RouteDistanceMatrix | null> {
+  if (!Array.isArray(points) || points.length < 2) return null;
+  const logs = toSyntheticLocationLogs(points, "mappls_matrix");
+  return getMapplsDistanceMatrixForLogs(logs, options);
+}

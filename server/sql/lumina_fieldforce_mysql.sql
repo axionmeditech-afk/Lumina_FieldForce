@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS `lff_access_requests` (
   `id` VARCHAR(64) NOT NULL,
   `name` VARCHAR(191) NOT NULL,
   `email` VARCHAR(191) NOT NULL,
+  `password_hash` VARCHAR(255) NULL,
   `requested_role` ENUM('admin','hr','manager','salesperson') NOT NULL,
   `approved_role` ENUM('admin','hr','manager','salesperson') NULL,
   `requested_department` VARCHAR(120) NOT NULL,
@@ -363,4 +364,3 @@ CREATE TABLE IF NOT EXISTS `lff_app_state` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`state_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-

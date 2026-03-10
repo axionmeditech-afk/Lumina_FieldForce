@@ -14,8 +14,10 @@ import type {
   SupportThread,
 } from "./types";
 
-export const DEFAULT_COMPANY_ID = "cmp_trackforce_ai";
-export const DEFAULT_COMPANY_NAME = "TrackForce AI";
+export const DEFAULT_COMPANY_ID = "cmp_company";
+export const DEFAULT_COMPANY_NAME = "Company";
+export const PENDING_COMPANY_ID = "cmp_pending";
+export const PENDING_COMPANY_NAME = "Pending Company";
 
 export const demoUsers: AppUser[] = [];
 export const demoPasswords: Record<string, string> = {};

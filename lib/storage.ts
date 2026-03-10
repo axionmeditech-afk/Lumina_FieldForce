@@ -27,6 +27,8 @@ import type {
 import {
   DEFAULT_COMPANY_ID,
   DEFAULT_COMPANY_NAME,
+  PENDING_COMPANY_ID,
+  PENDING_COMPANY_NAME,
 } from "./seedData";
 import { sendDeviceLocalNotification } from "./device-notifications";
 
@@ -60,9 +62,6 @@ const KEYS = {
 };
 
 const SEED_VERSION = "9";
-const MAHAKANT_BRANCH_NAME = "Ahmedabad - Mahakant Complex";
-const MAHAKANT_HEADQUARTERS =
-  "Mahakant Complex, Paldi, Ashram Road, Ahmedabad, Gujarat, India";
 const DEMO_EMAIL_SUFFIX = "@trackforce.ai";
 
 type ThemePreference = "system" | "light" | "dark";
@@ -200,7 +199,7 @@ function toApiBaseUrls(rawUrl: string): string[] {
   const basePath = hasApiSuffix ? pathWithoutSlash : `${pathWithoutSlash || ""}/api`;
   const allowedProtocol =
     parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.protocol : "https:";
-  const protocols: Array<"http:" | "https:"> = isPrivateHost
+  const protocols: ("http:" | "https:")[] = isPrivateHost
     ? ["http:", "https:"]
     : allowedProtocol === "http:"
       ? ["http:", "https:"]
@@ -531,13 +530,30 @@ function buildDefaultCompanyProfile(): CompanyProfile {
   return {
     id: DEFAULT_COMPANY_ID,
     name: DEFAULT_COMPANY_NAME,
-    legalName: "TrackForce AI Pvt Ltd",
-    industry: "Enterprise Workforce Intelligence",
-    headquarters: MAHAKANT_HEADQUARTERS,
-    primaryBranch: MAHAKANT_BRANCH_NAME,
-    supportEmail: "support@trackforce.ai",
-    supportPhone: "+91 98765 43210",
-    attendanceZoneLabel: MAHAKANT_BRANCH_NAME,
+    legalName: `${DEFAULT_COMPANY_NAME} Pvt Ltd`,
+    industry: "General",
+    headquarters: "India",
+    primaryBranch: "Main Branch",
+    supportEmail: "support@company.com",
+    supportPhone: "+91 00000 00000",
+    attendanceZoneLabel: "Main Branch",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function buildPendingCompanyProfile(): CompanyProfile {
+  const now = new Date().toISOString();
+  return {
+    id: PENDING_COMPANY_ID,
+    name: PENDING_COMPANY_NAME,
+    legalName: `${PENDING_COMPANY_NAME} Pvt Ltd`,
+    industry: "General",
+    headquarters: "India",
+    primaryBranch: "Main Branch",
+    supportEmail: "support@company.com",
+    supportPhone: "+91 00000 00000",
+    attendanceZoneLabel: "Main Branch",
     createdAt: now,
     updatedAt: now,
   };
@@ -732,8 +748,25 @@ async function ensureCompanyProfilesSeeded(): Promise<void> {
     await setItem(KEYS.COMPANIES, []);
     return;
   }
-  const normalized = existing.map((profile) => normalizeCompanyProfile(profile));
+  const cleaned = existing.filter((profile) => {
+    const name = sanitizeCompanyName(profile.name).toLowerCase();
+    if (!name) return false;
+    if (name.includes("trackforce")) return false;
+    if (name === "google") return false;
+    if (name === "google india") return false;
+    return true;
+  });
+  const normalized = cleaned.map((profile) => normalizeCompanyProfile(profile));
   await setItem(KEYS.COMPANIES, normalized);
+}
+
+async function ensurePendingCompanyProfile(): Promise<CompanyProfile> {
+  const companies = await getCompanyProfiles();
+  const pending = companies.find((company) => company.id === PENDING_COMPANY_ID);
+  if (pending) return pending;
+  const created = normalizeCompanyProfile(buildPendingCompanyProfile());
+  await setItem(KEYS.COMPANIES, [created, ...companies]);
+  return created;
 }
 
 async function ensureAuthUsersSeeded(): Promise<void> {
@@ -1219,31 +1252,11 @@ function resolveStoredAuthApprovalStatus(entry: StoredAuthUser): "pending" | "ap
   return "approved";
 }
 
-function hasApprovedAdminForCompanyName(
-  authUsers: StoredAuthUser[],
-  companyName: string
-): boolean {
-  const requestedName = sanitizeCompanyName(companyName).toLowerCase();
+function hasAnyApprovedAdmin(authUsers: StoredAuthUser[]): boolean {
   return authUsers.some((entry) => {
     if (resolveStoredAuthApprovalStatus(entry) !== "approved") return false;
-    if (entry.user.role !== "admin") return false;
-    const userCompanyName = sanitizeCompanyName(entry.user.companyName).toLowerCase();
-    return userCompanyName === requestedName;
+    return entry.user.role === "admin";
   });
-}
-
-async function resolveCompanyForSignupRequest(companyName: string): Promise<CompanyProfile> {
-  const requestedName = sanitizeCompanyName(companyName);
-  const companies = await getCompanyProfiles();
-  const existing =
-    companies.find(
-      (company) => sanitizeCompanyName(company.name).toLowerCase() === requestedName.toLowerCase()
-    ) || null;
-  if (existing) return existing;
-
-  const created = await createCompanyProfile({ name: requestedName });
-  if (created) return created;
-  return companies[0] || buildDefaultCompanyProfile();
 }
 
 export async function registerUser(input: RegisterUserInput): Promise<RegisterUserResult> {
@@ -1272,12 +1285,9 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
 
   const role = normalizeRole(input.role);
   const now = new Date().toISOString();
-  const adminAlreadyExistsForCompany = hasApprovedAdminForCompanyName(
-    authUsers,
-    requestedCompanyName
-  );
-  if (role === "admin" && !adminAlreadyExistsForCompany) {
-    const adminCompany = await resolveCompanyForSignupRequest(requestedCompanyName);
+  const adminAlreadyExists = hasAnyApprovedAdmin(authUsers);
+  if (role === "admin" && !adminAlreadyExists) {
+    const adminCompany = await ensurePendingCompanyProfile();
     const adminUser = normalizeUserProfile({
       id: makeId("u"),
       name,
@@ -1310,12 +1320,7 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
       company: adminCompany,
     };
   }
-  const companies = await getCompanyProfiles();
-  const matchingCompany =
-    companies.find(
-      (company) => sanitizeCompanyName(company.name).toLowerCase() === requestedCompanyName.toLowerCase()
-    ) || null;
-  const fallbackCompany = matchingCompany || companies[0] || buildDefaultCompanyProfile();
+  const fallbackCompany = await ensurePendingCompanyProfile();
 
   const pendingUser = normalizeUserProfile({
     id: makeId("u"),
@@ -1451,10 +1456,6 @@ export async function reviewUserAccessRequest(
     !normalizedCompanyIds.includes(selectedManager.companyId)
   ) {
     throw new Error("Selected manager must belong to an assigned company.");
-  }
-  const needsManagerAssignment = approvedRole === "salesperson";
-  if (action === "approved" && needsManagerAssignment && !normalizedManagerId) {
-    throw new Error("Select a reporting manager before approval.");
   }
   const assignedManagerId = action === "approved" ? normalizedManagerId || null : null;
   const assignedManagerName =

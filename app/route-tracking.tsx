@@ -1166,30 +1166,37 @@ export default function RouteTrackingScreen() {
           </Text>
           <View style={[styles.timelineCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
             {routePointRows.length ? (
-              routePointRows.map((point, idx) => (
-                <View
-                  key={`point_${point.id}`}
-                  style={[
-                    styles.row,
-                    idx < routePointRows.length - 1 && {
-                      borderBottomColor: colors.borderLight,
-                      borderBottomWidth: 0.5,
-                    },
-                  ]}
-                >
-                  <View style={[styles.rowIconWrap, { backgroundColor: `${colors.secondary}18` }]}>
-                    <Ionicons name="location-outline" size={16} color={colors.secondary} />
+              <ScrollView
+                style={styles.timelineScroll}
+                contentContainerStyle={styles.timelineContent}
+                showsVerticalScrollIndicator={false}
+                nestedScrollEnabled
+              >
+                {routePointRows.map((point, idx) => (
+                  <View
+                    key={`point_${point.id}`}
+                    style={[
+                      styles.row,
+                      idx < routePointRows.length - 1 && {
+                        borderBottomColor: colors.borderLight,
+                        borderBottomWidth: 0.5,
+                      },
+                    ]}
+                  >
+                    <View style={[styles.rowIconWrap, { backgroundColor: `${colors.secondary}18` }]}>
+                      <Ionicons name="location-outline" size={16} color={colors.secondary} />
+                    </View>
+                    <View style={styles.rowTextWrap}>
+                      <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                        {toTime(point.at)} | {point.battery || "--"}
+                      </Text>
+                      <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                        {point.locationName || point.geofenceName || "Resolving location..."}
+                      </Text>
+                    </View>
                   </View>
-                  <View style={styles.rowTextWrap}>
-                    <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      {toTime(point.at)} | {point.battery || "--"}
-                    </Text>
-                    <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                      {point.locationName || point.geofenceName || "Resolving location..."}
-                    </Text>
-                  </View>
-                </View>
-              ))
+                ))}
+              </ScrollView>
             ) : (
               <View style={styles.emptyTimeline}>
                 <Text style={[styles.emptyTimelineText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
@@ -1206,30 +1213,38 @@ export default function RouteTrackingScreen() {
           </Text>
           <View style={[styles.timelineCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
             {rows.length ? (
-              rows.map((row, idx) => {
-                const startLabel = row.type === "attendance" ? toTime(row.at) : `${toTime(row.startAt)} - ${toTime(row.endAt)}`;
-                return (
-                  <View
-                    key={row.id}
-                    style={[
-                      styles.row,
-                      idx < rows.length - 1 && { borderBottomColor: colors.borderLight, borderBottomWidth: 0.5 },
-                    ]}
-                  >
-                    <View style={[styles.rowIconWrap, { backgroundColor: `${row.iconColor}18` }]}>
-                      <Ionicons name={row.icon} size={16} color={row.iconColor} />
+              <ScrollView
+                style={styles.timelineScroll}
+                contentContainerStyle={styles.timelineContent}
+                showsVerticalScrollIndicator={false}
+                nestedScrollEnabled
+              >
+                {rows.map((row, idx) => {
+                  const startLabel =
+                    row.type === "attendance" ? toTime(row.at) : `${toTime(row.startAt)} - ${toTime(row.endAt)}`;
+                  return (
+                    <View
+                      key={row.id}
+                      style={[
+                        styles.row,
+                        idx < rows.length - 1 && { borderBottomColor: colors.borderLight, borderBottomWidth: 0.5 },
+                      ]}
+                    >
+                      <View style={[styles.rowIconWrap, { backgroundColor: `${row.iconColor}18` }]}>
+                        <Ionicons name={row.icon} size={16} color={row.iconColor} />
+                      </View>
+                      <View style={styles.rowTextWrap}>
+                        <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          {startLabel}
+                        </Text>
+                        <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                          {row.text}
+                        </Text>
+                      </View>
                     </View>
-                    <View style={styles.rowTextWrap}>
-                      <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                        {startLabel}
-                      </Text>
-                      <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                        {row.text}
-                      </Text>
-                    </View>
-                  </View>
-                );
-              })
+                  );
+                })}
+              </ScrollView>
             ) : (
               <View style={styles.emptyTimeline}>
                 <Text style={[styles.emptyTimelineText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
@@ -1432,6 +1447,12 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     overflow: "hidden",
+  },
+  timelineScroll: {
+    maxHeight: 260,
+  },
+  timelineContent: {
+    paddingVertical: 4,
   },
   row: {
     flexDirection: "row",

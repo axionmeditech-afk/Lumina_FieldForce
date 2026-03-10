@@ -21,7 +21,14 @@ import * as Crypto from "expo-crypto";
 import * as Location from "expo-location";
 import * as FileSystem from "expo-file-system/legacy";
 import Colors from "@/constants/colors";
-import { getApiBaseUrlCandidates } from "@/lib/attendance-api";
+import {
+  getApiBaseUrlCandidates,
+  getMapplsRoutePreview,
+  searchMapplsAutosuggest,
+  searchMapplsTextSearch,
+  type MapplsPlaceSuggestion,
+  type MapplsRoutePreviewResponse,
+} from "@/lib/attendance-api";
 import {
   addTask,
   addAuditLog,
@@ -79,6 +86,7 @@ const VOICE_WAVE_BAR_COUNT = 31;
 const RECORDING_START_FAILED_MESSAGE = "Recording could not start. Please try again.";
 const TRANSCRIPTION_FAILED_MESSAGE = "Transcription failed. Please try again.";
 const ROUTE_SEARCH_RESULTS_LIMIT = 20;
+const ROUTE_NAV_WAYPOINT_LIMIT = 6;
 const VOICE_PULSE_BASELINE = Array.from({ length: VOICE_WAVE_BAR_COUNT }, (_, index) => {
   const center = (VOICE_WAVE_BAR_COUNT - 1) / 2;
   const distance = Math.abs(index - center) / center;
@@ -159,6 +167,28 @@ function toRoutePlannerStopFromTask(task: Task): RoutePlannerStop | null {
   };
 }
 
+function toRoutePlannerStopFromMapplsSuggestion(
+  suggestion: MapplsPlaceSuggestion,
+  index: number
+): RoutePlannerStop | null {
+  if (
+    typeof suggestion.latitude !== "number" ||
+    !Number.isFinite(suggestion.latitude) ||
+    typeof suggestion.longitude !== "number" ||
+    !Number.isFinite(suggestion.longitude)
+  ) {
+    return null;
+  }
+  const label = suggestion.label?.trim() || suggestion.address?.trim() || `Place ${index + 1}`;
+  return {
+    id: createLocalId(`route_search_mappls_${index}`),
+    label,
+    address: suggestion.address?.trim() || null,
+    latitude: suggestion.latitude,
+    longitude: suggestion.longitude,
+  };
+}
+
 function createLocalId(prefix: string): string {
   try {
     return `${prefix}_${Crypto.randomUUID()}`;
@@ -229,15 +259,6 @@ function normalizeProviderOrder(input: string): string {
       continue;
     }
     if (
-      (chunk === "assemblyai" ||
-        chunk === "assembly_ai" ||
-        chunk === "assembly") &&
-      !mapped.includes("assemblyai")
-    ) {
-      mapped.push("assemblyai");
-      continue;
-    }
-    if (
       (chunk === "local" || chunk === "python" || chunk === "local_python") &&
       !mapped.includes("local_python")
     ) {
@@ -249,22 +270,20 @@ function normalizeProviderOrder(input: string): string {
     }
   }
   if (!mapped.length) {
-    return "gemini,revup,assemblyai,local_python,huggingface";
+    return "gemini,revup,local_python,huggingface";
   }
   const reordered = mapped.includes("gemini")
     ? ["gemini", ...mapped.filter((provider) => provider !== "gemini")]
     : mapped.includes("revup")
       ? ["revup", ...mapped.filter((provider) => provider !== "revup")]
-    : mapped.includes("assemblyai")
-      ? ["assemblyai", ...mapped.filter((provider) => provider !== "assemblyai")]
-    : mapped;
+      : mapped;
   return reordered.join(",");
 }
 
 const DEFAULT_STT_PROVIDER_ORDER = normalizeProviderOrder(
   (
     process.env.EXPO_PUBLIC_STT_PROVIDER_ORDER ||
-    "gemini,revup,assemblyai,local_python,huggingface"
+    "gemini,revup,local_python,huggingface"
   ).trim()
 );
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
@@ -535,16 +554,10 @@ function getClientSpeechCredentialHeaders(): Record<string, string> {
     process.env.REVUP_APP_ID ||
     ""
   ).trim();
-  const assemblyAiKey = (
-    process.env.EXPO_PUBLIC_ASSEMBLYAI_API_KEY ||
-    process.env.ASSEMBLYAI_API_KEY ||
-    ""
-  ).trim();
   const hfToken = getHuggingFaceEnvToken();
 
   if (revupApiKey) headers["X-Revup-Api-Key"] = revupApiKey;
   if (revupAppId) headers["X-Revup-App-Id"] = revupAppId;
-  if (assemblyAiKey) headers["X-AssemblyAI-Api-Key"] = assemblyAiKey;
   if (hfToken) headers["X-HF-Token"] = hfToken;
 
   return headers;
@@ -1031,6 +1044,9 @@ export default function SalesScreen() {
   const [routePlanStops, setRoutePlanStops] = useState<RoutePlannerStop[]>([]);
   const [routePlanDirty, setRoutePlanDirty] = useState(false);
   const [routePlanSaving, setRoutePlanSaving] = useState(false);
+  const [routePreviewBusy, setRoutePreviewBusy] = useState(false);
+  const [routePreviewError, setRoutePreviewError] = useState<string | null>(null);
+  const [routePreview, setRoutePreview] = useState<MapplsRoutePreviewResponse | null>(null);
   const [voicePulseBars, setVoicePulseBars] = useState<number[]>(VOICE_PULSE_BASELINE);
   const [voicePulseState, setVoicePulseState] = useState<"idle" | "listening" | "speaking">("idle");
 
@@ -1498,11 +1514,147 @@ export default function SalesScreen() {
     return buildRouteTimeline(selectedSalespersonId, todayDateKey, normalizedPoints);
   }, [attendanceRecords, locationLogs, selectedSalesperson, selectedSalespersonId, todayDateKey, user]);
 
-  const routePointRows = useMemo(
-    () => [...routeTimeline.points].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)).slice(0, 10),
-    [routeTimeline.points]
+  const latestRoutePoint = useMemo(() => {
+    if (!routeTimeline.points.length) return null;
+    return [...routeTimeline.points].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+  }, [routeTimeline.points]);
+
+  const navigationStops = useMemo<RoutePlannerStop[]>(() => {
+    const taskBackedStops = todaysVisitTasks
+      .filter(
+        (task) =>
+          typeof task.visitLatitude === "number" &&
+          typeof task.visitLongitude === "number" &&
+          getVisitStatus(task) !== "completed"
+      )
+      .map((task) => toRoutePlannerStopFromTask(task))
+      .filter((stop): stop is RoutePlannerStop => Boolean(stop));
+    if (taskBackedStops.length) {
+      const activeTaskStop = todaysVisitTasks
+        .filter((task) => getVisitStatus(task) === "in_progress")
+        .map((task) => toRoutePlannerStopFromTask(task))
+        .find((stop): stop is RoutePlannerStop => Boolean(stop));
+      if (activeTaskStop) {
+        const remaining = taskBackedStops.filter(
+          (stop) =>
+            Math.abs(stop.latitude - activeTaskStop.latitude) >= 0.00001 ||
+            Math.abs(stop.longitude - activeTaskStop.longitude) >= 0.00001
+        );
+        return dedupeRouteStops([activeTaskStop, ...remaining]);
+      }
+      return dedupeRouteStops(taskBackedStops);
+    }
+    return dedupeRouteStops(
+      visiblePlannedStops.map((stop, index) => ({
+        id: `${stop.id}_nav_${index + 1}`,
+        label: stop.label,
+        address: null,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+      }))
+    );
+  }, [todaysVisitTasks, visiblePlannedStops]);
+
+  const nextNavigationStop = navigationStops[0] ?? null;
+  const latestRouteLatitude = latestRoutePoint?.latitude ?? null;
+  const latestRouteLongitude = latestRoutePoint?.longitude ?? null;
+  const latestRouteOrigin = useMemo(
+    () =>
+      typeof latestRouteLatitude === "number" &&
+      Number.isFinite(latestRouteLatitude) &&
+      typeof latestRouteLongitude === "number" &&
+      Number.isFinite(latestRouteLongitude)
+        ? {
+            latitude: latestRouteLatitude,
+            longitude: latestRouteLongitude,
+          }
+        : null,
+    [latestRouteLatitude, latestRouteLongitude]
   );
-  const latestRoutePoint = routePointRows[0] ?? null;
+
+  useEffect(() => {
+    if (!latestRouteOrigin || !nextNavigationStop) {
+      setRoutePreview(null);
+      setRoutePreviewError(null);
+      setRoutePreviewBusy(false);
+      return;
+    }
+
+    const destination = {
+      latitude: nextNavigationStop.latitude,
+      longitude: nextNavigationStop.longitude,
+    };
+    const waypoints = navigationStops
+      .slice(1, ROUTE_NAV_WAYPOINT_LIMIT + 1)
+      .map((stop) => ({ latitude: stop.latitude, longitude: stop.longitude }));
+
+    let cancelled = false;
+    setRoutePreviewBusy(true);
+    setRoutePreviewError(null);
+
+    void getMapplsRoutePreview({
+      origin: latestRouteOrigin,
+      destination,
+      waypoints,
+      resource: "route_eta",
+      profile: "driving",
+      geometries: "polyline6",
+      steps: true,
+      alternatives: false,
+      region: "ind",
+    })
+      .then((response) => {
+        if (cancelled) return;
+        setRoutePreview(response);
+        setRoutePreviewError(response.directions?.error || null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRoutePreview(null);
+        setRoutePreviewError(error instanceof Error ? error.message : "Route preview unavailable.");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setRoutePreviewBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    latestRouteOrigin,
+    navigationStops,
+    nextNavigationStop,
+  ]);
+
+  const routePreviewPath = useMemo(
+    () => (routePreview?.directions?.path?.length ? routePreview.directions.path : undefined),
+    [routePreview]
+  );
+  const routePreviewSummary = useMemo(() => {
+    if (!nextNavigationStop) return "No pending destination for today.";
+    if (routePreviewBusy) return "Calculating destination route...";
+    if (routePreview?.directions) {
+      const distanceKm =
+        typeof routePreview.directions.distanceMeters === "number"
+          ? (routePreview.directions.distanceMeters / 1000).toFixed(2)
+          : null;
+      const etaMins =
+        typeof routePreview.directions.durationSeconds === "number"
+          ? Math.max(1, Math.round(routePreview.directions.durationSeconds / 60))
+          : null;
+      const parts = [`Next: ${nextNavigationStop.label}`];
+      if (distanceKm) parts.push(`${distanceKm} km`);
+      if (etaMins) parts.push(`${etaMins} mins ETA`);
+      if (routePreview.directions.error) parts.push("fallback to sampled points");
+      return parts.join(" | ");
+    }
+    if (routePreviewError) {
+      return `Route preview unavailable: ${routePreviewError}`;
+    }
+    return `Next: ${nextNavigationStop.label}`;
+  }, [nextNavigationStop, routePreview, routePreviewBusy, routePreviewError]);
 
   useEffect(() => {
     const inProgressTask = todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress");
@@ -1537,57 +1689,93 @@ export default function SalesScreen() {
     setRouteSearchBusy(true);
     try {
       let results: RoutePlannerStop[] = [];
+      let mapplsFailureMessage = "";
 
-      // Primary: OpenStreetMap Nominatim provides richer multi-result suggestions than geocodeAsync.
+      // Primary: Mappls autosuggest/text-search so admin route assignment uses the same mapping provider.
       try {
-        const params = new URLSearchParams({
-          q: query,
-          format: "jsonv2",
-          addressdetails: "1",
-          limit: String(ROUTE_SEARCH_RESULTS_LIMIT),
+        const autosuggest = await searchMapplsAutosuggest(query, {
+          region: "ind",
+          limit: ROUTE_SEARCH_RESULTS_LIMIT,
         });
-        const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-            "Accept-Language": "en-IN,en",
-            "User-Agent": "TrackForceField/1.0 (route-planner)",
-          },
-        });
-        if (response.ok) {
-          const payload = (await response.json()) as {
-            lat?: string;
-            lon?: string;
-            name?: string;
-            display_name?: string;
-          }[];
-          if (Array.isArray(payload)) {
-            results = payload
-              .map((item, index) => {
-                const latitude = Number.parseFloat(item.lat || "");
-                const longitude = Number.parseFloat(item.lon || "");
-                if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-                const displayName = (item.display_name || "").trim();
-                const label =
-                  (item.name || "").trim() ||
-                  displayName.split(",")[0]?.trim() ||
-                  query;
-                return {
-                  id: createLocalId(`route_search_osm_${index}`),
-                  label,
-                  address: displayName || null,
-                  latitude,
-                  longitude,
-                } as RoutePlannerStop;
-              })
-              .filter((item): item is RoutePlannerStop => Boolean(item));
+        let mapplsResults = (autosuggest.suggestions || [])
+          .map((suggestion, index) => toRoutePlannerStopFromMapplsSuggestion(suggestion, index))
+          .filter((item): item is RoutePlannerStop => Boolean(item));
+
+        if (!mapplsResults.length) {
+          const textSearch = await searchMapplsTextSearch(query, {
+            region: "ind",
+            limit: ROUTE_SEARCH_RESULTS_LIMIT,
+          });
+          mapplsResults = (textSearch.suggestions || [])
+            .map((suggestion, index) => toRoutePlannerStopFromMapplsSuggestion(suggestion, index))
+            .filter((item): item is RoutePlannerStop => Boolean(item));
+          if (!mapplsResults.length && textSearch.error) {
+            mapplsFailureMessage = textSearch.error;
+          }
+        }
+
+        if (mapplsResults.length) {
+          results = mapplsResults;
+        } else if (autosuggest.error) {
+          mapplsFailureMessage = autosuggest.error;
+        }
+      } catch (error) {
+        mapplsFailureMessage =
+          error instanceof Error ? error.message : "Mappls place search is unavailable right now.";
+      }
+
+      // Fallback: OpenStreetMap Nominatim when Mappls suggestions are unavailable.
+      try {
+        if (!results.length) {
+          const params = new URLSearchParams({
+            q: query,
+            format: "jsonv2",
+            addressdetails: "1",
+            limit: String(ROUTE_SEARCH_RESULTS_LIMIT),
+          });
+          const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              "Accept-Language": "en-IN,en",
+              "User-Agent": "TrackForceField/1.0 (route-planner)",
+            },
+          });
+          if (response.ok) {
+            const payload = (await response.json()) as {
+              lat?: string;
+              lon?: string;
+              name?: string;
+              display_name?: string;
+            }[];
+            if (Array.isArray(payload)) {
+              results = payload
+                .map((item, index) => {
+                  const latitude = Number.parseFloat(item.lat || "");
+                  const longitude = Number.parseFloat(item.lon || "");
+                  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+                  const displayName = (item.display_name || "").trim();
+                  const label =
+                    (item.name || "").trim() ||
+                    displayName.split(",")[0]?.trim() ||
+                    query;
+                  return {
+                    id: createLocalId(`route_search_osm_${index}`),
+                    label,
+                    address: displayName || null,
+                    latitude,
+                    longitude,
+                  } as RoutePlannerStop;
+                })
+                .filter((item): item is RoutePlannerStop => Boolean(item));
+            }
           }
         }
       } catch {
         // fallback below
       }
 
-      // Fallback: Expo geocode when OSM suggestions are unavailable.
+      // Last fallback: Expo geocode when network search providers are unavailable.
       if (!results.length) {
         const geocoded = await Location.geocodeAsync(query);
         const limited = geocoded.slice(0, ROUTE_SEARCH_RESULTS_LIMIT);
@@ -1618,7 +1806,8 @@ export default function SalesScreen() {
       const deduped = dedupeRouteStops(results).slice(0, ROUTE_SEARCH_RESULTS_LIMIT);
       setRouteSearchResults(deduped);
       if (!deduped.length) {
-        Alert.alert("No Results", "No matching locations found. Try a more specific search.");
+        const suffix = mapplsFailureMessage ? `\n\nMappls: ${mapplsFailureMessage}` : "";
+        Alert.alert("No Results", `No matching locations found. Try a more specific search.${suffix}`);
       }
     } catch (error) {
       Alert.alert(
@@ -2329,10 +2518,17 @@ export default function SalesScreen() {
           module: "Sales Intelligence",
         });
         setActiveVisitTaskId(task.id);
-        await startRecording({
+        const started = await startRecording({
           customerNameOverride: getVisitLabel(task),
           silent: true,
         });
+        if (!started) {
+          await updateTask(task.id, {
+            autoCaptureRecordingActive: false,
+            autoCaptureRecordingStartedAt: task.autoCaptureRecordingStartedAt ?? null,
+          });
+          throw new Error("Recording could not start. Check microphone permission and try again.");
+        }
         await loadData();
       } catch (error) {
         Alert.alert(
@@ -2359,6 +2555,9 @@ export default function SalesScreen() {
           overrideCustomerName: getVisitLabel(task),
           minTranscriptLength: 1,
         });
+        if (!conversationId) {
+          throw new Error("Recording could not be saved. Please try Departure again.");
+        }
         const nowIso = new Date().toISOString();
         await updateTask(task.id, {
           status: "completed",
@@ -2755,9 +2954,44 @@ export default function SalesScreen() {
                 points={routeTimeline.points}
                 halts={routeTimeline.halts}
                 plannedStops={visiblePlannedStops}
+                routePath={routePreviewPath}
                 colors={colors}
                 height={255}
               />
+
+              <View
+                style={[
+                  styles.routePreviewCard,
+                  { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                ]}
+              >
+                <View style={[styles.routePreviewIconWrap, { backgroundColor: `${colors.primary}18` }]}>
+                  {routePreviewBusy ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <Ionicons name="navigate-outline" size={16} color={colors.primary} />
+                  )}
+                </View>
+                <View style={styles.routePreviewTextWrap}>
+                  <Text
+                    style={[
+                      styles.routePreviewTitle,
+                      { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                    ]}
+                  >
+                    Destination Route
+                  </Text>
+                  <Text
+                    style={[
+                      styles.routePreviewMeta,
+                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                    ]}
+                    numberOfLines={3}
+                  >
+                    {routePreviewSummary}
+                  </Text>
+                </View>
+              </View>
 
               <View style={styles.summaryRow}>
                 <View
@@ -2853,46 +3087,6 @@ export default function SalesScreen() {
                       : "Waiting for live GPS point..."}
                   </Text>
                 </View>
-              </View>
-            </Animated.View>
-
-            <Animated.View entering={FadeInDown.duration(350).delay(60)}>
-              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                Route Points (1 min interval)
-              </Text>
-              <View style={[styles.timelineCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
-                {routePointRows.length ? (
-                  routePointRows.map((point, idx) => (
-                    <View
-                      key={point.id}
-                      style={[
-                        styles.row,
-                        idx < routePointRows.length - 1 && {
-                          borderBottomColor: colors.borderLight,
-                          borderBottomWidth: 0.5,
-                        },
-                      ]}
-                    >
-                      <View style={[styles.rowIconWrap, { backgroundColor: `${colors.secondary}18` }]}>
-                        <Ionicons name="location-outline" size={16} color={colors.secondary} />
-                      </View>
-                      <View style={styles.rowTextWrap}>
-                        <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                          {formatMumbaiTime(point.capturedAt)} | {formatBatteryPercent(point.batteryLevel)}
-                        </Text>
-                        <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                          {point.geofenceName || "Live GPS point"}
-                        </Text>
-                      </View>
-                    </View>
-                  ))
-                ) : (
-                  <View style={styles.emptyTimeline}>
-                    <Text style={[styles.emptyTimelineText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                      No route points available for today.
-                    </Text>
-                  </View>
-                )}
               </View>
             </Animated.View>
 
@@ -3543,6 +3737,34 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 12.5,
     fontFamily: "Inter_600SemiBold",
+  },
+  routePreviewCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    minHeight: 58,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  routePreviewIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  routePreviewTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  routePreviewTitle: {
+    fontSize: 12.5,
+  },
+  routePreviewMeta: {
+    fontSize: 11.5,
+    lineHeight: 16,
   },
   summaryRow: {
     flexDirection: "row",

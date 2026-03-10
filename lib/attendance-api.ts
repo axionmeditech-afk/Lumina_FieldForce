@@ -4,6 +4,7 @@ import type {
   AttendanceRecord,
   Geofence,
   LocationLog,
+  RouteDirections,
   RouteDistanceMatrix,
   RouteTimeline,
   UserAccessRequest,
@@ -570,7 +571,7 @@ export interface LiveMapPoint {
 }
 
 export async function getAdminLiveMapPoints(): Promise<LiveMapPoint[]> {
-  return fetchJson<LiveMapPoint[]>("/admin/live-map", { method: "GET" });
+  return fetchJson<LiveMapPoint[]>(`/admin/live-map?_ts=${Date.now()}`, { method: "GET" });
 }
 
 export interface AdminLiveMapRoute {
@@ -594,6 +595,7 @@ export async function getAdminLiveMapRoutes(
   const query = new URLSearchParams({
     date,
     interval_minutes: String(Math.max(1, Math.floor(intervalMinutes))),
+    _ts: String(Date.now()),
   });
   return fetchJson<AdminLiveMapRoutesResponse>(`/admin/live-map/routes?${query.toString()}`, {
     method: "GET",
@@ -1064,6 +1066,167 @@ export async function getAdminRouteDistanceMatrix(
     `/admin/route/${encodeURIComponent(userId)}/matrix?${query.toString()}`,
     { method: "GET" }
   );
+}
+
+export interface MapplsPlaceSuggestion {
+  id: string;
+  label: string;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  eloc: string | null;
+}
+
+export interface MapplsPlaceSearchResponse {
+  provider: "mappls";
+  mode: "autosuggest" | "text";
+  query: string;
+  suggestions: MapplsPlaceSuggestion[];
+  source: string | null;
+  error: string | null;
+}
+
+export interface MapplsReverseGeocodeResponse {
+  provider: "mappls";
+  latitude: number;
+  longitude: number;
+  label: string | null;
+  address: string | null;
+  locality: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  source: string | null;
+  error: string | null;
+}
+
+export interface MapplsCoordinatePoint {
+  latitude: number;
+  longitude: number;
+}
+
+export interface MapplsRoutePreviewResponse {
+  provider: "mappls";
+  origin: MapplsCoordinatePoint;
+  destination: MapplsCoordinatePoint;
+  waypointCount: number;
+  routePointCount: number;
+  directions: RouteDirections;
+}
+
+function toMapplsCoordinateToken(point: MapplsCoordinatePoint): string {
+  return `${point.latitude},${point.longitude}`;
+}
+
+export async function searchMapplsAutosuggest(
+  query: string,
+  opts?: {
+    latitude?: number | null;
+    longitude?: number | null;
+    region?: string | null;
+    limit?: number;
+  }
+): Promise<MapplsPlaceSearchResponse> {
+  const params = new URLSearchParams({ query: query.trim() });
+  if (typeof opts?.latitude === "number" && typeof opts?.longitude === "number") {
+    params.set("latitude", String(opts.latitude));
+    params.set("longitude", String(opts.longitude));
+    params.set("location", `${opts.latitude},${opts.longitude}`);
+  }
+  if (opts?.region) params.set("region", opts.region);
+  if (typeof opts?.limit === "number" && Number.isFinite(opts.limit)) {
+    params.set("limit", String(Math.max(1, Math.min(20, Math.floor(opts.limit)))));
+  }
+  return fetchJson<MapplsPlaceSearchResponse>(`/mappls/places/autosuggest?${params.toString()}`, {
+    method: "GET",
+  });
+}
+
+export async function searchMapplsTextSearch(
+  query: string,
+  opts?: {
+    latitude?: number | null;
+    longitude?: number | null;
+    region?: string | null;
+    limit?: number;
+  }
+): Promise<MapplsPlaceSearchResponse> {
+  const params = new URLSearchParams({ query: query.trim() });
+  if (typeof opts?.latitude === "number" && typeof opts?.longitude === "number") {
+    params.set("latitude", String(opts.latitude));
+    params.set("longitude", String(opts.longitude));
+    params.set("location", `${opts.latitude},${opts.longitude}`);
+  }
+  if (opts?.region) params.set("region", opts.region);
+  if (typeof opts?.limit === "number" && Number.isFinite(opts.limit)) {
+    params.set("limit", String(Math.max(1, Math.min(20, Math.floor(opts.limit)))));
+  }
+  return fetchJson<MapplsPlaceSearchResponse>(`/mappls/places/text-search?${params.toString()}`, {
+    method: "GET",
+  });
+}
+
+export async function reverseGeocodeMappls(
+  latitude: number,
+  longitude: number
+): Promise<MapplsReverseGeocodeResponse> {
+  const query = new URLSearchParams({
+    latitude: String(latitude),
+    longitude: String(longitude),
+  });
+  return fetchJson<MapplsReverseGeocodeResponse>(`/mappls/reverse-geocode?${query.toString()}`, {
+    method: "GET",
+  });
+}
+
+export async function getMapplsRoutePreview(payload: {
+  origin: MapplsCoordinatePoint;
+  destination: MapplsCoordinatePoint;
+  waypoints?: MapplsCoordinatePoint[];
+  resource?: "route_adv" | "route_eta" | "route_traffic";
+  profile?: "driving" | "walking" | "biking" | "trucking";
+  overview?: "full" | "simplified" | "false";
+  geometries?: "polyline" | "polyline6" | "geojson";
+  alternatives?: boolean;
+  steps?: boolean;
+  region?: string | null;
+  routeType?: number | null;
+}): Promise<MapplsRoutePreviewResponse> {
+  const params = new URLSearchParams({
+    origin: toMapplsCoordinateToken(payload.origin),
+    destination: toMapplsCoordinateToken(payload.destination),
+  });
+  const waypoints = Array.isArray(payload.waypoints)
+    ? payload.waypoints.filter(
+        (point) =>
+          Number.isFinite(point.latitude) &&
+          Number.isFinite(point.longitude)
+      )
+    : [];
+  if (waypoints.length) {
+    params.set(
+      "waypoints",
+      waypoints.map((point) => toMapplsCoordinateToken(point)).join(";")
+    );
+  }
+  if (payload.resource) params.set("resource", payload.resource);
+  if (payload.profile) params.set("profile", payload.profile);
+  if (payload.overview) params.set("overview", payload.overview);
+  if (payload.geometries) params.set("geometries", payload.geometries);
+  if (typeof payload.alternatives === "boolean") {
+    params.set("alternatives", payload.alternatives ? "1" : "0");
+  }
+  if (typeof payload.steps === "boolean") {
+    params.set("steps", payload.steps ? "1" : "0");
+  }
+  if (payload.region) params.set("region", payload.region);
+  if (typeof payload.routeType === "number" && Number.isFinite(payload.routeType)) {
+    params.set("rtype", String(Math.trunc(payload.routeType)));
+  }
+
+  return fetchJson<MapplsRoutePreviewResponse>(`/mappls/route/preview?${params.toString()}`, {
+    method: "GET",
+  });
 }
 
 export async function getDolibarrIntegrationSettings(): Promise<DolibarrIntegrationSettings> {

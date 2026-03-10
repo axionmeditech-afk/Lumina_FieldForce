@@ -10,7 +10,12 @@ import type {
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
-import { DEFAULT_COMPANY_ID, DEFAULT_COMPANY_NAME } from "@/lib/seedData";
+import {
+  DEFAULT_COMPANY_ID,
+  DEFAULT_COMPANY_NAME,
+  PENDING_COMPANY_ID,
+  PENDING_COMPANY_NAME,
+} from "@/lib/seedData";
 import { buildRouteTimeline } from "@/lib/route-analytics";
 import { requireAuth, requireRoles, signJwt } from "@/server/auth";
 import { storage } from "@/server/storage";
@@ -22,8 +27,13 @@ import {
 } from "@/server/services/dolibarr-sync";
 import {
   getMapplsDirectionsForLogs,
+  getMapplsDirectionsForCoordinates,
   getMapplsDistanceMatrixForLogs,
 } from "@/server/services/mappls-routing";
+import {
+  reverseGeocodeMapplsCoordinates,
+  searchMapplsPlaces,
+} from "@/server/services/mappls-places";
 import {
   Speech2TextError,
   transcribeSpeechWithFairseqS2T,
@@ -132,6 +142,44 @@ function parseBooleanQuery(value: unknown, fallback: boolean): boolean {
   if (cleaned === "1" || cleaned === "true" || cleaned === "yes") return true;
   if (cleaned === "0" || cleaned === "false" || cleaned === "no") return false;
   return fallback;
+}
+
+function parseCoordinatePair(
+  raw: string | null | undefined
+): { latitude: number; longitude: number } | null {
+  const value = (raw || "").trim();
+  if (!value) return null;
+  const tokens = value.split(",").map((item) => item.trim()).filter(Boolean);
+  if (tokens.length !== 2) return null;
+  const first = Number(tokens[0]);
+  const second = Number(tokens[1]);
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
+
+  if (Math.abs(first) <= 90 && Math.abs(second) <= 180) {
+    return { latitude: first, longitude: second };
+  }
+  if (Math.abs(first) <= 180 && Math.abs(second) <= 90) {
+    return { latitude: second, longitude: first };
+  }
+  return null;
+}
+
+function parseCoordinatesList(raw: string | null | undefined): { latitude: number; longitude: number }[] {
+  const value = (raw || "").trim();
+  if (!value) return [];
+  return value
+    .split(/[;|]/g)
+    .map((item) => parseCoordinatePair(item))
+    .filter((item): item is { latitude: number; longitude: number } => Boolean(item));
+}
+
+function parseOptionalQueryFloat(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const cleaned = value.trim();
+  if (!cleaned) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function isIsoDateString(value: string): boolean {
@@ -357,13 +405,19 @@ interface AuthUserRecord {
   approvalStatus?: "pending" | "approved" | "rejected";
 }
 
+type AccessRequestRecord = UserAccessRequest & {
+  passwordHash?: string | null;
+};
+
 const authUsersByEmail = new Map<string, AuthUserRecord>();
-const accessRequestsById = new Map<string, UserAccessRequest>();
+const accessRequestsById = new Map<string, AccessRequestRecord>();
 const inMemoryStateStore = new Map<string, string>();
 
 async function ensureCompanyExistsInMySql(companyId: string, companyName: string): Promise<void> {
   if (!isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
+  const safeName = companyName?.trim() || PENDING_COMPANY_NAME;
+  const safeId = companyId?.trim() || PENDING_COMPANY_ID;
   await conn.execute(
     `INSERT INTO lff_companies (
       id, name, legal_name, industry, headquarters, primary_branch, support_email, support_phone,
@@ -373,7 +427,7 @@ async function ensureCompanyExistsInMySql(companyId: string, companyName: string
       name = VALUES(name),
       legal_name = VALUES(legal_name),
       updated_at = NOW()`,
-    [companyId, companyName, companyName]
+    [safeId, safeName, safeName]
   );
 }
 
@@ -431,50 +485,101 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
   );
 }
 
-async function insertAccessRequestInMySql(entry: UserAccessRequest): Promise<void> {
+function toPublicAccessRequest(entry: AccessRequestRecord): UserAccessRequest {
+  const { passwordHash: _passwordHash, ...rest } = entry;
+  return rest;
+}
+
+async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
   if (!isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
-  await conn.execute(
-    `INSERT INTO lff_access_requests (
-      id, name, email, requested_role, approved_role, requested_department, requested_branch,
-      requested_company_name, status, requested_at, reviewed_at, reviewed_by_id, reviewed_by_name,
-      review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      approved_role = VALUES(approved_role),
-      status = VALUES(status),
-      reviewed_at = VALUES(reviewed_at),
-      reviewed_by_id = VALUES(reviewed_by_id),
-      reviewed_by_name = VALUES(reviewed_by_name),
-      review_comment = VALUES(review_comment),
-      assigned_company_ids_json = VALUES(assigned_company_ids_json),
-      assigned_manager_id = VALUES(assigned_manager_id),
-      assigned_manager_name = VALUES(assigned_manager_name)`,
-    [
-      entry.id,
-      entry.name,
-      entry.email,
-      entry.requestedRole,
-      entry.approvedRole ?? null,
-      entry.requestedDepartment ?? "",
-      entry.requestedBranch ?? "",
-      entry.requestedCompanyName ?? null,
-      entry.status,
-      entry.requestedAt.slice(0, 19).replace("T", " "),
-      entry.reviewedAt ? entry.reviewedAt.slice(0, 19).replace("T", " ") : null,
-      entry.reviewedById ?? null,
-      entry.reviewedByName ?? null,
-      entry.reviewComment ?? null,
-      JSON.stringify(entry.assignedCompanyIds || []),
-      entry.assignedManagerId ?? null,
-      entry.assignedManagerName ?? null,
-    ]
-  );
+  try {
+    await conn.execute(
+      `INSERT INTO lff_access_requests (
+        id, name, email, requested_role, approved_role, requested_department, requested_branch,
+        requested_company_name, status, requested_at, reviewed_at, reviewed_by_id, reviewed_by_name,
+        review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name,
+        password_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        approved_role = VALUES(approved_role),
+        status = VALUES(status),
+        reviewed_at = VALUES(reviewed_at),
+        reviewed_by_id = VALUES(reviewed_by_id),
+        reviewed_by_name = VALUES(reviewed_by_name),
+        review_comment = VALUES(review_comment),
+        assigned_company_ids_json = VALUES(assigned_company_ids_json),
+        assigned_manager_id = VALUES(assigned_manager_id),
+        assigned_manager_name = VALUES(assigned_manager_name),
+        password_hash = VALUES(password_hash)`,
+      [
+        entry.id,
+        entry.name,
+        entry.email,
+        entry.requestedRole,
+        entry.approvedRole ?? null,
+        entry.requestedDepartment ?? "",
+        entry.requestedBranch ?? "",
+        entry.requestedCompanyName ?? null,
+        entry.status,
+        entry.requestedAt.slice(0, 19).replace("T", " "),
+        entry.reviewedAt ? entry.reviewedAt.slice(0, 19).replace("T", " ") : null,
+        entry.reviewedById ?? null,
+        entry.reviewedByName ?? null,
+        entry.reviewComment ?? null,
+        JSON.stringify(entry.assignedCompanyIds || []),
+        entry.assignedManagerId ?? null,
+        entry.assignedManagerName ?? null,
+        entry.passwordHash ?? null,
+      ]
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/unknown column|password_hash/i.test(message)) {
+      throw error;
+    }
+    await conn.execute(
+      `INSERT INTO lff_access_requests (
+        id, name, email, requested_role, approved_role, requested_department, requested_branch,
+        requested_company_name, status, requested_at, reviewed_at, reviewed_by_id, reviewed_by_name,
+        review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        approved_role = VALUES(approved_role),
+        status = VALUES(status),
+        reviewed_at = VALUES(reviewed_at),
+        reviewed_by_id = VALUES(reviewed_by_id),
+        reviewed_by_name = VALUES(reviewed_by_name),
+        review_comment = VALUES(review_comment),
+        assigned_company_ids_json = VALUES(assigned_company_ids_json),
+        assigned_manager_id = VALUES(assigned_manager_id),
+        assigned_manager_name = VALUES(assigned_manager_name)`,
+      [
+        entry.id,
+        entry.name,
+        entry.email,
+        entry.requestedRole,
+        entry.approvedRole ?? null,
+        entry.requestedDepartment ?? "",
+        entry.requestedBranch ?? "",
+        entry.requestedCompanyName ?? null,
+        entry.status,
+        entry.requestedAt.slice(0, 19).replace("T", " "),
+        entry.reviewedAt ? entry.reviewedAt.slice(0, 19).replace("T", " ") : null,
+        entry.reviewedById ?? null,
+        entry.reviewedByName ?? null,
+        entry.reviewComment ?? null,
+        JSON.stringify(entry.assignedCompanyIds || []),
+        entry.assignedManagerId ?? null,
+        entry.assignedManagerName ?? null,
+      ]
+    );
+  }
 }
 
 async function listAccessRequestsFromMySql(
   status: UserAccessRequest["status"] | null
-): Promise<UserAccessRequest[]> {
+): Promise<AccessRequestRecord[]> {
   const conn = await getMySqlPool();
   const params: unknown[] = [];
   let sql = `SELECT * FROM lff_access_requests`;
@@ -509,7 +614,46 @@ async function listAccessRequestsFromMySql(
     })(),
     assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
     assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    passwordHash: row.password_hash ? String(row.password_hash) : undefined,
   }));
+}
+
+async function getAccessRequestByIdFromMySql(id: string): Promise<AccessRequestRecord | null> {
+  if (!isMySqlStateEnabled()) return null;
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_access_requests WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (!rows || rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: String(row.id),
+    name: String(row.name || ""),
+    email: String(row.email || ""),
+    requestedRole: (row.requested_role || "salesperson") as UserRole,
+    approvedRole: row.approved_role ? (row.approved_role as UserRole) : null,
+    requestedDepartment: String(row.requested_department || ""),
+    requestedBranch: String(row.requested_branch || ""),
+    requestedCompanyName: row.requested_company_name ? String(row.requested_company_name) : undefined,
+    status: row.status as UserAccessRequest["status"],
+    requestedAt: new Date(row.requested_at).toISOString(),
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    reviewedById: row.reviewed_by_id ? String(row.reviewed_by_id) : null,
+    reviewedByName: row.reviewed_by_name ? String(row.reviewed_by_name) : null,
+    reviewComment: row.review_comment ? String(row.review_comment) : null,
+    assignedCompanyIds: (() => {
+      try {
+        const parsed = JSON.parse(String(row.assigned_company_ids_json || "[]"));
+        return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+      } catch {
+        return [];
+      }
+    })(),
+    assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
+    assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    passwordHash: row.password_hash ? String(row.password_hash) : undefined,
+  };
 }
 
 function normalizeEmail(value: string): string {
@@ -587,6 +731,227 @@ function getLatestPendingAccessRequestByEmail(email: string): UserAccessRequest 
   return latest;
 }
 
+const IST_OFFSET_MS = (5 * 60 + 30) * 60_000;
+
+function parseDateKeyToUtcRange(
+  dateKey: string
+): { start: string; end: string } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dateKey || "").trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  const startUtc = new Date(Date.UTC(year, month - 1, day, 0, 0, 0) - IST_OFFSET_MS);
+  const endUtc = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - IST_OFFSET_MS);
+  return {
+    start: startUtc.toISOString().slice(0, 19).replace("T", " "),
+    end: endUtc.toISOString().slice(0, 19).replace("T", " "),
+  };
+}
+
+function getLatestAccessRequestByEmail(email: string): AccessRequestRecord | null {
+  const normalized = normalizeEmailKey(email);
+  let latest: AccessRequestRecord | null = null;
+  for (const request of accessRequestsById.values()) {
+    if (normalizeEmailKey(request.email) !== normalized) continue;
+    if (!latest || request.requestedAt > latest.requestedAt) {
+      latest = request;
+    }
+  }
+  return latest;
+}
+
+function mapLocationLogRow(row: any): LocationLog {
+  return {
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    userId: String(row.user_id),
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    accuracy: row.accuracy === null || row.accuracy === undefined ? null : Number(row.accuracy),
+    speed: row.speed === null || row.speed === undefined ? null : Number(row.speed),
+    heading: row.heading === null || row.heading === undefined ? null : Number(row.heading),
+    batteryLevel:
+      row.battery_level === null || row.battery_level === undefined
+        ? null
+        : Number(row.battery_level),
+    geofenceId: row.geofence_id ? String(row.geofence_id) : null,
+    geofenceName: row.geofence_name ? String(row.geofence_name) : null,
+    isInsideGeofence: Boolean(row.is_inside_geofence),
+    capturedAt: new Date(row.captured_at).toISOString(),
+  };
+}
+
+async function insertLocationLogInMySql(log: LocationLog): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_location_logs (
+      id, company_id, user_id, latitude, longitude, accuracy, speed, heading, battery_level,
+      geofence_id, geofence_name, is_inside_geofence, captured_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      latitude = VALUES(latitude),
+      longitude = VALUES(longitude),
+      accuracy = VALUES(accuracy),
+      speed = VALUES(speed),
+      heading = VALUES(heading),
+      battery_level = VALUES(battery_level),
+      geofence_id = VALUES(geofence_id),
+      geofence_name = VALUES(geofence_name),
+      is_inside_geofence = VALUES(is_inside_geofence),
+      captured_at = VALUES(captured_at)`,
+    [
+      log.id,
+      log.companyId ?? null,
+      log.userId,
+      log.latitude,
+      log.longitude,
+      log.accuracy ?? null,
+      log.speed ?? null,
+      log.heading ?? null,
+      log.batteryLevel ?? null,
+      log.geofenceId ?? null,
+      log.geofenceName ?? null,
+      log.isInsideGeofence ? 1 : 0,
+      new Date(log.capturedAt).toISOString().slice(0, 19).replace("T", " "),
+    ]
+  );
+}
+
+async function listLocationLogsLatestFromMySql(): Promise<LocationLog[]> {
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT 5000`
+  );
+  const latestByUser = new Map<string, LocationLog>();
+  for (const row of rows) {
+    const log = mapLocationLogRow(row);
+    if (!latestByUser.has(log.userId)) {
+      latestByUser.set(log.userId, log);
+    }
+  }
+  return Array.from(latestByUser.values());
+}
+
+async function listLocationLogsForDateFromMySql(dateKey: string): Promise<LocationLog[]> {
+  const range = parseDateKeyToUtcRange(dateKey);
+  if (!range) return [];
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_location_logs
+     WHERE captured_at BETWEEN ? AND ?
+     ORDER BY captured_at ASC`,
+    [range.start, range.end]
+  );
+  return rows.map(mapLocationLogRow);
+}
+
+async function listLocationLogsForUserDateFromMySql(
+  userId: string,
+  dateKey: string
+): Promise<LocationLog[]> {
+  const range = parseDateKeyToUtcRange(dateKey);
+  if (!range) return [];
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_location_logs
+     WHERE user_id = ? AND captured_at BETWEEN ? AND ?
+     ORDER BY captured_at ASC`,
+    [userId, range.start, range.end]
+  );
+  return rows.map(mapLocationLogRow);
+}
+
+async function getLatestAccessRequestByEmailFromMySql(
+  email: string
+): Promise<AccessRequestRecord | null> {
+  if (!isMySqlStateEnabled()) return null;
+  const normalized = normalizeEmail(email);
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_access_requests
+     WHERE email = ?
+     ORDER BY requested_at DESC
+     LIMIT 1`,
+    [normalized]
+  );
+  if (!rows || rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: String(row.id),
+    name: String(row.name || ""),
+    email: String(row.email || ""),
+    requestedRole: (row.requested_role || "salesperson") as UserRole,
+    approvedRole: row.approved_role ? (row.approved_role as UserRole) : null,
+    requestedDepartment: String(row.requested_department || ""),
+    requestedBranch: String(row.requested_branch || ""),
+    requestedCompanyName: row.requested_company_name ? String(row.requested_company_name) : undefined,
+    status: row.status as UserAccessRequest["status"],
+    requestedAt: new Date(row.requested_at).toISOString(),
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    reviewedById: row.reviewed_by_id ? String(row.reviewed_by_id) : null,
+    reviewedByName: row.reviewed_by_name ? String(row.reviewed_by_name) : null,
+    reviewComment: row.review_comment ? String(row.review_comment) : null,
+    assignedCompanyIds: (() => {
+      try {
+        const parsed = JSON.parse(String(row.assigned_company_ids_json || "[]"));
+        return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+      } catch {
+        return [];
+      }
+    })(),
+    assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
+    assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    passwordHash: row.password_hash ? String(row.password_hash) : undefined,
+  };
+}
+
+async function getLatestPendingAccessRequestByEmailFromMySql(
+  email: string
+): Promise<AccessRequestRecord | null> {
+  if (!isMySqlStateEnabled()) return null;
+  const normalized = normalizeEmail(email);
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_access_requests
+     WHERE email = ? AND status = 'pending'
+     ORDER BY requested_at DESC
+     LIMIT 1`,
+    [normalized]
+  );
+  if (!rows || rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: String(row.id),
+    name: String(row.name || ""),
+    email: String(row.email || ""),
+    requestedRole: (row.requested_role || "salesperson") as UserRole,
+    approvedRole: row.approved_role ? (row.approved_role as UserRole) : null,
+    requestedDepartment: String(row.requested_department || ""),
+    requestedBranch: String(row.requested_branch || ""),
+    requestedCompanyName: row.requested_company_name ? String(row.requested_company_name) : undefined,
+    status: row.status as UserAccessRequest["status"],
+    requestedAt: new Date(row.requested_at).toISOString(),
+    reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
+    reviewedById: row.reviewed_by_id ? String(row.reviewed_by_id) : null,
+    reviewedByName: row.reviewed_by_name ? String(row.reviewed_by_name) : null,
+    reviewComment: row.review_comment ? String(row.review_comment) : null,
+    assignedCompanyIds: (() => {
+      try {
+        const parsed = JSON.parse(String(row.assigned_company_ids_json || "[]"));
+        return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+      } catch {
+        return [];
+      }
+    })(),
+    assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
+    assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    passwordHash: row.password_hash ? String(row.password_hash) : undefined,
+  };
+}
+
 function isRemoteStateKeyAllowed(key: string): boolean {
   return REMOTE_STATE_ALLOWED_KEYS.has(key);
 }
@@ -631,18 +996,26 @@ function getCompanyIdFromName(companyName: string): string {
   return slug ? `cmp_${slug}` : DEFAULT_COMPANY_ID;
 }
 
-function hasApprovedAdminForCompany(companyName: string): boolean {
-  const normalizedCompanyName = normalizeCompanyName(companyName);
-  const companyNameKey = normalizedCompanyName.toLowerCase();
-  const companyId = getCompanyIdFromName(normalizedCompanyName);
+async function hasAnyApprovedAdmin(): Promise<boolean> {
+  if (isMySqlStateEnabled()) {
+    try {
+      const conn = await getMySqlPool();
+      const [rows] = await conn.query<any[]>(
+        `SELECT id FROM lff_users
+         WHERE role = 'admin'
+           AND approval_status = 'approved'
+         LIMIT 1`
+      );
+      if (rows && rows.length > 0) return true;
+    } catch {
+      // fallback to in-memory cache below if DB read fails
+    }
+  }
+
   for (const record of authUsersByEmail.values()) {
     if (resolveApprovalStatus(record) !== "approved") continue;
     if (record.user.role !== "admin") continue;
-    const userCompanyId = normalizeWhitespace(record.user.companyId || "");
-    const userCompanyName = normalizeCompanyName(record.user.companyName || "").toLowerCase();
-    if (userCompanyId === companyId || userCompanyName === companyNameKey) {
-      return true;
-    }
+    return true;
   }
   return false;
 }
@@ -692,40 +1065,9 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
   );
 
   for (const row of rows) {
-    const emailValue = normalizeEmailKey(typeof row?.email === "string" ? row.email : "");
-    const passwordHashValue =
-      typeof row?.password_hash === "string" ? row.password_hash.trim() : "";
-    if (!emailValue || !passwordHashValue) continue;
-
-    const role = normalizeRole(row?.role);
-    const companyId = normalizeWhitespace(String(row?.company_id || DEFAULT_COMPANY_ID)) || DEFAULT_COMPANY_ID;
-    const companyName = normalizeCompanyName(String(row?.company_name || DEFAULT_COMPANY_NAME));
-    const nowIso = new Date().toISOString();
-    const user: AppUser = {
-      id: normalizeWhitespace(String(row?.id || randomUUID())),
-      name: normalizeWhitespace(String(row?.name || emailValue)),
-      email: normalizeEmail(emailValue),
-      role,
-      companyId,
-      companyName,
-      companyIds: parseCompanyIdsFromJson(row?.company_ids_json, companyId),
-      department: normalizeWhitespace(String(row?.department || roleToDepartment(role))),
-      branch: normalizeWhitespace(String(row?.branch || "Main Branch")),
-      phone: normalizeWhitespace(String(row?.phone || "+91 00000 00000")),
-      joinDate: String(row?.join_date || new Date().toISOString().slice(0, 10)),
-      avatar: row?.avatar ? String(row.avatar) : undefined,
-      managerId: row?.manager_id ? String(row.manager_id) : undefined,
-      managerName: row?.manager_name ? String(row.manager_name) : undefined,
-      approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
-    };
-
-    authUsersByEmail.set(user.email, {
-      user,
-      passwordHash: passwordHashValue,
-      createdAt: toIsoTimestamp(row?.created_at, nowIso),
-      updatedAt: toIsoTimestamp(row?.updated_at, nowIso),
-      approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
-    });
+    const record = buildAuthRecordFromMySqlRow(row);
+    if (!record) continue;
+    authUsersByEmail.set(record.user.email, record);
   }
 }
 
@@ -740,6 +1082,80 @@ async function initAuthUsersStore(): Promise<void> {
     });
   }
   await authUsersStoreInitPromise;
+}
+
+function buildAuthRecordFromMySqlRow(row: any): AuthUserRecord | null {
+  const emailValue = normalizeEmailKey(typeof row?.email === "string" ? row.email : "");
+  const passwordHashValue =
+    typeof row?.password_hash === "string" ? row.password_hash.trim() : "";
+  if (!emailValue || !passwordHashValue) return null;
+
+  const role = normalizeRole(row?.role);
+  const companyId =
+    normalizeWhitespace(String(row?.company_id || DEFAULT_COMPANY_ID)) || DEFAULT_COMPANY_ID;
+  const companyName = normalizeCompanyName(String(row?.company_name || DEFAULT_COMPANY_NAME));
+  const nowIso = new Date().toISOString();
+  const user: AppUser = {
+    id: normalizeWhitespace(String(row?.id || randomUUID())),
+    name: normalizeWhitespace(String(row?.name || emailValue)),
+    email: normalizeEmail(emailValue),
+    role,
+    companyId,
+    companyName,
+    companyIds: parseCompanyIdsFromJson(row?.company_ids_json, companyId),
+    department: normalizeWhitespace(String(row?.department || roleToDepartment(role))),
+    branch: normalizeWhitespace(String(row?.branch || "Main Branch")),
+    phone: normalizeWhitespace(String(row?.phone || "+91 00000 00000")),
+    joinDate: String(row?.join_date || new Date().toISOString().slice(0, 10)),
+    avatar: row?.avatar ? String(row.avatar) : undefined,
+    managerId: row?.manager_id ? String(row.manager_id) : undefined,
+    managerName: row?.manager_name ? String(row.manager_name) : undefined,
+    approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
+  };
+
+  return {
+    user,
+    passwordHash: passwordHashValue,
+    createdAt: toIsoTimestamp(row?.created_at, nowIso),
+    updatedAt: toIsoTimestamp(row?.updated_at, nowIso),
+    approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
+  };
+}
+
+async function getAuthUserFromMySqlByEmail(email: string): Promise<AuthUserRecord | null> {
+  if (!isMySqlStateEnabled()) return null;
+  const normalized = normalizeEmail(email);
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT
+      id, name, email, password_hash, role, company_id, company_name, company_ids_json,
+      department, branch, phone, join_date, avatar, manager_id, manager_name, approval_status,
+      created_at, updated_at
+    FROM lff_users
+    WHERE email = ?
+    LIMIT 1`,
+    [normalized]
+  );
+  if (!rows || rows.length === 0) return null;
+  return buildAuthRecordFromMySqlRow(rows[0]);
+}
+
+async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord | null> {
+  const normalized = normalizeEmail(email);
+  if (!isMySqlStateEnabled()) {
+    return authUsersByEmail.get(normalized) ?? null;
+  }
+  try {
+    const record = await getAuthUserFromMySqlByEmail(normalized);
+    if (!record) {
+      authUsersByEmail.delete(normalized);
+      return null;
+    }
+    authUsersByEmail.set(record.user.email, record);
+    return record;
+  } catch {
+    return authUsersByEmail.get(normalized) ?? null;
+  }
 }
 
 function createAuthToken(user: AppUser): string {
@@ -772,14 +1188,13 @@ function buildUserFromRegistration(payload: {
   phone?: string;
 }): AppUser {
   const now = new Date().toISOString().slice(0, 10);
-  const normalizedCompanyName = normalizeCompanyName(payload.companyName);
   return {
     id: randomUUID(),
     name: normalizeWhitespace(payload.name),
     email: normalizeEmail(payload.email),
     role: payload.role,
-    companyId: getCompanyIdFromName(normalizedCompanyName),
-    companyName: normalizedCompanyName,
+    companyId: PENDING_COMPANY_ID,
+    companyName: PENDING_COMPANY_NAME,
     department: normalizeWhitespace(payload.department || roleToDepartment(payload.role)),
     branch: normalizeWhitespace(payload.branch || "Main Branch"),
     phone: normalizeWhitespace(payload.phone || "+91 00000 00000"),
@@ -1101,7 +1516,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const geminiApiKeyHeader = firstString(req.header("x-gemini-api-key"));
       const revupApiKeyHeader = firstString(req.header("x-revup-api-key"));
       const revupAppIdHeader = firstString(req.header("x-revup-app-id"));
-      const assemblyAiApiKeyHeader = firstString(req.header("x-assemblyai-api-key"));
       const hfTokenHeader = firstString(req.header("x-hf-token"));
       const withDiarization =
         withDiarizationRaw === null
@@ -1138,8 +1552,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
             revupApiKeyHeader || firstString(req.query.revup_api_key) || null,
           revupAppId:
             revupAppIdHeader || firstString(req.query.revup_app_id) || null,
-          assemblyAiApiKey:
-            assemblyAiApiKeyHeader || firstString(req.query.assemblyai_api_key) || null,
           huggingFaceToken:
             hfTokenHeader ||
             firstString(req.query.hf_token) ||
@@ -1194,18 +1606,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({ message: "Password must be at least 6 characters" });
       return;
     }
-    if (authUsersByEmail.has(normalizedEmail)) {
+
+    const normalizedRole = normalizeRole(role);
+    const normalizedCompanyName = normalizeCompanyName(companyName);
+    const existingRecord = await syncAuthUserCacheForEmail(normalizedEmail);
+    if (existingRecord && resolveApprovalStatus(existingRecord) === "approved") {
       res.status(409).json({ message: "User already exists for this email" });
       return;
     }
 
-    const normalizedRole = normalizeRole(role);
-    const normalizedCompanyName = normalizeCompanyName(companyName);
-    const companyAlreadyHasAdmin = hasApprovedAdminForCompany(normalizedCompanyName);
-    if (normalizedRole === "admin" && companyAlreadyHasAdmin) {
+    const adminAlreadyExists = await hasAnyApprovedAdmin();
+    if (normalizedRole === "admin" && adminAlreadyExists) {
       res.status(403).json({
         message:
-          "Admin already exists for this company. Ask an existing admin to approve additional admin access.",
+          "An admin already exists. Ask an existing admin to approve additional admin access.",
       });
       return;
     }
@@ -1284,16 +1698,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const normalizedRole = normalizeRole(role);
     const normalizedCompanyName = normalizeCompanyName(companyName);
-    const companyAlreadyHasAdmin = hasApprovedAdminForCompany(normalizedCompanyName);
+    const adminAlreadyExists = await hasAnyApprovedAdmin();
 
-    const existingRecord = authUsersByEmail.get(normalizedEmail);
+    const existingRecord = await syncAuthUserCacheForEmail(normalizedEmail);
     const existingStatus = existingRecord ? resolveApprovalStatus(existingRecord) : null;
     if (existingRecord && existingStatus === "approved") {
       res.status(409).json({ message: "User already exists for this email" });
       return;
     }
 
-    if (normalizedRole === "admin" && !companyAlreadyHasAdmin) {
+    if (normalizedRole === "admin" && !adminAlreadyExists) {
       const now = new Date().toISOString();
       const bootstrapAdmin = buildUserFromRegistration({
         name,
@@ -1336,7 +1750,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const existingPendingRequest = getLatestPendingAccessRequestByEmail(normalizedEmail);
+    let existingPendingRequest = getLatestPendingAccessRequestByEmail(normalizedEmail);
+    if (!existingPendingRequest && isMySqlStateEnabled()) {
+      const pendingFromDb = await getLatestPendingAccessRequestByEmailFromMySql(normalizedEmail);
+      if (pendingFromDb) {
+        accessRequestsById.set(pendingFromDb.id, pendingFromDb);
+        existingPendingRequest = toPublicAccessRequest(pendingFromDb);
+      }
+    }
     if (existingPendingRequest) {
       res.status(200).json({
         ok: true,
@@ -1361,15 +1782,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       approvalStatus: "pending" as const,
     };
 
+    const pendingPasswordHash = hashPassword(password);
     authUsersByEmail.set(normalizedEmail, {
       user: pendingUser,
-      passwordHash: hashPassword(password),
+      passwordHash: pendingPasswordHash,
       createdAt: existingRecord?.createdAt || now,
       updatedAt: now,
       approvalStatus: "pending",
     });
 
-    const pendingRequest: UserAccessRequest = {
+    const pendingRequest: AccessRequestRecord = {
       id: randomUUID(),
       name: pendingUser.name,
       email: pendingUser.email,
@@ -1387,16 +1809,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       assignedCompanyIds: [],
       assignedManagerId: null,
       assignedManagerName: null,
+      passwordHash: pendingPasswordHash,
     };
     accessRequestsById.set(pendingRequest.id, pendingRequest);
     try {
-      const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
-      if (latestAuthRecord) {
-        await upsertAuthUserInMySql(
-          latestAuthRecord,
-          pendingRequest.requestedCompanyName
-        );
-      }
       await insertAccessRequestInMySql(pendingRequest);
     } catch (error) {
       console.error("Failed to persist access request in MySQL", error);
@@ -1412,7 +1828,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.status(202).json({
       ok: true,
       message: "Signup request submitted. Wait for admin approval before signing in.",
-      request: pendingRequest,
+      request: toPublicAccessRequest(pendingRequest),
     });
   });
 
@@ -1431,7 +1847,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (isMySqlStateEnabled()) {
           try {
             const requests = await listAccessRequestsFromMySql(parsedStatus);
-            res.json(requests);
+            res.json(requests.map(toPublicAccessRequest));
             return;
           } catch (error) {
             console.error("Failed to read access requests from MySQL", error);
@@ -1439,7 +1855,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
         const requests = Array.from(accessRequestsById.values())
           .filter((entry) => !parsedStatus || entry.status === parsedStatus)
-          .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+          .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+          .map(toPublicAccessRequest);
         res.json(requests);
       })();
     }
@@ -1470,13 +1887,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
 
-      const currentRequest = accessRequestsById.get(requestId);
+      let currentRequest = accessRequestsById.get(requestId) || null;
+      if (!currentRequest && isMySqlStateEnabled()) {
+        currentRequest = await getAccessRequestByIdFromMySql(requestId);
+        if (currentRequest) {
+          accessRequestsById.set(requestId, currentRequest);
+        }
+      }
       if (!currentRequest) {
         res.status(404).json({ message: "Access request not found." });
         return;
       }
       if (currentRequest.status !== "pending") {
-        res.json(currentRequest);
+        res.json(toPublicAccessRequest(currentRequest));
         return;
       }
 
@@ -1502,28 +1925,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
 
       const normalizedEmail = normalizeEmail(currentRequest.email);
-      const authRecord = authUsersByEmail.get(normalizedEmail);
-      if (!authRecord) {
-        res
-          .status(404)
-          .json({ message: "User account request is missing. Ask the user to sign up again." });
-        return;
+      let authRecord = authUsersByEmail.get(normalizedEmail);
+      const pendingPasswordHash = currentRequest.passwordHash || null;
+      if (!authRecord && action === "approved") {
+        if (!pendingPasswordHash) {
+          res.status(404).json({
+            message: "User account request is missing credentials. Ask the user to sign up again.",
+          });
+          return;
+        }
+        const bootstrapUser = buildUserFromRegistration({
+          name: currentRequest.name,
+          email: normalizedEmail,
+          companyName: normalizeCompanyName(currentRequest.requestedCompanyName || DEFAULT_COMPANY_NAME),
+          role: currentRequest.requestedRole,
+          department: currentRequest.requestedDepartment,
+          branch: currentRequest.requestedBranch,
+        });
+        authRecord = {
+          user: bootstrapUser,
+          passwordHash: pendingPasswordHash,
+          createdAt: currentRequest.requestedAt,
+          updatedAt: now,
+          approvalStatus: "pending",
+        };
+        authUsersByEmail.set(normalizedEmail, authRecord);
       }
 
       if (action === "approved") {
         const effectiveCompanyName = normalizeCompanyName(
-          currentRequest.requestedCompanyName || authRecord.user.companyName || DEFAULT_COMPANY_NAME
+          currentRequest.requestedCompanyName || authRecord?.user.companyName || DEFAULT_COMPANY_NAME
         );
         const effectiveCompanyId =
           assignedCompanyIds[0] ||
-          authRecord.user.companyId ||
+          authRecord?.user.companyId ||
           getCompanyIdFromName(effectiveCompanyName);
         const reviewedUser: AppUser = {
-          ...authRecord.user,
+          ...(authRecord?.user ?? buildUserFromRegistration({
+            name: currentRequest.name,
+            email: normalizedEmail,
+            companyName: effectiveCompanyName,
+            role: finalRole,
+            department: currentRequest.requestedDepartment,
+            branch: currentRequest.requestedBranch,
+          })),
           role: finalRole,
           department:
             normalizeWhitespace(currentRequest.requestedDepartment) || roleToDepartment(finalRole),
-          branch: normalizeWhitespace(currentRequest.requestedBranch) || authRecord.user.branch,
+          branch:
+            normalizeWhitespace(currentRequest.requestedBranch) ||
+            authRecord?.user.branch ||
+            "Main Branch",
           companyId: effectiveCompanyId,
           companyName: effectiveCompanyName,
           companyIds: assignedCompanyIds.length ? assignedCompanyIds : [effectiveCompanyId],
@@ -1532,25 +1984,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
           approvalStatus: "approved",
         };
 
-        authUsersByEmail.set(normalizedEmail, {
-          ...authRecord,
-          user: reviewedUser,
-          updatedAt: now,
-          approvalStatus: "approved",
-        });
+        if (authRecord) {
+          authUsersByEmail.set(normalizedEmail, {
+            ...authRecord,
+            user: reviewedUser,
+            updatedAt: now,
+            approvalStatus: "approved",
+          });
+        }
       } else {
-        authUsersByEmail.set(normalizedEmail, {
-          ...authRecord,
-          user: {
-            ...authRecord.user,
+        if (authRecord) {
+          authUsersByEmail.set(normalizedEmail, {
+            ...authRecord,
+            user: {
+              ...authRecord.user,
+              approvalStatus: "rejected",
+            },
+            updatedAt: now,
             approvalStatus: "rejected",
-          },
-          updatedAt: now,
-          approvalStatus: "rejected",
-        });
+          });
+        }
       }
 
-      const reviewedRequest: UserAccessRequest = {
+      const reviewedRequest: AccessRequestRecord = {
         ...currentRequest,
         approvedRole,
         status: action,
@@ -1561,6 +2017,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         assignedCompanyIds,
         assignedManagerId,
         assignedManagerName,
+        passwordHash: action === "approved" ? null : currentRequest.passwordHash ?? null,
       };
       accessRequestsById.set(requestId, reviewedRequest);
       try {
@@ -1582,7 +2039,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         return;
       }
-      res.json(reviewedRequest);
+      res.json(toPublicAccessRequest(reviewedRequest));
     }
   );
 
@@ -1596,7 +2053,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     await initAuthUsersStore();
     const normalizedEmail = normalizeEmail(email);
     const authRecord = authUsersByEmail.get(normalizedEmail);
-    if (authRecord && authRecord.passwordHash === hashPassword(password)) {
+    const attemptedHash = hashPassword(password);
+    if (authRecord && authRecord.passwordHash === attemptedHash) {
       const status = resolveApprovalStatus(authRecord);
       if (status === "pending") {
         res.status(403).json({ message: "Your access request is pending admin approval." });
@@ -1605,6 +2063,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (status === "rejected") {
         res.status(403).json({ message: "Your access request was rejected by admin." });
         return;
+      }
+    } else {
+      let latestRequest = getLatestAccessRequestByEmail(normalizedEmail);
+      if (!latestRequest && isMySqlStateEnabled()) {
+        latestRequest = await getLatestAccessRequestByEmailFromMySql(normalizedEmail);
+      }
+      if (latestRequest?.passwordHash && latestRequest.passwordHash === attemptedHash) {
+        if (latestRequest.status === "pending") {
+          res.status(403).json({ message: "Your access request is pending admin approval." });
+          return;
+        }
+        if (latestRequest.status === "rejected") {
+          res.status(403).json({ message: "Your access request was rejected by admin." });
+          return;
+        }
       }
     }
     const user = await authenticateCredentials(normalizedEmail, password);
@@ -1626,7 +2099,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     await initAuthUsersStore();
     const normalizedEmail = normalizeEmail(email);
     const authRecord = authUsersByEmail.get(normalizedEmail);
-    if (authRecord && authRecord.passwordHash === hashPassword(password)) {
+    const attemptedHash = hashPassword(password);
+    if (authRecord && authRecord.passwordHash === attemptedHash) {
       const status = resolveApprovalStatus(authRecord);
       if (status === "pending") {
         res.status(403).json({ message: "Your access request is pending admin approval." });
@@ -1635,6 +2109,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (status === "rejected") {
         res.status(403).json({ message: "Your access request was rejected by admin." });
         return;
+      }
+    } else {
+      let latestRequest = getLatestAccessRequestByEmail(normalizedEmail);
+      if (!latestRequest && isMySqlStateEnabled()) {
+        latestRequest = await getLatestAccessRequestByEmailFromMySql(normalizedEmail);
+      }
+      if (latestRequest?.passwordHash && latestRequest.passwordHash === attemptedHash) {
+        if (latestRequest.status === "pending") {
+          res.status(403).json({ message: "Your access request is pending admin approval." });
+          return;
+        }
+        if (latestRequest.status === "rejected") {
+          res.status(403).json({ message: "Your access request was rejected by admin." });
+          return;
+        }
       }
     }
     const user = await authenticateCredentials(normalizedEmail, password);
@@ -1799,7 +2288,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       zones
     );
 
-    await storage.addLocationLog({
+    const log: LocationLog = {
       id: randomUUID(),
       userId: sample.userId,
       latitude: sample.latitude,
@@ -1812,7 +2301,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       geofenceName: status.activeZone?.name ?? null,
       isInsideGeofence: status.inside,
       capturedAt: sample.capturedAt ?? new Date().toISOString(),
-    });
+    };
+    await storage.addLocationLog(log);
+    try {
+      await insertLocationLogInMySql(log);
+    } catch (error) {
+      console.error("Failed to persist location log in MySQL", error);
+    }
     res.status(201).json({ ok: true, inside: status.inside, zone: status.activeZone?.name ?? null });
   });
 
@@ -1870,7 +2365,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         zones
       );
 
-      await storage.addLocationLog({
+      const log: LocationLog = {
         id: randomUUID(),
         userId: entry.userId,
         latitude: entry.latitude,
@@ -1883,7 +2378,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         geofenceName: status.activeZone?.name ?? null,
         isInsideGeofence: status.inside,
         capturedAt: entry.capturedAt ?? new Date().toISOString(),
-      });
+      };
+      await storage.addLocationLog(log);
+      try {
+        await insertLocationLogInMySql(log);
+      } catch (error) {
+        console.error("Failed to persist location log in MySQL", error);
+      }
       accepted += 1;
     }
 
@@ -1895,6 +2396,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/admin/live-map", requireAuth, requireRoles("admin", "hr", "manager"), async (_req, res) => {
+    res.set({
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
+    if (isMySqlStateEnabled()) {
+      try {
+        const latest = await listLocationLogsLatestFromMySql();
+        res.json(latest);
+        return;
+      } catch (error) {
+        console.error("Failed to read latest location logs from MySQL", error);
+      }
+    }
     const latest = await storage.getLocationLogsLatest();
     res.json(latest);
   });
@@ -1904,13 +2419,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
     requireAuth,
     requireRoles("admin", "hr", "manager"),
     async (req, res) => {
+      res.set({
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      });
       const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
       if (!isIsoDateString(requestedDate)) {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
       }
       const intervalMinutes = parseIntervalMinutes(req.query.interval_minutes, 1);
-      const allPoints = await storage.getLocationLogsForDate(requestedDate);
+      let allPoints: LocationLog[] = [];
+      if (isMySqlStateEnabled()) {
+        try {
+          allPoints = await listLocationLogsForDateFromMySql(requestedDate);
+        } catch (error) {
+          console.error("Failed to read location logs for date from MySQL", error);
+          allPoints = await storage.getLocationLogsForDate(requestedDate);
+        }
+      } else {
+        allPoints = await storage.getLocationLogsForDate(requestedDate);
+      }
       const byUser = new Map<string, LocationLog[]>();
       for (const point of allPoints) {
         const bucket = byUser.get(point.userId) ?? [];
@@ -1965,7 +2495,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const intervalMinutes = parseIntervalMinutes(req.query.interval_minutes, 1);
-      const rawPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
+      let rawPoints: LocationLog[] = [];
+      if (isMySqlStateEnabled()) {
+        try {
+          rawPoints = await listLocationLogsForUserDateFromMySql(userId, requestedDate);
+        } catch (error) {
+          console.error("Failed to read user location logs for date from MySQL", error);
+          rawPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
+        }
+      } else {
+        rawPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
+      }
       const attendance = await storage.getAttendanceHistory(userId);
       const attendanceEvents = attendance
         .filter((record) => isMumbaiDateKey(record.timestamp, requestedDate))
@@ -2051,6 +2591,172 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     }
   );
+
+  app.get("/api/mappls/places/autosuggest", requireAuth, async (req, res) => {
+    const query = firstString(req.query.query);
+    if (!query) {
+      res.status(400).json({ message: "query is required." });
+      return;
+    }
+
+    const locationPair =
+      parseCoordinatePair(firstString(req.query.location)) ||
+      (() => {
+        const lat = parseOptionalQueryFloat(req.query.latitude ?? req.query.lat);
+        const lng = parseOptionalQueryFloat(req.query.longitude ?? req.query.lng ?? req.query.lon);
+        if (lat === null || lng === null) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { latitude: lat, longitude: lng };
+      })();
+
+    const limit = parseOptionalInteger(req.query.limit ?? req.query.itemCount);
+    const response = await searchMapplsPlaces("autosuggest", query, {
+      latitude: locationPair?.latitude ?? null,
+      longitude: locationPair?.longitude ?? null,
+      region: firstString(req.query.region) || null,
+      limit,
+    });
+
+    if (!response) {
+      res.status(400).json({
+        message:
+          "Mappls places API key missing. Configure MAPPLS_PLACES_API_KEY or MAPPLS_REST_API_KEY in server env.",
+      });
+      return;
+    }
+
+    res.json(response);
+  });
+
+  app.get("/api/mappls/places/text-search", requireAuth, async (req, res) => {
+    const query = firstString(req.query.query);
+    if (!query) {
+      res.status(400).json({ message: "query is required." });
+      return;
+    }
+
+    const locationPair =
+      parseCoordinatePair(firstString(req.query.location)) ||
+      (() => {
+        const lat = parseOptionalQueryFloat(req.query.latitude ?? req.query.lat);
+        const lng = parseOptionalQueryFloat(req.query.longitude ?? req.query.lng ?? req.query.lon);
+        if (lat === null || lng === null) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { latitude: lat, longitude: lng };
+      })();
+
+    const limit = parseOptionalInteger(req.query.limit ?? req.query.itemCount);
+    const response = await searchMapplsPlaces("text", query, {
+      latitude: locationPair?.latitude ?? null,
+      longitude: locationPair?.longitude ?? null,
+      region: firstString(req.query.region) || null,
+      limit,
+    });
+
+    if (!response) {
+      res.status(400).json({
+        message:
+          "Mappls places API key missing. Configure MAPPLS_PLACES_API_KEY or MAPPLS_REST_API_KEY in server env.",
+      });
+      return;
+    }
+
+    res.json(response);
+  });
+
+  app.get("/api/mappls/reverse-geocode", requireAuth, async (req, res) => {
+    const pointFromPair = parseCoordinatePair(firstString(req.query.location));
+    const lat = parseOptionalQueryFloat(req.query.latitude ?? req.query.lat);
+    const lng = parseOptionalQueryFloat(req.query.longitude ?? req.query.lng ?? req.query.lon);
+    const point =
+      pointFromPair ||
+      (lat !== null && lng !== null
+        ? {
+            latitude: lat,
+            longitude: lng,
+          }
+        : null);
+
+    if (!point || Math.abs(point.latitude) > 90 || Math.abs(point.longitude) > 180) {
+      res.status(400).json({
+        message:
+          "Valid latitude and longitude are required. Use latitude/longitude or location=lat,lng.",
+      });
+      return;
+    }
+
+    const response = await reverseGeocodeMapplsCoordinates(point.latitude, point.longitude);
+    if (!response) {
+      res.status(400).json({
+        message:
+          "Mappls places API key missing. Configure MAPPLS_PLACES_API_KEY or MAPPLS_REST_API_KEY in server env.",
+      });
+      return;
+    }
+    res.json(response);
+  });
+
+  app.get("/api/mappls/route/preview", requireAuth, async (req, res) => {
+    const origin =
+      parseCoordinatePair(firstString(req.query.origin)) ||
+      (() => {
+        const lat = parseOptionalQueryFloat(req.query.origin_latitude ?? req.query.origin_lat);
+        const lng = parseOptionalQueryFloat(
+          req.query.origin_longitude ?? req.query.origin_lng ?? req.query.origin_lon
+        );
+        if (lat === null || lng === null) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { latitude: lat, longitude: lng };
+      })();
+    const destination =
+      parseCoordinatePair(firstString(req.query.destination)) ||
+      (() => {
+        const lat = parseOptionalQueryFloat(req.query.destination_latitude ?? req.query.destination_lat);
+        const lng = parseOptionalQueryFloat(
+          req.query.destination_longitude ?? req.query.destination_lng ?? req.query.destination_lon
+        );
+        if (lat === null || lng === null) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { latitude: lat, longitude: lng };
+      })();
+    const waypoints = parseCoordinatesList(firstString(req.query.waypoints));
+
+    if (!origin || !destination) {
+      res.status(400).json({
+        message:
+          "origin and destination are required. Use origin=lat,lng and destination=lat,lng.",
+      });
+      return;
+    }
+
+    const routePoints = [origin, ...waypoints, destination];
+    const directions = await getMapplsDirectionsForCoordinates(routePoints, {
+      resource: firstString(req.query.resource) || null,
+      profile: firstString(req.query.profile) || null,
+      overview: firstString(req.query.overview) || null,
+      geometries: firstString(req.query.geometries) || null,
+      alternatives: parseBooleanQuery(req.query.alternatives, false),
+      steps: parseBooleanQuery(req.query.steps, true),
+      region: firstString(req.query.region) || null,
+      routeType: parseOptionalInteger(req.query.rtype),
+    });
+
+    if (!directions) {
+      res.status(400).json({
+        message: "Mappls routing API key missing. Configure MAPPLS_ROUTING_API_KEY in server env.",
+      });
+      return;
+    }
+
+    res.json({
+      provider: "mappls",
+      origin,
+      destination,
+      waypointCount: waypoints.length,
+      routePointCount: routePoints.length,
+      directions,
+    });
+  });
 
   app.post("/api/attendance/checkin", requireAuth, async (req, res) => {
     const payload = parseCheckPayload(req);

@@ -415,20 +415,8 @@ export default function AdminControlsScreen() {
       const selectedManager = selectedManagerId
         ? eligibleManagers.find((manager) => manager.id === selectedManagerId) || null
         : null;
-      const requiresManagerAssignment = selectedRole === "salesperson";
       if (action === "approved" && selectedCompanyIds.length === 0) {
         Alert.alert("Select Companies", "Choose at least one company before approval.");
-        return;
-      }
-      if (action === "approved" && requiresManagerAssignment && eligibleManagers.length === 0) {
-        Alert.alert(
-          "Manager Required",
-          "No manager found in selected company environment. Add a manager first."
-        );
-        return;
-      }
-      if (action === "approved" && requiresManagerAssignment && !selectedManager) {
-        Alert.alert("Manager Required", "Select reporting manager before approval.");
         return;
       }
       if (action === "approved" && selectedManagerId && !selectedManager) {
@@ -706,7 +694,6 @@ export default function AdminControlsScreen() {
               const selectedCompanyIds = selectedCompanyIdsByRequest[request.id] || [];
               const selectedManagerId = selectedManagerIdByRequest[request.id] || "";
               const managersForRequest = getManagersForRequest(request.id);
-              const requiresManagerAssignment = selectedRole === "salesperson";
               const isBusy = busyAccessRequestId === request.id;
               return (
                 <View
@@ -804,7 +791,7 @@ export default function AdminControlsScreen() {
                   </View>
 
                   <Text style={[styles.assignLabel, { color: colors.textSecondary }]}>
-                    Assign reporting manager
+                    Assign reporting manager (optional)
                   </Text>
                   {managersForRequest.length === 0 ? (
                     <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
@@ -843,11 +830,6 @@ export default function AdminControlsScreen() {
                       })}
                     </View>
                   )}
-                  {requiresManagerAssignment ? (
-                    <Text style={[styles.requestMeta, { color: colors.warning }]}>
-                      Manager selection is required for salesperson approval.
-                    </Text>
-                  ) : null}
 
                   <View style={styles.requestActionRow}>
                     <Pressable

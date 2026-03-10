@@ -404,24 +404,6 @@ export default function ConversationDetailScreen() {
   }
 
   const canViewAnalysis = user?.role === "admin";
-  if (!canViewAnalysis) {
-    return (
-      <AppCanvas>
-        <View style={[styles.loadingContainer, { justifyContent: "center", alignItems: "center", paddingHorizontal: 24 }]}>
-          <Ionicons name="lock-closed-outline" size={34} color={colors.warning} />
-          <Text style={[styles.restrictedTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            Admin Access Only
-          </Text>
-          <Text style={[styles.restrictedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-            Transcript and AI analysis are visible only to admin users.
-          </Text>
-          <Pressable onPress={() => router.back()} style={[styles.backButton, { backgroundColor: colors.primary }]}>
-            <Text style={styles.backButtonText}>Go Back</Text>
-          </Pressable>
-        </View>
-      </AppCanvas>
-    );
-  }
 
   const onPlaybackStatusUpdate = (status: AVPlaybackStatus) => {
     if (!status.isLoaded) {
@@ -723,7 +705,7 @@ export default function ConversationDetailScreen() {
           </View>
         </Animated.View>
 
-        {convo.transcript ? (
+        {canViewAnalysis && convo.transcript ? (
           <Animated.View entering={FadeInDown.duration(400).delay(430)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               Transcript
@@ -791,17 +773,6 @@ export default function ConversationDetailScreen() {
 
 const styles = StyleSheet.create({
   loadingContainer: { flex: 1 },
-  restrictedTitle: { marginTop: 12, fontSize: 18 },
-  restrictedText: { marginTop: 8, fontSize: 13, lineHeight: 19, textAlign: "center" },
-  backButton: {
-    marginTop: 18,
-    minHeight: 40,
-    borderRadius: 10,
-    paddingHorizontal: 18,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  backButtonText: { color: "#FFFFFF", fontSize: 13, fontFamily: "Inter_600SemiBold" },
   scrollContent: { paddingHorizontal: 20 },
   headerRow: {
     flexDirection: "row",
