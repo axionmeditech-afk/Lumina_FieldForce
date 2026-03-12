@@ -106,7 +106,7 @@ export default function SalesPosAdminScreen() {
     setError(null);
     try {
       const [ordersResult, usersResult] = await Promise.all([
-        getDolibarrOrders({ limit: 200, sortfield: "tms", sortorder: "desc" }),
+        getDolibarrOrders({ limit: 200, sortfield: "date_commande", sortorder: "desc" }),
         getDolibarrUsers({ limit: 200, sortfield: "lastname", sortorder: "asc" }),
       ]);
       setOrders(Array.isArray(ordersResult) ? ordersResult : []);

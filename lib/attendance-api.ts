@@ -1397,14 +1397,19 @@ export async function getDolibarrOrders(options?: {
   sortorder?: "asc" | "desc";
 }): Promise<DolibarrOrder[]> {
   const params = new URLSearchParams();
+  const resolvedSortField =
+    options?.sortfield === "tms"
+      ? "date_commande"
+      : options?.sortfield || "date_commande";
+  const resolvedSortOrder = options?.sortorder || "desc";
   if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
     params.set("limit", String(Math.max(1, Math.floor(options.limit))));
   }
-  if (options?.sortfield) {
-    params.set("sortfield", options.sortfield);
+  if (resolvedSortField) {
+    params.set("sortfield", resolvedSortField);
   }
-  if (options?.sortorder) {
-    params.set("sortorder", options.sortorder);
+  if (resolvedSortOrder) {
+    params.set("sortorder", resolvedSortOrder);
   }
   const query = params.toString();
   return fetchJson<DolibarrOrder[]>(
