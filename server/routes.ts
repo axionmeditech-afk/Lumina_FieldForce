@@ -236,6 +236,22 @@ function resolveDolibarrProxyRule(pathname: string, role: UserRole | undefined):
   return null;
 }
 
+async function resolveDolibarrProxyConfig(userId: string): Promise<{
+  endpoint: string | null;
+  apiKey: string | null;
+  source: "env" | "settings";
+}> {
+  const envEndpoint = normalizeDolibarrEndpoint(DOLIBARR_ENV_ENDPOINT);
+  const envApiKey = normalizeApiSecret(DOLIBARR_ENV_API_KEY);
+  if (envEndpoint && envApiKey) {
+    return { endpoint: envEndpoint, apiKey: envApiKey, source: "env" };
+  }
+  const userConfig = await resolveDolibarrConfigForUser(userId);
+  const endpoint = normalizeDolibarrEndpoint(userConfig.endpoint);
+  const apiKey = normalizeApiSecret(userConfig.apiKey);
+  return { endpoint, apiKey, source: "settings" };
+}
+
 async function forwardDolibarrRequest(
   req: Request,
   res: Response,
@@ -244,14 +260,14 @@ async function forwardDolibarrRequest(
     forwardPath: string;
   }
 ) {
-  const config = await resolveDolibarrConfigForUser(options.userId);
-  if (!config.enabled) {
-    res.status(400).json({ message: "Dolibarr integration is disabled." });
-    return;
-  }
-  const endpoint = normalizeDolibarrEndpoint(config.endpoint);
-  if (!endpoint || !config.apiKey) {
-    res.status(400).json({ message: "Dolibarr endpoint and API key are required." });
+  const config = await resolveDolibarrProxyConfig(options.userId);
+  const endpoint = config.endpoint;
+  const apiKey = config.apiKey;
+  if (!endpoint || !apiKey) {
+    res.status(400).json({
+      message:
+        "Dolibarr endpoint and API key are required. Configure DOLIBARR_ENDPOINT and DOLIBARR_API_KEY on the backend.",
+    });
     return;
   }
 
@@ -269,8 +285,8 @@ async function forwardDolibarrRequest(
       method,
       headers: {
         "Content-Type": "application/json",
-        DOLAPIKEY: config.apiKey,
-        "X-Dolibarr-API-Key": config.apiKey,
+        DOLAPIKEY: apiKey,
+        "X-Dolibarr-API-Key": apiKey,
       },
       body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(req.body ?? {}),
       signal: controller.signal,
