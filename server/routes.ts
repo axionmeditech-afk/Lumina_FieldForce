@@ -59,6 +59,8 @@ const DOLIBARR_ENV_ENDPOINT = (
   process.env.DOLIBARR_BASE_URL ||
   ""
 ).trim();
+const DOLIBARR_INSECURE_TLS =
+  String(process.env.DOLIBARR_INSECURE_TLS || "false").toLowerCase() === "true";
 const DOLIBARR_ENV_API_KEY = (process.env.DOLIBARR_API_KEY || "").trim();
 const DOLIBARR_PROXY_RULES: Array<{
   prefix: string;
@@ -285,8 +287,13 @@ async function forwardDolibarrRequest(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
+    const agent =
+      DOLIBARR_INSECURE_TLS && endpoint.startsWith("https:")
+        ? new (await import("node:https")).Agent({ rejectUnauthorized: false })
+        : undefined;
     const response = await fetch(targetUrl, {
       method,
+      agent,
       headers: {
         "Content-Type": "application/json",
         DOLAPIKEY: apiKey,
