@@ -1502,7 +1502,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.all("/api/dolibarr/proxy/*", requireAuth, async (req, res) => {
+  app.all(/^\/api\/dolibarr\/proxy(\/.*)?$/, requireAuth, async (req, res) => {
     const userId = req.auth?.sub;
     if (!userId) {
       res.status(401).json({ message: "Not authenticated" });
