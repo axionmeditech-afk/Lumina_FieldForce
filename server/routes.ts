@@ -287,13 +287,15 @@ async function forwardDolibarrRequest(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const agent =
+    const dispatcher =
       DOLIBARR_INSECURE_TLS && endpoint.startsWith("https:")
-        ? new (await import("node:https")).Agent({ rejectUnauthorized: false })
+        ? new (await import("undici")).Agent({
+            connect: { rejectUnauthorized: false },
+          })
         : undefined;
     const response = await fetch(targetUrl, {
       method,
-      agent,
+      dispatcher,
       headers: {
         "Content-Type": "application/json",
         DOLAPIKEY: apiKey,
