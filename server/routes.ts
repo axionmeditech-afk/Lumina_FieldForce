@@ -54,7 +54,11 @@ const MIN_LOCATION_SAMPLE_COUNT = 2;
 const MAX_TRANSCRIBE_AUDIO_BYTES = 12 * 1024 * 1024;
 const DEFAULT_AI_MODEL =
   (process.env.GEMINI_MODEL || process.env.EXPO_PUBLIC_GEMINI_MODEL || "gemini-2.5-flash").trim();
-const DOLIBARR_ENV_ENDPOINT = (process.env.DOLIBARR_ENDPOINT || "").trim();
+const DOLIBARR_ENV_ENDPOINT = (
+  process.env.DOLIBARR_ENDPOINT ||
+  process.env.DOLIBARR_BASE_URL ||
+  ""
+).trim();
 const DOLIBARR_ENV_API_KEY = (process.env.DOLIBARR_API_KEY || "").trim();
 const DOLIBARR_PROXY_RULES: Array<{
   prefix: string;
@@ -299,8 +303,19 @@ async function forwardDolibarrRequest(
     }
     res.status(response.status).send(text);
   } catch (error) {
+    const err = error as { message?: string; cause?: unknown };
+    const cause = err?.cause as { code?: string; errno?: string; syscall?: string; hostname?: string } | undefined;
+    const extra =
+      cause && (cause.code || cause.errno || cause.syscall || cause.hostname)
+        ? ` (${[cause.code, cause.errno, cause.syscall, cause.hostname].filter(Boolean).join(" ")})`
+        : "";
     const message =
-      error instanceof Error ? error.message : "Unable to reach Dolibarr endpoint.";
+      (err?.message || "Unable to reach Dolibarr endpoint.") + extra;
+    console.error("Dolibarr proxy failed", {
+      targetUrl,
+      message,
+      cause,
+    });
     res.status(502).json({ message });
   } finally {
     clearTimeout(timer);
