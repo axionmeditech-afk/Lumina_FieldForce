@@ -1214,7 +1214,7 @@ export default function SalesScreen() {
     try {
       const [products, customers] = await Promise.all([
         getDolibarrProducts({ limit: 200, sortfield: "label", sortorder: "asc" }),
-        getDolibarrThirdParties({ limit: 200, sortfield: "name", sortorder: "asc" }),
+        getDolibarrThirdParties({ limit: 200, sortfield: "nom", sortorder: "asc" }),
       ]);
       setPosProducts(Array.isArray(products) ? products : []);
       setPosCustomers(Array.isArray(customers) ? customers : []);
