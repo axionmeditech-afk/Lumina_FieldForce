@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -141,14 +141,26 @@ export default function RootLayout() {
     Inter_600SemiBold,
     Inter_700Bold,
   });
+  const [appReady, setAppReady] = useState(false);
 
   useEffect(() => {
     if (fontsLoaded) {
-      SplashScreen.hideAsync();
+      setAppReady(true);
     }
   }, [fontsLoaded]);
 
-  if (!fontsLoaded) return null;
+  useEffect(() => {
+    const fallback = setTimeout(() => setAppReady(true), 4000);
+    return () => clearTimeout(fallback);
+  }, []);
+
+  useEffect(() => {
+    if (appReady) {
+      SplashScreen.hideAsync();
+    }
+  }, [appReady]);
+
+  if (!appReady) return null;
 
   return (
     <ThemeProvider>

@@ -1,4 +1,4 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
+﻿import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { Platform } from "react-native";
@@ -208,7 +208,7 @@ export async function ensureBackgroundLocationTracking(): Promise<{
       showsBackgroundLocationIndicator: false,
       activityType: Location.ActivityType.OtherNavigation,
       foregroundService: {
-        notificationTitle: "TrackForce route tracking active",
+        notificationTitle: "Lumina FieldForce route tracking active",
         notificationBody: "Background GPS is running during your shift.",
         killServiceOnDestroy: false,
       },

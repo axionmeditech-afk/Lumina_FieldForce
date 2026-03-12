@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import { Drawer } from "expo-router/drawer";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
@@ -103,7 +103,7 @@ function CustomDrawerContent(
           )}
         </View>
         <View style={styles.profileInfo}>
-          <Text style={styles.profileName}>{user?.name ?? "TrackForce User"}</Text>
+          <Text style={styles.profileName}>{user?.name ?? "Lumina FieldForce User"}</Text>
           <Text style={styles.profileMeta}>
             {(user?.role ?? "staff").toUpperCase()} | {company?.primaryBranch ?? user?.branch ?? "Enterprise Suite"}
           </Text>

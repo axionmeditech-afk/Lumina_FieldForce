@@ -296,7 +296,7 @@ export default function RouteTrackingScreen() {
 
   const isPrivilegedViewer =
     user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
-  const canViewTracking = isPrivilegedViewer || user?.role === "salesperson";
+  const canViewTracking = isPrivilegedViewer;
   const selectedDate = useMemo(() => getMumbaiDateKeyByOffset(dayOffset), [dayOffset]);
   const visibleEmployees = useMemo(() => {
     if (!user) return [];
@@ -902,7 +902,7 @@ export default function RouteTrackingScreen() {
             Access restricted
           </Text>
           <Text style={[styles.deniedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-            Route tracking dashboard is available for Admin, Manager, HR and Sales roles.
+            Route tracking dashboard is available for Admin, Manager, and HR roles.
           </Text>
           <Pressable onPress={() => router.back()} style={[styles.backButton, { backgroundColor: colors.primary }]}>
             <Text style={styles.backButtonText}>Go Back</Text>

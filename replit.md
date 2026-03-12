@@ -1,4 +1,4 @@
-# TrackForce AI
+﻿# Lumina FieldForce
 
 ## Overview
 Enterprise employee tracking + AI sales intelligence platform. Built with Expo React Native (frontend) and Express (backend).

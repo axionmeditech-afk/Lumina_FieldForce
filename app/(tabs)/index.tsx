@@ -106,6 +106,13 @@ type CommandHighlight = {
   tone: string;
 };
 
+type HeroBadge = {
+  id: string;
+  text: string;
+  icon: keyof typeof Ionicons.glyphMap | keyof typeof MaterialCommunityIcons.glyphMap;
+  iconLib?: "ion" | "mci";
+};
+
 const LATE_THRESHOLD_HOUR = 9;
 const LATE_THRESHOLD_MINUTE = 45;
 const DASHBOARD_POLL_INTERVAL_MS = 15_000;
@@ -165,6 +172,14 @@ function formatLiveSyncLabel(timestamp: string | null): string {
   const diffMinutes = Math.floor(diffSeconds / 60);
   if (diffMinutes < 60) return `Updated ${diffMinutes}m ago`;
   return `Updated ${parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function normalizeIdentity(value?: string | null): string {
+  return (value || "").trim().toLowerCase();
+}
+
+function getTaskLabel(task: Task): string {
+  return task.visitLocationLabel?.trim() || task.title.trim() || "Field visit";
 }
 
 function roleLabel(role?: UserRole | null): string {
@@ -239,8 +254,7 @@ function buildQuickLinks(
   userRole: UserRole | undefined,
   colors: ReturnType<typeof useAppTheme>["colors"]
 ): QuickLink[] {
-  const canTrackRoutes =
-    userRole === "admin" || userRole === "manager" || userRole === "hr" || userRole === "salesperson";
+  const isSalesperson = userRole === "salesperson";
   const links: QuickLink[] = [
     {
       id: "attendance",
@@ -250,14 +264,18 @@ function buildQuickLinks(
       color: colors.primary,
       route: "/(tabs)/attendance",
     },
-    {
-      id: "team",
-      title: "Team",
-      subtitle: "Member status and ownership",
-      icon: "people-outline",
-      color: colors.secondary,
-      route: "/(tabs)/team",
-    },
+    ...(isSalesperson
+      ? []
+      : [
+          {
+            id: "team",
+            title: "Team",
+            subtitle: "Member status and ownership",
+            icon: "people-outline",
+            color: colors.secondary,
+            route: "/(tabs)/team",
+          },
+        ]),
     {
       id: "tasks",
       title: "Tasks",
@@ -304,16 +322,13 @@ function buildQuickLinks(
       color: colors.accent,
       route: "/(tabs)/admin-controls",
     });
-  }
-
-  if (canTrackRoutes) {
     links.push({
       id: "route",
       title: "Route Track",
-      subtitle: userRole === "salesperson" ? "Your movement and halts" : "Sales movement and halts",
+      subtitle: "Sales movement and halts",
       icon: "navigate-outline",
       color: colors.primary,
-      route: userRole === "admin" ? "/(tabs)/route-tracking-admin" : "/route-tracking",
+      route: "/(tabs)/route-tracking-admin",
     });
   }
 
@@ -638,78 +653,235 @@ export default function DashboardScreen() {
     };
   }, [attendance, conversations, employees, expenses, notifications, supportThreads, tasks, user]);
 
+  const isSalesperson = user?.role === "salesperson";
+  const todayKey = useMemo(() => toLocalDateKey(new Date()), [liveClockTick]);
+  const userTasks = useMemo(() => {
+    if (!user) return [] as Task[];
+    const normalizedName = normalizeIdentity(user.name);
+    const normalizedEmail = normalizeIdentity(user.email);
+    return tasks.filter((task) => {
+      if (task.assignedTo === user.id) return true;
+      const assignedName = normalizeIdentity(task.assignedToName);
+      return (
+        (normalizedName && assignedName === normalizedName) ||
+        (normalizedEmail && assignedName === normalizedEmail)
+      );
+    });
+  }, [tasks, user]);
+  const userPendingTasks = useMemo(
+    () => userTasks.filter((task) => task.status === "pending").length,
+    [userTasks]
+  );
+  const userInProgressTasks = useMemo(
+    () => userTasks.filter((task) => task.status === "in_progress").length,
+    [userTasks]
+  );
+  const todaysVisits = useMemo(() => {
+    return userTasks
+      .filter((task) => task.taskType === "field_visit")
+      .filter((task) => (task.visitPlanDate || task.dueDate) === todayKey)
+      .sort((a, b) => {
+        const seqA = typeof a.visitSequence === "number" ? a.visitSequence : Number.POSITIVE_INFINITY;
+        const seqB = typeof b.visitSequence === "number" ? b.visitSequence : Number.POSITIVE_INFINITY;
+        if (seqA !== seqB) return seqA - seqB;
+        return a.createdAt.localeCompare(b.createdAt);
+      });
+  }, [todayKey, userTasks]);
+  const visitsCompleted = useMemo(
+    () => todaysVisits.filter((task) => task.status === "completed").length,
+    [todaysVisits]
+  );
+  const visitsInProgress = useMemo(
+    () => todaysVisits.filter((task) => task.status === "in_progress").length,
+    [todaysVisits]
+  );
+  const visitsPending = useMemo(
+    () => todaysVisits.filter((task) => task.status === "pending").length,
+    [todaysVisits]
+  );
+  const nextVisit = useMemo(
+    () => todaysVisits.find((task) => task.status !== "completed") ?? null,
+    [todaysVisits]
+  );
+  const userPendingExpenses = useMemo(() => {
+    if (!user) return 0;
+    return expenses.filter((expense) => expense.userId === user.id && expense.status === "pending")
+      .length;
+  }, [expenses, user]);
+  const userAttendanceToday = useMemo(() => {
+    if (!user) return [] as AttendanceRecord[];
+    return attendance.filter(
+      (record) => record.userId === user.id && toLocalDateKey(new Date(record.timestamp)) === todayKey
+    );
+  }, [attendance, todayKey, user]);
+  const hasCheckedIn = userAttendanceToday.some((record) => record.type === "checkin");
+  const hasCheckedOut = userAttendanceToday.some((record) => record.type === "checkout");
+  const attendanceStatus = hasCheckedOut ? "Checked out" : hasCheckedIn ? "Checked in" : "Not checked in";
+
   const quickLinks = useMemo(() => buildQuickLinks(user?.role, colors), [colors, user?.role]);
 
   const metricCards = useMemo<MetricCard[]>(
-    () => [
-      {
-        id: "present",
-        label: "Present Today",
-        value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
-        hint: `${snapshot.lateToday} late arrivals`,
-        icon: "person-add-outline",
-        tone: colors.success,
-      },
-      {
-        id: "tasks",
-        label: "Task Completion",
-        value: `${snapshot.taskCompletionRate}%`,
-        hint: `${snapshot.pendingTasks} pending · ${snapshot.inProgressTasks} running`,
-        icon: "checkbox-outline",
-        tone: colors.primary,
-      },
-      {
-        id: "support",
-        label: "Support Queue",
-        value: `${snapshot.openSupportThreads}`,
-        hint: `${snapshot.unreadNotifications} unread alerts`,
-        icon: "help-buoy-outline",
-        tone: colors.warning,
-      },
-      {
-        id: "sales",
-        label: "High Intent",
-        value: `${snapshot.highIntentDeals}`,
-        hint: `${snapshot.totalConversations} total conversations`,
-        icon: "sparkles-outline",
-        tone: colors.secondary,
-      },
-    ],
-    [colors.primary, colors.secondary, colors.success, colors.warning, snapshot]
+    () =>
+      isSalesperson
+        ? [
+            {
+              id: "visits",
+              label: "Visits Today",
+              value: `${visitsCompleted}/${todaysVisits.length}`,
+              hint: `${visitsPending} pending · ${visitsInProgress} active`,
+              icon: "navigate-outline",
+              tone: colors.primary,
+            },
+            {
+              id: "tasks",
+              label: "My Tasks",
+              value: `${userPendingTasks + userInProgressTasks}`,
+              hint: `${userPendingTasks} pending · ${userInProgressTasks} active`,
+              icon: "checkbox-outline",
+              tone: colors.success,
+            },
+            {
+              id: "alerts",
+              label: "My Alerts",
+              value: `${snapshot.unreadNotifications}`,
+              hint: `${snapshot.openSupportThreads} support threads`,
+              icon: "notifications-outline",
+              tone: colors.warning,
+            },
+            {
+              id: "expenses",
+              label: "Expenses",
+              value: `${userPendingExpenses}`,
+              hint: "Pending approvals",
+              icon: "receipt-outline",
+              tone: colors.secondary,
+            },
+          ]
+        : [
+            {
+              id: "present",
+              label: "Present Today",
+              value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
+              hint: `${snapshot.lateToday} late arrivals`,
+              icon: "person-add-outline",
+              tone: colors.success,
+            },
+            {
+              id: "tasks",
+              label: "Task Completion",
+              value: `${snapshot.taskCompletionRate}%`,
+              hint: `${snapshot.pendingTasks} pending · ${snapshot.inProgressTasks} running`,
+              icon: "checkbox-outline",
+              tone: colors.primary,
+            },
+            {
+              id: "support",
+              label: "Support Queue",
+              value: `${snapshot.openSupportThreads}`,
+              hint: `${snapshot.unreadNotifications} unread alerts`,
+              icon: "help-buoy-outline",
+              tone: colors.warning,
+            },
+            {
+              id: "sales",
+              label: "High Intent",
+              value: `${snapshot.highIntentDeals}`,
+              hint: `${snapshot.totalConversations} total conversations`,
+              icon: "sparkles-outline",
+              tone: colors.secondary,
+            },
+          ],
+    [
+      colors.primary,
+      colors.secondary,
+      colors.success,
+      colors.warning,
+      isSalesperson,
+      snapshot,
+      todaysVisits.length,
+      userInProgressTasks,
+      userPendingExpenses,
+      userPendingTasks,
+      visitsCompleted,
+      visitsInProgress,
+      visitsPending,
+    ]
   );
 
   const commandHighlights = useMemo<CommandHighlight[]>(
-    () => [
-      {
-        id: "active_staff",
-        label: "Active Staff",
-        value: `${snapshot.activeNow}`,
-        icon: "pulse-outline",
-        tone: colors.success,
-      },
-      {
-        id: "unread_alerts",
-        label: "Unread Alerts",
-        value: `${snapshot.unreadNotifications}`,
-        icon: "notifications-outline",
-        tone: colors.primary,
-      },
-      {
-        id: "pending_signins",
-        label: "Pending Sign-ins",
-        value: `${snapshot.pendingSignIns}`,
-        icon: "finger-print-outline",
-        tone: colors.warning,
-      },
-      {
-        id: "team_online",
-        label: "Team Presence",
-        value: `${snapshot.activeNow + snapshot.idleNow}/${snapshot.totalEmployees || 0}`,
-        icon: "people-circle-outline",
-        tone: colors.secondary,
-      },
-    ],
-    [colors.primary, colors.secondary, colors.success, colors.warning, snapshot]
+    () =>
+      isSalesperson
+        ? [
+            {
+              id: "visits_total",
+              label: "Visits Today",
+              value: `${todaysVisits.length}`,
+              icon: "navigate-outline",
+              tone: colors.primary,
+            },
+            {
+              id: "tasks_pending",
+              label: "Pending Tasks",
+              value: `${userPendingTasks}`,
+              icon: "checkbox-outline",
+              tone: colors.success,
+            },
+            {
+              id: "alerts_unread",
+              label: "Unread Alerts",
+              value: `${snapshot.unreadNotifications}`,
+              icon: "notifications-outline",
+              tone: colors.warning,
+            },
+            {
+              id: "expenses_pending",
+              label: "Pending Expenses",
+              value: `${userPendingExpenses}`,
+              icon: "receipt-outline",
+              tone: colors.secondary,
+            },
+          ]
+        : [
+            {
+              id: "active_staff",
+              label: "Active Staff",
+              value: `${snapshot.activeNow}`,
+              icon: "pulse-outline",
+              tone: colors.success,
+            },
+            {
+              id: "unread_alerts",
+              label: "Unread Alerts",
+              value: `${snapshot.unreadNotifications}`,
+              icon: "notifications-outline",
+              tone: colors.primary,
+            },
+            {
+              id: "pending_signins",
+              label: "Pending Sign-ins",
+              value: `${snapshot.pendingSignIns}`,
+              icon: "finger-print-outline",
+              tone: colors.warning,
+            },
+            {
+              id: "team_online",
+              label: "Team Presence",
+              value: `${snapshot.activeNow + snapshot.idleNow}/${snapshot.totalEmployees || 0}`,
+              icon: "people-circle-outline",
+              tone: colors.secondary,
+            },
+          ],
+    [
+      colors.primary,
+      colors.secondary,
+      colors.success,
+      colors.warning,
+      isSalesperson,
+      snapshot,
+      todaysVisits.length,
+      userPendingExpenses,
+      userPendingTasks,
+    ]
   );
 
   const presentRatio = useMemo(() => {
@@ -747,6 +919,110 @@ export default function DashboardScreen() {
     [liveClockTick]
   );
   const greeting = useMemo(() => getGreetingLabel(), [liveClockTick]);
+  const heroSubtitle = isSalesperson
+    ? "Your visits, tasks, and alerts for today."
+    : "Workforce command center with live attendance, support queue, and execution signals.";
+  const heroInsights = useMemo(
+    () =>
+      isSalesperson
+        ? [
+            {
+              id: "visits_done",
+              value: `${visitsCompleted}/${todaysVisits.length}`,
+              label: "Visits done",
+            },
+            {
+              id: "tasks_pending",
+              value: `${userPendingTasks}`,
+              label: "Pending tasks",
+            },
+            {
+              id: "alerts_unread",
+              value: `${snapshot.unreadNotifications}`,
+              label: "Unread alerts",
+            },
+          ]
+        : [
+            {
+              id: "active_now",
+              value: `${snapshot.activeNow}`,
+              label: "Active now",
+            },
+            {
+              id: "pending_signins",
+              value: `${snapshot.pendingSignIns}`,
+              label: "Pending sign-ins",
+            },
+            {
+              id: "today_checkouts",
+              value: `${snapshot.todayCheckouts}`,
+              label: "Checkouts today",
+            },
+          ],
+    [
+      isSalesperson,
+      snapshot.activeNow,
+      snapshot.pendingSignIns,
+      snapshot.todayCheckouts,
+      snapshot.unreadNotifications,
+      todaysVisits.length,
+      userPendingTasks,
+      visitsCompleted,
+    ]
+  );
+  const heroBadges = useMemo<HeroBadge[]>(
+    () =>
+      isSalesperson
+        ? [
+            {
+              id: "sync",
+              icon: "radio-outline",
+              text: liveSyncLabel,
+            },
+            {
+              id: "attendance",
+              icon: hasCheckedOut
+                ? "checkmark-done-outline"
+                : hasCheckedIn
+                  ? "checkmark-circle-outline"
+                  : "time-outline",
+              text: attendanceStatus,
+            },
+            {
+              id: "next_visit",
+              icon: "navigate-outline",
+              text: nextVisit ? `Next: ${getTaskLabel(nextVisit)}` : "No visits scheduled",
+            },
+          ]
+        : [
+            {
+              id: "sync",
+              icon: "radio-outline",
+              text: liveSyncLabel,
+            },
+            {
+              id: "velocity",
+              icon: "lightning-bolt-outline",
+              iconLib: "mci",
+              text: `${snapshot.taskCompletionRate}% delivery velocity`,
+            },
+            {
+              id: "support",
+              icon: "chatbubbles-outline",
+              text: `${snapshot.openSupportThreads} open support threads`,
+            },
+          ],
+    [
+      attendanceStatus,
+      hasCheckedIn,
+      hasCheckedOut,
+      isSalesperson,
+      liveSyncLabel,
+      nextVisit,
+      snapshot.openSupportThreads,
+      snapshot.taskCompletionRate,
+    ]
+  );
 
   if (!user) {
     return (
@@ -847,40 +1123,31 @@ export default function DashboardScreen() {
 
             <Text style={styles.heroGreetingText}>{greeting}</Text>
             <Text style={styles.heroTitleText}>{user.name}</Text>
-            <Text style={styles.heroSubtitleText}>
-              Workforce command center with live attendance, support queue, and execution signals.
-            </Text>
+            <Text style={styles.heroSubtitleText}>{heroSubtitle}</Text>
 
             <View style={styles.heroInsightRow}>
-              <View style={styles.heroInsightItem}>
-                <Text style={styles.heroInsightValue}>{snapshot.activeNow}</Text>
-                <Text style={styles.heroInsightLabel}>Active now</Text>
-              </View>
-              <View style={styles.heroDivider} />
-              <View style={styles.heroInsightItem}>
-                <Text style={styles.heroInsightValue}>{snapshot.pendingSignIns}</Text>
-                <Text style={styles.heroInsightLabel}>Pending sign-ins</Text>
-              </View>
-              <View style={styles.heroDivider} />
-              <View style={styles.heroInsightItem}>
-                <Text style={styles.heroInsightValue}>{snapshot.todayCheckouts}</Text>
-                <Text style={styles.heroInsightLabel}>Checkouts today</Text>
-              </View>
+              {heroInsights.map((item, index) => (
+                <React.Fragment key={item.id}>
+                  <View style={styles.heroInsightItem}>
+                    <Text style={styles.heroInsightValue}>{item.value}</Text>
+                    <Text style={styles.heroInsightLabel}>{item.label}</Text>
+                  </View>
+                  {index < heroInsights.length - 1 ? <View style={styles.heroDivider} /> : null}
+                </React.Fragment>
+              ))}
             </View>
 
             <View style={styles.heroBadgeRow}>
-              <View style={styles.heroBadge}>
-                <Ionicons name="radio-outline" size={13} color="#DDF5FF" />
-                <Text style={styles.heroBadgeText}>{liveSyncLabel}</Text>
-              </View>
-              <View style={styles.heroBadge}>
-                <MaterialCommunityIcons name="lightning-bolt-outline" size={13} color="#DDF5FF" />
-                <Text style={styles.heroBadgeText}>{snapshot.taskCompletionRate}% delivery velocity</Text>
-              </View>
-              <View style={styles.heroBadge}>
-                <Ionicons name="chatbubbles-outline" size={13} color="#DDF5FF" />
-                <Text style={styles.heroBadgeText}>{snapshot.openSupportThreads} open support threads</Text>
-              </View>
+              {heroBadges.map((badge) => (
+                <View key={badge.id} style={styles.heroBadge}>
+                  {badge.iconLib === "mci" ? (
+                    <MaterialCommunityIcons name={badge.icon} size={13} color="#DDF5FF" />
+                  ) : (
+                    <Ionicons name={badge.icon} size={13} color="#DDF5FF" />
+                  )}
+                  <Text style={styles.heroBadgeText}>{badge.text}</Text>
+                </View>
+              ))}
             </View>
           </LinearGradient>
         </Animated.View>
@@ -930,10 +1197,10 @@ export default function DashboardScreen() {
         <Animated.View entering={FadeInDown.duration(420).delay(40)} style={styles.sectionWrap}>
           <View style={styles.sectionHeader}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              Live Metrics
+              {isSalesperson ? "My Progress" : "Live Metrics"}
             </Text>
             <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              Real-time operational health
+              {isSalesperson ? "Today's visits, tasks, and alerts" : "Real-time operational health"}
             </Text>
           </View>
           <View style={styles.metricGrid}>
@@ -972,102 +1239,199 @@ export default function DashboardScreen() {
           </View>
         </Animated.View>
 
-        <Animated.View
-          entering={FadeInDown.duration(420).delay(120)}
-          style={[
-            styles.pulseCard,
-            { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
-          ]}
-        >
-          <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              Operational Pulse
-            </Text>
-            <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              Attendance + execution trend
-            </Text>
-          </View>
+        {isSalesperson ? (
+          <Animated.View
+            entering={FadeInDown.duration(420).delay(120)}
+            style={[
+              styles.sectionCard,
+              { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+            ]}
+          >
+            <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                Today&apos;s Visits
+              </Text>
+              <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                Your field stops and route flow
+              </Text>
+            </View>
 
-          <View style={styles.progressRow}>
-            <View style={styles.progressHeader}>
-              <Text style={[styles.progressLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                Attendance Coverage
-              </Text>
-              <Text style={[styles.progressValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                {presentRatio}%
-              </Text>
-            </View>
-            <View style={[styles.progressTrack, { backgroundColor: colors.borderLight }]}>
-              <View
-                style={[
-                  styles.progressFill,
-                  {
-                    width: `${Math.min(100, Math.max(0, presentRatio))}%`,
-                    backgroundColor: colors.success,
-                  },
-                ]}
-              />
-            </View>
-          </View>
+            {todaysVisits.length === 0 ? (
+              <View style={styles.emptyInlineWrap}>
+                <Ionicons name="flag-outline" size={18} color={colors.textTertiary} />
+                <Text style={[styles.emptyInlineText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  No visits assigned for today.
+                </Text>
+              </View>
+            ) : (
+              todaysVisits.slice(0, 4).map((task, index) => {
+                const statusColor =
+                  task.status === "completed"
+                    ? colors.success
+                    : task.status === "in_progress"
+                      ? colors.primary
+                      : colors.warning;
+                const statusLabel =
+                  task.status === "completed"
+                    ? "Completed"
+                    : task.status === "in_progress"
+                      ? "In progress"
+                      : "Pending";
+                const subtitle = task.visitLocationAddress?.trim() || task.description || "Field visit";
+                return (
+                  <View
+                    key={task.id}
+                    style={[
+                      styles.activityRow,
+                      index < Math.min(4, todaysVisits.length) - 1 && {
+                        borderBottomWidth: 1,
+                        borderBottomColor: colors.borderLight,
+                      },
+                    ]}
+                  >
+                    <View style={[styles.activityIconWrap, { backgroundColor: `${statusColor}16` }]}>
+                      <Ionicons name="navigate-outline" size={16} color={statusColor} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <View style={styles.activityTitleRow}>
+                        <Text style={[styles.activityTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          {task.visitSequence ? `#${task.visitSequence} ` : ""}
+                          {getTaskLabel(task)}
+                        </Text>
+                        <View style={[styles.activityBadge, { backgroundColor: `${statusColor}18` }]}>
+                          <Text style={[styles.activityBadgeText, { color: statusColor, fontFamily: "Inter_600SemiBold" }]}>
+                            {statusLabel}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text
+                        style={[styles.activitySubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}
+                        numberOfLines={2}
+                      >
+                        {subtitle}
+                      </Text>
+                      <Text style={[styles.activityTime, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                        {task.visitPlanDate || task.dueDate}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })
+            )}
 
-          <View style={styles.progressRow}>
-            <View style={styles.progressHeader}>
-              <Text style={[styles.progressLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                Task Throughput
-              </Text>
-              <Text style={[styles.progressValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                {snapshot.taskCompletionRate}%
-              </Text>
-            </View>
-            <View style={[styles.progressTrack, { backgroundColor: colors.borderLight }]}>
-              <View
-                style={[
-                  styles.progressFill,
-                  {
-                    width: `${Math.min(100, Math.max(0, snapshot.taskCompletionRate))}%`,
-                    backgroundColor: colors.primary,
-                  },
-                ]}
-              />
-            </View>
-          </View>
-
-          {isSalesVisible ? (
-            <View
-              style={[
-                styles.salesStrip,
-                { borderColor: colors.border, backgroundColor: `${colors.secondary}0E` },
+            <Pressable
+              onPress={() => router.push("/(tabs)/sales" as never)}
+              style={({ pressed }) => [
+                styles.salesCtaButton,
+                {
+                  backgroundColor: colors.primary,
+                  opacity: pressed ? 0.85 : 1,
+                },
               ]}
             >
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.salesStripLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                  Avg Interest Score
+              <Ionicons name="map-outline" size={16} color="#FFFFFF" />
+              <Text style={styles.salesCtaText}>Open Sales Day</Text>
+            </Pressable>
+          </Animated.View>
+        ) : (
+          <Animated.View
+            entering={FadeInDown.duration(420).delay(120)}
+            style={[
+              styles.pulseCard,
+              { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+            ]}
+          >
+            <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                Operational Pulse
+              </Text>
+              <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                Attendance + execution trend
+              </Text>
+            </View>
+
+            <View style={styles.progressRow}>
+              <View style={styles.progressHeader}>
+                <Text style={[styles.progressLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                  Attendance Coverage
                 </Text>
-                <Text style={[styles.salesStripValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                  {snapshot.avgInterestScore.toFixed(1)}
+                <Text style={[styles.progressValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                  {presentRatio}%
                 </Text>
               </View>
-              <View style={styles.salesStripDivider} />
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.salesStripLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                  High Intent Deals
-                </Text>
-                <Text style={[styles.salesStripValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                  {snapshot.highIntentDeals}
-                </Text>
+              <View style={[styles.progressTrack, { backgroundColor: colors.borderLight }]}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    {
+                      width: `${Math.min(100, Math.max(0, presentRatio))}%`,
+                      backgroundColor: colors.success,
+                    },
+                  ]}
+                />
               </View>
             </View>
-          ) : null}
-        </Animated.View>
+
+            <View style={styles.progressRow}>
+              <View style={styles.progressHeader}>
+                <Text style={[styles.progressLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                  Task Throughput
+                </Text>
+                <Text style={[styles.progressValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                  {snapshot.taskCompletionRate}%
+                </Text>
+              </View>
+              <View style={[styles.progressTrack, { backgroundColor: colors.borderLight }]}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    {
+                      width: `${Math.min(100, Math.max(0, snapshot.taskCompletionRate))}%`,
+                      backgroundColor: colors.primary,
+                    },
+                  ]}
+                />
+              </View>
+            </View>
+
+            {isSalesVisible ? (
+              <View
+                style={[
+                  styles.salesStrip,
+                  { borderColor: colors.border, backgroundColor: `${colors.secondary}0E` },
+                ]}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.salesStripLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                    Avg Interest Score
+                  </Text>
+                  <Text style={[styles.salesStripValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    {snapshot.avgInterestScore.toFixed(1)}
+                  </Text>
+                </View>
+                <View style={styles.salesStripDivider} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.salesStripLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                    High Intent Deals
+                  </Text>
+                  <Text style={[styles.salesStripValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    {snapshot.highIntentDeals}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+          </Animated.View>
+        )}
 
         <Animated.View entering={FadeInDown.duration(420).delay(170)} style={styles.sectionWrap}>
           <View style={styles.sectionHeader}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              Quick Actions
+              {isSalesperson ? "My Shortcuts" : "Quick Actions"}
             </Text>
             <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              Jump directly into modules
+              {isSalesperson ? "Tools you use every day" : "Jump directly into modules"}
             </Text>
           </View>
 
@@ -1110,10 +1474,10 @@ export default function DashboardScreen() {
           <View style={[styles.cardSheen, { backgroundColor: `${colors.warning}24` }]} />
           <View style={styles.sectionHeader}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              Support Priority
+              {isSalesperson ? "My Support" : "Support Priority"}
             </Text>
             <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              Open threads requiring attention
+              {isSalesperson ? "Your open requests and updates" : "Open threads requiring attention"}
             </Text>
           </View>
 
@@ -1172,103 +1536,107 @@ export default function DashboardScreen() {
           )}
         </Animated.View>
 
-        <Animated.View
-          entering={FadeInDown.duration(420).delay(260)}
-          style={[styles.sectionCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
-        >
-          <View style={[styles.cardSheen, { backgroundColor: `${colors.secondary}24` }]} />
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              Activity Timeline
-            </Text>
-            <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              Latest actions across operations
-            </Text>
-          </View>
-
-          {loading ? (
-            <View style={styles.loadingWrap}>
-              <ActivityIndicator size="small" color={colors.primary} />
-            </View>
-          ) : activityFeed.length === 0 ? (
-            <View style={styles.emptyInlineWrap}>
-              <Ionicons name="information-circle-outline" size={18} color={colors.textTertiary} />
-              <Text style={[styles.emptyInlineText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                Live activity will appear once operations start.
+        {!isSalesperson ? (
+          <Animated.View
+            entering={FadeInDown.duration(420).delay(260)}
+            style={[styles.sectionCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
+          >
+            <View style={[styles.cardSheen, { backgroundColor: `${colors.secondary}24` }]} />
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                Activity Timeline
+              </Text>
+              <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                Latest actions across operations
               </Text>
             </View>
-          ) : (
-            activityFeed.map((entry, index) => (
-              <View
-                key={entry.id}
-                style={[
-                  styles.activityRow,
-                  index < activityFeed.length - 1 && {
-                    borderBottomWidth: 1,
-                    borderBottomColor: colors.borderLight,
-                  },
-                ]}
-              >
-                <View style={[styles.activityIconWrap, { backgroundColor: `${entry.iconColor}14` }]}>
-                  <Ionicons name={entry.icon} size={16} color={entry.iconColor} />
-                </View>
 
-                <View style={{ flex: 1 }}>
-                  <View style={styles.activityTitleRow}>
-                    <Text style={[styles.activityTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      {entry.title}
-                    </Text>
-                    {entry.badge ? (
-                      <View style={[styles.activityBadge, { backgroundColor: `${colors.primary}18` }]}>
-                        <Text style={[styles.activityBadgeText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
-                          {entry.badge}
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-                  <Text style={[styles.activitySubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]} numberOfLines={2}>
-                    {entry.subtitle}
-                  </Text>
-                  <Text style={[styles.activityTime, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-                    {formatTimeLabel(entry.timestamp)} · {formatRelativeTime(entry.timestamp)}
-                  </Text>
-                </View>
+            {loading ? (
+              <View style={styles.loadingWrap}>
+                <ActivityIndicator size="small" color={colors.primary} />
               </View>
-            ))
-          )}
-        </Animated.View>
+            ) : activityFeed.length === 0 ? (
+              <View style={styles.emptyInlineWrap}>
+                <Ionicons name="information-circle-outline" size={18} color={colors.textTertiary} />
+                <Text style={[styles.emptyInlineText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  Live activity will appear once operations start.
+                </Text>
+              </View>
+            ) : (
+              activityFeed.map((entry, index) => (
+                <View
+                  key={entry.id}
+                  style={[
+                    styles.activityRow,
+                    index < activityFeed.length - 1 && {
+                      borderBottomWidth: 1,
+                      borderBottomColor: colors.borderLight,
+                    },
+                  ]}
+                >
+                  <View style={[styles.activityIconWrap, { backgroundColor: `${entry.iconColor}14` }]}>
+                    <Ionicons name={entry.icon} size={16} color={entry.iconColor} />
+                  </View>
 
-        <Animated.View entering={FadeInDown.duration(420).delay(300)} style={styles.footerSummaryRow}>
-          <View
-            style={[
-              styles.footerSummaryCard,
-              { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
-            ]}
-          >
-            <Ionicons name="people-outline" size={18} color={colors.primary} />
-            <Text style={[styles.footerSummaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-              Teams
-            </Text>
-            <Text style={[styles.footerSummaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {teams.length}
-            </Text>
-          </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={styles.activityTitleRow}>
+                      <Text style={[styles.activityTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                        {entry.title}
+                      </Text>
+                      {entry.badge ? (
+                        <View style={[styles.activityBadge, { backgroundColor: `${colors.primary}18` }]}>
+                          <Text style={[styles.activityBadgeText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                            {entry.badge}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text style={[styles.activitySubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]} numberOfLines={2}>
+                      {entry.subtitle}
+                    </Text>
+                    <Text style={[styles.activityTime, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      {formatTimeLabel(entry.timestamp)} · {formatRelativeTime(entry.timestamp)}
+                    </Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </Animated.View>
+        ) : null}
 
-          <View
-            style={[
-              styles.footerSummaryCard,
-              { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
-            ]}
-          >
-            <Ionicons name="receipt-outline" size={18} color={colors.warning} />
-            <Text style={[styles.footerSummaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-              Pending Expenses
-            </Text>
-            <Text style={[styles.footerSummaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {snapshot.pendingExpenses}
-            </Text>
-          </View>
-        </Animated.View>
+        {!isSalesperson ? (
+          <Animated.View entering={FadeInDown.duration(420).delay(300)} style={styles.footerSummaryRow}>
+            <View
+              style={[
+                styles.footerSummaryCard,
+                { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+              ]}
+            >
+              <Ionicons name="people-outline" size={18} color={colors.primary} />
+              <Text style={[styles.footerSummaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                Teams
+              </Text>
+              <Text style={[styles.footerSummaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                {teams.length}
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.footerSummaryCard,
+                { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+              ]}
+            >
+              <Ionicons name="receipt-outline" size={18} color={colors.warning} />
+              <Text style={[styles.footerSummaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                Pending Expenses
+              </Text>
+              <Text style={[styles.footerSummaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                {snapshot.pendingExpenses}
+              </Text>
+            </View>
+          </Animated.View>
+        ) : null}
       </Animated.ScrollView>
     </AppCanvas>
   );
@@ -1675,6 +2043,20 @@ const styles = StyleSheet.create({
   emptyInlineText: {
     fontSize: 12.5,
     flex: 1,
+  },
+  salesCtaButton: {
+    marginTop: 10,
+    borderRadius: 10,
+    minHeight: 40,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  salesCtaText: {
+    color: "#FFFFFF",
+    fontSize: 12.5,
+    fontFamily: "Inter_600SemiBold",
   },
   threadRow: {
     flexDirection: "row",

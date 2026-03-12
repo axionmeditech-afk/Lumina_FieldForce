@@ -56,6 +56,18 @@ const DEFAULT_AI_MODEL =
   (process.env.GEMINI_MODEL || process.env.EXPO_PUBLIC_GEMINI_MODEL || "gemini-2.5-flash").trim();
 const DOLIBARR_ENV_ENDPOINT = (process.env.DOLIBARR_ENDPOINT || "").trim();
 const DOLIBARR_ENV_API_KEY = (process.env.DOLIBARR_API_KEY || "").trim();
+const DOLIBARR_PROXY_RULES: Array<{
+  prefix: string;
+  roles: UserRole[];
+}> = [
+  { prefix: "/users", roles: ["admin", "hr", "manager"] },
+  { prefix: "/salaries", roles: ["admin", "hr", "manager"] },
+  { prefix: "/salary", roles: ["admin", "hr", "manager"] },
+  { prefix: "/products", roles: ["admin", "hr", "manager", "salesperson"] },
+  { prefix: "/thirdparties", roles: ["admin", "hr", "manager", "salesperson"] },
+  { prefix: "/orders", roles: ["admin", "hr", "manager", "salesperson"] },
+  { prefix: "/invoices", roles: ["admin", "hr", "manager"] },
+];
 const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_companies",
   "@trackforce_employees",
@@ -194,6 +206,89 @@ function maskApiKey(value: string | null | undefined): string | null {
     return `${cleaned.slice(0, 1)}***${cleaned.slice(-1)}`;
   }
   return `${cleaned.slice(0, 4)}***${cleaned.slice(-3)}`;
+}
+
+function normalizeDolibarrEndpoint(value: string | null | undefined): string | null {
+  const raw = (value || "").trim().replace(/\/+$/, "");
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    if (/\/api\/index\.php$/i.test(pathname)) {
+      return url.toString().replace(/\/+$/, "");
+    }
+    if (/\/api$/i.test(pathname)) {
+      url.pathname = `${pathname}/index.php`;
+      return url.toString().replace(/\/+$/, "");
+    }
+    url.pathname = `${pathname}/api/index.php`;
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function resolveDolibarrProxyRule(pathname: string, role: UserRole | undefined): string | null {
+  if (!role) return "Missing role.";
+  const match = DOLIBARR_PROXY_RULES.find((rule) => pathname.startsWith(rule.prefix));
+  if (!match) return "Unsupported Dolibarr path.";
+  if (!match.roles.includes(role)) return "Insufficient permissions for Dolibarr path.";
+  return null;
+}
+
+async function forwardDolibarrRequest(
+  req: Request,
+  res: Response,
+  options: {
+    userId: string;
+    forwardPath: string;
+  }
+) {
+  const config = await resolveDolibarrConfigForUser(options.userId);
+  if (!config.enabled) {
+    res.status(400).json({ message: "Dolibarr integration is disabled." });
+    return;
+  }
+  const endpoint = normalizeDolibarrEndpoint(config.endpoint);
+  if (!endpoint || !config.apiKey) {
+    res.status(400).json({ message: "Dolibarr endpoint and API key are required." });
+    return;
+  }
+
+  const method = req.method.toUpperCase();
+  const queryIndex = req.url.indexOf("?");
+  const query = queryIndex >= 0 ? req.url.slice(queryIndex) : "";
+  const base = endpoint.replace(/\/+$/, "");
+  const path = options.forwardPath.startsWith("/") ? options.forwardPath : `/${options.forwardPath}`;
+  const targetUrl = `${base}${path}${query}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(targetUrl, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        DOLAPIKEY: config.apiKey,
+        "X-Dolibarr-API-Key": config.apiKey,
+      },
+      body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(req.body ?? {}),
+      signal: controller.signal,
+    });
+
+    const text = await response.text();
+    const contentType = response.headers.get("content-type");
+    if (contentType) {
+      res.setHeader("Content-Type", contentType);
+    }
+    res.status(response.status).send(text);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unable to reach Dolibarr endpoint.";
+    res.status(502).json({ message });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function resolveDolibarrConfigForUser(
@@ -1405,6 +1500,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } finally {
       clearTimeout(timer);
     }
+  });
+
+  app.all("/api/dolibarr/proxy/*", requireAuth, async (req, res) => {
+    const userId = req.auth?.sub;
+    if (!userId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+
+    const forwardPath = req.path.replace(/^\/api\/dolibarr\/proxy/, "");
+    const ruleError = resolveDolibarrProxyRule(forwardPath, req.auth?.role);
+    if (ruleError) {
+      res.status(403).json({ message: ruleError });
+      return;
+    }
+
+    await forwardDolibarrRequest(req, res, {
+      userId,
+      forwardPath,
+    });
   });
 
   app.post(

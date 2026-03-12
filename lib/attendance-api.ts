@@ -26,6 +26,50 @@ interface QueueItem {
   payload: AttendanceCheckPayload;
 }
 
+export interface DolibarrProduct {
+  id?: number | string;
+  ref?: string;
+  label?: string;
+  description?: string;
+  price?: number | string;
+  price_ttc?: number | string;
+  tva_tx?: number | string;
+  type?: number | string;
+  status?: number | string;
+}
+
+export interface DolibarrThirdParty {
+  id?: number | string;
+  name?: string;
+  nom?: string;
+  email?: string;
+  status?: number | string;
+  client?: number | string;
+}
+
+export interface DolibarrOrderLineInput {
+  productId: number;
+  qty: number;
+  unitPrice?: number;
+  taxRate?: number;
+  description?: string;
+  productType?: number;
+}
+
+export interface DolibarrOrderCreatePayload {
+  customerId: number;
+  lines: DolibarrOrderLineInput[];
+  date?: string;
+  note?: string;
+  refClient?: string;
+}
+
+export interface DolibarrOrderCreateResult {
+  ok: boolean;
+  orderId: number | null;
+  message?: string;
+}
+
 const PUBLIC_API_PATH_PATTERNS = [
   /^\/health\b/i,
   /^\/auth\/(login|token|register|access-request)\b/i,
@@ -860,6 +904,26 @@ function parseDolibarrUserId(payload: unknown): number | null {
   return null;
 }
 
+function parseDolibarrEntityId(payload: unknown): number | null {
+  if (typeof payload === "number" && Number.isFinite(payload)) {
+    return Math.trunc(payload);
+  }
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  const candidates = [body.id, body.rowid, body.order_id, body.ref];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return Math.trunc(candidate);
+    }
+    if (typeof candidate === "string" && /^\d+$/.test(candidate.trim())) {
+      return Number(candidate.trim());
+    }
+  }
+  return null;
+}
+
 function buildDolibarrCreatePayload(
   payload: DolibarrEmployeeSyncPayload,
   login: string
@@ -1226,6 +1290,94 @@ export async function getMapplsRoutePreview(payload: {
 
   return fetchJson<MapplsRoutePreviewResponse>(`/mappls/route/preview?${params.toString()}`, {
     method: "GET",
+  });
+}
+
+export async function getDolibarrProducts(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+}): Promise<DolibarrProduct[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrProduct[]>(`/dolibarr/proxy/products${query ? `?${query}` : ""}`, {
+    method: "GET",
+  });
+}
+
+export async function getDolibarrThirdParties(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+}): Promise<DolibarrThirdParty[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrThirdParty[]>(
+    `/dolibarr/proxy/thirdparties${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export async function createDolibarrSalesOrder(
+  payload: DolibarrOrderCreatePayload
+): Promise<DolibarrOrderCreateResult> {
+  const orderPayload: Record<string, unknown> = {
+    socid: payload.customerId,
+    lines: payload.lines.map((line) => ({
+      fk_product: line.productId,
+      qty: line.qty,
+      subprice: line.unitPrice,
+      tva_tx: line.taxRate,
+      desc: line.description,
+      product_type: line.productType,
+    })),
+  };
+
+  if (payload.date) {
+    orderPayload.date = payload.date;
+  }
+  if (payload.note) {
+    orderPayload.note_public = payload.note;
+  }
+  if (payload.refClient) {
+    orderPayload.ref_client = payload.refClient;
+  }
+
+  const response = await fetchJson<Record<string, unknown>>("/dolibarr/proxy/orders", {
+    method: "POST",
+    body: JSON.stringify(orderPayload),
+  });
+  const orderId = parseDolibarrEntityId(response);
+  return {
+    ok: Boolean(orderId),
+    orderId,
+    message: orderId ? "Sales order created." : "Sales order created but ID not returned.",
+  };
+}
+
+export async function validateDolibarrSalesOrder(orderId: number): Promise<void> {
+  await fetchJson<Record<string, unknown>>(`/dolibarr/proxy/orders/${orderId}/validate`, {
+    method: "POST",
   });
 }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+﻿import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -532,7 +532,7 @@ export default function SalaryScreen() {
 
   const handlePrintSlip = useCallback(
     async (salary: SalaryRecord) => {
-      const companyName = user?.companyName || "TrackForce AI";
+      const companyName = user?.companyName || "Lumina FieldForce";
       setPrintingSlipId(salary.id);
       try {
         const html = buildSalarySlipHtml({
@@ -600,7 +600,7 @@ export default function SalaryScreen() {
         visible={Boolean(selectedSlip)}
         salary={selectedSlip}
         colors={colors}
-        companyName={user?.companyName || "TrackForce AI"}
+        companyName={user?.companyName || "Lumina FieldForce"}
         printing={selectedSlip ? printingSlipId === selectedSlip.id : false}
         onClose={handleCloseSlip}
         onPrint={() => {

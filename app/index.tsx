@@ -1,21 +1,33 @@
-import { View, ActivityIndicator, StyleSheet } from "react-native";
+import { useEffect, useMemo, useState } from "react";
 import { Redirect } from "expo-router";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAppTheme } from "@/contexts/ThemeContext";
-import { AppCanvas } from "@/components/AppCanvas";
+import { StartScreen } from "@/components/StartScreen";
 
 export default function IndexScreen() {
   const { user, isLoading } = useAuth();
-  const { colors } = useAppTheme();
+  const [videoComplete, setVideoComplete] = useState(false);
+
+  useEffect(() => {
+    const fallback = setTimeout(() => setVideoComplete(true), 8000);
+    return () => clearTimeout(fallback);
+  }, []);
+
+  const subtitle = useMemo(() => {
+    if (isLoading) return "Preparing your workspace";
+    return "Final checks before launch";
+  }, [isLoading]);
+
+  const hint = useMemo(() => {
+    if (isLoading) return "Securing data and syncing live tools";
+    return "Optimizing your session";
+  }, [isLoading]);
+
+  if (!videoComplete) {
+    return <StartScreen showVideo onVideoFinish={() => setVideoComplete(true)} />;
+  }
 
   if (isLoading) {
-    return (
-      <AppCanvas>
-        <View style={[styles.container, { backgroundColor: "transparent" }]}>
-          <ActivityIndicator size="large" color={colors.primary} />
-        </View>
-      </AppCanvas>
-    );
+    return <StartScreen subtitle={subtitle} hint={hint} />;
   }
 
   if (user) {
@@ -24,11 +36,3 @@ export default function IndexScreen() {
 
   return <Redirect href="/login" />;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-});

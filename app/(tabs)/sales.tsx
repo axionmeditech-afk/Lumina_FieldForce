@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -23,9 +23,16 @@ import * as FileSystem from "expo-file-system/legacy";
 import Colors from "@/constants/colors";
 import {
   getApiBaseUrlCandidates,
+  getDolibarrProducts,
+  getDolibarrThirdParties,
+  createDolibarrSalesOrder,
+  validateDolibarrSalesOrder,
   getMapplsRoutePreview,
   searchMapplsAutosuggest,
   searchMapplsTextSearch,
+  type DolibarrProduct,
+  type DolibarrThirdParty,
+  type DolibarrOrderLineInput,
   type MapplsPlaceSuggestion,
   type MapplsRoutePreviewResponse,
 } from "@/lib/attendance-api";
@@ -136,6 +143,7 @@ function formatSearchAddress(value: string | null | undefined): string {
   return cleaned || "Address unavailable";
 }
 
+
 function buildRoutePlannerAddress(
   address: Partial<Location.LocationGeocodedAddress> | null | undefined
 ): string {
@@ -207,6 +215,54 @@ function dedupeRouteStops(stops: RoutePlannerStop[]): RoutePlannerStop[] {
     out.push(stop);
   }
   return out;
+}
+
+function normalizeSearchText(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function parseNumericId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return null;
+}
+
+function getDolibarrProductId(product: DolibarrProduct): number | null {
+  return parseNumericId(product.id);
+}
+
+function getDolibarrThirdPartyId(party: DolibarrThirdParty): number | null {
+  return parseNumericId(party.id);
+}
+
+function getDolibarrProductLabel(product: DolibarrProduct): string {
+  return product.label?.trim() || product.ref?.trim() || "Product";
+}
+
+function getDolibarrThirdPartyLabel(party: DolibarrThirdParty): string {
+  return party.name?.trim() || party.nom?.trim() || "Customer";
+}
+
+function getDolibarrProductPrice(product: DolibarrProduct): number {
+  const candidates = [product.price, product.price_ttc];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+    if (typeof candidate === "string") {
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
+function getDolibarrProductTaxRate(product: DolibarrProduct): number {
+  const candidate = product.tva_tx;
+  if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+  if (typeof candidate === "string") {
+    const parsed = Number(candidate);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
 }
 
 const speechPackage: any = (() => {
@@ -1049,6 +1105,18 @@ export default function SalesScreen() {
   const [routePreview, setRoutePreview] = useState<MapplsRoutePreviewResponse | null>(null);
   const [voicePulseBars, setVoicePulseBars] = useState<number[]>(VOICE_PULSE_BASELINE);
   const [voicePulseState, setVoicePulseState] = useState<"idle" | "listening" | "speaking">("idle");
+  const [posProducts, setPosProducts] = useState<DolibarrProduct[]>([]);
+  const [posCustomers, setPosCustomers] = useState<DolibarrThirdParty[]>([]);
+  const [posProductQuery, setPosProductQuery] = useState("");
+  const [posCustomerQuery, setPosCustomerQuery] = useState("");
+  const [posSelectedCustomerId, setPosSelectedCustomerId] = useState<string | null>(null);
+  const [posCart, setPosCart] = useState<Record<string, { product: DolibarrProduct; qty: number }>>(
+    {}
+  );
+  const [posLoading, setPosLoading] = useState(false);
+  const [posSubmitting, setPosSubmitting] = useState(false);
+  const [posError, setPosError] = useState<string | null>(null);
+  const [posSuccess, setPosSuccess] = useState<string | null>(null);
 
   const finalSegmentsRef = useRef<string[]>([]);
   const startedAtRef = useRef<number | null>(null);
@@ -1138,9 +1206,42 @@ export default function SalesScreen() {
     setSelectedSalespersonId(selfEmployee?.id || user.id);
   }, [isAdminViewer, user]);
 
+  const loadPosData = useCallback(async () => {
+    if (isAdminViewer) return;
+    setPosLoading(true);
+    setPosError(null);
+    setPosSuccess(null);
+    try {
+      const [products, customers] = await Promise.all([
+        getDolibarrProducts({ limit: 200, sortfield: "label", sortorder: "asc" }),
+        getDolibarrThirdParties({ limit: 200, sortfield: "name", sortorder: "asc" }),
+      ]);
+      setPosProducts(Array.isArray(products) ? products : []);
+      setPosCustomers(Array.isArray(customers) ? customers : []);
+      if (!posSelectedCustomerId) {
+        const firstCustomerId = customers && customers.length
+          ? getDolibarrThirdPartyId(customers[0])
+          : null;
+        if (firstCustomerId) {
+          setPosSelectedCustomerId(String(firstCustomerId));
+        }
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to load POS data from Dolibarr.";
+      setPosError(message);
+    } finally {
+      setPosLoading(false);
+    }
+  }, [isAdminViewer, posSelectedCustomerId]);
+
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    void loadPosData();
+  }, [loadPosData]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1738,7 +1839,7 @@ export default function SalesScreen() {
             headers: {
               Accept: "application/json",
               "Accept-Language": "en-IN,en",
-              "User-Agent": "TrackForceField/1.0 (route-planner)",
+              "User-Agent": "LuminaFieldForce/1.0 (route-planner)",
             },
           });
           if (response.ok) {
@@ -2503,6 +2604,48 @@ export default function SalesScreen() {
           status: "in_progress",
           arrivalAt: task.arrivalAt ?? nowIso,
           departureAt: null,
+          autoCaptureRecordingActive: false,
+          autoCaptureRecordingStartedAt: task.autoCaptureRecordingStartedAt ?? null,
+          autoCaptureRecordingStoppedAt: null,
+          autoCaptureConversationId: null,
+        });
+        await addAuditLog({
+          id: createLocalId("audit"),
+          userId: user.id,
+          userName: user.name,
+          action: "Visit Arrived",
+          details: `${user.name} arrived at ${getVisitLabel(task)}.`,
+          timestamp: nowIso,
+          module: "Sales Intelligence",
+        });
+        setActiveVisitTaskId(task.id);
+        await loadData();
+      } catch (error) {
+        Alert.alert(
+          "Unable to Start Visit",
+          error instanceof Error ? error.message : "Failed to mark arrival."
+        );
+      } finally {
+        setVisitActionTaskId(null);
+      }
+    },
+    [activeVisitTaskId, isAdminViewer, loadData, user, visitActionTaskId]
+  );
+
+  const handleMeetingStart = useCallback(
+    async (task: Task) => {
+      if (!user || isAdminViewer) return;
+      if (visitActionTaskId) return;
+      if (isRecordingStateRef.current && activeVisitTaskId && activeVisitTaskId !== task.id) {
+        Alert.alert("Visit In Progress", "Please complete current active visit before starting another.");
+        return;
+      }
+      setVisitActionTaskId(task.id);
+      try {
+        const nowIso = new Date().toISOString();
+        await updateTask(task.id, {
+          status: "in_progress",
+          arrivalAt: task.arrivalAt ?? nowIso,
           autoCaptureRecordingActive: true,
           autoCaptureRecordingStartedAt: task.autoCaptureRecordingStartedAt ?? nowIso,
           autoCaptureRecordingStoppedAt: null,
@@ -2512,8 +2655,8 @@ export default function SalesScreen() {
           id: createLocalId("audit"),
           userId: user.id,
           userName: user.name,
-          action: "Auto Recording Started",
-          details: `${user.name} arrived at ${getVisitLabel(task)} and auto capture was started.`,
+          action: "Meeting Started",
+          details: `${user.name} started meeting at ${getVisitLabel(task)}.`,
           timestamp: nowIso,
           module: "Sales Intelligence",
         });
@@ -2532,8 +2675,8 @@ export default function SalesScreen() {
         await loadData();
       } catch (error) {
         Alert.alert(
-          "Unable to Start Visit",
-          error instanceof Error ? error.message : "Failed to mark arrival."
+          "Unable to Start Meeting",
+          error instanceof Error ? error.message : "Failed to start meeting."
         );
       } finally {
         setVisitActionTaskId(null);
@@ -2542,7 +2685,7 @@ export default function SalesScreen() {
     [activeVisitTaskId, isAdminViewer, loadData, startRecording, user, visitActionTaskId]
   );
 
-  const handleVisitDeparture = useCallback(
+  const handleMeetingEnd = useCallback(
     async (task: Task) => {
       if (!user || isAdminViewer) return;
       if (visitActionTaskId) return;
@@ -2556,13 +2699,10 @@ export default function SalesScreen() {
           minTranscriptLength: 1,
         });
         if (!conversationId) {
-          throw new Error("Recording could not be saved. Please try Departure again.");
+          throw new Error("Recording could not be saved. Please try Meeting End again.");
         }
         const nowIso = new Date().toISOString();
         await updateTask(task.id, {
-          status: "completed",
-          departureAt: nowIso,
-          arrivalAt: task.arrivalAt ?? nowIso,
           autoCaptureRecordingActive: false,
           autoCaptureRecordingStoppedAt: nowIso,
           autoCaptureConversationId: conversationId,
@@ -2571,8 +2711,52 @@ export default function SalesScreen() {
           id: createLocalId("audit"),
           userId: user.id,
           userName: user.name,
-          action: "Auto Recording Stopped",
-          details: `${user.name} departed from ${getVisitLabel(task)} and auto capture was stopped.`,
+          action: "Meeting Ended",
+          details: `${user.name} ended meeting at ${getVisitLabel(task)}.`,
+          timestamp: nowIso,
+          module: "Sales Intelligence",
+        });
+        await loadData();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } catch (error) {
+        Alert.alert(
+          "Unable to End Meeting",
+          error instanceof Error ? error.message : "Failed to stop meeting."
+        );
+      } finally {
+        setVisitActionTaskId(null);
+      }
+    },
+    [isAdminViewer, loadData, saveConversation, stopRecordingAndWait, user, visitActionTaskId]
+  );
+
+  const handleVisitDeparture = useCallback(
+    async (task: Task) => {
+      if (!user || isAdminViewer) return;
+      if (visitActionTaskId) return;
+      if (task.autoCaptureRecordingActive) {
+        Alert.alert("Meeting In Progress", "Please end the meeting before departure.");
+        return;
+      }
+      if (!task.autoCaptureConversationId) {
+        Alert.alert("Meeting Not Ended", "Please tap Meeting End before departure.");
+        return;
+      }
+      setVisitActionTaskId(task.id);
+      try {
+        const nowIso = new Date().toISOString();
+        await updateTask(task.id, {
+          status: "completed",
+          departureAt: nowIso,
+          arrivalAt: task.arrivalAt ?? nowIso,
+          autoCaptureRecordingActive: false,
+        });
+        await addAuditLog({
+          id: createLocalId("audit"),
+          userId: user.id,
+          userName: user.name,
+          action: "Visit Completed",
+          details: `${user.name} departed from ${getVisitLabel(task)}.`,
           timestamp: nowIso,
           module: "Sales Intelligence",
         });
@@ -2588,7 +2772,7 @@ export default function SalesScreen() {
         setVisitActionTaskId(null);
       }
     },
-    [isAdminViewer, loadData, saveConversation, stopRecordingAndWait, user, visitActionTaskId]
+    [isAdminViewer, loadData, user, visitActionTaskId]
   );
 
   const voicePulseColor =
@@ -2608,6 +2792,197 @@ export default function SalesScreen() {
       ? "Audio signal detected. Continue speaking."
       : "Recorder is active. Keep speaking to strengthen the live pulse."
     : "You're ready to record.";
+  const visitSummary = useMemo(() => {
+    let completed = 0;
+    let inProgress = 0;
+    let pending = 0;
+    for (const task of todaysVisitTasks) {
+      const status = getVisitStatus(task);
+      if (status === "completed") completed += 1;
+      else if (status === "in_progress") inProgress += 1;
+      else pending += 1;
+    }
+    return {
+      total: todaysVisitTasks.length,
+      completed,
+      inProgress,
+      pending,
+    };
+  }, [todaysVisitTasks]);
+  const activeVisitTask = useMemo(
+    () => todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress") ?? null,
+    [todaysVisitTasks]
+  );
+  const remainingVisits = Math.max(visitSummary.total - visitSummary.completed, 0);
+  const salesHeroMeta = activeVisitTask
+    ? `Active: ${getVisitLabel(activeVisitTask)}`
+    : nextNavigationStop
+      ? `Next stop: ${nextNavigationStop.label}`
+      : "No visits pending today.";
+  const salesHeroStatus = visitSummary.total
+    ? `${visitSummary.completed}/${visitSummary.total} visits completed`
+    : "No visits assigned yet.";
+
+  const selectedCustomer = useMemo(() => {
+    if (!posSelectedCustomerId) return null;
+    return (
+      posCustomers.find(
+        (entry) => String(getDolibarrThirdPartyId(entry) ?? "") === posSelectedCustomerId
+      ) || null
+    );
+  }, [posCustomers, posSelectedCustomerId]);
+
+  const filteredCustomers = useMemo(() => {
+    const query = normalizeSearchText(posCustomerQuery);
+    const matches = posCustomers.filter((entry) => {
+      const label = getDolibarrThirdPartyLabel(entry);
+      const email = entry.email || "";
+      return !query || label.toLowerCase().includes(query) || email.toLowerCase().includes(query);
+    });
+    return matches.slice(0, 6);
+  }, [posCustomers, posCustomerQuery]);
+
+  const filteredProducts = useMemo(() => {
+    const query = normalizeSearchText(posProductQuery);
+    const matches = posProducts.filter((entry) => {
+      const label = getDolibarrProductLabel(entry);
+      const ref = entry.ref || "";
+      return !query || label.toLowerCase().includes(query) || ref.toLowerCase().includes(query);
+    });
+    return matches.slice(0, 8);
+  }, [posProducts, posProductQuery]);
+
+  const cartItems = useMemo(
+    () =>
+      Object.values(posCart).filter(
+        (entry) => entry && typeof entry.qty === "number" && entry.qty > 0
+      ),
+    [posCart]
+  );
+
+  const cartTotal = useMemo(() => {
+    return cartItems.reduce((sum, entry) => {
+      const price = getDolibarrProductPrice(entry.product);
+      return sum + price * entry.qty;
+    }, 0);
+  }, [cartItems]);
+
+  const formatPrice = useCallback((value: number) => {
+    return `INR ${value.toFixed(2)}`;
+  }, []);
+
+  const handleSelectCustomer = useCallback((party: DolibarrThirdParty) => {
+    const id = getDolibarrThirdPartyId(party);
+    if (!id) return;
+    setPosSelectedCustomerId(String(id));
+  }, []);
+
+  const handleAddProductToCart = useCallback((product: DolibarrProduct) => {
+    const id = getDolibarrProductId(product);
+    if (!id) return;
+    setPosCart((current) => {
+      const key = String(id);
+      const existing = current[key];
+      const nextQty = existing ? existing.qty + 1 : 1;
+      return {
+        ...current,
+        [key]: {
+          product: existing?.product || product,
+          qty: nextQty,
+        },
+      };
+    });
+  }, []);
+
+  const handleSetCartQty = useCallback((productId: number, qty: number) => {
+    const safeQty = Math.max(0, Math.floor(qty));
+    setPosCart((current) => {
+      const key = String(productId);
+      if (safeQty <= 0) {
+        const { [key]: _removed, ...rest } = current;
+        return rest;
+      }
+      const existing = current[key];
+      if (!existing) return current;
+      return {
+        ...current,
+        [key]: {
+          ...existing,
+          qty: safeQty,
+        },
+      };
+    });
+  }, []);
+
+  const handleCreateSalesOrder = useCallback(async () => {
+    if (posSubmitting) return;
+    if (!selectedCustomer) {
+      Alert.alert("Select Customer", "Choose a customer before creating the sales order.");
+      return;
+    }
+    if (!cartItems.length) {
+      Alert.alert("Cart Empty", "Add at least one product to create a sales order.");
+      return;
+    }
+
+    const customerId = getDolibarrThirdPartyId(selectedCustomer);
+    if (!customerId) {
+      Alert.alert("Customer Missing", "Unable to resolve the selected customer.");
+      return;
+    }
+
+    const lines: DolibarrOrderLineInput[] = cartItems
+      .map((entry) => {
+        const productId = getDolibarrProductId(entry.product);
+        if (!productId) return null;
+        const unitPrice = getDolibarrProductPrice(entry.product);
+        const taxRate = getDolibarrProductTaxRate(entry.product);
+        const rawProductType = entry.product.type;
+        const productType =
+          typeof rawProductType === "number"
+            ? rawProductType
+            : typeof rawProductType === "string"
+              ? Number(rawProductType)
+              : 0;
+        return {
+          productId,
+          qty: entry.qty,
+          unitPrice,
+          taxRate,
+          description: entry.product.description || entry.product.label || undefined,
+          productType: Number.isFinite(productType) ? productType : 0,
+        } satisfies DolibarrOrderLineInput;
+      })
+      .filter((entry): entry is DolibarrOrderLineInput => Boolean(entry));
+
+    if (!lines.length) {
+      Alert.alert("Products Missing", "Unable to build sales order lines.");
+      return;
+    }
+
+    setPosSubmitting(true);
+    setPosError(null);
+    setPosSuccess(null);
+    try {
+      const result = await createDolibarrSalesOrder({
+        customerId,
+        lines,
+      });
+      if (!result.orderId) {
+        throw new Error(result.message || "Sales order created but ID missing.");
+      }
+      await validateDolibarrSalesOrder(result.orderId);
+      setPosSuccess(`Sales order #${result.orderId} created and validated.`);
+      setPosCart({});
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to create sales order.";
+      setPosError(message);
+      Alert.alert("Order Failed", message);
+    } finally {
+      setPosSubmitting(false);
+    }
+  }, [cartItems, posSubmitting, selectedCustomer]);
 
   return (
     <AppCanvas>
@@ -2633,466 +3008,590 @@ export default function SalesScreen() {
               </Text>
             </Animated.View>
 
-            <Animated.View
-              entering={FadeInDown.duration(400).delay(40)}
-              style={[
-                styles.routeCard,
-                { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-              ]}
-            >
-              <View style={styles.routeHeaderRow}>
-                <Text
-                  style={[styles.routeHeaderTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}
-                >
-                  Today&apos;s Route
-                </Text>
-                <Text
-                  style={[
-                    styles.routeHeaderSubtitle,
-                    { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
-                  ]}
-                >
-                  {mumbaiNowLabel}
-                </Text>
-              </View>
+            {isAdminViewer ? (
+              <Animated.View
+                entering={FadeInDown.duration(400).delay(40)}
+                style={[
+                  styles.routeCard,
+                  { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                ]}
+              >
+                <View style={styles.routeHeaderRow}>
+                  <Text
+                    style={[styles.routeHeaderTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}
+                  >
+                    Today&apos;s Route
+                  </Text>
+                  <Text
+                    style={[
+                      styles.routeHeaderSubtitle,
+                      { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                    ]}
+                  >
+                    {mumbaiNowLabel}
+                  </Text>
+                </View>
 
-              {isAdminViewer ? (
-                <FlatList
-                  horizontal
-                  data={selectableSalespeople}
-                  keyExtractor={(item) => item.id}
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.salespersonChipRow}
-                  renderItem={({ item }) => {
-                    const active = item.id === selectedSalespersonId;
-                    return (
-                      <Pressable
-                        onPress={() => setSelectedSalespersonId(item.id)}
-                        style={[
-                          styles.salespersonChip,
-                          {
-                            borderColor: active ? colors.primary : colors.border,
-                            backgroundColor: active ? colors.primary : colors.surfaceSecondary,
-                          },
-                        ]}
-                      >
-                        <Text
+                {isAdminViewer ? (
+                  <FlatList
+                    horizontal
+                    data={selectableSalespeople}
+                    keyExtractor={(item) => item.id}
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.salespersonChipRow}
+                    renderItem={({ item }) => {
+                      const active = item.id === selectedSalespersonId;
+                      return (
+                        <Pressable
+                          onPress={() => setSelectedSalespersonId(item.id)}
                           style={[
-                            styles.salespersonChipText,
+                            styles.salespersonChip,
                             {
-                              color: active ? "#FFFFFF" : colors.textSecondary,
-                              fontFamily: "Inter_500Medium",
+                              borderColor: active ? colors.primary : colors.border,
+                              backgroundColor: active ? colors.primary : colors.surfaceSecondary,
                             },
                           ]}
                         >
-                          {item.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  }}
-                />
-              ) : null}
-
-              {isAdminViewer ? (
-                <View style={[styles.routePlannerCard, { borderColor: colors.borderLight }]}>
-                  <View style={styles.routePlannerHeader}>
-                    <Text
-                      style={[
-                        styles.routePlannerTitle,
-                        { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                      ]}
-                    >
-                      Assign Route Stops
-                    </Text>
-                    <Text
-                      style={[
-                        styles.routePlannerSubtitle,
-                        { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
-                      ]}
-                    >
-                      {selectedSalesperson
-                        ? `${selectedSalesperson.name} | ${routePlanDate}`
-                        : routePlanDate}
-                    </Text>
-                  </View>
-
-                  <TextInput
-                    value={routePlanDate}
-                    onChangeText={setRoutePlanDate}
-                    placeholder="Route date (YYYY-MM-DD)"
-                    placeholderTextColor={colors.textTertiary}
-                    style={[
-                      styles.routePlannerInput,
-                      {
-                        borderColor: colors.border,
-                        backgroundColor: colors.surface,
-                        color: colors.text,
-                        fontFamily: "Inter_500Medium",
-                      },
-                    ]}
+                          <Text
+                            style={[
+                              styles.salespersonChipText,
+                              {
+                                color: active ? "#FFFFFF" : colors.textSecondary,
+                                fontFamily: "Inter_500Medium",
+                              },
+                            ]}
+                          >
+                            {item.name}
+                          </Text>
+                        </Pressable>
+                      );
+                    }}
                   />
+                ) : null}
 
-                  <View style={styles.routeSearchRow}>
+                {isAdminViewer ? (
+                  <View style={[styles.routePlannerCard, { borderColor: colors.borderLight }]}>
+                    <View style={styles.routePlannerHeader}>
+                      <Text
+                        style={[
+                          styles.routePlannerTitle,
+                          { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                        ]}
+                      >
+                        Assign Route Stops
+                      </Text>
+                      <Text
+                        style={[
+                          styles.routePlannerSubtitle,
+                          { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                        ]}
+                      >
+                        {selectedSalesperson
+                          ? `${selectedSalesperson.name} | ${routePlanDate}`
+                          : routePlanDate}
+                      </Text>
+                    </View>
+
                     <TextInput
-                      value={routeSearchQuery}
-                      onChangeText={setRouteSearchQuery}
-                      onSubmitEditing={() => {
-                        void handleSearchRouteLocations();
-                      }}
-                      returnKeyType="search"
-                      placeholder="Search location, area, company..."
+                      value={routePlanDate}
+                      onChangeText={setRoutePlanDate}
+                      placeholder="Route date (YYYY-MM-DD)"
                       placeholderTextColor={colors.textTertiary}
                       style={[
-                        styles.routeSearchInput,
+                        styles.routePlannerInput,
                         {
                           borderColor: colors.border,
                           backgroundColor: colors.surface,
                           color: colors.text,
-                          fontFamily: "Inter_400Regular",
+                          fontFamily: "Inter_500Medium",
                         },
                       ]}
                     />
-                    <Pressable
-                      onPress={() => void handleSearchRouteLocations()}
-                      disabled={routeSearchBusy}
-                      style={({ pressed }) => [
-                        styles.routeSearchButton,
-                        {
-                          backgroundColor: colors.primary,
-                          opacity: pressed || routeSearchBusy ? 0.75 : 1,
-                        },
-                      ]}
-                    >
-                      {routeSearchBusy ? (
-                        <ActivityIndicator size="small" color="#FFFFFF" />
-                      ) : (
-                        <Ionicons name="search-outline" size={17} color="#FFFFFF" />
-                      )}
-                    </Pressable>
-                  </View>
 
-                  {routeSearchResults.length ? (
+                    <View style={styles.routeSearchRow}>
+                      <TextInput
+                        value={routeSearchQuery}
+                        onChangeText={setRouteSearchQuery}
+                        onSubmitEditing={() => {
+                          void handleSearchRouteLocations();
+                        }}
+                        returnKeyType="search"
+                        placeholder="Search location, area, company..."
+                        placeholderTextColor={colors.textTertiary}
+                        style={[
+                          styles.routeSearchInput,
+                          {
+                            borderColor: colors.border,
+                            backgroundColor: colors.surface,
+                            color: colors.text,
+                            fontFamily: "Inter_400Regular",
+                          },
+                        ]}
+                      />
+                      <Pressable
+                        onPress={() => void handleSearchRouteLocations()}
+                        disabled={routeSearchBusy}
+                        style={({ pressed }) => [
+                          styles.routeSearchButton,
+                          {
+                            backgroundColor: colors.primary,
+                            opacity: pressed || routeSearchBusy ? 0.75 : 1,
+                          },
+                        ]}
+                      >
+                        {routeSearchBusy ? (
+                          <ActivityIndicator size="small" color="#FFFFFF" />
+                        ) : (
+                          <Ionicons name="search-outline" size={17} color="#FFFFFF" />
+                        )}
+                      </Pressable>
+                    </View>
+
+                    {routeSearchResults.length ? (
+                      <View
+                        style={[
+                          styles.routeSearchResultWrap,
+                          { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                        ]}
+                      >
+                        {routeSearchResults.map((result) => (
+                          <Pressable
+                            key={result.id}
+                            onPress={() => handleAddRouteStop(result)}
+                            style={({ pressed }) => [
+                              styles.routeSearchResultRow,
+                              {
+                                borderBottomColor: colors.borderLight,
+                                opacity: pressed ? 0.85 : 1,
+                              },
+                            ]}
+                          >
+                            <View style={styles.routeSearchResultTextWrap}>
+                              <Text
+                                style={[
+                                  styles.routeSearchResultTitle,
+                                  { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                ]}
+                                numberOfLines={1}
+                              >
+                                {result.label}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.routeSearchResultMeta,
+                                  { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                ]}
+                                numberOfLines={2}
+                              >
+                                {formatSearchAddress(result.address)}
+                              </Text>
+                            </View>
+                            <Ionicons name="add-circle-outline" size={20} color={colors.primary} />
+                          </Pressable>
+                        ))}
+                      </View>
+                    ) : null}
+
                     <View
                       style={[
-                        styles.routeSearchResultWrap,
+                        styles.routeDraftWrap,
                         { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
                       ]}
                     >
-                      {routeSearchResults.map((result) => (
-                        <Pressable
-                          key={result.id}
-                          onPress={() => handleAddRouteStop(result)}
-                          style={({ pressed }) => [
-                            styles.routeSearchResultRow,
-                            {
-                              borderBottomColor: colors.borderLight,
-                              opacity: pressed ? 0.85 : 1,
-                            },
-                          ]}
-                        >
-                          <View style={styles.routeSearchResultTextWrap}>
-                            <Text
+                      {routePlanStops.length ? (
+                        routePlanStops.map((stop, index) => (
+                          <View
+                            key={stop.id}
+                            style={[
+                              styles.routeDraftRow,
+                              index < routePlanStops.length - 1 && {
+                                borderBottomWidth: 0.5,
+                                borderBottomColor: colors.borderLight,
+                              },
+                            ]}
+                          >
+                            <View
                               style={[
-                                styles.routeSearchResultTitle,
-                                { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                styles.routeDraftSequence,
+                                { backgroundColor: `${colors.primary}20` },
                               ]}
-                              numberOfLines={1}
                             >
-                              {result.label}
-                            </Text>
-                            <Text
-                              style={[
-                                styles.routeSearchResultMeta,
-                                { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                              ]}
-                              numberOfLines={2}
-                            >
-                              {formatSearchAddress(result.address)}
-                            </Text>
+                              <Text
+                                style={[
+                                  styles.routeDraftSequenceText,
+                                  { color: colors.primary, fontFamily: "Inter_700Bold" },
+                                ]}
+                              >
+                                {index + 1}
+                              </Text>
+                            </View>
+                            <View style={styles.routeDraftTextWrap}>
+                              <Text
+                                style={[
+                                  styles.routeDraftTitle,
+                                  { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                ]}
+                                numberOfLines={1}
+                              >
+                                {stop.label}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.routeDraftMeta,
+                                  { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                ]}
+                                numberOfLines={2}
+                              >
+                                {formatSearchAddress(stop.address)}
+                              </Text>
+                            </View>
+                            <View style={styles.routeDraftActions}>
+                              <Pressable
+                                onPress={() => handleMoveRouteStop(index, "up")}
+                                disabled={index === 0}
+                                style={({ pressed }) => [
+                                  styles.routeDraftIconBtn,
+                                  {
+                                    opacity: index === 0 ? 0.35 : pressed ? 0.7 : 1,
+                                  },
+                                ]}
+                              >
+                                <Ionicons name="chevron-up-outline" size={16} color={colors.textSecondary} />
+                              </Pressable>
+                              <Pressable
+                                onPress={() => handleMoveRouteStop(index, "down")}
+                                disabled={index === routePlanStops.length - 1}
+                                style={({ pressed }) => [
+                                  styles.routeDraftIconBtn,
+                                  {
+                                    opacity:
+                                      index === routePlanStops.length - 1 ? 0.35 : pressed ? 0.7 : 1,
+                                  },
+                                ]}
+                              >
+                                <Ionicons
+                                  name="chevron-down-outline"
+                                  size={16}
+                                  color={colors.textSecondary}
+                                />
+                              </Pressable>
+                              <Pressable
+                                onPress={() => handleRemoveRouteStop(stop.id)}
+                                style={({ pressed }) => [
+                                  styles.routeDraftIconBtn,
+                                  { opacity: pressed ? 0.7 : 1 },
+                                ]}
+                              >
+                                <Ionicons name="close-outline" size={16} color={colors.danger} />
+                              </Pressable>
+                            </View>
                           </View>
-                          <Ionicons name="add-circle-outline" size={20} color={colors.primary} />
-                        </Pressable>
-                      ))}
+                        ))
+                      ) : (
+                        <View style={styles.routeDraftEmpty}>
+                          <Text
+                            style={[
+                              styles.routeDraftEmptyText,
+                              { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                            ]}
+                          >
+                            Search and add stops to build route order.
+                          </Text>
+                        </View>
+                      )}
                     </View>
-                  ) : null}
 
+                    <Pressable
+                      onPress={() => void handleAssignRoutePlan()}
+                      disabled={routePlanSaving || !selectedSalespersonId || !routePlanStops.length}
+                      style={({ pressed }) => [
+                        styles.routeAssignButton,
+                        {
+                          backgroundColor: colors.primary,
+                          opacity:
+                            pressed || routePlanSaving || !selectedSalespersonId || !routePlanStops.length
+                              ? 0.72
+                              : 1,
+                        },
+                      ]}
+                    >
+                      {routePlanSaving ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.routeAssignButtonText}>
+                          Assign Route ({routePlanStops.length})
+                        </Text>
+                      )}
+                    </Pressable>
+                  </View>
+                ) : null}
+
+                <RouteMapNative
+                  points={routeTimeline.points}
+                  halts={routeTimeline.halts}
+                  plannedStops={visiblePlannedStops}
+                  routePath={routePreviewPath}
+                  colors={colors}
+                  height={255}
+                />
+
+                <View
+                  style={[
+                    styles.routePreviewCard,
+                    { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                  ]}
+                >
+                  <View style={[styles.routePreviewIconWrap, { backgroundColor: `${colors.primary}18` }]}>
+                    {routePreviewBusy ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <Ionicons name="navigate-outline" size={16} color={colors.primary} />
+                    )}
+                  </View>
+                  <View style={styles.routePreviewTextWrap}>
+                    <Text
+                      style={[
+                        styles.routePreviewTitle,
+                        { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                      ]}
+                    >
+                      Destination Route
+                    </Text>
+                    <Text
+                      style={[
+                        styles.routePreviewMeta,
+                        { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                      ]}
+                      numberOfLines={3}
+                    >
+                      {routePreviewSummary}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.summaryRow}>
                   <View
                     style={[
-                      styles.routeDraftWrap,
+                      styles.summaryCard,
                       { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
                     ]}
                   >
-                    {routePlanStops.length ? (
-                      routePlanStops.map((stop, index) => (
-                        <View
-                          key={stop.id}
-                          style={[
-                            styles.routeDraftRow,
-                            index < routePlanStops.length - 1 && {
-                              borderBottomWidth: 0.5,
-                              borderBottomColor: colors.borderLight,
-                            },
-                          ]}
-                        >
-                          <View
-                            style={[
-                              styles.routeDraftSequence,
-                              { backgroundColor: `${colors.primary}20` },
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.routeDraftSequenceText,
-                                { color: colors.primary, fontFamily: "Inter_700Bold" },
-                              ]}
-                            >
-                              {index + 1}
-                            </Text>
-                          </View>
-                          <View style={styles.routeDraftTextWrap}>
-                            <Text
-                              style={[
-                                styles.routeDraftTitle,
-                                { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                              ]}
-                              numberOfLines={1}
-                            >
-                              {stop.label}
-                            </Text>
-                            <Text
-                              style={[
-                                styles.routeDraftMeta,
-                                { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                              ]}
-                              numberOfLines={2}
-                            >
-                              {formatSearchAddress(stop.address)}
-                            </Text>
-                          </View>
-                          <View style={styles.routeDraftActions}>
-                            <Pressable
-                              onPress={() => handleMoveRouteStop(index, "up")}
-                              disabled={index === 0}
-                              style={({ pressed }) => [
-                                styles.routeDraftIconBtn,
-                                {
-                                  opacity: index === 0 ? 0.35 : pressed ? 0.7 : 1,
-                                },
-                              ]}
-                            >
-                              <Ionicons name="chevron-up-outline" size={16} color={colors.textSecondary} />
-                            </Pressable>
-                            <Pressable
-                              onPress={() => handleMoveRouteStop(index, "down")}
-                              disabled={index === routePlanStops.length - 1}
-                              style={({ pressed }) => [
-                                styles.routeDraftIconBtn,
-                                {
-                                  opacity:
-                                    index === routePlanStops.length - 1 ? 0.35 : pressed ? 0.7 : 1,
-                                },
-                              ]}
-                            >
-                              <Ionicons
-                                name="chevron-down-outline"
-                                size={16}
-                                color={colors.textSecondary}
-                              />
-                            </Pressable>
-                            <Pressable
-                              onPress={() => handleRemoveRouteStop(stop.id)}
-                              style={({ pressed }) => [
-                                styles.routeDraftIconBtn,
-                                { opacity: pressed ? 0.7 : 1 },
-                              ]}
-                            >
-                              <Ionicons name="close-outline" size={16} color={colors.danger} />
-                            </Pressable>
-                          </View>
-                        </View>
-                      ))
-                    ) : (
-                      <View style={styles.routeDraftEmpty}>
-                        <Text
-                          style={[
-                            styles.routeDraftEmptyText,
-                            { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                          ]}
-                        >
-                          Search and add stops to build route order.
+                    <Text
+                      style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}
+                    >
+                      {routeTimeline.summary.totalDistanceKm.toFixed(2)} km
+                    </Text>
+                    <Text
+                      style={[
+                        styles.summaryLabel,
+                        { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                      ]}
+                    >
+                      Distance
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.summaryCard,
+                      { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                    ]}
+                  >
+                    <Text
+                      style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}
+                    >
+                      {routeTimeline.summary.totalHaltMinutes} mins
+                    </Text>
+                    <Text
+                      style={[
+                        styles.summaryLabel,
+                        { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                      ]}
+                    >
+                      Halt Time
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.summaryCard,
+                      { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                    ]}
+                  >
+                    <Text
+                      style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}
+                    >
+                      {visiblePlannedStops.length}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.summaryLabel,
+                        { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                      ]}
+                    >
+                      Planned Stops
+                    </Text>
+                  </View>
+                </View>
+
+                <View
+                  style={[
+                    styles.currentLocationCard,
+                    { borderColor: colors.border, backgroundColor: colors.surface },
+                  ]}
+                >
+                  <View style={[styles.currentLocationIcon, { backgroundColor: `${colors.primary}18` }]}>
+                    <Ionicons name="locate-outline" size={16} color={colors.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[
+                        styles.currentLocationTitle,
+                        { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                      ]}
+                    >
+                      Current Location
+                    </Text>
+                    <Text
+                      style={[
+                        styles.currentLocationMeta,
+                        { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                      ]}
+                    >
+                      {latestRoutePoint
+                        ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
+                            latestRoutePoint.batteryLevel
+                          )}`
+                        : "Waiting for live GPS point..."}
+                    </Text>
+                  </View>
+                </View>
+              </Animated.View>
+            ) : (
+              <>
+                <Animated.View entering={FadeInDown.duration(420).delay(40)}>
+                  <LinearGradient
+                    colors={isDark ? [colors.heroEnd, colors.primary] : [colors.heroStart, colors.heroEnd]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.salesHeroCard}
+                  >
+                    <View style={styles.salesHeroTopRow}>
+                      <Text style={styles.salesHeroEyebrow}>My Field Day</Text>
+                      <Text style={styles.salesHeroDate}>{mumbaiNowLabel}</Text>
+                    </View>
+                    <Text style={styles.salesHeroTitle}>Route Focus</Text>
+                    <Text style={styles.salesHeroMeta}>{salesHeroMeta}</Text>
+                    <View style={styles.salesHeroStatsRow}>
+                      <View style={styles.salesHeroStat}>
+                        <Text style={styles.salesHeroStatValue}>{visitSummary.completed}</Text>
+                        <Text style={styles.salesHeroStatLabel}>Completed</Text>
+                      </View>
+                      <View style={styles.salesHeroStatDivider} />
+                      <View style={styles.salesHeroStat}>
+                        <Text style={styles.salesHeroStatValue}>{remainingVisits}</Text>
+                        <Text style={styles.salesHeroStatLabel}>Remaining</Text>
+                      </View>
+                      <View style={styles.salesHeroStatDivider} />
+                      <View style={styles.salesHeroStat}>
+                        <Text style={styles.salesHeroStatValue}>{visitSummary.total}</Text>
+                        <Text style={styles.salesHeroStatLabel}>Total</Text>
+                      </View>
+                    </View>
+                    <View style={styles.salesHeroFooter}>
+                      <View
+                        style={[
+                          styles.salesHeroBadge,
+                          {
+                            backgroundColor: activeVisitTask ? "rgba(255,255,255,0.24)" : "rgba(255,255,255,0.18)",
+                          },
+                        ]}
+                      >
+                        <Ionicons name={activeVisitTask ? "pulse-outline" : "checkmark-circle-outline"} size={14} color="#FFFFFF" />
+                        <Text style={styles.salesHeroBadgeText}>
+                          {activeVisitTask ? "Visit live" : "Route ready"}
                         </Text>
                       </View>
+                      <Text style={styles.salesHeroStatus}>{salesHeroStatus}</Text>
+                    </View>
+                  </LinearGradient>
+                </Animated.View>
+
+                <Animated.View
+                  entering={FadeInDown.duration(380).delay(80)}
+                  style={[
+                    styles.salesMapCard,
+                    { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                  ]}
+                >
+                  <View style={styles.salesMapHeader}>
+                    <Text style={[styles.salesMapTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      My Route Map
+                    </Text>
+                    <Text style={[styles.salesMapMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                      {mumbaiNowLabel}
+                    </Text>
+                  </View>
+                  <RouteMapNative
+                    points={routeTimeline.points}
+                    halts={routeTimeline.halts}
+                    plannedStops={visiblePlannedStops}
+                    routePath={routePreviewPath}
+                    colors={colors}
+                    height={230}
+                  />
+                </Animated.View>
+
+                <Animated.View
+                  entering={FadeInDown.duration(360).delay(110)}
+                  style={[
+                    styles.salesInfoCard,
+                    { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                  ]}
+                >
+                  <View style={[styles.salesInfoIcon, { backgroundColor: `${colors.primary}18` }]}>
+                    {routePreviewBusy ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <Ionicons name="navigate-outline" size={16} color={colors.primary} />
                     )}
                   </View>
+                  <View style={styles.salesInfoText}>
+                    <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      Next Stop
+                    </Text>
+                    <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                      {routePreviewSummary}
+                    </Text>
+                  </View>
+                </Animated.View>
 
-                  <Pressable
-                    onPress={() => void handleAssignRoutePlan()}
-                    disabled={routePlanSaving || !selectedSalespersonId || !routePlanStops.length}
-                    style={({ pressed }) => [
-                      styles.routeAssignButton,
-                      {
-                        backgroundColor: colors.primary,
-                        opacity:
-                          pressed || routePlanSaving || !selectedSalespersonId || !routePlanStops.length
-                            ? 0.72
-                            : 1,
-                      },
-                    ]}
-                  >
-                    {routePlanSaving ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.routeAssignButtonText}>
-                        Assign Route ({routePlanStops.length})
-                      </Text>
-                    )}
-                  </Pressable>
-                </View>
-              ) : null}
-
-              <RouteMapNative
-                points={routeTimeline.points}
-                halts={routeTimeline.halts}
-                plannedStops={visiblePlannedStops}
-                routePath={routePreviewPath}
-                colors={colors}
-                height={255}
-              />
-
-              <View
-                style={[
-                  styles.routePreviewCard,
-                  { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
-                ]}
-              >
-                <View style={[styles.routePreviewIconWrap, { backgroundColor: `${colors.primary}18` }]}>
-                  {routePreviewBusy ? (
-                    <ActivityIndicator size="small" color={colors.primary} />
-                  ) : (
-                    <Ionicons name="navigate-outline" size={16} color={colors.primary} />
-                  )}
-                </View>
-                <View style={styles.routePreviewTextWrap}>
-                  <Text
-                    style={[
-                      styles.routePreviewTitle,
-                      { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                    ]}
-                  >
-                    Destination Route
-                  </Text>
-                  <Text
-                    style={[
-                      styles.routePreviewMeta,
-                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                    ]}
-                    numberOfLines={3}
-                  >
-                    {routePreviewSummary}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.summaryRow}>
-                <View
+                <Animated.View
+                  entering={FadeInDown.duration(360).delay(130)}
                   style={[
-                    styles.summaryCard,
-                    { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                    styles.salesInfoCard,
+                    { backgroundColor: colors.surface, borderColor: colors.border },
                   ]}
                 >
-                  <Text
-                    style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}
-                  >
-                    {routeTimeline.summary.totalDistanceKm.toFixed(2)} km
-                  </Text>
-                  <Text
-                    style={[
-                      styles.summaryLabel,
-                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                    ]}
-                  >
-                    Distance
-                  </Text>
-                </View>
-                <View
-                  style={[
-                    styles.summaryCard,
-                    { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
-                  ]}
-                >
-                  <Text
-                    style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}
-                  >
-                    {routeTimeline.summary.totalHaltMinutes} mins
-                  </Text>
-                  <Text
-                    style={[
-                      styles.summaryLabel,
-                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                    ]}
-                  >
-                    Halt Time
-                  </Text>
-                </View>
-                <View
-                  style={[
-                    styles.summaryCard,
-                    { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
-                  ]}
-                >
-                  <Text
-                    style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}
-                  >
-                    {visiblePlannedStops.length}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.summaryLabel,
-                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                    ]}
-                  >
-                    Planned Stops
-                  </Text>
-                </View>
-              </View>
+                  <View style={[styles.salesInfoIcon, { backgroundColor: `${colors.secondary}18` }]}>
+                    <Ionicons name="locate-outline" size={16} color={colors.secondary} />
+                  </View>
+                  <View style={styles.salesInfoText}>
+                    <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>Current Location</Text>
+                    <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                      {latestRoutePoint
+                        ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
+                            latestRoutePoint.batteryLevel
+                          )}`
+                        : "Waiting for live GPS point..."}
+                    </Text>
+                  </View>
+                </Animated.View>
+              </>
+            )}
 
-              <View
-                style={[
-                  styles.currentLocationCard,
-                  { borderColor: colors.border, backgroundColor: colors.surface },
-                ]}
-              >
-                <View style={[styles.currentLocationIcon, { backgroundColor: `${colors.primary}18` }]}>
-                  <Ionicons name="locate-outline" size={16} color={colors.primary} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={[
-                      styles.currentLocationTitle,
-                      { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                    ]}
-                  >
-                    Current Location
-                  </Text>
-                  <Text
-                    style={[
-                      styles.currentLocationMeta,
-                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                    ]}
-                  >
-                    {latestRoutePoint
-                      ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
-                          latestRoutePoint.batteryLevel
-                        )}`
-                      : "Waiting for live GPS point..."}
-                  </Text>
-                </View>
-              </View>
-            </Animated.View>
 
             <Animated.View entering={FadeInDown.duration(350).delay(70)}>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                Assigned Field Visits
+                {isAdminViewer ? "Assigned Field Visits" : "Today's Visits"}
               </Text>
               <View style={[styles.timelineCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
                 {todaysVisitTasks.length ? (
@@ -3101,16 +3600,23 @@ export default function SalesScreen() {
                     const statusColor = getVisitStatusColor(status, colors);
                     const isBusy = visitActionTaskId === task.id;
                     const canArrive = !isAdminViewer && status === "pending";
-                    const canDepart = !isAdminViewer && status === "in_progress";
                     const recordingActive = Boolean(task.autoCaptureRecordingActive) && status !== "completed";
+                    const canMeetingStart =
+                      !isAdminViewer && status === "in_progress" && !recordingActive && !task.autoCaptureConversationId;
+                    const canMeetingEnd = !isAdminViewer && status === "in_progress" && recordingActive;
+                    const canDepart =
+                      !isAdminViewer && status === "in_progress" && !recordingActive && Boolean(task.autoCaptureConversationId);
                     const recordingStartAt = task.autoCaptureRecordingStartedAt || task.arrivalAt || null;
                     const recordingStopAt = task.autoCaptureRecordingStoppedAt || task.departureAt || null;
-                    const recordingHint = recordingActive
-                      ? `Recording LIVE${recordingStartAt ? ` | ${formatMumbaiTime(recordingStartAt)}` : ""}`
-                      : task.autoCaptureConversationId
-                        ? `Recording saved${recordingStopAt ? ` | ${formatMumbaiTime(recordingStopAt)}` : ""}`
-                        : status === "in_progress"
-                          ? "Recording state syncing..."
+                    const recordingHint =
+                      status === "in_progress"
+                        ? recordingActive
+                          ? `Meeting recording LIVE${recordingStartAt ? ` | ${formatMumbaiTime(recordingStartAt)}` : ""}`
+                          : task.autoCaptureConversationId
+                            ? `Meeting saved${recordingStopAt ? ` | ${formatMumbaiTime(recordingStopAt)}` : ""}`
+                            : "Meeting not started"
+                        : task.autoCaptureConversationId
+                          ? `Meeting saved${recordingStopAt ? ` | ${formatMumbaiTime(recordingStopAt)}` : ""}`
                           : null;
                     return (
                       <View
@@ -3189,6 +3695,44 @@ export default function SalesScreen() {
                               )}
                             </Pressable>
                           ) : null}
+                          {canMeetingStart ? (
+                            <Pressable
+                              onPress={() => void handleMeetingStart(task)}
+                              disabled={isBusy}
+                              style={({ pressed }) => [
+                                styles.visitActionButton,
+                                {
+                                  backgroundColor: colors.primary,
+                                  opacity: pressed || isBusy ? 0.7 : 1,
+                                },
+                              ]}
+                            >
+                              {isBusy ? (
+                                <ActivityIndicator size="small" color="#FFFFFF" />
+                              ) : (
+                                <Text style={styles.visitActionButtonText}>Meeting Start</Text>
+                              )}
+                            </Pressable>
+                          ) : null}
+                          {canMeetingEnd ? (
+                            <Pressable
+                              onPress={() => void handleMeetingEnd(task)}
+                              disabled={isBusy}
+                              style={({ pressed }) => [
+                                styles.visitActionButton,
+                                {
+                                  backgroundColor: colors.warning,
+                                  opacity: pressed || isBusy ? 0.7 : 1,
+                                },
+                              ]}
+                            >
+                              {isBusy ? (
+                                <ActivityIndicator size="small" color="#FFFFFF" />
+                              ) : (
+                                <Text style={styles.visitActionButtonText}>Meeting End</Text>
+                              )}
+                            </Pressable>
+                          ) : null}
                           {canDepart ? (
                             <Pressable
                               onPress={() => void handleVisitDeparture(task)}
@@ -3242,9 +3786,275 @@ export default function SalesScreen() {
                   ]}
                 >
                   {activeVisitTaskId
-                    ? "Visit session is active. Tap Departure after leaving location."
-                    : "Tap Arrived to start visit session and Departure when you leave."}
+                    ? "Visit active. Tap Meeting Start when meeting begins, then Meeting End, then Departure."
+                    : "Tap Arrived, then Meeting Start when the meeting begins, Meeting End, and finally Departure."}
                 </Text>
+              </Animated.View>
+            ) : null}
+
+            {!isAdminViewer ? (
+              <Animated.View
+                entering={FadeInDown.duration(380).delay(92)}
+                style={[
+                  styles.posCard,
+                  { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                ]}
+              >
+                <View style={styles.posHeaderRow}>
+                  <View style={styles.posHeaderTitle}>
+                    <Ionicons name="cart-outline" size={18} color={colors.primary} />
+                    <Text style={[styles.posHeaderText, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      Quick Sale (POS)
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() => void loadPosData()}
+                    style={({ pressed }) => [
+                      styles.posRefreshButton,
+                      { borderColor: colors.border, opacity: pressed ? 0.75 : 1 },
+                    ]}
+                  >
+                    <Ionicons name="refresh" size={14} color={colors.textSecondary} />
+                    <Text style={[styles.posRefreshText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                      Refresh
+                    </Text>
+                  </Pressable>
+                </View>
+
+                {posLoading ? (
+                  <View style={styles.posLoadingRow}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={[styles.posLoadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                      Syncing products and customers...
+                    </Text>
+                  </View>
+                ) : null}
+
+                {posError ? (
+                  <View style={[styles.posStatusBanner, { backgroundColor: colors.danger + "14", borderColor: colors.danger + "40" }]}>
+                    <Ionicons name="alert-circle-outline" size={16} color={colors.danger} />
+                    <Text style={[styles.posStatusText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>
+                      {posError}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {posSuccess ? (
+                  <View style={[styles.posStatusBanner, { backgroundColor: colors.success + "12", borderColor: colors.success + "35" }]}>
+                    <Ionicons name="checkmark-circle-outline" size={16} color={colors.success} />
+                    <Text style={[styles.posStatusText, { color: colors.success, fontFamily: "Inter_500Medium" }]}>
+                      {posSuccess}
+                    </Text>
+                  </View>
+                ) : null}
+
+                <View style={styles.posSection}>
+                  <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                    Customer
+                  </Text>
+                  <TextInput
+                    style={[
+                      styles.posInput,
+                      { color: colors.text, borderColor: colors.border, backgroundColor: colors.surface },
+                    ]}
+                    placeholder="Search customer"
+                    placeholderTextColor={colors.textTertiary}
+                    value={posCustomerQuery}
+                    onChangeText={setPosCustomerQuery}
+                  />
+
+                  {selectedCustomer ? (
+                    <View style={[styles.posSelectedChip, { backgroundColor: colors.primary + "10", borderColor: colors.primary + "30" }]}>
+                      <Ionicons name="person-outline" size={14} color={colors.primary} />
+                      <Text style={[styles.posSelectedText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                        {getDolibarrThirdPartyLabel(selectedCustomer)}
+                      </Text>
+                      {selectedCustomer.email ? (
+                        <Text style={[styles.posSelectedSubtext, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
+                          {selectedCustomer.email}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+
+                  <View style={styles.posOptionList}>
+                    {filteredCustomers.length ? (
+                      filteredCustomers.map((entry) => {
+                        const id = getDolibarrThirdPartyId(entry);
+                        const isSelected = id && String(id) === posSelectedCustomerId;
+                        return (
+                          <Pressable
+                            key={`${id ?? getDolibarrThirdPartyLabel(entry)}_customer`}
+                            onPress={() => handleSelectCustomer(entry)}
+                            style={({ pressed }) => [
+                              styles.posOptionRow,
+                              {
+                                borderColor: isSelected ? colors.primary : colors.borderLight,
+                                backgroundColor: isSelected ? colors.primary + "12" : colors.surface,
+                                opacity: pressed ? 0.8 : 1,
+                              },
+                            ]}
+                          >
+                            <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                              {getDolibarrThirdPartyLabel(entry)}
+                            </Text>
+                            {entry.email ? (
+                              <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                                {entry.email}
+                              </Text>
+                            ) : null}
+                          </Pressable>
+                        );
+                      })
+                    ) : (
+                      <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                        No customers found.
+                      </Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={styles.posSection}>
+                  <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                    Products
+                  </Text>
+                  <TextInput
+                    style={[
+                      styles.posInput,
+                      { color: colors.text, borderColor: colors.border, backgroundColor: colors.surface },
+                    ]}
+                    placeholder="Search products"
+                    placeholderTextColor={colors.textTertiary}
+                    value={posProductQuery}
+                    onChangeText={setPosProductQuery}
+                  />
+
+                  <View style={styles.posOptionList}>
+                    {filteredProducts.length ? (
+                      filteredProducts.map((product) => {
+                        const id = getDolibarrProductId(product);
+                        const price = getDolibarrProductPrice(product);
+                        return (
+                          <View
+                            key={`${id ?? getDolibarrProductLabel(product)}_product`}
+                            style={[
+                              styles.posProductRow,
+                              { borderColor: colors.borderLight, backgroundColor: colors.surface },
+                            ]}
+                          >
+                            <View style={styles.posProductInfo}>
+                              <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                                {getDolibarrProductLabel(product)}
+                              </Text>
+                              <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                                {product.ref ? `Ref: ${product.ref}` : "Standard item"} • {formatPrice(price)}
+                              </Text>
+                            </View>
+                            <Pressable
+                              onPress={() => handleAddProductToCart(product)}
+                              style={({ pressed }) => [
+                                styles.posAddButton,
+                                { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 },
+                              ]}
+                            >
+                              <Ionicons name="add" size={16} color="#FFFFFF" />
+                              <Text style={styles.posAddButtonText}>Add</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })
+                    ) : (
+                      <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                        No products found.
+                      </Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={styles.posSection}>
+                  <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                    Cart
+                  </Text>
+                  {cartItems.length ? (
+                    <View style={styles.posCartList}>
+                      {cartItems.map((entry) => {
+                        const id = getDolibarrProductId(entry.product);
+                        if (!id) return null;
+                        const price = getDolibarrProductPrice(entry.product);
+                        return (
+                          <View key={`cart_${id}`} style={[styles.posCartRow, { borderColor: colors.borderLight }]}>
+                            <View style={styles.posCartInfo}>
+                              <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                                {getDolibarrProductLabel(entry.product)}
+                              </Text>
+                              <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                                {formatPrice(price)} • Qty {entry.qty}
+                              </Text>
+                            </View>
+                            <View style={styles.posQtyControls}>
+                              <Pressable
+                                onPress={() => handleSetCartQty(id, entry.qty - 1)}
+                                style={({ pressed }) => [
+                                  styles.posQtyButton,
+                                  { borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+                                ]}
+                              >
+                                <Ionicons name="remove" size={14} color={colors.textSecondary} />
+                              </Pressable>
+                              <Text style={[styles.posQtyValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                                {entry.qty}
+                              </Text>
+                              <Pressable
+                                onPress={() => handleSetCartQty(id, entry.qty + 1)}
+                                style={({ pressed }) => [
+                                  styles.posQtyButton,
+                                  { borderColor: colors.border, opacity: pressed ? 0.7 : 1 },
+                                ]}
+                              >
+                                <Ionicons name="add" size={14} color={colors.textSecondary} />
+                              </Pressable>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                      Add products to create an order.
+                    </Text>
+                  )}
+                </View>
+
+                <View style={styles.posFooterRow}>
+                  <View>
+                    <Text style={[styles.posTotalLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                      Order Total
+                    </Text>
+                    <Text style={[styles.posTotalValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                      {formatPrice(cartTotal)}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() => void handleCreateSalesOrder()}
+                    disabled={posSubmitting || !cartItems.length || !selectedCustomer}
+                    style={({ pressed }) => [
+                      styles.posCheckoutButton,
+                      {
+                        backgroundColor: colors.success,
+                        opacity: pressed || posSubmitting || !cartItems.length || !selectedCustomer ? 0.6 : 1,
+                      },
+                    ]}
+                  >
+                    {posSubmitting ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <>
+                        <Ionicons name="checkmark-circle-outline" size={16} color="#FFFFFF" />
+                        <Text style={styles.posCheckoutText}>Create Order</Text>
+                      </>
+                    )}
+                  </Pressable>
+                </View>
               </Animated.View>
             ) : null}
 
@@ -3546,14 +4356,16 @@ export default function SalesScreen() {
         }
         renderItem={({ item }) => <ConversationCard conversation={item} colors={colors} />}
         ListEmptyComponent={
-          <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-            <Ionicons name="chatbubbles-outline" size={40} color={colors.textTertiary} />
-            <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {isAdminViewer
-                ? "No conversations analyzed yet"
-                : "Conversation transcripts and analysis are visible to admin only."}
-            </Text>
-          </View>
+          isAdminViewer ? (
+            <View
+              style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+            >
+              <Ionicons name="chatbubbles-outline" size={40} color={colors.textTertiary} />
+              <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                No conversations analyzed yet
+              </Text>
+            </View>
+          ) : null
         }
       />
     </AppCanvas>
@@ -3763,6 +4575,135 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
   },
   routePreviewMeta: {
+    fontSize: 11.5,
+    lineHeight: 16,
+  },
+  salesHeroCard: {
+    borderRadius: 20,
+    padding: 18,
+    gap: 8,
+    marginBottom: 14,
+  },
+  salesHeroTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  salesHeroEyebrow: {
+    color: "rgba(255,255,255,0.9)",
+    fontSize: 11,
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    fontFamily: "Inter_600SemiBold",
+  },
+  salesHeroDate: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+  },
+  salesHeroTitle: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontFamily: "Inter_700Bold",
+  },
+  salesHeroMeta: {
+    color: "rgba(255,255,255,0.88)",
+    fontSize: 13,
+    fontFamily: "Inter_500Medium",
+  },
+  salesHeroStatsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 6,
+  },
+  salesHeroStat: {
+    flex: 1,
+    alignItems: "center",
+    gap: 2,
+  },
+  salesHeroStatValue: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontFamily: "Inter_700Bold",
+  },
+  salesHeroStatLabel: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+  },
+  salesHeroStatDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: "rgba(255,255,255,0.2)",
+  },
+  salesHeroFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 8,
+  },
+  salesHeroBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  salesHeroBadgeText: {
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontFamily: "Inter_600SemiBold",
+  },
+  salesHeroStatus: {
+    color: "rgba(255,255,255,0.9)",
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+  },
+  salesMapCard: {
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    gap: 8,
+    marginBottom: 12,
+  },
+  salesMapHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  salesMapTitle: {
+    fontSize: 14,
+  },
+  salesMapMeta: {
+    fontSize: 11,
+  },
+  salesInfoCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 10,
+  },
+  salesInfoIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  salesInfoText: {
+    flex: 1,
+    gap: 2,
+  },
+  salesInfoTitle: {
+    fontSize: 12.5,
+  },
+  salesInfoMeta: {
     fontSize: 11.5,
     lineHeight: 16,
   },
@@ -4196,6 +5137,155 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   emptyText: { fontSize: 14, textAlign: "center" },
+  posCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 16,
+    marginTop: 16,
+    gap: 14,
+  },
+  posHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  posHeaderTitle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  posHeaderText: { fontSize: 16 },
+  posRefreshButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  posRefreshText: { fontSize: 12 },
+  posLoadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  posLoadingText: { fontSize: 12 },
+  posStatusBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  posStatusText: { fontSize: 12, flex: 1 },
+  posSection: {
+    gap: 8,
+  },
+  posSectionTitle: { fontSize: 15 },
+  posInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+  },
+  posSelectedChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  posSelectedText: { fontSize: 12 },
+  posSelectedSubtext: { fontSize: 11 },
+  posOptionList: {
+    gap: 8,
+  },
+  posOptionRow: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  posOptionTitle: { fontSize: 13 },
+  posOptionSubtitle: { fontSize: 11 },
+  posEmptyText: { fontSize: 12 },
+  posProductRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  posProductInfo: { flex: 1, gap: 2 },
+  posAddButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  posAddButtonText: {
+    fontSize: 12,
+    color: "#FFFFFF",
+    fontFamily: "Inter_600SemiBold",
+  },
+  posCartList: {
+    gap: 8,
+  },
+  posCartRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  posCartInfo: { flex: 1, gap: 2 },
+  posQtyControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  posQtyButton: {
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 6,
+  },
+  posQtyValue: { fontSize: 12, minWidth: 18, textAlign: "center" },
+  posFooterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 6,
+    gap: 12,
+  },
+  posTotalLabel: { fontSize: 12 },
+  posTotalValue: { fontSize: 18 },
+  posCheckoutButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  posCheckoutText: {
+    fontSize: 12,
+    color: "#FFFFFF",
+    fontFamily: "Inter_600SemiBold",
+  },
 });
 
 

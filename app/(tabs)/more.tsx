@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+﻿import React, { useCallback, useEffect, useState } from "react";
 import {
   Image,
   View,
@@ -53,11 +53,13 @@ export default function MoreScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
   const isPrivileged = user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
+  const isSalesperson = user?.role === "salesperson";
   const canSeeAdminControls = canAccessAdminControls(user?.role);
   const [companyOptions, setCompanyOptions] = useState<CompanyProfile[]>([]);
   const [switchingCompanyId, setSwitchingCompanyId] = useState<string | null>(null);
+  const baseMenuItems = isPrivileged ? PRIVILEGED_MENU_ITEMS : EMPLOYEE_MENU_ITEMS;
   const menuItems = [
-    ...(isPrivileged ? PRIVILEGED_MENU_ITEMS : EMPLOYEE_MENU_ITEMS),
+    ...baseMenuItems.filter((item) => !(isSalesperson && item.title === "Route Tracking")),
     ...(canSeeAdminControls
       ? [
           {
@@ -233,7 +235,7 @@ export default function MoreScreen() {
         </Animated.View>
 
         <Text style={[styles.version, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-          {company?.name || user?.companyName || "TrackForce AI"} v1.0.0
+          {company?.name || user?.companyName || "Lumina FieldForce"} v1.0.0
         </Text>
 
         <View style={{ height: 40 }} />
