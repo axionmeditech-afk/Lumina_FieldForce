@@ -218,6 +218,22 @@ export default function SidebarLayout() {
         }}
       />
       <Drawer.Screen
+        name="sales-pos-admin"
+        options={{
+          title: "Sales POS",
+          drawerItemStyle: isAdmin ? undefined : { display: "none" },
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon
+              icon="receipt-outline"
+              activeIcon="receipt"
+              focused={focused}
+              size={size}
+              offsetX={18}
+            />
+          ),
+        }}
+      />
+      <Drawer.Screen
         name="route-tracking-admin"
         options={{
           title: "Route Tracking",

@@ -47,6 +47,35 @@ export interface DolibarrThirdParty {
   client?: number | string;
 }
 
+export interface DolibarrUser {
+  id?: number | string;
+  firstname?: string;
+  lastname?: string;
+  login?: string;
+  email?: string;
+}
+
+export interface DolibarrOrder {
+  id?: number | string;
+  ref?: string;
+  label?: string;
+  socid?: number | string;
+  socname?: string;
+  thirdparty_name?: string;
+  date?: string | number;
+  date_commande?: string | number;
+  date_creation?: string | number;
+  tms?: string | number;
+  total_ht?: number | string;
+  total_ttc?: number | string;
+  total?: number | string;
+  user_author?: number | string;
+  user_author_id?: number | string;
+  fk_user_author?: number | string;
+  fk_user_salesman?: number | string;
+  fk_user?: number | string;
+}
+
 export interface DolibarrOrderLineInput {
   productId: number;
   qty: number;
@@ -1332,6 +1361,54 @@ export async function getDolibarrThirdParties(options?: {
   const query = params.toString();
   return fetchJson<DolibarrThirdParty[]>(
     `/dolibarr/proxy/thirdparties${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export async function getDolibarrUsers(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+}): Promise<DolibarrUser[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrUser[]>(
+    `/dolibarr/proxy/users${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export async function getDolibarrOrders(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+}): Promise<DolibarrOrder[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrOrder[]>(
+    `/dolibarr/proxy/orders${query ? `?${query}` : ""}`,
     {
       method: "GET",
     }
