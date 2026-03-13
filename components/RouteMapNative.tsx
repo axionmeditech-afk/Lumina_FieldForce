@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
-import MapView, { Marker, Polyline, type LatLng, type Region } from "react-native-maps";
+import MapView, {
+  Marker,
+  Polyline,
+  type LatLng,
+  type Region,
+} from "react-native-maps";
+import { WebView } from "react-native-webview";
 import Constants from "expo-constants";
 import type Colors from "@/constants/colors";
 import { formatMumbaiTime } from "@/lib/ist-time";
@@ -68,6 +74,301 @@ function buildRegion(coords: LatLng[]): Region | null {
     latitudeDelta,
     longitudeDelta,
   };
+}
+
+function buildBounds(coords: LatLng[]): [[number, number], [number, number]] | null {
+  if (!coords.length) return null;
+  let minLat = Number.POSITIVE_INFINITY;
+  let maxLat = Number.NEGATIVE_INFINITY;
+  let minLng = Number.POSITIVE_INFINITY;
+  let maxLng = Number.NEGATIVE_INFINITY;
+
+  for (const coord of coords) {
+    minLat = Math.min(minLat, coord.latitude);
+    maxLat = Math.max(maxLat, coord.latitude);
+    minLng = Math.min(minLng, coord.longitude);
+    maxLng = Math.max(maxLng, coord.longitude);
+  }
+
+  return [
+    [minLat, minLng],
+    [maxLat, maxLng],
+  ];
+}
+
+function buildOsmHtml(payload: {
+  center: { latitude: number; longitude: number };
+  bounds: [[number, number], [number, number]] | null;
+  routes: Array<{ coords: Array<[number, number]>; color: string }>;
+  markers: Array<{ lat: number; lng: number; color: string; label?: string }>;
+}) {
+  const safeJson = JSON.stringify(payload).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <style>
+      html, body { height: 100%; margin: 0; padding: 0; }
+      body { background: #0b1020; }
+      #map { height: 100%; width: 100%; position: relative; }
+      .map-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(120% 120% at 15% 10%, rgba(255, 255, 255, 0.12), transparent 55%),
+          radial-gradient(120% 120% at 85% 90%, rgba(15, 118, 110, 0.16), transparent 55%),
+          linear-gradient(180deg, rgba(15, 23, 42, 0.15), transparent 35%, rgba(15, 23, 42, 0.18));
+        mix-blend-mode: soft-light;
+      }
+      .leaflet-container { background: #0b1020; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      .leaflet-control-zoom {
+        border: 0;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.25);
+      }
+      .leaflet-control-zoom a {
+        background: #101a2d;
+        color: #ffffff;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+      }
+      .leaflet-control-zoom a:last-child { border-bottom: 0; }
+      .leaflet-control-zoom a:hover { background: #111827; }
+      .leaflet-control-zoom .leaflet-disabled { background: #1f2937; color: #94a3b8; }
+      .leaflet-control-attribution {
+        font-size: 10px;
+        color: #dbeafe;
+        background: rgba(2, 6, 23, 0.62);
+        padding: 2px 6px;
+        border-radius: 999px;
+      }
+      .leaflet-top.leaflet-left {
+        left: auto;
+        right: 12px;
+        top: auto;
+        bottom: 12px;
+      }
+      .leaflet-bottom.leaflet-right {
+        right: 12px;
+        bottom: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="map-overlay"></div>
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script>
+      const data = ${safeJson};
+      const map = L.map("map", {
+        zoomControl: true,
+        attributionControl: true,
+        dragging: true,
+        touchZoom: true,
+        doubleClickZoom: true,
+        boxZoom: false,
+        keyboard: false,
+      });
+      L.control.attribution({ prefix: false }).addTo(map);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+        maxZoom: 19,
+        subdomains: "abcd",
+        attribution: "© OpenStreetMap, © CARTO",
+      }).addTo(map);
+
+      if (data.bounds) {
+        map.fitBounds(data.bounds, { padding: [24, 24] });
+      } else {
+        map.setView([data.center.latitude, data.center.longitude], 13);
+      }
+
+      (data.routes || []).forEach((route) => {
+        if (!route.coords || route.coords.length < 2) return;
+        L.polyline(route.coords, { color: route.color, weight: 4, opacity: 0.95 }).addTo(map);
+      });
+
+      (data.markers || []).forEach((marker) => {
+        L.circleMarker([marker.lat, marker.lng], {
+          radius: 6,
+          color: marker.color,
+          fillColor: marker.color,
+          fillOpacity: 0.95,
+          weight: 2,
+        }).addTo(map);
+      });
+    </script>
+  </body>
+</html>`;
+}
+
+function buildMaptilerHtml(payload: {
+  center: { latitude: number; longitude: number };
+  bounds: [[number, number], [number, number]] | null;
+  routes: Array<{ coords: Array<[number, number]>; color: string }>;
+  markers: Array<{ lat: number; lng: number; color: string; label?: string }>;
+  styleUrl: string;
+  maptilerKey?: string;
+}) {
+  const safeJson = JSON.stringify(payload).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
+    <link
+      href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <style>
+      html, body, #map { height: 100%; margin: 0; padding: 0; }
+      body { background: #0b1020; }
+      #map { position: relative; }
+      .map-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(120% 120% at 15% 10%, rgba(255, 255, 255, 0.12), transparent 55%),
+          radial-gradient(120% 120% at 85% 90%, rgba(14, 116, 144, 0.2), transparent 55%),
+          linear-gradient(180deg, rgba(2, 6, 23, 0.1), transparent 35%, rgba(2, 6, 23, 0.25));
+        mix-blend-mode: soft-light;
+      }
+      .maplibregl-ctrl-group {
+        border-radius: 12px;
+        overflow: hidden;
+        border: 0;
+        box-shadow: 0 10px 22px rgba(15, 23, 42, 0.35);
+      }
+      .maplibregl-ctrl button {
+        background: #101a2d;
+      }
+      .maplibregl-ctrl button:hover {
+        background: #1a2640;
+      }
+      .maplibregl-ctrl-attrib {
+        background: rgba(2, 6, 23, 0.55);
+        color: #dbeafe;
+        border-radius: 999px;
+        padding: 2px 6px;
+        margin: 0 10px 10px 0;
+      }
+      .route-marker {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        border: 3px solid #ffffff;
+        box-shadow: 0 10px 16px rgba(2, 6, 23, 0.4);
+      }
+      .route-marker-label {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        color: #ffffff;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="map-overlay"></div>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <script>
+      const data = ${safeJson};
+      const map = new maplibregl.Map({
+        container: "map",
+        style: data.styleUrl,
+        center: [data.center.longitude, data.center.latitude],
+        zoom: 12.8,
+        pitch: 0,
+        bearing: 0,
+        antialias: true
+      });
+
+      map.dragRotate.disable();
+      map.touchZoomRotate.disableRotation();
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ maxWidth: 80, unit: "metric" }), "bottom-left");
+
+      map.on("load", () => {
+        if (data.bounds) {
+          const min = data.bounds[0];
+          const max = data.bounds[1];
+          const bounds = new maplibregl.LngLatBounds([min[1], min[0]], [max[1], max[0]]);
+          map.fitBounds(bounds, { padding: 40, duration: 0 });
+        }
+
+        const features = [];
+        (data.routes || []).forEach((route) => {
+          if (!route.coords || route.coords.length < 2) return;
+          features.push({
+            type: "Feature",
+            properties: { color: route.color || "#22d3ee" },
+            geometry: {
+              type: "LineString",
+              coordinates: route.coords.map((c) => [c[1], c[0]])
+            }
+          });
+        });
+        if (features.length) {
+          map.addSource("routeLines", {
+            type: "geojson",
+            data: { type: "FeatureCollection", features }
+          });
+          map.addLayer({
+            id: "routeLinesCasing",
+            type: "line",
+            source: "routeLines",
+            paint: {
+              "line-color": "rgba(15, 23, 42, 0.85)",
+              "line-width": 7,
+              "line-opacity": 0.9
+            }
+          });
+          map.addLayer({
+            id: "routeLinesLayer",
+            type: "line",
+            source: "routeLines",
+            paint: {
+              "line-color": ["get", "color"],
+              "line-width": 4.5,
+              "line-opacity": 0.95
+            }
+          });
+        }
+
+        (data.markers || []).forEach((marker) => {
+          const el = document.createElement("div");
+          el.className = "route-marker";
+          el.style.background = marker.color || "#22d3ee";
+          if (marker.label) {
+            const label = document.createElement("div");
+            label.className = "route-marker-label";
+            label.textContent = marker.label;
+            el.appendChild(label);
+          }
+          new maplibregl.Marker({ element: el })
+            .setLngLat([marker.lng, marker.lat])
+            .addTo(map);
+        });
+      });
+    </script>
+  </body>
+</html>`;
 }
 
 function toLatLng(points: LocationLog[]): LatLng[] {
@@ -163,13 +464,17 @@ export function RouteMapNative({
 }: RouteMapNativeProps) {
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (
-    process.env.EXPO_PUBLIC_MAP_PROVIDER || (isExpoGo ? "google" : "mappls")
+    process.env.EXPO_PUBLIC_MAP_PROVIDER || "osm"
   )
     .trim()
     .toLowerCase();
   const mapProvider =
-    configuredMapProvider === "mappls" && isExpoGo ? "google" : configuredMapProvider;
+    configuredMapProvider === "mappls" && isExpoGo ? "osm" : configuredMapProvider;
   const shouldUseMappls = Platform.OS === "android" && mapProvider === "mappls" && !isExpoGo;
+  const isOsmProvider = mapProvider === "osm" || mapProvider === "openstreetmap";
+  const isMaptilerProvider = mapProvider === "maptiler";
+  const maptilerStyleUrl = process.env.EXPO_PUBLIC_MAPTILER_STYLE_URL?.trim() || "";
+  const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY?.trim() || "";
   const mapplsClusterId = process.env.EXPO_PUBLIC_MAPPLS_CLUSTER_ID?.trim() || "";
   const mapplsRegion = process.env.EXPO_PUBLIC_MAPPLS_REGION?.trim() || "IND";
   const mapplsTrackingEnabled = (process.env.EXPO_PUBLIC_MAPPLS_TRACKING_WIDGET || "true")
@@ -259,6 +564,7 @@ export function RouteMapNative({
   }, [coords, hasMultiRoutes, normalizedMultiRoutes, normalizedPlannedStops]);
 
   const region = useMemo(() => buildRegion(allCoords), [allCoords]);
+  const bounds = useMemo(() => buildBounds(allCoords), [allCoords]);
   const startPoint = points[0];
   const endPoint = points[points.length - 1];
   const intermediatePoints = useMemo(
@@ -344,6 +650,106 @@ export function RouteMapNative({
     [normalizedMultiRoutes]
   );
 
+  const osmRoutes = useMemo(() => {
+    if (hasMultiRoutes) {
+      return multiRouteDefs
+        .filter((route) => route.coords.length >= 2)
+        .map((route) => ({
+          coords: route.coords.map((coord) => [coord.latitude, coord.longitude] as [number, number]),
+          color: route.color,
+        }));
+    }
+    if (coords.length >= 2) {
+      return [
+        {
+          coords: coords.map((coord) => [coord.latitude, coord.longitude] as [number, number]),
+          color: colors.primary,
+        },
+      ];
+    }
+    return [];
+  }, [colors.primary, coords, hasMultiRoutes, multiRouteDefs]);
+
+  const osmMarkers = useMemo(() => {
+    const markers: Array<{ lat: number; lng: number; color: string; label?: string }> = [];
+    if (hasMultiRoutes) {
+      for (const route of multiRouteDefs) {
+        if (route.endPoint) {
+          markers.push({
+            lat: route.endPoint.latitude,
+            lng: route.endPoint.longitude,
+            color: route.color,
+          });
+        }
+      }
+    } else {
+      if (startPoint) {
+        markers.push({
+          lat: startPoint.latitude,
+          lng: startPoint.longitude,
+          color: colors.success,
+          label: "S",
+        });
+      }
+      if (endPoint) {
+        markers.push({
+          lat: endPoint.latitude,
+          lng: endPoint.longitude,
+          color: colors.danger,
+          label: "E",
+        });
+      }
+      for (const halt of halts) {
+        markers.push({
+          lat: halt.latitude,
+          lng: halt.longitude,
+          color: "#F59E0B",
+          label: "H",
+        });
+      }
+    }
+    for (const stop of normalizedPlannedStops) {
+      markers.push({
+        lat: stop.latitude,
+        lng: stop.longitude,
+        color: resolvePlannedStopColor(stop.status, colors),
+        label: "P",
+      });
+    }
+    return markers;
+  }, [
+    colors,
+    endPoint,
+    halts,
+    hasMultiRoutes,
+    multiRouteDefs,
+    normalizedPlannedStops,
+    startPoint,
+  ]);
+
+  const mapHtml = useMemo(() => {
+    if ((!isOsmProvider && !isMaptilerProvider) || !region) return null;
+    if (isMaptilerProvider && maptilerStyleUrl) {
+      return buildMaptilerHtml({
+        center: { latitude: region.latitude, longitude: region.longitude },
+        bounds,
+        routes: osmRoutes,
+        markers: osmMarkers,
+        styleUrl: maptilerStyleUrl,
+        maptilerKey,
+      });
+    }
+    if (isOsmProvider) {
+      return buildOsmHtml({
+        center: { latitude: region.latitude, longitude: region.longitude },
+        bounds,
+        routes: osmRoutes,
+        markers: osmMarkers,
+      });
+    }
+    return null;
+  }, [bounds, isMaptilerProvider, isOsmProvider, maptilerKey, maptilerStyleUrl, osmMarkers, osmRoutes, region]);
+
   useEffect(() => {
     if (!shouldUseMappls) {
       setMapplsModule(null);
@@ -385,7 +791,8 @@ export function RouteMapNative({
   }, [shouldUseTrackingWidget]);
 
   const googleMapsApiKey = (Constants.expoConfig as any)?.android?.config?.googleMaps?.apiKey;
-  const hasAndroidMapsKey = Platform.OS !== "android" || isExpoGo || Boolean(googleMapsApiKey);
+  const hasAndroidMapsKey =
+    Platform.OS !== "android" || isExpoGo || mapProvider !== "google" || Boolean(googleMapsApiKey);
 
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -748,6 +1155,65 @@ export function RouteMapNative({
             </MapplsGL.PointAnnotation>
           ))}
         </MapplsGL.MapView>
+      </View>
+    );
+  }
+
+  if (isOsmProvider || isMaptilerProvider) {
+    if (isMaptilerProvider && !maptilerStyleUrl) {
+      return (
+        <View style={{ gap: 8 }}>
+          <RouteMapPanel points={panelPoints} halts={panelHalts} colors={colors} height={height} />
+          <View
+            style={[
+              styles.noteBox,
+              {
+                borderColor: colors.warning + "55",
+                backgroundColor: colors.warning + "14",
+              },
+            ]}
+          >
+            <Text style={[styles.noteText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
+              MapTiler style URL missing. Set `EXPO_PUBLIC_MAPTILER_STYLE_URL` and rebuild.
+            </Text>
+          </View>
+        </View>
+      );
+    }
+    if (!hasAnyPoints || !region) {
+      return (
+        <View style={[styles.empty, { borderColor: colors.border, backgroundColor: colors.backgroundElevated, height }]}> 
+          <Text style={[styles.emptyTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+            No route points for selected day
+          </Text>
+          <Text style={[styles.emptySubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+            The live route will render here as soon as location points are received from the API.
+          </Text>
+        </View>
+      );
+    }
+
+    if (!mapHtml) {
+      return (
+        <View style={[styles.empty, { borderColor: colors.border, backgroundColor: colors.backgroundElevated, height }]}> 
+          <Text style={[styles.emptyTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+            Loading map...
+          </Text>
+        </View>
+      );
+    }
+
+    return (
+      <View style={[styles.container, { height, borderColor: colors.border }]}> 
+        <WebView
+          originWhitelist={["*"]}
+          source={{ html: mapHtml }}
+          style={StyleSheet.absoluteFill}
+          scrollEnabled
+          nestedScrollEnabled
+          javaScriptEnabled
+          domStorageEnabled
+        />
       </View>
     );
   }

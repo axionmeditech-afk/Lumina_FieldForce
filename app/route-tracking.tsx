@@ -286,14 +286,11 @@ export default function RouteTrackingScreen() {
   const resolvingLocationKeysRef = useRef(new Set<string>());
   const LIVE_REFRESH_INTERVAL_MS = 1 * 60 * 1000;
   const isExpoGo = Constants.appOwnership === "expo";
-  const isNativeMapplsEnabled = process.env.EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE === "true";
-  const configuredMapProvider = (
-    process.env.EXPO_PUBLIC_MAP_PROVIDER || (isExpoGo ? "google" : "mappls")
-  )
+  const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "osm")
     .trim()
     .toLowerCase();
   const mapProvider =
-    configuredMapProvider === "mappls" && isExpoGo ? "google" : configuredMapProvider;
+    configuredMapProvider === "mappls" && isExpoGo ? "osm" : configuredMapProvider;
 
   const isPrivilegedViewer =
     user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
@@ -1048,14 +1045,20 @@ export default function RouteTrackingScreen() {
           </View>
         ) : null}
 
-        {mapProvider === "mappls" ? (
+        {mapProvider === "osm" || mapProvider === "openstreetmap" ? (
           <View style={[styles.infoWrap, { backgroundColor: colors.primary + "16", borderColor: colors.primary + "55" }]}>
             <Ionicons name="map-outline" size={16} color={colors.primary} />
             <Text style={[styles.infoText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
-              Map provider: Mappls (Android).
-              {isNativeMapplsEnabled
-                ? " Keep Mappls `*.a.conf/*.a.olf` files in `android/app` and run a dev build. Cluster ID is optional."
-                : " Native Mappls is disabled. Install `mappls-map-react-native`, set `EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE=true`, and rebuild. Cluster ID is optional."}
+              Map provider: OpenStreetMap (free tiles). Route points will render on the map.
+            </Text>
+          </View>
+        ) : null}
+
+        {mapProvider === "maptiler" ? (
+          <View style={[styles.infoWrap, { backgroundColor: colors.primary + "16", borderColor: colors.primary + "55" }]}>
+            <Ionicons name="map-outline" size={16} color={colors.primary} />
+            <Text style={[styles.infoText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
+              Map provider: MapTiler Streets (vector). 3D disabled for better performance.
             </Text>
           </View>
         ) : null}
