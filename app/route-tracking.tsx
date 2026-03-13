@@ -772,8 +772,11 @@ export default function RouteTrackingScreen() {
 
   const rows = useMemo<TimelineRow[]>(() => {
     if (!timeline) return [];
-    const haltById = new Map(timeline.halts.map((halt) => [halt.id, halt]));
-    const attendanceRows: TimelineRow[] = timeline.attendanceEvents.map((event) => ({
+    const halts = timeline.halts ?? [];
+    const segments = timeline.segments ?? [];
+    const attendanceEvents = timeline.attendanceEvents ?? [];
+    const haltById = new Map(halts.map((halt) => [halt.id, halt]));
+    const attendanceRows: TimelineRow[] = attendanceEvents.map((event) => ({
       id: `att_${event.id}`,
       type: "attendance",
       at: event.at,
@@ -782,7 +785,7 @@ export default function RouteTrackingScreen() {
       text: `${event.type === "checkin" ? "Checked In" : "Checked Out"} at ${event.geofenceName || "Unknown Zone"}`,
     }));
 
-    const segmentRows: TimelineRow[] = timeline.segments.map((segment) => {
+    const segmentRows: TimelineRow[] = segments.map((segment) => {
       if (segment.type === "halt") {
         const halt = segment.haltId ? haltById.get(segment.haltId) : undefined;
         const startBattery = toBatteryLabel(halt?.startBatteryLevel);
@@ -823,6 +826,37 @@ export default function RouteTrackingScreen() {
       return aStart.localeCompare(bStart);
     });
   }, [colors.danger, colors.primary, colors.success, colors.warning, timeline]);
+
+  const summary = useMemo(() => {
+    const raw = timeline?.summary;
+    const totalDistanceKm =
+      typeof raw?.totalDistanceKm === "number" && Number.isFinite(raw.totalDistanceKm)
+        ? raw.totalDistanceKm
+        : 0;
+    const totalMovingMinutes =
+      typeof raw?.totalMovingMinutes === "number" && Number.isFinite(raw.totalMovingMinutes)
+        ? raw.totalMovingMinutes
+        : 0;
+    const totalHaltMinutes =
+      typeof raw?.totalHaltMinutes === "number" && Number.isFinite(raw.totalHaltMinutes)
+        ? raw.totalHaltMinutes
+        : 0;
+    const haltCount =
+      typeof raw?.haltCount === "number" && Number.isFinite(raw.haltCount)
+        ? raw.haltCount
+        : 0;
+    const pointCount =
+      typeof raw?.pointCount === "number" && Number.isFinite(raw.pointCount)
+        ? raw.pointCount
+        : 0;
+    return {
+      totalDistanceKm,
+      totalMovingMinutes,
+      totalHaltMinutes,
+      haltCount,
+      pointCount,
+    };
+  }, [timeline?.summary]);
 
   const routePointRows = useMemo(() => {
     if (!timeline?.points?.length) return [];
@@ -1119,7 +1153,7 @@ export default function RouteTrackingScreen() {
         <Animated.View entering={FadeInDown.duration(350).delay(80)} style={styles.summaryRow}>
           <View style={[styles.summaryCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
             <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {timeline?.summary.totalDistanceKm.toFixed(2) ?? "0.00"} km
+              {summary.totalDistanceKm.toFixed(2)} km
             </Text>
             <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               Distance
@@ -1127,7 +1161,7 @@ export default function RouteTrackingScreen() {
           </View>
           <View style={[styles.summaryCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
             <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {timeline?.summary.totalHaltMinutes ?? 0} mins
+              {summary.totalHaltMinutes} mins
             </Text>
             <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               Halt Time
@@ -1135,7 +1169,7 @@ export default function RouteTrackingScreen() {
           </View>
           <View style={[styles.summaryCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
             <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {timeline?.summary.haltCount ?? 0}
+              {summary.haltCount}
             </Text>
             <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               Halts
