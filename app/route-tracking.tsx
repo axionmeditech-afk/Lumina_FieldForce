@@ -286,6 +286,7 @@ export default function RouteTrackingScreen() {
   const resolvingLocationKeysRef = useRef(new Set<string>());
   const LIVE_REFRESH_INTERVAL_MS = 1 * 60 * 1000;
   const isExpoGo = Constants.appOwnership === "expo";
+  const isNativeMapplsEnabled = process.env.EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE === "true";
   const configuredMapProvider = (
     process.env.EXPO_PUBLIC_MAP_PROVIDER || (isExpoGo ? "google" : "mappls")
   )
@@ -1017,7 +1018,10 @@ export default function RouteTrackingScreen() {
           <View style={[styles.infoWrap, { backgroundColor: colors.primary + "16", borderColor: colors.primary + "55" }]}>
             <Ionicons name="map-outline" size={16} color={colors.primary} />
             <Text style={[styles.infoText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
-              Map provider: Mappls (Android). Keep Mappls `*.a.conf/*.a.olf` files in `android/app` and run a dev build. Cluster ID is optional.
+              Map provider: Mappls (Android).
+              {isNativeMapplsEnabled
+                ? " Keep Mappls `*.a.conf/*.a.olf` files in `android/app` and run a dev build. Cluster ID is optional."
+                : " Native Mappls is disabled. Install `mappls-map-react-native`, set `EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE=true`, and rebuild. Cluster ID is optional."}
             </Text>
           </View>
         ) : null}

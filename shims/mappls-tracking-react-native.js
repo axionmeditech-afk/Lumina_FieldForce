@@ -14,6 +14,7 @@ const MapplsTrackingWidget = React.forwardRef(function MapplsTrackingWidget(_, r
 });
 
 const sdk = {
+  __isShim: true,
   MapplsTrackingWidget,
 };
 

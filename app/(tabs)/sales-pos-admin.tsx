@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import Animated, { FadeInDown } from "react-native-reanimated";
@@ -89,6 +89,14 @@ function getUserLabel(user: DolibarrUser): string {
   return name || user.login?.trim() || user.email?.trim() || "Salesperson";
 }
 
+function getOrderCustomerName(order: DolibarrOrder): string {
+  return (
+    order.socname?.toString().trim() ||
+    order.thirdparty_name?.toString().trim() ||
+    "Customer"
+  );
+}
+
 export default function SalesPosAdminScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
@@ -99,6 +107,7 @@ export default function SalesPosAdminScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rangeDays, setRangeDays] = useState<number>(30);
+  const [expandedSalesIds, setExpandedSalesIds] = useState<Record<string, boolean>>({});
 
   const loadData = useCallback(async () => {
     if (!isAdmin) return;
@@ -176,11 +185,38 @@ export default function SalesPosAdminScreen() {
     return Array.from(map.values()).sort((a, b) => b.count - a.count);
   }, [filteredOrders, usersById]);
 
+  const ordersBySalesperson = useMemo(() => {
+    const map = new Map<string, DolibarrOrder[]>();
+    for (const order of filteredOrders) {
+      const salespersonId = getOrderSalespersonId(order);
+      const key = salespersonId ? String(salespersonId) : "unassigned";
+      const current = map.get(key) || [];
+      current.push(order);
+      map.set(key, current);
+    }
+    for (const [key, list] of map) {
+      list.sort((a, b) => {
+        const aDate = getOrderDate(a)?.getTime() ?? 0;
+        const bDate = getOrderDate(b)?.getTime() ?? 0;
+        return bDate - aDate;
+      });
+      map.set(key, list);
+    }
+    return map;
+  }, [filteredOrders]);
+
   const totalOrders = salespersonSummary.reduce((sum, entry) => sum + entry.count, 0);
   const totalValue = salespersonSummary.reduce((sum, entry) => sum + entry.totalValue, 0);
 
   const formatCurrency = useCallback((value: number) => {
     return `INR ${value.toFixed(2)}`;
+  }, []);
+
+  const toggleSalespersonOrders = useCallback((id: string) => {
+    setExpandedSalesIds((current) => ({
+      ...current,
+      [id]: !current[id],
+    }));
   }, []);
 
   return (
@@ -337,6 +373,84 @@ export default function SalesPosAdminScreen() {
                 </Text>
               </View>
             </View>
+
+            <Pressable
+              onPress={() => toggleSalespersonOrders(item.id)}
+              style={({ pressed }) => [
+                styles.expandButton,
+                {
+                  borderColor: colors.border,
+                  backgroundColor: colors.surface,
+                  opacity: pressed ? 0.8 : 1,
+                },
+              ]}
+            >
+              <Ionicons
+                name={expandedSalesIds[item.id] ? "chevron-up" : "chevron-down"}
+                size={16}
+                color={colors.textSecondary}
+              />
+              <Text style={[styles.expandText, { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" }]}>
+                {expandedSalesIds[item.id] ? "Hide orders" : "View orders"}
+              </Text>
+            </Pressable>
+
+            {expandedSalesIds[item.id] ? (
+              <View
+                style={[
+                  styles.orderList,
+                  { borderColor: colors.borderLight, backgroundColor: colors.surface },
+                ]}
+              >
+                <View style={styles.orderListHeader}>
+                  <Text style={[styles.orderHeaderText, { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" }]}>
+                    Recent Orders
+                  </Text>
+                  <Text style={[styles.orderHeaderText, { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" }]}>
+                    {ordersBySalesperson.get(item.id)?.length ?? 0}
+                  </Text>
+                </View>
+                <ScrollView
+                  style={styles.orderScroll}
+                  contentContainerStyle={styles.orderScrollContent}
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                >
+                  {ordersBySalesperson.get(item.id)?.length ? (
+                    ordersBySalesperson.get(item.id)!.map((order) => {
+                      const orderDate = getOrderDate(order);
+                      const total = getOrderTotal(order);
+                      const ref = order.ref || order.id || "Order";
+                      return (
+                        <View key={`order_${item.id}_${ref}`} style={styles.orderRow}>
+                          <View style={styles.orderRowLeft}>
+                            <Text style={[styles.orderTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                              {ref}
+                            </Text>
+                            <Text style={[styles.orderSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                              {getOrderCustomerName(order)}
+                            </Text>
+                          </View>
+                          <View style={styles.orderRowRight}>
+                            <Text style={[styles.orderMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                              {orderDate ? orderDate.toLocaleDateString() : "???"}
+                            </Text>
+                            <Text style={[styles.orderValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                              {formatCurrency(total)}
+                            </Text>
+                          </View>
+                        </View>
+                      );
+                    })
+                  ) : (
+                    <Text style={[styles.orderEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                      No orders available.
+                    </Text>
+                  )}
+                </ScrollView>
+              </View>
+            ) : null}
+
           </Animated.View>
         )}
         ListEmptyComponent={
@@ -450,6 +564,50 @@ const styles = StyleSheet.create({
   },
   salespersonLabel: { fontSize: 11 },
   salespersonValue: { fontSize: 12 },
+  expandButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  expandText: { fontSize: 12 },
+  orderList: {
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    gap: 10,
+  },
+  orderListHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  orderHeaderText: { fontSize: 11 },
+  orderScroll: {
+    maxHeight: 240,
+  },
+  orderScrollContent: {
+    gap: 8,
+    paddingRight: 4,
+  },
+  orderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+    borderRadius: 10,
+    paddingVertical: 6,
+  },
+  orderRowLeft: { flex: 1, gap: 2 },
+  orderRowRight: { alignItems: "flex-end", gap: 2 },
+  orderTitle: { fontSize: 12 },
+  orderSubtitle: { fontSize: 11 },
+  orderMeta: { fontSize: 10 },
+  orderValue: { fontSize: 12 },
+  orderEmptyText: { fontSize: 12 },
   emptyState: {
     borderRadius: 16,
     padding: 40,

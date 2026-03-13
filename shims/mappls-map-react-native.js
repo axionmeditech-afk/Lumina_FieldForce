@@ -18,6 +18,7 @@ function Noop() {
 }
 
 const sdk = {
+  __isShim: true,
   setRegion: () => {},
   setClusterId: () => {},
   MapView,

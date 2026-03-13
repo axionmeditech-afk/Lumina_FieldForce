@@ -83,6 +83,7 @@ export interface DolibarrOrderLineInput {
   taxRate?: number;
   description?: string;
   productType?: number;
+  discountPercent?: number;
 }
 
 export interface DolibarrOrderCreatePayload {
@@ -1326,10 +1327,14 @@ export async function getDolibarrProducts(options?: {
   limit?: number;
   sortfield?: string;
   sortorder?: "asc" | "desc";
+  page?: number;
 }): Promise<DolibarrProduct[]> {
   const params = new URLSearchParams();
   if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
     params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (typeof options?.page === "number" && Number.isFinite(options.page)) {
+    params.set("page", String(Math.max(0, Math.floor(options.page))));
   }
   if (options?.sortfield) {
     params.set("sortfield", options.sortfield);
@@ -1347,6 +1352,7 @@ export async function getDolibarrThirdParties(options?: {
   limit?: number;
   sortfield?: string;
   sortorder?: "asc" | "desc";
+  page?: number;
 }): Promise<DolibarrThirdParty[]> {
   const params = new URLSearchParams();
   const resolvedSortField =
@@ -1356,6 +1362,9 @@ export async function getDolibarrThirdParties(options?: {
   const resolvedSortOrder = options?.sortorder || "asc";
   if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
     params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (typeof options?.page === "number" && Number.isFinite(options.page)) {
+    params.set("page", String(Math.max(0, Math.floor(options.page))));
   }
   if (resolvedSortField) {
     params.set("sortfield", resolvedSortField);
@@ -1437,11 +1446,14 @@ export async function createDolibarrSalesOrder(
       tva_tx: line.taxRate,
       desc: line.description,
       product_type: line.productType,
+      remise_percent: line.discountPercent,
     })),
   };
 
   if (payload.date) {
     orderPayload.date = payload.date;
+  } else {
+    orderPayload.date = Math.floor(Date.now() / 1000);
   }
   if (payload.note) {
     orderPayload.note_public = payload.note;

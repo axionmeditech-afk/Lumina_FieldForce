@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Linking,
+  ScrollView,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -94,6 +95,7 @@ const RECORDING_START_FAILED_MESSAGE = "Recording could not start. Please try ag
 const TRANSCRIPTION_FAILED_MESSAGE = "Transcription failed. Please try again.";
 const ROUTE_SEARCH_RESULTS_LIMIT = 20;
 const ROUTE_NAV_WAYPOINT_LIMIT = 6;
+const POS_PAGE_SIZE = 100;
 const VOICE_PULSE_BASELINE = Array.from({ length: VOICE_WAVE_BAR_COUNT }, (_, index) => {
   const center = (VOICE_WAVE_BAR_COUNT - 1) / 2;
   const distance = Math.abs(index - center) / center;
@@ -263,6 +265,27 @@ function getDolibarrProductTaxRate(product: DolibarrProduct): number {
     if (Number.isFinite(parsed)) return parsed;
   }
   return 0;
+}
+
+function mergeUniqueProducts(
+  current: DolibarrProduct[],
+  incoming: DolibarrProduct[]
+): DolibarrProduct[] {
+  const seen = new Set<string>();
+  const all = [...current];
+  for (const product of current) {
+    const id = getDolibarrProductId(product);
+    const key = id ? `id:${id}` : `ref:${product.ref || ""}|label:${product.label || ""}`;
+    seen.add(key);
+  }
+  for (const product of incoming) {
+    const id = getDolibarrProductId(product);
+    const key = id ? `id:${id}` : `ref:${product.ref || ""}|label:${product.label || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    all.push(product);
+  }
+  return all;
 }
 
 const speechPackage: any = (() => {
@@ -1110,13 +1133,16 @@ export default function SalesScreen() {
   const [posProductQuery, setPosProductQuery] = useState("");
   const [posCustomerQuery, setPosCustomerQuery] = useState("");
   const [posSelectedCustomerId, setPosSelectedCustomerId] = useState<string | null>(null);
-  const [posCart, setPosCart] = useState<Record<string, { product: DolibarrProduct; qty: number }>>(
-    {}
-  );
+  const [posCart, setPosCart] = useState<
+    Record<string, { product: DolibarrProduct; qty: number; discountPercent: number }>
+  >({});
   const [posLoading, setPosLoading] = useState(false);
   const [posSubmitting, setPosSubmitting] = useState(false);
   const [posError, setPosError] = useState<string | null>(null);
   const [posSuccess, setPosSuccess] = useState<string | null>(null);
+  const [posProductsPage, setPosProductsPage] = useState(0);
+  const [posProductsHasMore, setPosProductsHasMore] = useState(false);
+  const [posProductsLoadingMore, setPosProductsLoadingMore] = useState(false);
 
   const finalSegmentsRef = useRef<string[]>([]);
   const startedAtRef = useRef<number | null>(null);
@@ -1213,10 +1239,13 @@ export default function SalesScreen() {
     setPosSuccess(null);
     try {
       const [products, customers] = await Promise.all([
-        getDolibarrProducts({ limit: 200, sortfield: "label", sortorder: "asc" }),
+        getDolibarrProducts({ limit: POS_PAGE_SIZE, sortfield: "label", sortorder: "asc" }),
         getDolibarrThirdParties({ limit: 200, sortfield: "nom", sortorder: "asc" }),
       ]);
-      setPosProducts(Array.isArray(products) ? products : []);
+      const productList = Array.isArray(products) ? products : [];
+      setPosProducts(productList);
+      setPosProductsPage(0);
+      setPosProductsHasMore(productList.length >= POS_PAGE_SIZE);
       setPosCustomers(Array.isArray(customers) ? customers : []);
       if (!posSelectedCustomerId) {
         const firstCustomerId = customers && customers.length
@@ -2839,7 +2868,7 @@ export default function SalesScreen() {
       const email = entry.email || "";
       return !query || label.toLowerCase().includes(query) || email.toLowerCase().includes(query);
     });
-    return matches.slice(0, 6);
+    return matches;
   }, [posCustomers, posCustomerQuery]);
 
   const filteredProducts = useMemo(() => {
@@ -2849,7 +2878,7 @@ export default function SalesScreen() {
       const ref = entry.ref || "";
       return !query || label.toLowerCase().includes(query) || ref.toLowerCase().includes(query);
     });
-    return matches.slice(0, 8);
+    return matches;
   }, [posProducts, posProductQuery]);
 
   const cartItems = useMemo(
@@ -2863,7 +2892,9 @@ export default function SalesScreen() {
   const cartTotal = useMemo(() => {
     return cartItems.reduce((sum, entry) => {
       const price = getDolibarrProductPrice(entry.product);
-      return sum + price * entry.qty;
+      const discount = Math.max(0, Math.min(100, entry.discountPercent || 0));
+      const discounted = price * (1 - discount / 100);
+      return sum + discounted * entry.qty;
     }, 0);
   }, [cartItems]);
 
@@ -2884,11 +2915,13 @@ export default function SalesScreen() {
       const key = String(id);
       const existing = current[key];
       const nextQty = existing ? existing.qty + 1 : 1;
+      const discountPercent = existing ? existing.discountPercent : 0;
       return {
         ...current,
         [key]: {
           product: existing?.product || product,
           qty: nextQty,
+          discountPercent,
         },
       };
     });
@@ -2913,6 +2946,52 @@ export default function SalesScreen() {
       };
     });
   }, []);
+
+  const handleSetCartDiscount = useCallback((productId: number, discountPercent: number) => {
+    const safeDiscount = Math.max(0, Math.min(100, Math.round(discountPercent)));
+    setPosCart((current) => {
+      const key = String(productId);
+      const existing = current[key];
+      if (!existing) return current;
+      return {
+        ...current,
+        [key]: {
+          ...existing,
+          discountPercent: safeDiscount,
+        },
+      };
+    });
+  }, []);
+
+  const handleLoadMoreProducts = useCallback(async () => {
+    if (posProductsLoadingMore || posLoading || !posProductsHasMore) return;
+    setPosProductsLoadingMore(true);
+    setPosError(null);
+    try {
+      const nextPage = posProductsPage + 1;
+      const nextProducts = await getDolibarrProducts({
+        limit: POS_PAGE_SIZE,
+        page: nextPage,
+        sortfield: "label",
+        sortorder: "asc",
+      });
+      const list = Array.isArray(nextProducts) ? nextProducts : [];
+      setPosProducts((current) => mergeUniqueProducts(current, list));
+      setPosProductsPage(nextPage);
+      setPosProductsHasMore(list.length >= POS_PAGE_SIZE);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to load more products.";
+      setPosError(message);
+    } finally {
+      setPosProductsLoadingMore(false);
+    }
+  }, [
+    posLoading,
+    posProductsHasMore,
+    posProductsLoadingMore,
+    posProductsPage,
+  ]);
 
   const handleCreateSalesOrder = useCallback(async () => {
     if (posSubmitting) return;
@@ -2951,6 +3030,7 @@ export default function SalesScreen() {
           taxRate,
           description: entry.product.description || entry.product.label || undefined,
           productType: Number.isFinite(productType) ? productType : 0,
+          discountPercent: entry.discountPercent || 0,
         } satisfies DolibarrOrderLineInput;
       })
       .filter((entry): entry is DolibarrOrderLineInput => Boolean(entry));
@@ -3800,25 +3880,58 @@ export default function SalesScreen() {
                   { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
                 ]}
               >
-                <View style={styles.posHeaderRow}>
-                  <View style={styles.posHeaderTitle}>
-                    <Ionicons name="cart-outline" size={18} color={colors.primary} />
-                    <Text style={[styles.posHeaderText, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      Quick Sale (POS)
-                    </Text>
+                <LinearGradient
+                  colors={[colors.primary, colors.secondary]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.posHero}
+                >
+                  <View style={styles.posHeroLeft}>
+                    <View style={styles.posHeroIconShell}>
+                      <Ionicons name="cart-outline" size={18} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.posHeroTextWrap}>
+                      <Text style={styles.posHeroTitle}>Quick Sale</Text>
+                      <Text style={styles.posHeroSubtitle}>
+                        Create a validated sales order in seconds.
+                      </Text>
+                    </View>
                   </View>
                   <Pressable
                     onPress={() => void loadPosData()}
                     style={({ pressed }) => [
-                      styles.posRefreshButton,
-                      { borderColor: colors.border, opacity: pressed ? 0.75 : 1 },
+                      styles.posHeroAction,
+                      { opacity: pressed ? 0.8 : 1 },
                     ]}
                   >
-                    <Ionicons name="refresh" size={14} color={colors.textSecondary} />
-                    <Text style={[styles.posRefreshText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                      Refresh
-                    </Text>
+                    <Ionicons name="refresh" size={14} color="#FFFFFF" />
+                    <Text style={styles.posHeroActionText}>Refresh</Text>
                   </Pressable>
+                </LinearGradient>
+
+                <View style={styles.posMetaRow}>
+                  <View
+                    style={[
+                      styles.posMetaPill,
+                      { borderColor: colors.borderLight, backgroundColor: colors.surface },
+                    ]}
+                  >
+                    <Text style={[styles.posMetaLabel, { color: colors.textSecondary }]}>Items</Text>
+                    <Text style={[styles.posMetaValue, { color: colors.text }]}>{cartItems.length}</Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.posMetaPill,
+                      styles.posMetaPillWide,
+                      { borderColor: colors.borderLight, backgroundColor: colors.surface },
+                    ]}
+                  >
+                    <Text style={[styles.posMetaLabel, { color: colors.textSecondary }]}>Customer</Text>
+                    <Text numberOfLines={1} style={[styles.posMetaValue, { color: colors.text }]}
+                    >
+                      {selectedCustomer ? getDolibarrThirdPartyLabel(selectedCustomer) : "Not selected"}
+                    </Text>
+                  </View>
                 </View>
 
                 {posLoading ? (
@@ -3848,10 +3961,13 @@ export default function SalesScreen() {
                   </View>
                 ) : null}
 
-                <View style={styles.posSection}>
-                  <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                    Customer
-                  </Text>
+                <View style={[styles.posSection, styles.posSectionCard, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}>
+                  <View style={styles.posSectionHeader}>
+                    <Ionicons name="person-outline" size={16} color={colors.primary} />
+                    <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      Customer
+                    </Text>
+                  </View>
                   <TextInput
                     style={[
                       styles.posInput,
@@ -3870,7 +3986,11 @@ export default function SalesScreen() {
                         {getDolibarrThirdPartyLabel(selectedCustomer)}
                       </Text>
                       {selectedCustomer.email ? (
-                        <Text style={[styles.posSelectedSubtext, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
+                        <Text
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                          style={[styles.posSelectedSubtext, { color: colors.primary, fontFamily: "Inter_500Medium" }]}
+                        >
                           {selectedCustomer.email}
                         </Text>
                       ) : null}
@@ -3878,46 +3998,61 @@ export default function SalesScreen() {
                   ) : null}
 
                   <View style={styles.posOptionList}>
-                    {filteredCustomers.length ? (
-                      filteredCustomers.map((entry) => {
-                        const id = getDolibarrThirdPartyId(entry);
-                        const isSelected = id && String(id) === posSelectedCustomerId;
-                        return (
-                          <Pressable
-                            key={`${id ?? getDolibarrThirdPartyLabel(entry)}_customer`}
-                            onPress={() => handleSelectCustomer(entry)}
-                            style={({ pressed }) => [
-                              styles.posOptionRow,
-                              {
-                                borderColor: isSelected ? colors.primary : colors.borderLight,
-                                backgroundColor: isSelected ? colors.primary + "12" : colors.surface,
-                                opacity: pressed ? 0.8 : 1,
-                              },
-                            ]}
-                          >
-                            <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                              {getDolibarrThirdPartyLabel(entry)}
-                            </Text>
-                            {entry.email ? (
-                              <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                                {entry.email}
-                              </Text>
-                            ) : null}
-                          </Pressable>
-                        );
-                      })
-                    ) : (
-                      <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                        No customers found.
-                      </Text>
-                    )}
+                    <View style={[styles.posScrollShell, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+                      <ScrollView
+                        nestedScrollEnabled
+                        contentContainerStyle={styles.posScrollContent}
+                        showsVerticalScrollIndicator={false}
+                      >
+                        {filteredCustomers.length ? (
+                          filteredCustomers.map((entry) => {
+                            const id = getDolibarrThirdPartyId(entry);
+                            const isSelected = id && String(id) === posSelectedCustomerId;
+                            return (
+                              <Pressable
+                                key={`${id ?? getDolibarrThirdPartyLabel(entry)}_customer`}
+                                onPress={() => handleSelectCustomer(entry)}
+                                style={({ pressed }) => [
+                                  styles.posOptionRow,
+                                  {
+                                    borderColor: isSelected ? colors.primary : colors.borderLight,
+                                    backgroundColor: isSelected ? colors.primary + "12" : colors.surface,
+                                    opacity: pressed ? 0.8 : 1,
+                                  },
+                                ]}
+                              >
+                                <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                                  {getDolibarrThirdPartyLabel(entry)}
+                                </Text>
+                                {entry.email ? (
+                                  <Text
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail"
+                                    style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}
+                                  >
+                                    {entry.email}
+                                  </Text>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })
+                        ) : (
+                          <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                            No customers found.
+                          </Text>
+                        )}
+                      </ScrollView>
+                    </View>
                   </View>
                 </View>
 
-                <View style={styles.posSection}>
-                  <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                    Products
-                  </Text>
+                <View style={[styles.posSection, styles.posSectionCard, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}>
+                  <View style={styles.posSectionHeader}>
+                    <Ionicons name="pricetag-outline" size={16} color={colors.primary} />
+                    <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      Products
+                    </Text>
+                  </View>
                   <TextInput
                     style={[
                       styles.posInput,
@@ -3930,51 +4065,87 @@ export default function SalesScreen() {
                   />
 
                   <View style={styles.posOptionList}>
-                    {filteredProducts.length ? (
-                      filteredProducts.map((product) => {
-                        const id = getDolibarrProductId(product);
-                        const price = getDolibarrProductPrice(product);
-                        return (
-                          <View
-                            key={`${id ?? getDolibarrProductLabel(product)}_product`}
-                            style={[
-                              styles.posProductRow,
-                              { borderColor: colors.borderLight, backgroundColor: colors.surface },
-                            ]}
-                          >
-                            <View style={styles.posProductInfo}>
-                              <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                                {getDolibarrProductLabel(product)}
-                              </Text>
-                              <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                                {product.ref ? `Ref: ${product.ref}` : "Standard item"} • {formatPrice(price)}
-                              </Text>
-                            </View>
-                            <Pressable
-                              onPress={() => handleAddProductToCart(product)}
-                              style={({ pressed }) => [
-                                styles.posAddButton,
-                                { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 },
-                              ]}
-                            >
-                              <Ionicons name="add" size={16} color="#FFFFFF" />
-                              <Text style={styles.posAddButtonText}>Add</Text>
-                            </Pressable>
-                          </View>
-                        );
-                      })
-                    ) : (
-                      <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                        No products found.
-                      </Text>
-                    )}
+                    <View style={[styles.posScrollShell, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+                      <ScrollView
+                        nestedScrollEnabled
+                        contentContainerStyle={styles.posScrollContent}
+                        showsVerticalScrollIndicator={false}
+                      >
+                        {filteredProducts.length ? (
+                          filteredProducts.map((product) => {
+                            const id = getDolibarrProductId(product);
+                            const price = getDolibarrProductPrice(product);
+                            return (
+                              <View
+                                key={`${id ?? getDolibarrProductLabel(product)}_product`}
+                                style={[
+                                  styles.posProductRow,
+                                  { borderColor: colors.borderLight, backgroundColor: colors.surface },
+                                ]}
+                              >
+                                <View style={styles.posProductInfo}>
+                                  <Text style={[styles.posOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                                    {getDolibarrProductLabel(product)}
+                                  </Text>
+                                  <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                                    {product.ref ? `Ref: ${product.ref}` : "Standard item"} • {formatPrice(price)}
+                                  </Text>
+                                </View>
+                                <Pressable
+                                  onPress={() => handleAddProductToCart(product)}
+                                  style={({ pressed }) => [
+                                    styles.posAddButton,
+                                    { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 },
+                                  ]}
+                                >
+                                  <Ionicons name="add" size={16} color="#FFFFFF" />
+                                  <Text style={styles.posAddButtonText}>Add</Text>
+                                </Pressable>
+                              </View>
+                            );
+                          })
+                        ) : (
+                          <Text style={[styles.posEmptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                            No products found.
+                          </Text>
+                        )}
+                      </ScrollView>
+                    </View>
+                    {posProductsHasMore ? (
+                      <Pressable
+                        onPress={() => void handleLoadMoreProducts()}
+                        disabled={posProductsLoadingMore}
+                        style={({ pressed }) => [
+                          styles.posLoadMoreButton,
+                          {
+                            borderColor: colors.border,
+                            backgroundColor: colors.surface,
+                            opacity: pressed || posProductsLoadingMore ? 0.7 : 1,
+                          },
+                        ]}
+                      >
+                        {posProductsLoadingMore ? (
+                          <ActivityIndicator size="small" color={colors.primary} />
+                        ) : (
+                          <>
+                            <Ionicons name="add-circle-outline" size={16} color={colors.primary} />
+                            <Text style={[styles.posLoadMoreText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                              Load more products
+                            </Text>
+                          </>
+                        )}
+                      </Pressable>
+                    ) : null}
                   </View>
                 </View>
 
-                <View style={styles.posSection}>
-                  <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                    Cart
-                  </Text>
+                <View style={[styles.posSection, styles.posSectionCard, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}>
+                  <View style={styles.posSectionHeader}>
+                    <Ionicons name="basket-outline" size={16} color={colors.primary} />
+                    <Text style={[styles.posSectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      Cart
+                    </Text>
+                  </View>
                   {cartItems.length ? (
                     <View style={styles.posCartList}>
                       {cartItems.map((entry) => {
@@ -3990,6 +4161,23 @@ export default function SalesScreen() {
                               <Text style={[styles.posOptionSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                                 {formatPrice(price)} • Qty {entry.qty}
                               </Text>
+                            </View>
+                            <View style={styles.posDiscountBlock}>
+                              <Text style={[styles.posDiscountLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                                Discount %
+                              </Text>
+                              <TextInput
+                                keyboardType="numeric"
+                                value={String(entry.discountPercent || 0)}
+                                onChangeText={(value) => {
+                                  const parsed = Number(value.replace(/[^0-9.]/g, ""));
+                                  handleSetCartDiscount(id, Number.isFinite(parsed) ? parsed : 0);
+                                }}
+                                style={[
+                                  styles.posDiscountInput,
+                                  { borderColor: colors.border, color: colors.text, backgroundColor: colors.surface },
+                                ]}
+                              />
                             </View>
                             <View style={styles.posQtyControls}>
                               <Pressable
@@ -5138,33 +5326,93 @@ const styles = StyleSheet.create({
   },
   emptyText: { fontSize: 14, textAlign: "center" },
   posCard: {
-    borderRadius: 18,
+    borderRadius: 22,
     borderWidth: 1,
     padding: 16,
     marginTop: 16,
     gap: 14,
+    shadowColor: "#0B1E3A",
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 6,
   },
-  posHeaderRow: {
+  posHero: {
+    borderRadius: 18,
+    padding: 14,
+    gap: 10,
+  },
+  posHeroLeft: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: 12,
   },
-  posHeaderTitle: {
-    flexDirection: "row",
+  posHeroIconShell: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.18)",
     alignItems: "center",
-    gap: 8,
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.3)",
   },
-  posHeaderText: { fontSize: 16 },
-  posRefreshButton: {
+  posHeroTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  posHeroTitle: {
+    fontSize: 16,
+    color: "#FFFFFF",
+    fontFamily: "Inter_700Bold",
+  },
+  posHeroSubtitle: {
+    fontSize: 12,
+    color: "rgba(255,255,255,0.82)",
+    fontFamily: "Inter_400Regular",
+  },
+  posHeroAction: {
+    alignSelf: "flex-start",
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-    borderWidth: 1,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.3)",
+    backgroundColor: "rgba(255,255,255,0.18)",
   },
-  posRefreshText: { fontSize: 12 },
+  posHeroActionText: {
+    fontSize: 11,
+    color: "#FFFFFF",
+    fontFamily: "Inter_600SemiBold",
+  },
+  posMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  posMetaPill: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 2,
+  },
+  posMetaPillWide: {
+    flex: 1,
+  },
+  posMetaLabel: {
+    fontSize: 10,
+    color: "#7C879B",
+    fontFamily: "Inter_500Medium",
+  },
+  posMetaValue: {
+    fontSize: 12,
+    color: "#101828",
+    fontFamily: "Inter_700Bold",
+  },
   posLoadingRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -5184,6 +5432,16 @@ const styles = StyleSheet.create({
   posSection: {
     gap: 8,
   },
+  posSectionCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 12,
+  },
+  posSectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   posSectionTitle: { fontSize: 15 },
   posInput: {
     borderWidth: 1,
@@ -5201,9 +5459,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
   },
-  posSelectedText: { fontSize: 12 },
-  posSelectedSubtext: { fontSize: 11 },
+  posSelectedText: { fontSize: 12, flexShrink: 1 },
+  posSelectedSubtext: { fontSize: 11, flexShrink: 1 },
   posOptionList: {
+    gap: 8,
+  },
+  posScrollShell: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 8,
+    maxHeight: 220,
+  },
+  posScrollContent: {
     gap: 8,
   },
   posOptionRow: {
@@ -5214,7 +5481,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   posOptionTitle: { fontSize: 13 },
-  posOptionSubtitle: { fontSize: 11 },
+  posOptionSubtitle: { fontSize: 11, flexShrink: 1 },
   posEmptyText: { fontSize: 12 },
   posProductRow: {
     flexDirection: "row",
@@ -5239,6 +5506,16 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontFamily: "Inter_600SemiBold",
   },
+  posLoadMoreButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  posLoadMoreText: { fontSize: 12 },
   posCartList: {
     gap: 8,
   },
@@ -5253,6 +5530,20 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   posCartInfo: { flex: 1, gap: 2 },
+  posDiscountBlock: {
+    alignItems: "flex-start",
+    gap: 4,
+  },
+  posDiscountLabel: { fontSize: 10 },
+  posDiscountInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 12,
+    minWidth: 64,
+    textAlign: "center",
+  },
   posQtyControls: {
     flexDirection: "row",
     alignItems: "center",

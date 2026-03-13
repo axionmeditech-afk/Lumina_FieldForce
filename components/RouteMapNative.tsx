@@ -212,6 +212,8 @@ export function RouteMapNative({
     if (!trackingModule) return null;
     return trackingModule.default ?? trackingModule;
   }, [trackingModule]);
+  const mapplsIsShim = Boolean(mapplsSdk && (mapplsSdk as any).__isShim);
+  const trackingIsShim = Boolean(trackingSdk && (trackingSdk as any).__isShim);
   const TrackingWidget = useMemo(() => {
     const moduleRoot = trackingSdk as any;
     if (!moduleRoot) return null;
@@ -348,7 +350,7 @@ export function RouteMapNative({
       return;
     }
     let mounted = true;
-    void import("../shims/mappls-map-react-native")
+    void import("mappls-map-react-native")
       .then((module) => {
         if (!mounted) return;
         setMapplsModule(module);
@@ -368,7 +370,7 @@ export function RouteMapNative({
       return;
     }
     let mounted = true;
-    void import("../shims/mappls-tracking-react-native")
+    void import("mappls-tracking-react-native")
       .then((module) => {
         if (!mounted) return;
         setTrackingModule(module);
@@ -467,7 +469,7 @@ export function RouteMapNative({
   }
 
   if (shouldUseMappls) {
-    if (!mapplsSdk) {
+    if (!mapplsSdk || mapplsIsShim) {
       return (
         <View style={{ gap: 8 }}>
           <RouteMapPanel points={panelPoints} halts={panelHalts} colors={colors} height={height} />
@@ -481,7 +483,8 @@ export function RouteMapNative({
             ]}
           >
             <Text style={[styles.noteText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
-              Mappls SDK not loaded. Run `npm install mappls-map-react-native` and build a dev client.
+              Mappls SDK not loaded. Install `mappls-map-react-native`, set
+              `EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE=true`, and rebuild the Android app.
             </Text>
           </View>
         </View>
@@ -504,7 +507,7 @@ export function RouteMapNative({
     const MapplsGL = mapplsSdk as any;
 
     if (shouldUseTrackingWidget) {
-      if (!trackingSdk || !TrackingWidget) {
+      if (!trackingSdk || !TrackingWidget || trackingIsShim) {
         return (
           <View style={{ gap: 8 }}>
             <RouteMapPanel points={panelPoints} halts={panelHalts} colors={colors} height={height} />
@@ -517,8 +520,9 @@ export function RouteMapNative({
                 },
               ]}
             >
-              <Text style={[styles.noteText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}> 
-                Tracking widget not loaded. Install `mappls-tracking-react-native` and run Android dev build.
+              <Text style={[styles.noteText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
+                Tracking widget not loaded. Install `mappls-tracking-react-native`, set
+                `EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE=true`, and rebuild the Android app.
               </Text>
             </View>
           </View>
