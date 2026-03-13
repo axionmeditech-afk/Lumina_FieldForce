@@ -1900,6 +1900,15 @@ export async function updateSalaryStatus(
   }
 }
 
+export async function addSalaryRecord(record: SalaryRecord): Promise<void> {
+  const companyId = await getActiveCompanyId();
+  const salaries = await getRawList<SalaryRecord>(KEYS.SALARIES);
+  const nextRecord = withCompanyId(record, companyId ?? record.companyId ?? DEFAULT_COMPANY_ID);
+  const filtered = salaries.filter((entry) => entry.id !== record.id);
+  filtered.unshift(nextRecord);
+  await setItem(KEYS.SALARIES, filtered);
+}
+
 export async function getTasks(): Promise<Task[]> {
   const companyId = await getActiveCompanyId();
   const tasks = await getRawList<Task>(KEYS.TASKS);
@@ -2043,7 +2052,7 @@ export async function getSettings(): Promise<Record<string, string>> {
   const themeMode =
     current.themeMode === "light" || current.themeMode === "dark" || current.themeMode === "system"
       ? current.themeMode
-      : "system";
+      : "light";
   const backendApiUrl = (current.backendApiUrl || "").trim() || BACKEND_ENV_DEFAULTS.apiBaseUrl;
   const dolibarrEndpoint =
     (current.dolibarrEndpoint || "").trim() || DOLIBARR_ENV_DEFAULTS.endpoint;
@@ -2051,14 +2060,7 @@ export async function getSettings(): Promise<Record<string, string>> {
   const aiApiKey = (current.aiApiKey || "").trim() || AI_ENV_DEFAULTS.apiKey;
   const aiModel = (current.aiModel || "").trim() || AI_ENV_DEFAULTS.model;
   const aiProjectId = (current.aiProjectId || "").trim() || AI_ENV_DEFAULTS.projectId;
-  const dolibarrEnabled =
-    current.dolibarrEnabled === "true"
-      ? "true"
-      : current.dolibarrEnabled === "false"
-        ? "false"
-        : dolibarrEndpoint && dolibarrApiKey
-          ? "true"
-          : "false";
+  const dolibarrEnabled = "true";
 
   return {
     ...current,
@@ -2120,7 +2122,7 @@ export async function updateSettings(
     normalized.biometricLogin = normalized.biometricLogin === "false" ? "false" : "true";
   }
   if ("dolibarrEnabled" in normalized) {
-    normalized.dolibarrEnabled = normalized.dolibarrEnabled === "true" ? "true" : "false";
+    normalized.dolibarrEnabled = "true";
   }
   if ("backendApiUrl" in normalized) {
     normalized.backendApiUrl = normalized.backendApiUrl.trim();

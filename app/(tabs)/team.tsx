@@ -21,10 +21,10 @@ import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import {
   addAuditLog,
   addTask,
-  getEmployees,
   getTeams,
   upsertTeam,
 } from "@/lib/storage";
+import { getEmployees } from "@/lib/employee-data";
 import type { Employee, Task, Team, UserRole } from "@/lib/types";
 
 const LEAD_ROLES: UserRole[] = ["admin", "hr", "manager"];

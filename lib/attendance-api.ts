@@ -100,6 +100,28 @@ export interface DolibarrOrderCreateResult {
   message?: string;
 }
 
+export interface RemoteStateResponse<T> {
+  key: string;
+  value: T | null;
+  updatedAt: string | null;
+  source?: string | null;
+}
+
+export interface DolibarrSalarySyncPayload {
+  salaryId: string;
+  employeeName: string;
+  employeeEmail?: string;
+  month: string;
+  grossPay: number;
+  netPay: number;
+  status: string;
+}
+
+export interface DolibarrSalarySyncResult {
+  ok: boolean;
+  message: string;
+}
+
 const PUBLIC_API_PATH_PATTERNS = [
   /^\/health\b/i,
   /^\/auth\/(login|token|register|access-request)\b/i,
@@ -419,6 +441,19 @@ async function fetchJsonWithTimeout<T>(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function getRemoteState<T>(key: string): Promise<RemoteStateResponse<T>> {
+  const encodedKey = encodeURIComponent(key);
+  return fetchJson<RemoteStateResponse<T>>(`/state/${encodedKey}`, { method: "GET" });
+}
+
+export async function setRemoteState<T>(key: string, value: T): Promise<void> {
+  const encodedKey = encodeURIComponent(key);
+  await fetchJson<Record<string, unknown>>(`/state/${encodedKey}`, {
+    method: "PUT",
+    body: JSON.stringify({ value }),
+  });
 }
 
 export async function issueApiToken(
@@ -1504,11 +1539,84 @@ export async function testDolibarrIntegration(
   });
 }
 
+function buildDolibarrSalaryNote(payload: DolibarrSalarySyncPayload): { marker: string; line: string } {
+  const marker = `[TF_SALARY:${payload.salaryId}]`;
+  const cleanMonth = (payload.month || "").trim() || "unknown";
+  const cleanName = (payload.employeeName || "").trim() || "employee";
+  const line = `${marker} ${cleanMonth} net=${payload.netPay} gross=${payload.grossPay} status=${payload.status} name=${cleanName}`;
+  return { marker, line };
+}
+
+export async function syncSalaryToDolibarr(
+  payload: DolibarrSalarySyncPayload
+): Promise<DolibarrSalarySyncResult> {
+  const email = (payload.employeeEmail || "").trim().toLowerCase();
+  if (!email) {
+    return { ok: false, message: "Missing employee email for Dolibarr salary sync." };
+  }
+
+  let dolibarrUser: Record<string, unknown> | null = null;
+  try {
+    dolibarrUser = await fetchJson<Record<string, unknown>>(
+      `/dolibarr/proxy/users/email/${encodeURIComponent(email)}`,
+      { method: "GET" }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to fetch Dolibarr user by email.";
+    return { ok: false, message };
+  }
+
+  const userId = parseDolibarrEntityId(dolibarrUser);
+  if (!userId) {
+    return { ok: false, message: "Dolibarr user not found for salary sync." };
+  }
+
+  let userDetail: Record<string, unknown> | null = null;
+  try {
+    userDetail = await fetchJson<Record<string, unknown>>(
+      `/dolibarr/proxy/users/${encodeURIComponent(String(userId))}`,
+      { method: "GET" }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to read Dolibarr user details.";
+    return { ok: false, message };
+  }
+
+  const existingNote =
+    typeof userDetail?.note_private === "string"
+      ? String(userDetail.note_private)
+      : typeof userDetail?.note_public === "string"
+        ? String(userDetail.note_public)
+        : "";
+  const { marker, line } = buildDolibarrSalaryNote(payload);
+  if (existingNote.includes(marker)) {
+    return { ok: true, message: "Salary already recorded in Dolibarr." };
+  }
+
+  const nextNote = existingNote.trim() ? `${existingNote.trim()}\n${line}` : line;
+  try {
+    await fetchJson<Record<string, unknown>>(
+      `/dolibarr/proxy/users/${encodeURIComponent(String(userId))}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          note_private: nextNote,
+        }),
+      }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to update Dolibarr user note.";
+    return { ok: false, message };
+  }
+
+  return { ok: true, message: "Salary recorded in Dolibarr." };
+}
+
 export async function syncApprovedEmployeeToDolibarr(
   payload: DolibarrEmployeeSyncPayload
 ): Promise<DolibarrEmployeeSyncResult> {
   const settings = await getSettings();
-  const localEnabled = settings.dolibarrEnabled === "true";
+  const localEnabled = true;
   const localEndpoint = (settings.dolibarrEndpoint || "").trim();
   const localApiKey = (settings.dolibarrApiKey || "").trim();
   const backendApiUrl = (settings.backendApiUrl || "").trim();
@@ -1517,18 +1625,7 @@ export async function syncApprovedEmployeeToDolibarr(
   const payloadApiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
   const resolvedEndpoint = payloadEndpoint || localEndpoint;
   const resolvedApiKey = payloadApiKey || localApiKey;
-  const resolvedEnabled =
-    typeof payload.enabled === "boolean" ? payload.enabled : localEnabled;
-
-  if (!resolvedEnabled) {
-    return {
-      ok: true,
-      status: "skipped",
-      message: "Dolibarr sync skipped: integration is disabled in Settings.",
-      dolibarrUserId: null,
-      endpointUsed: null,
-    };
-  }
+  const resolvedEnabled = true;
 
   const body: DolibarrEmployeeSyncPayload = {
     ...payload,

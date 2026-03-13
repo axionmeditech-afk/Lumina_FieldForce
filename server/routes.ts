@@ -364,7 +364,7 @@ async function resolveDolibarrConfigForUser(
   const endpoint = endpointValue || null;
   const apiKey = apiKeyValue || null;
   const configured = Boolean(endpoint && apiKey);
-  const enabled = overrides?.enabled ?? stored?.enabled ?? latestStored?.enabled ?? configured;
+    const enabled = true;
   return {
     enabled,
     endpoint,
@@ -1488,15 +1488,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
     });
 
-    if (!config.enabled) {
-      res.json({
-        ok: false,
-        status: null,
-        message: "Dolibarr sync is disabled in settings.",
-      });
-      return;
-    }
-    if (!config.endpoint || !config.apiKey) {
+      if (!config.endpoint || !config.apiKey) {
       res.json({
         ok: false,
         status: null,

@@ -36,7 +36,6 @@ import {
   getAttendance,
   getAuditLogs,
   getConversations,
-  getEmployees,
   getExpenses,
   getNotificationsForCurrentUser,
   STORAGE_KEYS,
@@ -45,6 +44,7 @@ import {
   getTeams,
   subscribeStorageUpdates,
 } from "@/lib/storage";
+import { getEmployees } from "@/lib/employee-data";
 import type {
   AppNotification,
   AttendanceRecord,
@@ -596,11 +596,15 @@ export default function DashboardScreen() {
 
   const snapshot = useMemo<DashboardSnapshot>(() => {
     const todayKey = toLocalDateKey(new Date());
+    const employeeRoster = employees.filter((employee) => employee.role !== "admin");
+    const employeeIdSet = new Set(employeeRoster.map((employee) => employee.id));
     const validAttendance = attendance.filter((record) => record.approvalStatus !== "rejected");
     const todayRecords = validAttendance.filter(
       (record) => toLocalDateKey(new Date(record.timestamp)) === todayKey
     );
-    const todayCheckins = todayRecords.filter((record) => record.type === "checkin");
+    const todayCheckins = todayRecords.filter(
+      (record) => record.type === "checkin" && employeeIdSet.has(record.userId)
+    );
     const presentUserIds = new Set(todayCheckins.map((record) => record.userId));
     const lateToday = todayCheckins.filter((record) => {
       const parsed = new Date(record.timestamp);
@@ -611,9 +615,14 @@ export default function DashboardScreen() {
           parsed.getMinutes() > LATE_THRESHOLD_MINUTE)
       );
     }).length;
-    const todayCheckouts = todayRecords.filter((record) => record.type === "checkout").length;
+    const todayCheckouts = todayRecords.filter(
+      (record) => record.type === "checkout" && employeeIdSet.has(record.userId)
+    ).length;
     const pendingSignIns = attendance.filter(
-      (record) => record.type === "checkin" && record.approvalStatus === "pending"
+      (record) =>
+        record.type === "checkin" &&
+        record.approvalStatus === "pending" &&
+        employeeIdSet.has(record.userId)
     ).length;
     const pendingTasks = tasks.filter((task) => task.status === "pending").length;
     const inProgressTasks = tasks.filter((task) => task.status === "in_progress").length;
@@ -630,13 +639,13 @@ export default function DashboardScreen() {
           );
 
     return {
-      totalEmployees: employees.length,
+      totalEmployees: employeeRoster.length,
       presentToday: presentUserIds.size,
       lateToday,
-      onLeave: Math.max(employees.length - presentUserIds.size, 0),
-      activeNow: employees.filter((employee) => employee.status === "active").length,
-      idleNow: employees.filter((employee) => employee.status === "idle").length,
-      offlineNow: employees.filter((employee) => employee.status === "offline").length,
+      onLeave: Math.max(employeeRoster.length - presentUserIds.size, 0),
+      activeNow: employeeRoster.filter((employee) => employee.status === "active").length,
+      idleNow: employeeRoster.filter((employee) => employee.status === "idle").length,
+      offlineNow: employeeRoster.filter((employee) => employee.status === "offline").length,
       pendingTasks,
       pendingExpenses,
       totalConversations: conversations.length,

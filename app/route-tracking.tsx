@@ -42,7 +42,8 @@ import {
   getVerifiedLocationEvidence,
 } from "@/lib/location-service";
 import { buildRouteTimeline } from "@/lib/route-analytics";
-import { addLocationLog, getAttendance, getEmployees, getLocationLogs, getTasks } from "@/lib/storage";
+import { addLocationLog, getAttendance, getLocationLogs, getTasks } from "@/lib/storage";
+import { getEmployees } from "@/lib/employee-data";
 import type { AttendanceRecord, Employee, LocationLog, Task } from "@/lib/types";
 
 function toShortDate(dateKey: string): string {

@@ -17,11 +17,11 @@ import Colors from "@/constants/colors";
 import {
   addAuditLog,
   addTask,
-  getEmployees,
   getTasks,
   getTeams,
   updateTaskStatus,
 } from "@/lib/storage";
+import { getEmployees } from "@/lib/employee-data";
 import { useAuth } from "@/contexts/AuthContext";
 import type { Employee, Task, Team, UserRole } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";

@@ -97,6 +97,7 @@ export interface SalaryRecord {
   companyId?: string;
   employeeId: string;
   employeeName: string;
+  employeeEmail?: string;
   month: string;
   basic: number;
   hra: number;

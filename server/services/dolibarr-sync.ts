@@ -275,16 +275,6 @@ export async function syncApprovedUserToDolibarrEmployee(
   user: DolibarrEmployeeSyncInput,
   config?: DolibarrApiConfig
 ): Promise<DolibarrEmployeeSyncResult> {
-  const enabled = config?.enabled ?? true;
-  if (!enabled) {
-    return {
-      ok: false,
-      status: "skipped",
-      message: "Dolibarr sync disabled in settings.",
-      dolibarrUserId: null,
-      endpointUsed: null,
-    };
-  }
 
   const endpoint = normalizeText(config?.endpoint || process.env.DOLIBARR_ENDPOINT || "");
   const apiKey = normalizeText(config?.apiKey || process.env.DOLIBARR_API_KEY || "");
@@ -399,20 +389,6 @@ export async function syncAttendanceWithDolibarr(
     apiKey?: string | null;
   }
 ): Promise<void> {
-  const enabled = config?.enabled ?? true;
-  if (!enabled) {
-    await storage.addDolibarrSyncLog({
-      id: randomUUID(),
-      attendanceId: attendance.id,
-      userId: attendance.userId,
-      attempt: 1,
-      status: "failed",
-      message: "Dolibarr sync disabled in settings",
-      createdAt: new Date().toISOString(),
-      syncedAt: null,
-    });
-    return;
-  }
 
   const endpoint = config?.endpoint || process.env.DOLIBARR_ENDPOINT;
   const apiKey = config?.apiKey || process.env.DOLIBARR_API_KEY;

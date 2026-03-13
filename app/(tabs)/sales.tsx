@@ -43,12 +43,12 @@ import {
   addConversation,
   getAttendance,
   getConversations,
-  getEmployees,
   getLocationLogs,
   getTasks,
   removeTask,
   updateTask,
 } from "@/lib/storage";
+import { getEmployees } from "@/lib/employee-data";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
 import { buildRouteTimeline } from "@/lib/route-analytics";
 import { formatMumbaiDateTime, formatMumbaiTime, isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";

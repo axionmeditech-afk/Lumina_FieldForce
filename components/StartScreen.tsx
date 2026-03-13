@@ -87,7 +87,7 @@ export function StartScreen({
     return (
       <View style={[styles.videoRoot, { backgroundColor: "#05070D" }]}>
         <Image
-          source={require("../assets/images/splash-lumina.png")}
+          source={require("../assets/images/logo.png")}
           style={[styles.videoFallback, videoReady && !videoFailed ? styles.videoFallbackHidden : null]}
           resizeMode="contain"
         />

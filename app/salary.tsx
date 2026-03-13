@@ -9,6 +9,7 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  TextInput,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -16,8 +17,9 @@ import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import Colors from "@/constants/colors";
-import { addAuditLog, getEmployees, getSalaries, updateSalaryStatus } from "@/lib/storage";
-import type { SalaryRecord } from "@/lib/types";
+import { addAuditLog, updateSalaryStatus } from "@/lib/storage";
+import { getEmployees, getSalaries, saveSalaryRecord } from "@/lib/employee-data";
+import type { Employee, SalaryRecord } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { useAuth } from "@/contexts/AuthContext";
@@ -33,6 +35,17 @@ function formatMonthLabel(monthKey: string): string {
 
 function formatCurrency(value: number): string {
   return `INR ${value.toLocaleString()}`;
+}
+
+function parseAmountInput(value: string): number {
+  const cleaned = value.replace(/[^0-9.]/g, "");
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(parsed, 0);
+}
+
+function getDefaultMonthKey(): string {
+  return new Date().toISOString().slice(0, 7);
 }
 
 function getSalarySlipNumber(salary: SalaryRecord): string {
@@ -445,21 +458,108 @@ function SalarySlipModal({
   );
 }
 
+function AmountField({
+  label,
+  value,
+  onChangeText,
+  colors,
+  placeholder = "0",
+}: {
+  label: string;
+  value: string;
+  onChangeText: (next: string) => void;
+  colors: typeof Colors.light;
+  placeholder?: string;
+}) {
+  return (
+    <View style={styles.formRow}>
+      <Text style={[styles.formLabel, { color: colors.textSecondary }]}>{label}</Text>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        keyboardType="numeric"
+        placeholderTextColor={colors.textTertiary}
+        style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+      />
+    </View>
+  );
+}
+
+function EmployeePickerRow({
+  employee,
+  selected,
+  colors,
+  onSelect,
+}: {
+  employee: Employee;
+  selected: boolean;
+  colors: typeof Colors.light;
+  onSelect: (employee: Employee) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => onSelect(employee)}
+      style={({ pressed }) => [
+        styles.employeeRow,
+        {
+          borderColor: selected ? colors.primary : colors.border,
+          backgroundColor: selected ? colors.primary + "18" : colors.surface,
+          opacity: pressed ? 0.86 : 1,
+        },
+      ]}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.employeeName, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+          {employee.name}
+        </Text>
+        <Text style={[styles.employeeMeta, { color: colors.textSecondary }]}>
+          {employee.department} • {employee.branch}
+        </Text>
+      </View>
+      <Ionicons
+        name={selected ? "checkmark-circle" : "ellipse-outline"}
+        size={20}
+        color={selected ? colors.primary : colors.textTertiary}
+      />
+    </Pressable>
+  );
+}
+
 export default function SalaryScreen() {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
   const [salaries, setSalaries] = useState<SalaryRecord[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [selectedSlip, setSelectedSlip] = useState<SalaryRecord | null>(null);
   const [printingSlipId, setPrintingSlipId] = useState<string | null>(null);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createEmployeeId, setCreateEmployeeId] = useState("");
+  const [createEmployeeName, setCreateEmployeeName] = useState("");
+  const [createEmployeeEmail, setCreateEmployeeEmail] = useState("");
+  const [createSearch, setCreateSearch] = useState("");
+  const [createMonth, setCreateMonth] = useState(getDefaultMonthKey());
+  const [createBasic, setCreateBasic] = useState("");
+  const [createHra, setCreateHra] = useState("");
+  const [createTransport, setCreateTransport] = useState("");
+  const [createMedical, setCreateMedical] = useState("");
+  const [createBonus, setCreateBonus] = useState("");
+  const [createOvertime, setCreateOvertime] = useState("");
+  const [createTax, setCreateTax] = useState("");
+  const [createPf, setCreatePf] = useState("");
+  const [createInsurance, setCreateInsurance] = useState("");
+  const [savingSalary, setSavingSalary] = useState(false);
   const isAdmin = user?.role === "admin";
 
   const loadData = useCallback(async () => {
     const [salaryData, employees] = await Promise.all([getSalaries(), getEmployees()]);
     if (!user) {
       setSalaries([]);
+      setEmployees([]);
       return;
     }
+    setEmployees(employees);
     if (isAdmin) {
       setSalaries(salaryData);
       return;
@@ -521,6 +621,155 @@ export default function SalaryScreen() {
     await loadData();
   }, [isAdmin, loadData, salaries, user]);
 
+  const resetCreateForm = useCallback(() => {
+    setCreateEmployeeId("");
+    setCreateEmployeeName("");
+    setCreateEmployeeEmail("");
+    setCreateSearch("");
+    setCreateMonth(getDefaultMonthKey());
+    setCreateBasic("");
+    setCreateHra("");
+    setCreateTransport("");
+    setCreateMedical("");
+    setCreateBonus("");
+    setCreateOvertime("");
+    setCreateTax("");
+    setCreatePf("");
+    setCreateInsurance("");
+  }, []);
+
+  const handleOpenCreate = useCallback(() => {
+    if (!isAdmin) return;
+    resetCreateForm();
+    setShowCreateModal(true);
+  }, [isAdmin, resetCreateForm]);
+
+  const handleCloseCreate = useCallback(() => {
+    if (savingSalary) return;
+    setShowCreateModal(false);
+  }, [savingSalary]);
+
+  const selectableEmployees = useMemo(
+    () => employees.filter((employee) => employee.role !== "admin"),
+    [employees]
+  );
+
+  const filteredEmployees = useMemo(() => {
+    const q = createSearch.trim().toLowerCase();
+    if (!q) return selectableEmployees;
+    return selectableEmployees.filter((employee) => {
+      return (
+        employee.name.toLowerCase().includes(q) ||
+        employee.email.toLowerCase().includes(q) ||
+        employee.department.toLowerCase().includes(q) ||
+        employee.branch.toLowerCase().includes(q)
+      );
+    });
+  }, [createSearch, selectableEmployees]);
+
+  const handleCreateSalary = useCallback(async () => {
+    if (!isAdmin || !user) return;
+    if (!createEmployeeId || !createEmployeeName) {
+      Alert.alert("Employee Required", "Select an employee before saving the salary.");
+      return;
+    }
+    const monthKey = createMonth.trim();
+    if (!/^\d{4}-\d{2}$/.test(monthKey)) {
+      Alert.alert("Invalid Month", "Enter month as YYYY-MM (example: 2026-03).");
+      return;
+    }
+
+    const basic = parseAmountInput(createBasic);
+    const hra = parseAmountInput(createHra);
+    const transport = parseAmountInput(createTransport);
+    const medical = parseAmountInput(createMedical);
+    const bonus = parseAmountInput(createBonus);
+    const overtime = parseAmountInput(createOvertime);
+    const tax = parseAmountInput(createTax);
+    const pf = parseAmountInput(createPf);
+    const insurance = parseAmountInput(createInsurance);
+    const grossPay = basic + hra + transport + medical + bonus + overtime;
+    const totalDeductions = tax + pf + insurance;
+    const netPay = Math.max(grossPay - totalDeductions, 0);
+
+    setSavingSalary(true);
+    try {
+      const salaryRecord: SalaryRecord = {
+        id: Crypto.randomUUID(),
+        employeeId: createEmployeeId,
+        employeeName: createEmployeeName,
+        employeeEmail: createEmployeeEmail || undefined,
+        month: monthKey,
+        basic,
+        hra,
+        transport,
+        medical,
+        bonus,
+        overtime,
+        tax,
+        pf,
+        insurance,
+        grossPay,
+        totalDeductions,
+        netPay,
+        status: "approved",
+      };
+
+      const result = await saveSalaryRecord(salaryRecord);
+
+      await addAuditLog({
+        id: Crypto.randomUUID(),
+        userId: user.id,
+        userName: user.name,
+        action: "Salary Added",
+        details: `Added salary for ${createEmployeeName} (${monthKey})`,
+        timestamp: new Date().toISOString(),
+        module: "Salary",
+      });
+
+      if (result.dolibarr && !result.dolibarr.ok) {
+        Alert.alert(
+          "Dolibarr Sync Warning",
+          result.dolibarr.message || "Salary saved, but Dolibarr sync failed."
+        );
+      }
+
+      if (!result.synced) {
+        Alert.alert(
+          "Offline Salary Saved",
+          "Salary saved locally. Connect to the backend to sync company-wide."
+        );
+      }
+
+      setShowCreateModal(false);
+      await loadData();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to save salary record.";
+      Alert.alert("Save Failed", message);
+    } finally {
+      setSavingSalary(false);
+    }
+  }, [
+    addAuditLog,
+    createBasic,
+    createBonus,
+    createEmployeeEmail,
+    createEmployeeId,
+    createEmployeeName,
+    createHra,
+    createInsurance,
+    createMedical,
+    createMonth,
+    createOvertime,
+    createPf,
+    createTax,
+    createTransport,
+    isAdmin,
+    loadData,
+    user,
+  ]);
+
   const handleViewSlip = useCallback((salary: SalaryRecord) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setSelectedSlip(salary);
@@ -567,9 +816,14 @@ export default function SalaryScreen() {
             </Pressable>
             <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Salary</Text>
             {isAdmin ? (
-              <Pressable onPress={() => void handleMarkAllPaid()} hitSlop={10}>
-                <Ionicons name="cash-outline" size={23} color={colors.primary} />
-              </Pressable>
+              <View style={styles.headerActions}>
+                <Pressable onPress={handleOpenCreate} hitSlop={10}>
+                  <Ionicons name="add-circle-outline" size={24} color={colors.primary} />
+                </Pressable>
+                <Pressable onPress={() => void handleMarkAllPaid()} hitSlop={10}>
+                  <Ionicons name="cash-outline" size={23} color={colors.primary} />
+                </Pressable>
+              </View>
             ) : (
               <View style={{ width: 24 }} />
             )}
@@ -608,6 +862,115 @@ export default function SalaryScreen() {
           void handlePrintSlip(selectedSlip);
         }}
       />
+
+      <Modal visible={showCreateModal} transparent animationType="slide" onRequestClose={handleCloseCreate}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.createModalCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                New Salary Record
+              </Text>
+              <Pressable onPress={handleCloseCreate} hitSlop={10}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Employee</Text>
+              <TextInput
+                value={createSearch}
+                onChangeText={setCreateSearch}
+                placeholder="Search employee..."
+                placeholderTextColor={colors.textTertiary}
+                style={[styles.searchInput, { color: colors.text, borderColor: colors.border }]}
+              />
+              <View style={styles.employeeList}>
+                {filteredEmployees.length === 0 ? (
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                    No employees found.
+                  </Text>
+                ) : (
+                  filteredEmployees.map((employee) => (
+                    <EmployeePickerRow
+                      key={employee.id}
+                      employee={employee}
+                      selected={employee.id === createEmployeeId}
+                      colors={colors}
+                      onSelect={(selected) => {
+                        setCreateEmployeeId(selected.id);
+                        setCreateEmployeeName(selected.name);
+                        setCreateEmployeeEmail(selected.email);
+                      }}
+                    />
+                  ))
+                )}
+              </View>
+
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Salary Month (YYYY-MM)</Text>
+              <TextInput
+                value={createMonth}
+                onChangeText={setCreateMonth}
+                placeholder="2026-03"
+                placeholderTextColor={colors.textTertiary}
+                style={[styles.searchInput, { color: colors.text, borderColor: colors.border }]}
+              />
+
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Earnings</Text>
+              <AmountField label="Basic" value={createBasic} onChangeText={setCreateBasic} colors={colors} />
+              <AmountField label="HRA" value={createHra} onChangeText={setCreateHra} colors={colors} />
+              <AmountField label="Transport" value={createTransport} onChangeText={setCreateTransport} colors={colors} />
+              <AmountField label="Medical" value={createMedical} onChangeText={setCreateMedical} colors={colors} />
+              <AmountField label="Bonus" value={createBonus} onChangeText={setCreateBonus} colors={colors} />
+              <AmountField label="Overtime" value={createOvertime} onChangeText={setCreateOvertime} colors={colors} />
+
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Deductions</Text>
+              <AmountField label="Income Tax" value={createTax} onChangeText={setCreateTax} colors={colors} />
+              <AmountField label="Provident Fund" value={createPf} onChangeText={setCreatePf} colors={colors} />
+              <AmountField label="Insurance" value={createInsurance} onChangeText={setCreateInsurance} colors={colors} />
+            </ScrollView>
+
+            <View style={styles.modalFooter}>
+              <Pressable
+                onPress={handleCloseCreate}
+                disabled={savingSalary}
+                style={({ pressed }) => [
+                  styles.modalFooterButton,
+                  {
+                    borderColor: colors.border,
+                    backgroundColor: colors.surface,
+                    opacity: pressed || savingSalary ? 0.85 : 1,
+                  },
+                ]}
+              >
+                <Text style={[styles.modalFooterButtonText, { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" }]}>
+                  Cancel
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void handleCreateSalary()}
+                disabled={savingSalary}
+                style={({ pressed }) => [
+                  styles.modalFooterButton,
+                  {
+                    borderColor: colors.primary,
+                    backgroundColor: colors.primary,
+                    opacity: pressed || savingSalary ? 0.85 : 1,
+                  },
+                ]}
+              >
+                {savingSalary ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Ionicons name="save-outline" size={16} color="#FFFFFF" />
+                )}
+                <Text style={[styles.modalFooterButtonText, { color: "#FFFFFF", fontFamily: "Inter_600SemiBold" }]}>
+                  {savingSalary ? "Saving..." : "Save Salary"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </AppCanvas>
   );
 }
@@ -705,11 +1068,78 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   emptyText: { fontSize: 14, fontFamily: "Inter_400Regular" },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
   modalBackdrop: {
     flex: 1,
     justifyContent: "center",
     paddingHorizontal: 16,
     paddingVertical: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(2, 6, 23, 0.55)",
+  },
+  createModalCard: {
+    maxHeight: "92%",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  sectionLabel: {
+    fontSize: 12,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  searchInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+  },
+  employeeList: {
+    gap: 8,
+    marginBottom: 6,
+  },
+  employeeRow: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  employeeName: {
+    fontSize: 13.5,
+  },
+  employeeMeta: {
+    fontSize: 11.5,
+    marginTop: 2,
+  },
+  emptyPickerText: {
+    fontSize: 12.5,
+    textAlign: "center",
+    paddingVertical: 6,
+  },
+  formRow: {
+    gap: 6,
+  },
+  formLabel: {
+    fontSize: 12.5,
+  },
+  formInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
   },
   modalCard: {
     maxHeight: "92%",

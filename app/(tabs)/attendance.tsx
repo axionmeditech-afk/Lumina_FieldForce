@@ -27,13 +27,13 @@ import {
   addAttendanceAnomaly,
   addLocationLog,
   getAttendance,
-  getEmployees,
   getGeofencesForUser,
   getSettings,
   isCheckedIn,
   setCheckedIn,
   updateAttendanceApproval,
 } from "@/lib/storage";
+import { getEmployees } from "@/lib/employee-data";
 import type { AttendanceRecord, Geofence, GeofenceEvaluation } from "@/lib/types";
 import {
   attendanceCheckIn,

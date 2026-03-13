@@ -54,7 +54,7 @@ export default function SettingsScreen() {
   const [profilePhotoDirty, setProfilePhotoDirty] = useState(false);
   const [isPickingProfilePhoto, setIsPickingProfilePhoto] = useState(false);
   const [backendApiUrl, setBackendApiUrl] = useState("");
-  const [dolibarrEnabled, setDolibarrEnabled] = useState(false);
+  const [dolibarrEnabled, setDolibarrEnabled] = useState(true);
   const [dolibarrEndpoint, setDolibarrEndpoint] = useState("");
   const [dolibarrApiKey, setDolibarrApiKey] = useState("");
   const [showDolibarrApiKey, setShowDolibarrApiKey] = useState(false);
@@ -125,7 +125,7 @@ export default function SettingsScreen() {
         setAutoSync(settings.autoSync !== "false");
         setOfflineMode(settings.offlineMode === "true");
         setBackendApiUrl(settings.backendApiUrl || "");
-        setDolibarrEnabled(settings.dolibarrEnabled === "true");
+        setDolibarrEnabled(true);
         setDolibarrEndpoint(settings.dolibarrEndpoint || "");
         setDolibarrApiKey(settings.dolibarrApiKey || "");
         if (!isAdmin) {
@@ -142,7 +142,7 @@ export default function SettingsScreen() {
           try {
             const remoteDolibarr = await getDolibarrIntegrationSettings();
             if (!mounted) return;
-            setDolibarrEnabled(remoteDolibarr.enabled);
+            setDolibarrEnabled(true);
             setDolibarrEndpoint(remoteDolibarr.endpoint || settings.dolibarrEndpoint || "");
             setDolibarrHealthNote(
               remoteDolibarr.configured
@@ -216,7 +216,7 @@ export default function SettingsScreen() {
       nextSettings.autoSync = normalizedAutoSync ? "true" : "false";
       nextSettings.offlineMode = normalizedOfflineMode ? "true" : "false";
       nextSettings.backendApiUrl = backendApiUrl.trim();
-      nextSettings.dolibarrEnabled = dolibarrEnabled ? "true" : "false";
+      nextSettings.dolibarrEnabled = "true";
       nextSettings.dolibarrEndpoint = dolibarrEndpoint.trim();
       nextSettings.dolibarrApiKey = dolibarrApiKey.trim();
     }
@@ -280,7 +280,7 @@ export default function SettingsScreen() {
           try {
             const remoteDolibarr = await withTimeout(
               updateDolibarrIntegrationSettings({
-                enabled: dolibarrEnabled,
+                enabled: true,
                 endpoint: dolibarrEndpoint.trim(),
                 apiKey: dolibarrApiKey.trim(),
               }),
@@ -428,7 +428,7 @@ export default function SettingsScreen() {
     setIsTestingDolibarr(true);
     try {
       const result = await testDolibarrIntegration({
-        enabled: dolibarrEnabled,
+        enabled: true,
         endpoint: dolibarrEndpoint.trim(),
         apiKey: dolibarrApiKey.trim(),
       });
@@ -742,15 +742,16 @@ export default function SettingsScreen() {
                 INTEGRATIONS
               </Text>
               <View style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                <ToggleRow
-                  icon="server-outline"
-                  iconColor="#0EA5E9"
-                  label="Dolibarr ERP Sync"
-                  description="Push attendance records to Dolibarr"
-                  value={dolibarrEnabled}
-                  onToggle={setDolibarrEnabled}
-                  colors={colors}
-                />
+                  <ToggleRow
+                    icon="server-outline"
+                    iconColor="#0EA5E9"
+                    label="Dolibarr ERP Sync"
+                    description="Push attendance records to Dolibarr"
+                    value={dolibarrEnabled}
+                    onToggle={() => setDolibarrEnabled(true)}
+                    disabled
+                    colors={colors}
+                  />
                 <View style={[styles.divider, { backgroundColor: colors.borderLight }]} />
                 <View style={styles.inputRow}>
                   <Text style={[styles.inputLabel, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
@@ -1023,23 +1024,25 @@ export default function SettingsScreen() {
   );
 }
 
-function ToggleRow({
-  icon,
-  iconColor,
-  label,
-  description,
-  value,
-  onToggle,
-  colors,
-}: {
-  icon: string;
-  iconColor: string;
-  label: string;
-  description: string;
-  value: boolean;
-  onToggle: (v: boolean) => void;
-  colors: ReturnType<typeof useAppTheme>["colors"];
-}) {
+  function ToggleRow({
+    icon,
+    iconColor,
+    label,
+    description,
+    value,
+    onToggle,
+    disabled,
+    colors,
+  }: {
+    icon: string;
+    iconColor: string;
+    label: string;
+    description: string;
+    value: boolean;
+    onToggle: (v: boolean) => void;
+    disabled?: boolean;
+    colors: ReturnType<typeof useAppTheme>["colors"];
+  }) {
   return (
     <View style={styles.toggleRow}>
       <View style={[styles.rowIcon, { backgroundColor: iconColor + "15" }]}>
@@ -1049,15 +1052,16 @@ function ToggleRow({
         <Text style={[styles.rowLabel, { color: colors.text, fontFamily: "Inter_500Medium" }]}>{label}</Text>
         <Text style={[styles.rowDesc, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>{description}</Text>
       </View>
-      <Switch
-        value={value}
-        onValueChange={(v) => {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          onToggle(v);
-        }}
-        trackColor={{ false: colors.border, true: colors.primary + "60" }}
-        thumbColor={value ? colors.primary : colors.textTertiary}
-      />
+        <Switch
+          value={value}
+          disabled={disabled}
+          onValueChange={(v) => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            onToggle(v);
+          }}
+          trackColor={{ false: colors.border, true: colors.primary + "60" }}
+          thumbColor={value ? colors.primary : colors.textTertiary}
+        />
     </View>
   );
 }
