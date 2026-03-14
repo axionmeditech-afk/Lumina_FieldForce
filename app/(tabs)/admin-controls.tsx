@@ -505,31 +505,14 @@ export default function AdminControlsScreen() {
                 await new Promise<void>((resolve) => setTimeout(resolve, 700));
                 const secondAttempt = await attemptSync();
                 if (!secondAttempt.ok) {
-                  const firstMessage = normalizeDolibarrWarning(
-                    firstAttempt.message || "Could not sync employee to Dolibarr HRM."
-                  );
-                  const secondMessage = normalizeDolibarrWarning(
-                    secondAttempt.message || "Could not sync employee to Dolibarr HRM."
-                  );
-                  const merged =
-                    firstMessage === secondMessage
-                      ? firstMessage
-                      : `${secondMessage}\n\nPrevious attempt: ${firstMessage}`;
-                  Alert.alert(
-                    "Approved with Dolibarr Warning",
-                    `Access request approved, but employee sync failed in Dolibarr.\n\n${merged}`
-                  );
+                  console.warn("Dolibarr employee sync failed after approval", {
+                    firstAttempt,
+                    secondAttempt,
+                  });
                 }
               }
             } catch (error) {
-              const message =
-                error instanceof Error
-                  ? error.message
-                  : "Could not sync employee to Dolibarr HRM.";
-              Alert.alert(
-                "Approved with Dolibarr Warning",
-                `Access request approved, but employee sync failed in Dolibarr.\n\n${normalizeDolibarrWarning(message)}`
-              );
+              console.warn("Dolibarr employee sync failed after approval", error);
             }
           })();
         }

@@ -1,9 +1,11 @@
 import type {
+  AppNotification,
   AppUser,
   AttendanceCheckPayload,
   AttendanceRecord,
   Geofence,
   LocationLog,
+  NotificationAudience,
   RouteDirections,
   RouteDistanceMatrix,
   RouteTimeline,
@@ -53,6 +55,8 @@ export interface DolibarrUser {
   lastname?: string;
   login?: string;
   email?: string;
+  statut?: number | string;
+  status?: number | string;
 }
 
 export interface DolibarrOrder {
@@ -1462,6 +1466,34 @@ export async function getDolibarrUsers(options?: {
       method: "GET",
     }
   );
+}
+
+export async function getRemoteNotifications(): Promise<AppNotification[]> {
+  return fetchJson<AppNotification[]>("/notifications", { method: "GET" });
+}
+
+export async function createRemoteNotification(input: {
+  title: string;
+  body: string;
+  kind: AppNotification["kind"];
+  audience: NotificationAudience;
+}): Promise<AppNotification> {
+  return fetchJson<AppNotification>("/notifications", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function markRemoteNotificationRead(notificationId: string): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/notifications/${notificationId}/read`, {
+    method: "POST",
+  });
+}
+
+export async function markAllRemoteNotificationsRead(): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>("/notifications/read-all", {
+    method: "POST",
+  });
 }
 
 export async function getDolibarrOrders(options?: {

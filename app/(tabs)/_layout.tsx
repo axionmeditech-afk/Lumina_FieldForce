@@ -1,4 +1,4 @@
-﻿import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Drawer } from "expo-router/drawer";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
@@ -12,6 +12,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { canAccessAdminControls, canAccessSalesModule } from "@/lib/role-access";
+import { getUnreadNotificationsCount } from "@/lib/storage";
 
 type DrawerIconProps = {
   icon: keyof typeof Ionicons.glyphMap;
@@ -19,6 +20,7 @@ type DrawerIconProps = {
   focused: boolean;
   size: number;
   offsetX?: number;
+  badgeCount?: number;
 };
 
 function DrawerIcon({
@@ -27,10 +29,15 @@ function DrawerIcon({
   focused,
   size,
   offsetX = 0,
+  badgeCount = 0,
 }: DrawerIconProps) {
   const { colors } = useAppTheme();
   const iconColor = focused ? colors.primary : colors.textSecondary;
   const iconSize = size;
+  const badgeLabel = useMemo(() => {
+    if (!badgeCount || badgeCount <= 0) return "";
+    return badgeCount > 99 ? "99+" : String(badgeCount);
+  }, [badgeCount]);
   return (
     <View
       style={[
@@ -48,6 +55,11 @@ function DrawerIcon({
           size={iconSize}
           color={iconColor}
         />
+        {badgeLabel ? (
+          <View style={styles.badge}>
+            <Text style={styles.badgeText}>{badgeLabel}</Text>
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -126,6 +138,27 @@ export default function SidebarLayout() {
   const isAdmin = user?.role === "admin";
   const canSeeSalesAi = canAccessSalesModule(user?.role);
   const canSeeAdminControls = canAccessAdminControls(user?.role);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadUnreadCount = async () => {
+      try {
+        const count = await getUnreadNotificationsCount();
+        if (active) setUnreadNotificationsCount(count);
+      } catch {
+        if (active) setUnreadNotificationsCount((current) => current);
+      }
+    };
+
+    void loadUnreadCount();
+    const interval = setInterval(loadUnreadCount, 20000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [user?.id]);
 
   return (
     <Drawer
@@ -248,7 +281,13 @@ export default function SidebarLayout() {
         options={{
           title: "Notifications",
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="notifications-outline" activeIcon="notifications" focused={focused} size={size} />
+            <DrawerIcon
+              icon="notifications-outline"
+              activeIcon="notifications"
+              focused={focused}
+              size={size}
+              badgeCount={unreadNotificationsCount}
+            />
           ),
         }}
       />
@@ -303,6 +342,23 @@ const styles = StyleSheet.create({
     height: 22,
     alignItems: "center",
     justifyContent: "center",
+  },
+  badge: {
+    position: "absolute",
+    top: -8,
+    right: -12,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    backgroundColor: "#E11D48",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontFamily: "Inter_700Bold",
   },
   profileCard: {
     marginHorizontal: 12,
@@ -378,3 +434,4 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 });
+

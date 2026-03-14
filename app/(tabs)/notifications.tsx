@@ -65,7 +65,17 @@ export default function NotificationsScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadData();
+      let active = true;
+      void (async () => {
+        await loadData();
+        await markAllNotificationsRead();
+        if (active) {
+          await loadData();
+        }
+      })();
+      return () => {
+        active = false;
+      };
     }, [loadData])
   );
 

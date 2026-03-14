@@ -2299,11 +2299,155 @@ function canReceiveNotification(audience: NotificationAudience, role?: UserRole 
   return audience === role;
 }
 
+async function fetchRemoteNotifications(): Promise<AppNotification[] | null> {
+  const token = await getApiToken();
+  if (!token) return null;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/notifications`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status >= 500) continue;
+        return null;
+      }
+      const payload = (await response.json()) as AppNotification[];
+      return Array.isArray(payload) ? payload : null;
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function createRemoteNotificationInternal(input: {
+  title: string;
+  body: string;
+  kind: AppNotification["kind"];
+  audience: NotificationAudience;
+}): Promise<AppNotification | null> {
+  const token = await getApiToken();
+  if (!token) return null;
+  const apiBases = await getRemoteStateApiCandidates();
+  const body = JSON.stringify(input);
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/notifications`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status >= 500) continue;
+        return null;
+      }
+      const payload = (await response.json()) as AppNotification;
+      return payload ?? null;
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function markRemoteNotificationReadInternal(notificationId: string): Promise<boolean> {
+  const token = await getApiToken();
+  if (!token) return false;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/notifications/${notificationId}/read`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (response.ok) return true;
+      if (response.status >= 500) continue;
+      return false;
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return false;
+}
+
+async function markAllRemoteNotificationsReadInternal(): Promise<boolean> {
+  const token = await getApiToken();
+  if (!token) return false;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/notifications/read-all`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (response.ok) return true;
+      if (response.status >= 500) continue;
+      return false;
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return false;
+}
+
+async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
+  try {
+    const remote = await fetchRemoteNotifications();
+    if (!Array.isArray(remote)) return null;
+    const companyId = await getActiveCompanyId();
+    const existing = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
+    const preserved = existing.filter((item) => !matchesCompany(item, companyId));
+    const normalized = remote.map((item) => ({
+      ...item,
+      readByIds: Array.isArray(item.readByIds) ? item.readByIds : [],
+    }));
+    await setItem(KEYS.NOTIFICATIONS, [...normalized, ...preserved]);
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
 export async function getNotificationsForCurrentUser(): Promise<AppNotification[]> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return [];
   const companyId = await getActiveCompanyId();
-  const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
+  const remote = await refreshRemoteNotifications();
+  const notifications = remote ?? (await getRawList<AppNotification>(KEYS.NOTIFICATIONS));
   return notifications
     .filter(
       (item) =>
@@ -2314,7 +2458,8 @@ export async function getNotificationsForCurrentUser(): Promise<AppNotification[
 
 export async function getCompanyNotifications(): Promise<AppNotification[]> {
   const companyId = await getActiveCompanyId();
-  const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
+  const remote = await refreshRemoteNotifications();
+  const notifications = remote ?? (await getRawList<AppNotification>(KEYS.NOTIFICATIONS));
   return notifications
     .filter((item) => matchesCompany(item, companyId))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -2333,9 +2478,16 @@ export async function addNotification(
 ): Promise<AppNotification> {
   const companyId =
     options && "companyId" in options ? options.companyId ?? null : await getActiveCompanyId();
+  const remoteCandidate = await createRemoteNotificationInternal({
+    title: notification.title,
+    body: notification.body,
+    kind: notification.kind,
+    audience: notification.audience,
+  });
+
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   const candidate: AppNotification = withCompanyId<AppNotification>(
-    {
+    remoteCandidate || {
       ...notification,
       readByIds: Array.from(new Set(notification.readByIds || [])),
     },
@@ -2375,6 +2527,7 @@ export async function addNotification(
 export async function markNotificationRead(notificationId: string): Promise<void> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return;
+  await markRemoteNotificationReadInternal(notificationId);
   const companyId = await getActiveCompanyId();
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   const index = notifications.findIndex(
@@ -2393,6 +2546,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
 export async function markAllNotificationsRead(): Promise<void> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return;
+  await markAllRemoteNotificationsReadInternal();
   const companyId = await getActiveCompanyId();
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   let changed = false;

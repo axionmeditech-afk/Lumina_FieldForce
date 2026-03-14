@@ -102,14 +102,32 @@ function mergeEmployees(
 }
 
 function mapDolibarrUsersToEmployees(
-  users: Array<{ id?: number | string; firstname?: string; lastname?: string; login?: string; email?: string }>,
+  users: Array<{
+    id?: number | string;
+    firstname?: string;
+    lastname?: string;
+    login?: string;
+    email?: string;
+    statut?: number | string;
+    status?: number | string;
+  }>,
   currentUser: AppUser | null
 ): Employee[] {
   const companyId = currentUser?.companyId || "";
   const branch = currentUser?.branch || "Main Branch";
   const joined = currentUser?.joinDate || new Date().toISOString().slice(0, 10);
 
+  const isUserActive = (user: { statut?: number | string; status?: number | string }): boolean => {
+    const raw = user.statut ?? user.status;
+    if (raw === undefined || raw === null || raw === "") return true;
+    const numeric = Number(raw);
+    if (!Number.isNaN(numeric)) return numeric === 1;
+    const text = String(raw).toLowerCase();
+    return text !== "0" && text !== "false" && text !== "disabled";
+  };
+
   return users
+    .filter((user) => isUserActive(user))
     .map((user) => {
       const first = normalizeText(user.firstname);
       const last = normalizeText(user.lastname);

@@ -2,11 +2,13 @@ import express, { type Express, type Request } from "express";
 import { createServer, type Server } from "node:http";
 import { createHash, randomUUID } from "crypto";
 import type {
+  AppNotification,
   AppUser,
   AttendanceCheckPayload,
   AttendanceRecord,
   Geofence,
   LocationLog,
+  NotificationAudience,
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
@@ -1260,6 +1262,172 @@ function toIsoTimestamp(value: unknown, fallbackIso: string): string {
   return fallbackIso;
 }
 
+function normalizeNotificationAudience(value: unknown): NotificationAudience {
+  if (value === "all") return "all";
+  if (value === "admin" || value === "hr" || value === "manager" || value === "salesperson") {
+    return value;
+  }
+  return "all";
+}
+
+function normalizeNotificationKind(value: unknown): AppNotification["kind"] {
+  if (value === "announcement" || value === "policy" || value === "alert" || value === "support") {
+    return value;
+  }
+  return "alert";
+}
+
+function parseReadByIds(value: unknown): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === "string");
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((entry): entry is string => typeof entry === "string");
+      }
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function buildNotificationFromRow(row: any): AppNotification {
+  const nowIso = new Date().toISOString();
+  return {
+    id: String(row?.id || randomUUID()),
+    companyId: row?.company_id ? String(row.company_id) : undefined,
+    title: normalizeWhitespace(String(row?.title || "Notification")),
+    body: normalizeWhitespace(String(row?.body || "")),
+    kind: normalizeNotificationKind(row?.kind),
+    audience: normalizeNotificationAudience(row?.audience),
+    createdById: String(row?.created_by_id || "system"),
+    createdByName: normalizeWhitespace(String(row?.created_by_name || "System")),
+    createdAt: toIsoTimestamp(row?.created_at, nowIso),
+    readByIds: parseReadByIds(row?.read_by_user_ids_json),
+  };
+}
+
+async function insertNotificationInMySql(notification: AppNotification): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_notifications (
+      id, company_id, title, body, kind, audience, created_by_id, created_by_name,
+      created_at, read_by_user_ids_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      title = VALUES(title),
+      body = VALUES(body),
+      kind = VALUES(kind),
+      audience = VALUES(audience),
+      created_by_id = VALUES(created_by_id),
+      created_by_name = VALUES(created_by_name),
+      created_at = VALUES(created_at),
+      read_by_user_ids_json = COALESCE(read_by_user_ids_json, VALUES(read_by_user_ids_json))`,
+    [
+      notification.id,
+      notification.companyId ?? null,
+      notification.title,
+      notification.body,
+      notification.kind,
+      notification.audience,
+      notification.createdById,
+      notification.createdByName,
+      notification.createdAt.slice(0, 19).replace("T", " "),
+      JSON.stringify(notification.readByIds || []),
+    ]
+  );
+}
+
+async function listNotificationsFromMySql(
+  role: UserRole,
+  companyId?: string | null
+): Promise<AppNotification[]> {
+  if (!isMySqlStateEnabled()) return [];
+  const conn = await getMySqlPool();
+  const params: Array<string | null> = [role];
+  let where = "WHERE (audience = 'all' OR audience = ?)";
+  if (companyId) {
+    where += " AND (company_id = ? OR company_id IS NULL)";
+    params.push(companyId);
+  }
+  const [rows] = await conn.query<any[]>(
+    `SELECT id, company_id, title, body, kind, audience, created_by_id, created_by_name, created_at, read_by_user_ids_json
+     FROM lff_notifications
+     ${where}
+     ORDER BY created_at DESC
+     LIMIT 500`,
+    params
+  );
+  return (rows || []).map((row) => buildNotificationFromRow(row));
+}
+
+async function markNotificationReadInMySql(notificationId: string, userId: string): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT read_by_user_ids_json FROM lff_notifications WHERE id = ? LIMIT 1`,
+    [notificationId]
+  );
+  if (!rows || rows.length === 0) return;
+  const currentReadBy = parseReadByIds(rows[0]?.read_by_user_ids_json);
+  if (currentReadBy.includes(userId)) return;
+  currentReadBy.push(userId);
+  await conn.execute(
+    `UPDATE lff_notifications SET read_by_user_ids_json = ? WHERE id = ?`,
+    [JSON.stringify(currentReadBy), notificationId]
+  );
+}
+
+async function markAllNotificationsReadInMySql(
+  role: UserRole,
+  userId: string,
+  companyId?: string | null
+): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const notifications = await listNotificationsFromMySql(role, companyId);
+  const conn = await getMySqlPool();
+  await Promise.all(
+    notifications.map((notification) => {
+      const readBy = Array.isArray(notification.readByIds)
+        ? notification.readByIds
+        : [];
+      if (readBy.includes(userId)) return Promise.resolve();
+      const nextReadBy = [...readBy, userId];
+      return conn.execute(
+        `UPDATE lff_notifications SET read_by_user_ids_json = ? WHERE id = ?`,
+        [JSON.stringify(nextReadBy), notification.id]
+      );
+    })
+  );
+}
+
+function buildAccessRequestNotification(payload: {
+  requestId: string;
+  name: string;
+  email: string;
+  companyName: string;
+}): AppNotification {
+  const createdAt = new Date().toISOString();
+  const companyId = getCompanyIdFromName(payload.companyName);
+  return {
+    id: `notif_access_${payload.requestId}`,
+    companyId,
+    title: "New access request",
+    body: `${payload.name} (${payload.email}) requested access.`,
+    kind: "alert",
+    audience: "admin",
+    createdById: payload.requestId,
+    createdByName: payload.name,
+    createdAt,
+    readByIds: [],
+  };
+}
+
 function normalizeApprovalStatusValue(value: unknown): "pending" | "approved" | "rejected" {
   if (value === "pending" || value === "approved" || value === "rejected") return value;
   return "approved";
@@ -1645,6 +1813,128 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } finally {
       clearTimeout(timer);
+    }
+  });
+
+  app.get("/api/notifications", requireAuth, async (req, res) => {
+    const role = req.auth?.role || "salesperson";
+    await initAuthUsersStore();
+    const authRecord = req.auth?.email
+      ? getAuthUserByIdentifier(req.auth.email)
+      : null;
+    const companyId = authRecord?.user.companyId ?? null;
+
+    if (!isMySqlStateEnabled()) {
+      res.json([]);
+      return;
+    }
+
+    try {
+      const notifications = await listNotificationsFromMySql(role, companyId);
+      res.json(notifications);
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to load notifications: ${error.message}`
+            : "Unable to load notifications.",
+      });
+    }
+  });
+
+  app.post(
+    "/api/notifications",
+    requireAuth,
+    requireRoles("admin", "manager"),
+    async (req, res) => {
+      const { title, body, kind, audience } = req.body as {
+        title?: string;
+        body?: string;
+        kind?: AppNotification["kind"];
+        audience?: NotificationAudience;
+      };
+      if (!title || !body) {
+        res.status(400).json({ message: "Notification title and body are required." });
+        return;
+      }
+
+      await initAuthUsersStore();
+      const authRecord = req.auth?.email
+        ? getAuthUserByIdentifier(req.auth.email)
+        : null;
+      const companyId = authRecord?.user.companyId ?? null;
+      const createdAt = new Date().toISOString();
+      const notification: AppNotification = {
+        id: `notif_${randomUUID()}`,
+        companyId: companyId || undefined,
+        title: normalizeWhitespace(title),
+        body: normalizeWhitespace(body),
+        kind: normalizeNotificationKind(kind),
+        audience: normalizeNotificationAudience(audience),
+        createdById: req.auth?.sub || "system",
+        createdByName: req.auth?.email || "System",
+        createdAt,
+        readByIds: [],
+      };
+
+      try {
+        await insertNotificationInMySql(notification);
+        res.status(201).json(notification);
+      } catch (error) {
+        res.status(500).json({
+          message:
+            error instanceof Error
+              ? `Unable to save notification: ${error.message}`
+              : "Unable to save notification.",
+        });
+      }
+    }
+  );
+
+  app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
+    const notificationId = firstString(req.params.id);
+    if (!notificationId) {
+      res.status(400).json({ message: "Notification id is required." });
+      return;
+    }
+    if (!isMySqlStateEnabled()) {
+      res.json({ ok: true });
+      return;
+    }
+    try {
+      await markNotificationReadInMySql(notificationId, req.auth?.sub || "");
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to mark notification read: ${error.message}`
+            : "Unable to mark notification read.",
+      });
+    }
+  });
+
+  app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.json({ ok: true });
+      return;
+    }
+    try {
+      const role = req.auth?.role || "salesperson";
+      await initAuthUsersStore();
+      const authRecord = req.auth?.email
+        ? getAuthUserByIdentifier(req.auth.email)
+        : null;
+      const companyId = authRecord?.user.companyId ?? null;
+      await markAllNotificationsReadInMySql(role, req.auth?.sub || "", companyId);
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to mark notifications read: ${error.message}`
+            : "Unable to mark notifications read.",
+      });
     }
   });
 
@@ -2077,6 +2367,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       await insertAccessRequestInMySql(pendingRequest);
       await upsertAuthUserInMySql(pendingAuthRecord, normalizedCompanyName);
+      try {
+        const notification = buildAccessRequestNotification({
+          requestId: pendingRequest.id,
+          name: pendingUser.name,
+          email: pendingUser.email,
+          companyName: normalizedCompanyName,
+        });
+        await insertNotificationInMySql(notification);
+      } catch (error) {
+        console.error("Failed to persist access request notification", error);
+      }
     } catch (error) {
       console.error("Failed to persist access request in MySQL", error);
       res.status(500).json({
@@ -2286,9 +2587,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       accessRequestsById.set(requestId, reviewedRequest);
       try {
         const latestAuthRecord = getAuthUserByIdentifier(normalizedEmail);
-        if (latestAuthRecord) {
+        const fallbackAuthRecord =
+          !latestAuthRecord && action === "approved"
+            ? ({
+                user: {
+                  ...reviewedUser,
+                  approvalStatus: "approved",
+                },
+                passwordHash: pendingPasswordHash || "",
+                createdAt: reviewedRequest.requestedAt,
+                updatedAt: now,
+                approvalStatus: "approved",
+              } as AuthUserRecord)
+            : null;
+        const recordToPersist = latestAuthRecord || fallbackAuthRecord;
+        if (recordToPersist) {
           await upsertAuthUserInMySql(
-            latestAuthRecord,
+            recordToPersist,
             reviewedRequest.requestedCompanyName
           );
         }
