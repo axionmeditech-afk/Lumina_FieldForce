@@ -56,10 +56,13 @@ export default function LoginScreen() {
     () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "Sales",
     [role]
   );
+  const signInLabel = mode === "signin" ? "Email or Username" : "Email Address";
+  const signInPlaceholder = mode === "signin" ? "email or username" : "name@enterprise.com";
+  const signInKeyboardType = mode === "signin" ? "default" : "email-address";
 
   const handleAuthAction = async () => {
     if (!email.trim() || !password.trim()) {
-      Alert.alert("Missing Fields", "Please enter both email and password");
+      Alert.alert("Missing Fields", "Please enter your email/username and password");
       return;
     }
     if (mode === "signup") {
@@ -74,10 +77,13 @@ export default function LoginScreen() {
 
     try {
       if (mode === "signin") {
-        const success = await login(email.trim().toLowerCase(), password);
+        const success = await login(email.trim(), password);
         if (!success) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          Alert.alert("Login Failed", "Invalid email or password. Please try again or create an account.");
+          Alert.alert(
+            "Login Failed",
+            "Invalid email/username or password. Please try again or create an account."
+          );
           return;
         }
       } else {
@@ -285,12 +291,12 @@ export default function LoginScreen() {
 
             <InputField
               colors={colors}
-              label="Email Address"
-              placeholder="name@enterprise.com"
+              label={signInLabel}
+              placeholder={signInPlaceholder}
               icon="mail-outline"
               value={email}
               onChangeText={setEmail}
-              keyboardType="email-address"
+              keyboardType={signInKeyboardType}
               autoCapitalize="none"
               autoCorrect={false}
             />

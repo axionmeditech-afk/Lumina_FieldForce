@@ -458,6 +458,10 @@ function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeLogin(value: string): string {
+  return normalizeWhitespace(value).toLowerCase();
+}
+
 function normalizeWhitespace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
@@ -592,6 +596,9 @@ function normalizeUserProfile(user: AppUser): AppUser {
       : "approved";
   const managerId = normalizeWhitespace(user.managerId ?? "");
   const managerName = normalizeWhitespace(user.managerName ?? "");
+  const explicitLogin = normalizeWhitespace(user.login ?? "");
+  const fallbackLogin =
+    explicitLogin || normalizeEmail(user.email).split("@")[0] || slugify(user.name);
   return {
     ...user,
     companyId,
@@ -599,6 +606,7 @@ function normalizeUserProfile(user: AppUser): AppUser {
     companyIds,
     name: normalizeWhitespace(user.name),
     email: normalizeEmail(user.email),
+    login: fallbackLogin || undefined,
     department: normalizeWhitespace(user.department),
     branch: normalizeWhitespace(user.branch),
     phone: normalizePhone(user.phone),
@@ -1534,11 +1542,24 @@ export async function reviewUserAccessRequest(
   return reviewedRequest;
 }
 
-export async function authenticateUser(email: string, password: string): Promise<AppUser | null> {
+export async function authenticateUser(identifier: string, password: string): Promise<AppUser | null> {
   await seedDataIfNeeded();
-  const normalizedEmail = normalizeEmail(email);
+  const normalizedEmail = normalizeEmail(identifier);
+  const normalizedLogin = normalizeLogin(identifier);
+  const isEmailIdentifier = normalizedEmail.includes("@");
   const users = await getAuthUsersRaw();
-  const match = users.find((entry) => normalizeEmail(entry.user.email) === normalizedEmail);
+  const match = users.find((entry) => {
+    const emailValue = normalizeEmail(entry.user.email);
+    if (isEmailIdentifier) {
+      return emailValue === normalizedEmail;
+    }
+    const loginValue = normalizeLogin(entry.user.login || "");
+    const emailPrefix = emailValue.split("@")[0] || "";
+    return (
+      (loginValue && loginValue === normalizedLogin) ||
+      (emailPrefix && emailPrefix === normalizedLogin)
+    );
+  });
   if (!match) return null;
   const passwordHash = await hashPassword(password);
   if (match.passwordHash !== passwordHash) return null;

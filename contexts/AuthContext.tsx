@@ -34,7 +34,7 @@ interface AuthContextValue {
   user: AppUser | null;
   company: CompanyProfile | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<boolean>;
+  login: (identifier: string, password: string) => Promise<boolean>;
   signup: (input: SignupInput) => Promise<{ ok: boolean; message?: string; authenticated?: boolean }>;
   updateCompany: (
     updates: Partial<Omit<CompanyProfile, "id" | "createdAt" | "updatedAt">>
@@ -108,11 +108,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void bootstrap();
   }, [refreshSession]);
 
-  const login = async (email: string, password: string): Promise<boolean> => {
-    const normalizedEmail = email.trim().toLowerCase();
-    const token = await issueApiToken(normalizedEmail, password, { timeoutMs: 2200 });
+  const login = async (identifier: string, password: string): Promise<boolean> => {
+    const rawIdentifier = identifier.trim();
+    const normalizedIdentifier = rawIdentifier.includes("@")
+      ? rawIdentifier.toLowerCase()
+      : rawIdentifier;
+    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const attemptToken = async (value: string): Promise<string | null> => {
+      if (!value) return null;
+      let issued = await issueApiToken(value, password, { timeoutMs: 4200 });
+      if (!issued) {
+        await delay(350);
+        issued = await issueApiToken(value, password, { timeoutMs: 4200 });
+      }
+      return issued;
+    };
+
+    let token = await attemptToken(normalizedIdentifier);
+    if (!token && rawIdentifier && rawIdentifier !== normalizedIdentifier) {
+      token = await attemptToken(rawIdentifier);
+    }
+    if (!token && rawIdentifier && !rawIdentifier.includes("@")) {
+      token = await attemptToken(rawIdentifier.toLowerCase());
+    }
     if (token) {
-      const remoteUser = await getAuthenticatedApiUser({ timeoutMs: 2200 });
+      let remoteUser = await getAuthenticatedApiUser({ timeoutMs: 3200 });
+      if (!remoteUser) {
+        await delay(250);
+        remoteUser = await getAuthenticatedApiUser({ timeoutMs: 3200 });
+      }
       if (remoteUser) {
         const hydrated = await syncBackendAuthenticatedUser(remoteUser);
         setUser(hydrated);
@@ -122,12 +146,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    const u = await authenticateUser(email, password);
+    const u = await authenticateUser(rawIdentifier, password);
     if (u) {
       setUser(u);
       const activeCompany = await getCurrentCompanyProfile();
       setCompany(activeCompany);
-      void hydrateApiSession(u, email, password, true);
+      void hydrateApiSession(u, rawIdentifier, password, true);
       return true;
     }
     return false;

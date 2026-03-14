@@ -111,6 +111,12 @@ export interface DolibarrSalarySyncPayload {
   salaryId: string;
   employeeName: string;
   employeeEmail?: string;
+  label?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  paymentDate?: string;
+  paymentMode?: string;
+  note?: string;
   month: string;
   grossPay: number;
   netPay: number;
@@ -457,17 +463,29 @@ export async function setRemoteState<T>(key: string, value: T): Promise<void> {
 }
 
 export async function issueApiToken(
-  email: string,
+  identifier: string,
   password: string,
   options?: AuthRequestOptions
 ): Promise<string | null> {
   const timeoutMs = Math.max(300, options?.timeoutMs ?? 1800);
+  const cleanIdentifier = identifier.trim();
+  if (!cleanIdentifier) {
+    return null;
+  }
+  const payload = cleanIdentifier.includes("@")
+    ? { email: cleanIdentifier, password }
+    : {
+        email: cleanIdentifier,
+        login: cleanIdentifier,
+        username: cleanIdentifier,
+        password,
+      };
   try {
     const result = await fetchJsonWithTimeout<{ token: string }>(
       "/auth/token",
       {
         method: "POST",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(payload),
       },
       timeoutMs
     );
@@ -847,6 +865,12 @@ function stripHtml(value: string): string {
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isDolibarrUserNotFound(message: string): boolean {
+  const raw = normalizeDolibarrText(message).toLowerCase();
+  const plain = stripHtml(raw);
+  return /user not found/.test(raw) || /user not found/.test(plain);
 }
 
 function isMissingDolibarrSyncRoute(message: string): boolean {
@@ -1543,7 +1567,21 @@ function buildDolibarrSalaryNote(payload: DolibarrSalarySyncPayload): { marker: 
   const marker = `[TF_SALARY:${payload.salaryId}]`;
   const cleanMonth = (payload.month || "").trim() || "unknown";
   const cleanName = (payload.employeeName || "").trim() || "employee";
-  const line = `${marker} ${cleanMonth} net=${payload.netPay} gross=${payload.grossPay} status=${payload.status} name=${cleanName}`;
+  const cleanLabel = normalizeDolibarrText(payload.label || "");
+  const cleanStart = normalizeDolibarrText(payload.periodStart || "");
+  const cleanEnd = normalizeDolibarrText(payload.periodEnd || "");
+  const cleanPayDate = normalizeDolibarrText(payload.paymentDate || "");
+  const cleanPayMode = normalizeDolibarrText(payload.paymentMode || "");
+  const cleanNote = normalizeDolibarrText(payload.note || "");
+  const period = [cleanStart, cleanEnd].filter(Boolean).join("..");
+  const extras: string[] = [];
+  if (cleanLabel) extras.push(`label="${cleanLabel}"`);
+  if (period) extras.push(`period=${period}`);
+  if (cleanPayDate) extras.push(`payDate=${cleanPayDate}`);
+  if (cleanPayMode) extras.push(`payMode="${cleanPayMode}"`);
+  if (cleanNote) extras.push(`note="${cleanNote.slice(0, 120)}"`);
+  const extraPart = extras.length ? ` ${extras.join(" ")}` : "";
+  const line = `${marker} ${cleanMonth} net=${payload.netPay} gross=${payload.grossPay} status=${payload.status} name=${cleanName}${extraPart}`;
   return { marker, line };
 }
 
@@ -1555,15 +1593,54 @@ export async function syncSalaryToDolibarr(
     return { ok: false, message: "Missing employee email for Dolibarr salary sync." };
   }
 
-  let dolibarrUser: Record<string, unknown> | null = null;
-  try {
-    dolibarrUser = await fetchJson<Record<string, unknown>>(
-      `/dolibarr/proxy/users/email/${encodeURIComponent(email)}`,
-      { method: "GET" }
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to fetch Dolibarr user by email.";
-    return { ok: false, message };
+  const normalizedEmail = normalizeDolibarrEmail(email);
+
+  const resolveUserByEmail = async (): Promise<Record<string, unknown> | null> => {
+    try {
+      return await fetchJson<Record<string, unknown>>(
+        `/dolibarr/proxy/users/email/${encodeURIComponent(normalizedEmail)}`,
+        { method: "GET" }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message && !isDolibarrUserNotFound(message)) {
+        return null;
+      }
+    }
+
+    try {
+      const users = await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
+      const matched = users.find((user) => {
+        const candidate = normalizeDolibarrEmail(user.email || "");
+        return candidate && candidate === normalizedEmail;
+      });
+      return matched ? (matched as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  let dolibarrUser = await resolveUserByEmail();
+  if (!dolibarrUser) {
+    const syncEmployee = await syncApprovedEmployeeToDolibarr({
+      name: payload.employeeName || "Employee",
+      email: normalizedEmail,
+      role: "salesperson",
+    });
+
+    if (syncEmployee.ok || syncEmployee.status === "exists") {
+      dolibarrUser = await resolveUserByEmail();
+    }
+
+    if (!dolibarrUser) {
+      const friendly = summarizeDolibarrSyncError(syncEmployee.message);
+      return {
+        ok: false,
+        message: friendly
+          ? `Dolibarr user not found. ${friendly}`
+          : "Dolibarr user not found for salary sync.",
+      };
+    }
   }
 
   const userId = parseDolibarrEntityId(dolibarrUser);
@@ -1649,22 +1726,6 @@ export async function syncApprovedEmployeeToDolibarr(
     body.apiKey = localApiKey;
   }
 
-  let directResult: DolibarrEmployeeSyncResult | null = null;
-  const canRunDirectFirst = Boolean(resolvedEndpoint && resolvedApiKey && resolvedEnabled);
-  if (canRunDirectFirst) {
-    directResult = await syncApprovedEmployeeToDolibarrDirect(payload, {
-      enabled: true,
-      endpoint: resolvedEndpoint,
-      apiKey: resolvedApiKey,
-    });
-    if (directResult.ok) {
-      return {
-        ...directResult,
-        message: `${directResult.message} (direct device sync)`,
-      };
-    }
-  }
-
   let backendResult: DolibarrEmployeeSyncResult | null = null;
   let backendError: Error | null = null;
 
@@ -1691,12 +1752,11 @@ export async function syncApprovedEmployeeToDolibarr(
   const fallbackEndpoint =
     resolvedEndpoint || (routeMissingOnBackend ? backendApiUrl : "");
   const fallbackApiKey = resolvedApiKey;
-  const shouldTryFallbackDirect =
-    !canRunDirectFirst &&
-    Boolean(fallbackEndpoint && fallbackApiKey) &&
-    (resolvedEnabled || routeMissingOnBackend);
+  const shouldTryDirect =
+    Boolean(fallbackEndpoint && fallbackApiKey) && (resolvedEnabled || routeMissingOnBackend);
 
-  if (shouldTryFallbackDirect) {
+  let directResult: DolibarrEmployeeSyncResult | null = null;
+  if (shouldTryDirect) {
     directResult = await syncApprovedEmployeeToDolibarrDirect(payload, {
       enabled: true,
       endpoint: fallbackEndpoint,

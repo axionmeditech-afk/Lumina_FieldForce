@@ -87,7 +87,7 @@ function normalizeDolibarrWarning(message: string): string {
     /network request failed/i.test(merged) ||
     /failed to fetch/i.test(merged)
   ) {
-    return "Backend is not reachable from this device. In Settings > Backend API URL, set the correct LAN IP (example: http://<your-ip>:5000).";
+    return "Backend is not reachable from this device. Use the public API domain in Settings > Backend API URL (example: https://api.yourdomain.com) and ensure the server is reachable.";
   }
   return merged;
 }
@@ -492,18 +492,34 @@ export default function AdminControlsScreen() {
         if (action === "approved") {
           void (async () => {
             try {
-              const syncResult = await syncApprovedEmployeeToDolibarr({
-                name: request.name,
-                email: request.email,
-                role: selectedRole,
-                department: request.requestedDepartment,
-                branch: request.requestedBranch,
-              });
-              if (!syncResult.ok) {
-                Alert.alert(
-                  "Approved with Dolibarr Warning",
-                  `Access request approved, but employee sync failed in Dolibarr.\n\n${normalizeDolibarrWarning(syncResult.message || "Could not sync employee to Dolibarr HRM.")}`
-                );
+              const attemptSync = async () =>
+                syncApprovedEmployeeToDolibarr({
+                  name: request.name,
+                  email: request.email,
+                  role: selectedRole,
+                  department: request.requestedDepartment,
+                  branch: request.requestedBranch,
+                });
+              const firstAttempt = await attemptSync();
+              if (!firstAttempt.ok) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 700));
+                const secondAttempt = await attemptSync();
+                if (!secondAttempt.ok) {
+                  const firstMessage = normalizeDolibarrWarning(
+                    firstAttempt.message || "Could not sync employee to Dolibarr HRM."
+                  );
+                  const secondMessage = normalizeDolibarrWarning(
+                    secondAttempt.message || "Could not sync employee to Dolibarr HRM."
+                  );
+                  const merged =
+                    firstMessage === secondMessage
+                      ? firstMessage
+                      : `${secondMessage}\n\nPrevious attempt: ${firstMessage}`;
+                  Alert.alert(
+                    "Approved with Dolibarr Warning",
+                    `Access request approved, but employee sync failed in Dolibarr.\n\n${merged}`
+                  );
+                }
               }
             } catch (error) {
               const message =

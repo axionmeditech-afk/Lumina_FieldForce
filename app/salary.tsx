@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback } from "react";
+﻿import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -31,6 +31,14 @@ function formatMonthLabel(monthKey: string): string {
     month: "long",
     year: "numeric",
   });
+}
+
+function formatPeriodLabel(start?: string, end?: string): string | null {
+  const cleanStart = (start || "").trim();
+  const cleanEnd = (end || "").trim();
+  if (!cleanStart && !cleanEnd) return null;
+  if (cleanStart && cleanEnd) return `${cleanStart} - ${cleanEnd}`;
+  return cleanStart || cleanEnd;
 }
 
 function formatCurrency(value: number): string {
@@ -165,6 +173,8 @@ function SalaryBreakdown({
     salary.status === "paid" ? colors.success :
     salary.status === "approved" ? colors.primary : colors.warning;
   const isPrinting = printingSlipId === salary.id;
+  const label = salary.label?.trim() || formatMonthLabel(salary.month);
+  const periodLabel = formatPeriodLabel(salary.periodStart, salary.periodEnd);
 
   return (
     <Pressable
@@ -179,9 +189,14 @@ function SalaryBreakdown({
           <Text style={[styles.salaryName, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
             {salary.employeeName}
           </Text>
-          <Text style={[styles.salaryMonth, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-            {formatMonthLabel(salary.month)}
+          <Text style={[styles.salaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+            {label}
           </Text>
+          {periodLabel ? (
+            <Text style={[styles.salaryPeriod, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+              {periodLabel}
+            </Text>
+          ) : null}
         </View>
         <View style={styles.salaryHeaderRight}>
           <Text style={[styles.netPay, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
@@ -331,8 +346,10 @@ function SalarySlipModal({
   onPrint: () => void;
 }) {
   if (!salary) return null;
+  const insets = useSafeAreaInsets();
 
   const monthLabel = formatMonthLabel(salary.month);
+  const periodLabel = formatPeriodLabel(salary.periodStart, salary.periodEnd);
   const statusColor =
     salary.status === "paid" ? colors.success :
     salary.status === "approved" ? colors.primary : colors.warning;
@@ -360,14 +377,19 @@ function SalarySlipModal({
                   <Text style={[styles.slipCompany, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                     {companyName}
                   </Text>
-                  <Text style={[styles.slipSubtext, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                    {monthLabel}
-                  </Text>
-                </View>
-                <View style={[styles.statusChip, { backgroundColor: statusColor + "15" }]}>
-                  <Text style={[styles.statusText, { color: statusColor, fontFamily: "Inter_500Medium" }]}>
-                    {salary.status}
-                  </Text>
+              <Text style={[styles.slipSubtext, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                {monthLabel}
+              </Text>
+              {salary.label ? (
+                <Text style={[styles.slipSubtext, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                  {salary.label}
+                </Text>
+              ) : null}
+            </View>
+            <View style={[styles.statusChip, { backgroundColor: statusColor + "15" }]}>
+              <Text style={[styles.statusText, { color: statusColor, fontFamily: "Inter_500Medium" }]}>
+                {salary.status}
+              </Text>
                 </View>
               </View>
               <Text style={[styles.slipMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
@@ -376,6 +398,21 @@ function SalarySlipModal({
               <Text style={[styles.slipMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Employee: {salary.employeeName}
               </Text>
+              {periodLabel ? (
+                <Text style={[styles.slipMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  Period: {periodLabel}
+                </Text>
+              ) : null}
+              {salary.paymentDate ? (
+                <Text style={[styles.slipMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  Payment Date: {salary.paymentDate}
+                </Text>
+              ) : null}
+              {salary.paymentMode ? (
+                <Text style={[styles.slipMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  Payment Mode: {salary.paymentMode}
+                </Text>
+              ) : null}
               <Text style={[styles.slipMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Generated: {new Date().toLocaleString()}
               </Text>
@@ -414,7 +451,7 @@ function SalarySlipModal({
             </View>
           </ScrollView>
 
-          <View style={styles.modalFooter}>
+          <View style={[styles.modalFooter, { paddingBottom: Math.max(insets.bottom, 12) }]}>
             <Pressable
               onPress={onClose}
               style={({ pressed }) => [
@@ -539,16 +576,13 @@ export default function SalaryScreen() {
   const [createEmployeeName, setCreateEmployeeName] = useState("");
   const [createEmployeeEmail, setCreateEmployeeEmail] = useState("");
   const [createSearch, setCreateSearch] = useState("");
-  const [createMonth, setCreateMonth] = useState(getDefaultMonthKey());
-  const [createBasic, setCreateBasic] = useState("");
-  const [createHra, setCreateHra] = useState("");
-  const [createTransport, setCreateTransport] = useState("");
-  const [createMedical, setCreateMedical] = useState("");
-  const [createBonus, setCreateBonus] = useState("");
-  const [createOvertime, setCreateOvertime] = useState("");
-  const [createTax, setCreateTax] = useState("");
-  const [createPf, setCreatePf] = useState("");
-  const [createInsurance, setCreateInsurance] = useState("");
+  const [createLabel, setCreateLabel] = useState("");
+  const [createPeriodStart, setCreatePeriodStart] = useState("");
+  const [createPeriodEnd, setCreatePeriodEnd] = useState("");
+  const [createPaymentDate, setCreatePaymentDate] = useState("");
+  const [createPaymentMode, setCreatePaymentMode] = useState("");
+  const [createAmount, setCreateAmount] = useState("");
+  const [createNote, setCreateNote] = useState("");
   const [savingSalary, setSavingSalary] = useState(false);
   const isAdmin = user?.role === "admin";
 
@@ -626,16 +660,13 @@ export default function SalaryScreen() {
     setCreateEmployeeName("");
     setCreateEmployeeEmail("");
     setCreateSearch("");
-    setCreateMonth(getDefaultMonthKey());
-    setCreateBasic("");
-    setCreateHra("");
-    setCreateTransport("");
-    setCreateMedical("");
-    setCreateBonus("");
-    setCreateOvertime("");
-    setCreateTax("");
-    setCreatePf("");
-    setCreateInsurance("");
+    setCreateLabel("");
+    setCreatePeriodStart("");
+    setCreatePeriodEnd("");
+    setCreatePaymentDate("");
+    setCreatePaymentMode("");
+    setCreateAmount("");
+    setCreateNote("");
   }, []);
 
   const handleOpenCreate = useCallback(() => {
@@ -673,24 +704,36 @@ export default function SalaryScreen() {
       Alert.alert("Employee Required", "Select an employee before saving the salary.");
       return;
     }
-    const monthKey = createMonth.trim();
-    if (!/^\d{4}-\d{2}$/.test(monthKey)) {
-      Alert.alert("Invalid Month", "Enter month as YYYY-MM (example: 2026-03).");
+    const label = createLabel.trim() || "Salary";
+    const periodStart = createPeriodStart.trim();
+    const periodEnd = createPeriodEnd.trim();
+    const paymentDate = createPaymentDate.trim();
+    const paymentMode = createPaymentMode.trim();
+    const note = createNote.trim();
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (periodStart && !datePattern.test(periodStart)) {
+      Alert.alert("Invalid Date", "Period start must be in YYYY-MM-DD format.");
+      return;
+    }
+    if (periodEnd && !datePattern.test(periodEnd)) {
+      Alert.alert("Invalid Date", "Period end must be in YYYY-MM-DD format.");
+      return;
+    }
+    if (paymentDate && !datePattern.test(paymentDate)) {
+      Alert.alert("Invalid Date", "Payment date must be in YYYY-MM-DD format.");
       return;
     }
 
-    const basic = parseAmountInput(createBasic);
-    const hra = parseAmountInput(createHra);
-    const transport = parseAmountInput(createTransport);
-    const medical = parseAmountInput(createMedical);
-    const bonus = parseAmountInput(createBonus);
-    const overtime = parseAmountInput(createOvertime);
-    const tax = parseAmountInput(createTax);
-    const pf = parseAmountInput(createPf);
-    const insurance = parseAmountInput(createInsurance);
-    const grossPay = basic + hra + transport + medical + bonus + overtime;
-    const totalDeductions = tax + pf + insurance;
-    const netPay = Math.max(grossPay - totalDeductions, 0);
+    const amount = parseAmountInput(createAmount);
+    if (!amount || amount <= 0) {
+      Alert.alert("Invalid Amount", "Enter a valid salary amount.");
+      return;
+    }
+    const monthSource = periodStart || paymentDate || "";
+    const monthKey = /^\d{4}-\d{2}/.test(monthSource) ? monthSource.slice(0, 7) : getDefaultMonthKey();
+    const grossPay = amount;
+    const totalDeductions = 0;
+    const netPay = amount;
 
     setSavingSalary(true);
     try {
@@ -699,16 +742,22 @@ export default function SalaryScreen() {
         employeeId: createEmployeeId,
         employeeName: createEmployeeName,
         employeeEmail: createEmployeeEmail || undefined,
+        label,
+        periodStart: periodStart || undefined,
+        periodEnd: periodEnd || undefined,
+        paymentDate: paymentDate || undefined,
+        paymentMode: paymentMode || undefined,
+        note: note || undefined,
         month: monthKey,
-        basic,
-        hra,
-        transport,
-        medical,
-        bonus,
-        overtime,
-        tax,
-        pf,
-        insurance,
+        basic: amount,
+        hra: 0,
+        transport: 0,
+        medical: 0,
+        bonus: 0,
+        overtime: 0,
+        tax: 0,
+        pf: 0,
+        insurance: 0,
         grossPay,
         totalDeductions,
         netPay,
@@ -752,19 +801,16 @@ export default function SalaryScreen() {
     }
   }, [
     addAuditLog,
-    createBasic,
-    createBonus,
     createEmployeeEmail,
     createEmployeeId,
     createEmployeeName,
-    createHra,
-    createInsurance,
-    createMedical,
-    createMonth,
-    createOvertime,
-    createPf,
-    createTax,
-    createTransport,
+    createLabel,
+    createPeriodStart,
+    createPeriodEnd,
+    createPaymentDate,
+    createPaymentMode,
+    createAmount,
+    createNote,
     isAdmin,
     loadData,
     user,
@@ -906,30 +952,73 @@ export default function SalaryScreen() {
                 )}
               </View>
 
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Salary Month (YYYY-MM)</Text>
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Salary Details</Text>
+              <View style={styles.formRow}>
+                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Label</Text>
+                <TextInput
+                  value={createLabel}
+                  onChangeText={setCreateLabel}
+                  placeholder="Salary Payment"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                />
+              </View>
+              <View style={styles.formRow}>
+                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Period Start (YYYY-MM-DD)</Text>
+                <TextInput
+                  value={createPeriodStart}
+                  onChangeText={setCreatePeriodStart}
+                  placeholder="2026-03-01"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                />
+              </View>
+              <View style={styles.formRow}>
+                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Period End (YYYY-MM-DD)</Text>
+                <TextInput
+                  value={createPeriodEnd}
+                  onChangeText={setCreatePeriodEnd}
+                  placeholder="2026-03-31"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                />
+              </View>
+              <AmountField label="Amount" value={createAmount} onChangeText={setCreateAmount} colors={colors} />
+
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Payment</Text>
+              <View style={styles.formRow}>
+                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Payment Date (YYYY-MM-DD)</Text>
+                <TextInput
+                  value={createPaymentDate}
+                  onChangeText={setCreatePaymentDate}
+                  placeholder="2026-03-31"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                />
+              </View>
+              <View style={styles.formRow}>
+                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Payment Mode</Text>
+                <TextInput
+                  value={createPaymentMode}
+                  onChangeText={setCreatePaymentMode}
+                  placeholder="Bank Transfer / Cash / Cheque"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                />
+              </View>
+
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Notes</Text>
               <TextInput
-                value={createMonth}
-                onChangeText={setCreateMonth}
-                placeholder="2026-03"
+                value={createNote}
+                onChangeText={setCreateNote}
+                placeholder="Optional notes for this salary entry"
                 placeholderTextColor={colors.textTertiary}
-                style={[styles.searchInput, { color: colors.text, borderColor: colors.border }]}
+                style={[styles.formInput, { color: colors.text, borderColor: colors.border, minHeight: 70 }]}
+                multiline
               />
-
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Earnings</Text>
-              <AmountField label="Basic" value={createBasic} onChangeText={setCreateBasic} colors={colors} />
-              <AmountField label="HRA" value={createHra} onChangeText={setCreateHra} colors={colors} />
-              <AmountField label="Transport" value={createTransport} onChangeText={setCreateTransport} colors={colors} />
-              <AmountField label="Medical" value={createMedical} onChangeText={setCreateMedical} colors={colors} />
-              <AmountField label="Bonus" value={createBonus} onChangeText={setCreateBonus} colors={colors} />
-              <AmountField label="Overtime" value={createOvertime} onChangeText={setCreateOvertime} colors={colors} />
-
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Deductions</Text>
-              <AmountField label="Income Tax" value={createTax} onChangeText={setCreateTax} colors={colors} />
-              <AmountField label="Provident Fund" value={createPf} onChangeText={setCreatePf} colors={colors} />
-              <AmountField label="Insurance" value={createInsurance} onChangeText={setCreateInsurance} colors={colors} />
             </ScrollView>
 
-            <View style={styles.modalFooter}>
+            <View style={[styles.modalFooter, { paddingBottom: Math.max(insets.bottom, 12) }]}>
               <Pressable
                 onPress={handleCloseCreate}
                 disabled={savingSalary}
@@ -998,6 +1087,8 @@ const styles = StyleSheet.create({
   salaryHeaderLeft: { flex: 1, gap: 2 },
   salaryName: { fontSize: 15 },
   salaryMonth: { fontSize: 12 },
+  salaryLabel: { fontSize: 12 },
+  salaryPeriod: { fontSize: 11 },
   salaryHeaderRight: { alignItems: "flex-end", gap: 4 },
   netPay: { fontSize: 16 },
   statusChip: {
@@ -1235,3 +1326,4 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
   },
 });
+

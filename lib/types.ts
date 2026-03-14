@@ -4,6 +4,7 @@ export interface AppUser {
   id: string;
   name: string;
   email: string;
+  login?: string;
   role: UserRole;
   companyId: string;
   companyName: string;
@@ -98,6 +99,12 @@ export interface SalaryRecord {
   employeeId: string;
   employeeName: string;
   employeeEmail?: string;
+  label?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  paymentDate?: string;
+  paymentMode?: string;
+  note?: string;
   month: string;
   basic: number;
   hra: number;
