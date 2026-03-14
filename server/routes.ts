@@ -545,8 +545,55 @@ type AccessRequestRecord = UserAccessRequest & {
 };
 
 const authUsersByEmail = new Map<string, AuthUserRecord>();
+const authUsersByLogin = new Map<string, AuthUserRecord>();
 const accessRequestsById = new Map<string, AccessRequestRecord>();
 const inMemoryStateStore = new Map<string, string>();
+
+function setAuthUserRecord(record: AuthUserRecord): void {
+  const emailKey = normalizeEmailKey(record.user.email);
+  if (emailKey) {
+    authUsersByEmail.set(emailKey, record);
+  }
+  const loginKey = normalizeLoginKey(record.user.login);
+  if (loginKey) {
+    authUsersByLogin.set(loginKey, record);
+  }
+}
+
+function removeAuthUserByEmail(email: string): void {
+  const emailKey = normalizeEmailKey(email);
+  const record = authUsersByEmail.get(emailKey);
+  if (record?.user.login) {
+    authUsersByLogin.delete(normalizeLoginKey(record.user.login));
+  }
+  authUsersByEmail.delete(emailKey);
+}
+
+function removeAuthUserByLogin(login: string): void {
+  const loginKey = normalizeLoginKey(login);
+  const record = authUsersByLogin.get(loginKey);
+  if (record?.user.email) {
+    authUsersByEmail.delete(normalizeEmailKey(record.user.email));
+  }
+  authUsersByLogin.delete(loginKey);
+}
+
+function getAuthUserByIdentifier(identifier: string): AuthUserRecord | null {
+  const trimmed = normalizeWhitespace(identifier);
+  if (!trimmed) return null;
+  const normalizedEmail = normalizeEmailKey(trimmed);
+  const loginCandidate = trimmed.includes("@") ? trimmed.split("@")[0] || trimmed : trimmed;
+  const normalizedLogin = normalizeLoginKey(loginCandidate);
+  if (normalizedEmail) {
+    const byEmail = authUsersByEmail.get(normalizedEmail);
+    if (byEmail) return byEmail;
+  }
+  if (normalizedLogin) {
+    const byLogin = authUsersByLogin.get(normalizedLogin);
+    if (byLogin) return byLogin;
+  }
+  return null;
+}
 
 async function ensureCompanyExistsInMySql(companyId: string, companyName: string): Promise<void> {
   if (!isMySqlStateEnabled()) return;
@@ -570,54 +617,78 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
   if (!isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
   const user = record.user;
-  const companyId = user.companyId || DEFAULT_COMPANY_ID;
-  const companyName = user.companyName || DEFAULT_COMPANY_NAME;
-  await ensureCompanyExistsInMySql(companyId, companyName);
-  await conn.execute(
-    `INSERT INTO lff_users (
-      id, name, email, password_hash, role, company_id, company_name, company_ids_json,
-      department, branch, phone, join_date, avatar, manager_id, manager_name, approval_status,
-      requested_company_name, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      name = VALUES(name),
-      password_hash = VALUES(password_hash),
-      role = VALUES(role),
-      company_id = VALUES(company_id),
-      company_name = VALUES(company_name),
-      company_ids_json = VALUES(company_ids_json),
-      department = VALUES(department),
-      branch = VALUES(branch),
-      phone = VALUES(phone),
-      join_date = VALUES(join_date),
-      avatar = VALUES(avatar),
-      manager_id = VALUES(manager_id),
-      manager_name = VALUES(manager_name),
-      approval_status = VALUES(approval_status),
-      requested_company_name = VALUES(requested_company_name),
-      updated_at = VALUES(updated_at)`,
-    [
-      user.id,
-      user.name,
-      user.email,
-      record.passwordHash,
-      user.role,
-      companyId,
-      companyName,
-      JSON.stringify(user.companyIds || [companyId]),
-      user.department,
-      user.branch,
-      user.phone || "",
-      user.joinDate || new Date().toISOString().slice(0, 10),
-      user.avatar || null,
-      user.managerId || null,
-      user.managerName || null,
-      resolveApprovalStatus(record),
-      requestedCompanyName || null,
-      record.createdAt.slice(0, 19).replace("T", " "),
-      record.updatedAt.slice(0, 19).replace("T", " "),
-    ]
+  const normalizedEmail = normalizeEmail(user.email || "");
+  const baseLogin = normalizeLoginKey(user.login || buildLoginFromEmailAndName(normalizedEmail, user.name));
+  const login = baseLogin || buildLoginFromEmailAndName(normalizedEmail, user.name);
+  const safeEmail = normalizedEmail || `${login}@dolibarr.local`;
+  const cleanedName = normalizeWhitespace(user.name);
+  const nameParts = cleanedName.split(" ").filter(Boolean);
+  const firstName = nameParts.shift() || login || "Employee";
+  const lastName = nameParts.join(" ") || "User";
+  const adminFlag = user.role === "admin" ? 1 : 0;
+  const employeeFlag = user.role === "admin" ? 0 : 1;
+  const phone = normalizeWhitespace(user.phone || "");
+  const passwordHash = isLikelyMd5(record.passwordHash) ? record.passwordHash.trim().toLowerCase() : "";
+
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid, login FROM nmy5_user WHERE email = ? OR login = ? LIMIT 1`,
+    [safeEmail, login]
   );
+  if (rows && rows.length > 0) {
+    const rowid = rows[0].rowid;
+    await conn.execute(
+      `UPDATE nmy5_user
+       SET login = ?, email = ?, firstname = ?, lastname = ?, admin = ?, employee = ?,
+           office_phone = ?, user_mobile = ?, pass_crypted = COALESCE(?, pass_crypted),
+           statut = 1, tms = NOW()
+       WHERE rowid = ?`,
+      [
+        login,
+        safeEmail,
+        firstName,
+        lastName,
+        adminFlag,
+        employeeFlag,
+        phone || null,
+        phone || null,
+        passwordHash || null,
+        rowid,
+      ]
+    );
+    return;
+  }
+
+  const insertUser = async (nextLogin: string): Promise<void> => {
+    await conn.execute(
+      `INSERT INTO nmy5_user (
+        login, email, firstname, lastname, pass_crypted, admin, employee, statut, entity,
+        office_phone, user_mobile, datec, tms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, NOW(), NOW())`,
+      [
+        nextLogin,
+        safeEmail,
+        firstName,
+        lastName,
+        passwordHash || null,
+        adminFlag,
+        employeeFlag,
+        phone || null,
+        phone || null,
+      ]
+    );
+  };
+
+  try {
+    await insertUser(login);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/duplicate|already exists|unique/i.test(message)) {
+      const suffix = Date.now().toString(36).slice(-4);
+      await insertUser(`${login}_${suffix}`);
+      return;
+    }
+    throw error;
+  }
 }
 
 function toPublicAccessRequest(entry: AccessRequestRecord): UserAccessRequest {
@@ -803,8 +874,27 @@ function normalizeEmailKey(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+function normalizeLoginKey(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
 function hashPassword(password: string): string {
+  return createHash("md5").update(password).digest("hex");
+}
+
+function hashPasswordLegacy(password: string): string {
   return createHash("sha256").update(`trackforce::${password}`).digest("hex");
+}
+
+function matchesStoredPasswordHash(storedHash: string | null | undefined, password: string): boolean {
+  const normalized = (storedHash || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === hashPassword(password) || normalized === hashPasswordLegacy(password);
+}
+
+function isLikelyMd5(value: string | null | undefined): boolean {
+  const normalized = (value || "").trim();
+  return /^[a-f0-9]{32}$/i.test(normalized);
 }
 
 function normalizeRole(role: unknown): UserRole {
@@ -1136,9 +1226,9 @@ async function hasAnyApprovedAdmin(): Promise<boolean> {
     try {
       const conn = await getMySqlPool();
       const [rows] = await conn.query<any[]>(
-        `SELECT id FROM lff_users
-         WHERE role = 'admin'
-           AND approval_status = 'approved'
+        `SELECT rowid FROM nmy5_user
+         WHERE admin = 1
+           AND statut = 1
          LIMIT 1`
       );
       if (rows && rows.length > 0) return true;
@@ -1193,16 +1283,15 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT
-      id, name, email, password_hash, role, company_id, company_name, company_ids_json,
-      department, branch, phone, join_date, avatar, manager_id, manager_name, approval_status,
-      created_at, updated_at
-    FROM lff_users`
+      rowid, login, email, firstname, lastname, admin, statut, employee,
+      office_phone, user_mobile, pass_crypted, pass, datec, tms
+    FROM nmy5_user`
   );
 
   for (const row of rows) {
     const record = buildAuthRecordFromMySqlRow(row);
     if (!record) continue;
-    authUsersByEmail.set(record.user.email, record);
+    setAuthUserRecord(record);
   }
 }
 
@@ -1220,56 +1309,62 @@ async function initAuthUsersStore(): Promise<void> {
 }
 
 function buildAuthRecordFromMySqlRow(row: any): AuthUserRecord | null {
-  const emailValue = normalizeEmailKey(typeof row?.email === "string" ? row.email : "");
-  const passwordHashValue =
-    typeof row?.password_hash === "string" ? row.password_hash.trim() : "";
-  if (!emailValue || !passwordHashValue) return null;
+  const loginValue = normalizeLoginKey(typeof row?.login === "string" ? row.login : "");
+  const rawEmail = typeof row?.email === "string" ? row.email : "";
+  const emailValue = normalizeEmailKey(rawEmail || (loginValue ? `${loginValue}@dolibarr.local` : ""));
+  const passCrypted =
+    typeof row?.pass_crypted === "string" ? row.pass_crypted.trim().toLowerCase() : "";
+  const passPlain = typeof row?.pass === "string" ? row.pass.trim() : "";
+  const passwordHashValue = passCrypted || (passPlain ? hashPassword(passPlain) : "");
+  if (!loginValue || !passwordHashValue) return null;
 
-  const role = normalizeRole(row?.role);
-  const companyId =
-    normalizeWhitespace(String(row?.company_id || DEFAULT_COMPANY_ID)) || DEFAULT_COMPANY_ID;
-  const companyName = normalizeCompanyName(String(row?.company_name || DEFAULT_COMPANY_NAME));
+  const isAdmin = Number(row?.admin || 0) === 1;
+  const role: UserRole = isAdmin ? "admin" : "salesperson";
   const nowIso = new Date().toISOString();
+  const firstName = normalizeWhitespace(String(row?.firstname || ""));
+  const lastName = normalizeWhitespace(String(row?.lastname || ""));
+  const fullName = normalizeWhitespace(`${firstName} ${lastName}`) || loginValue;
+  const phone = normalizeWhitespace(String(row?.user_mobile || row?.office_phone || "+91 00000 00000"));
+  const statusValue = typeof row?.statut === "number" ? row.statut : Number(row?.statut || 1);
+  const approvalStatus: "approved" | "rejected" = statusValue === 1 ? "approved" : "rejected";
   const user: AppUser = {
-    id: normalizeWhitespace(String(row?.id || randomUUID())),
-    name: normalizeWhitespace(String(row?.name || emailValue)),
+    id: normalizeWhitespace(String(row?.rowid || randomUUID())),
+    name: fullName,
     email: normalizeEmail(emailValue),
+    login: loginValue,
     role,
-    companyId,
-    companyName,
-    companyIds: parseCompanyIdsFromJson(row?.company_ids_json, companyId),
-    department: normalizeWhitespace(String(row?.department || roleToDepartment(role))),
-    branch: normalizeWhitespace(String(row?.branch || "Main Branch")),
-    phone: normalizeWhitespace(String(row?.phone || "+91 00000 00000")),
-    joinDate: String(row?.join_date || new Date().toISOString().slice(0, 10)),
-    avatar: row?.avatar ? String(row.avatar) : undefined,
-    managerId: row?.manager_id ? String(row.manager_id) : undefined,
-    managerName: row?.manager_name ? String(row.manager_name) : undefined,
-    approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
+    companyId: DEFAULT_COMPANY_ID,
+    companyName: DEFAULT_COMPANY_NAME,
+    companyIds: [DEFAULT_COMPANY_ID],
+    department: roleToDepartment(role),
+    branch: "Main Branch",
+    phone,
+    joinDate: String(row?.datec ? new Date(row.datec).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)),
+    approvalStatus,
   };
 
   return {
     user,
     passwordHash: passwordHashValue,
-    createdAt: toIsoTimestamp(row?.created_at, nowIso),
-    updatedAt: toIsoTimestamp(row?.updated_at, nowIso),
-    approvalStatus: normalizeApprovalStatusValue(row?.approval_status),
+    createdAt: toIsoTimestamp(row?.datec, nowIso),
+    updatedAt: toIsoTimestamp(row?.tms, nowIso),
+    approvalStatus,
   };
 }
 
-async function getAuthUserFromMySqlByEmail(email: string): Promise<AuthUserRecord | null> {
+async function getAuthUserFromMySqlByEmail(identifier: string): Promise<AuthUserRecord | null> {
   if (!isMySqlStateEnabled()) return null;
-  const normalized = normalizeEmail(email);
+  const normalizedEmail = normalizeEmail(identifier);
+  const normalizedLogin = normalizeLoginKey(identifier);
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT
-      id, name, email, password_hash, role, company_id, company_name, company_ids_json,
-      department, branch, phone, join_date, avatar, manager_id, manager_name, approval_status,
-      created_at, updated_at
-    FROM lff_users
-    WHERE email = ?
+      rowid, login, email, firstname, lastname, admin, statut, employee,
+      office_phone, user_mobile, pass_crypted, pass, datec, tms
+    FROM nmy5_user
+    WHERE email = ? OR login = ?
     LIMIT 1`,
-    [normalized]
+    [normalizedEmail, normalizedLogin]
   );
   if (!rows || rows.length === 0) return null;
   return buildAuthRecordFromMySqlRow(rows[0]);
@@ -1283,10 +1378,10 @@ async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord 
   try {
     const record = await getAuthUserFromMySqlByEmail(normalized);
     if (!record) {
-      authUsersByEmail.delete(normalized);
+      removeAuthUserByEmail(normalized);
       return null;
     }
-    authUsersByEmail.set(record.user.email, record);
+    setAuthUserRecord(record);
     return record;
   } catch {
     return authUsersByEmail.get(normalized) ?? null;
@@ -1301,11 +1396,22 @@ function createAuthToken(user: AppUser): string {
   });
 }
 
-async function authenticateCredentials(email: string, password: string): Promise<AppUser | null> {
+function buildLoginFromEmailAndName(email: string, name: string): string {
+  const fromEmail = email.split("@")[0] || "";
+  const fromName = name.toLowerCase().replace(/\s+/g, ".");
+  const cleaned = (fromEmail || fromName || "employee")
+    .replace(/[^a-z0-9._-]/gi, "")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 42)
+    .toLowerCase();
+  return cleaned || `user_${Date.now().toString(36).slice(-6)}`;
+}
+
+async function authenticateCredentials(identifier: string, password: string): Promise<AppUser | null> {
   await initAuthUsersStore();
-  const record = authUsersByEmail.get(normalizeEmail(email));
+  const record = getAuthUserByIdentifier(identifier);
   if (!record) return null;
-  if (record.passwordHash !== hashPassword(password)) return null;
+  if (!matchesStoredPasswordHash(record.passwordHash, password)) return null;
   if (resolveApprovalStatus(record) !== "approved") return null;
   return {
     ...record.user,
@@ -1323,10 +1429,13 @@ function buildUserFromRegistration(payload: {
   phone?: string;
 }): AppUser {
   const now = new Date().toISOString().slice(0, 10);
+  const normalizedEmail = normalizeEmail(payload.email);
+  const login = buildLoginFromEmailAndName(normalizedEmail, payload.name);
   return {
     id: randomUUID(),
     name: normalizeWhitespace(payload.name),
-    email: normalizeEmail(payload.email),
+    email: normalizedEmail,
+    login,
     role: payload.role,
     companyId: PENDING_COMPANY_ID,
     companyName: PENDING_COMPANY_NAME,
@@ -1788,11 +1897,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       updatedAt: now,
       approvalStatus: "approved",
     };
-    authUsersByEmail.set(user.email, authRecord);
+    setAuthUserRecord(authRecord);
     try {
       await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
     } catch (error) {
-      authUsersByEmail.delete(user.email);
+      removeAuthUserByEmail(user.email);
       console.error("Failed to persist registered user in MySQL", error);
       res.status(500).json({
         message:
@@ -1872,11 +1981,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         updatedAt: now,
         approvalStatus: "approved",
       };
-      authUsersByEmail.set(normalizedEmail, authRecord);
+      setAuthUserRecord(authRecord);
       try {
         await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
       } catch (error) {
-        authUsersByEmail.delete(normalizedEmail);
+        removeAuthUserByEmail(normalizedEmail);
         console.error("Failed to persist bootstrap admin in MySQL", error);
         res.status(500).json({
           message:
@@ -1930,7 +2039,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
 
     const pendingPasswordHash = hashPassword(password);
-    authUsersByEmail.set(normalizedEmail, {
+    setAuthUserRecord({
       user: pendingUser,
       passwordHash: pendingPasswordHash,
       createdAt: existingRecord?.createdAt || now,
@@ -2096,7 +2205,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           updatedAt: now,
           approvalStatus: "pending",
         };
-        authUsersByEmail.set(normalizedEmail, authRecord);
+        setAuthUserRecord(authRecord);
       }
 
       if (action === "approved") {
@@ -2132,7 +2241,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         };
 
         if (authRecord) {
-          authUsersByEmail.set(normalizedEmail, {
+          setAuthUserRecord({
             ...authRecord,
             user: reviewedUser,
             updatedAt: now,
@@ -2141,7 +2250,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       } else {
         if (authRecord) {
-          authUsersByEmail.set(normalizedEmail, {
+          setAuthUserRecord({
             ...authRecord,
             user: {
               ...authRecord.user,
@@ -2168,7 +2277,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       };
       accessRequestsById.set(requestId, reviewedRequest);
       try {
-        const latestAuthRecord = authUsersByEmail.get(normalizedEmail);
+        const latestAuthRecord = getAuthUserByIdentifier(normalizedEmail);
         if (latestAuthRecord) {
           await upsertAuthUserInMySql(
             latestAuthRecord,
@@ -2191,17 +2300,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   );
 
   app.post("/api/auth/login", async (req, res) => {
-    const { email, password } = req.body as { email?: string; password?: string };
-    if (!email || !password) {
-      res.status(400).json({ message: "Email and password are required" });
+    const { email, login, username, identifier, password } = req.body as {
+      email?: string;
+      login?: string;
+      username?: string;
+      identifier?: string;
+      password?: string;
+    };
+    const rawIdentifier =
+      (identifier || "").trim() ||
+      (email || "").trim() ||
+      (login || "").trim() ||
+      (username || "").trim();
+    if (!rawIdentifier || !password) {
+      res.status(400).json({ message: "Email/username and password are required" });
       return;
     }
 
     await initAuthUsersStore();
-    const normalizedEmail = normalizeEmail(email);
-    const authRecord = authUsersByEmail.get(normalizedEmail);
-    const attemptedHash = hashPassword(password);
-    if (authRecord && authRecord.passwordHash === attemptedHash) {
+    const authRecord = getAuthUserByIdentifier(rawIdentifier);
+    if (authRecord && matchesStoredPasswordHash(authRecord.passwordHash, password)) {
       const status = resolveApprovalStatus(authRecord);
       if (status === "pending") {
         res.status(403).json({ message: "Your access request is pending admin approval." });
@@ -2211,12 +2329,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(403).json({ message: "Your access request was rejected by admin." });
         return;
       }
-    } else {
+    } else if (rawIdentifier.includes("@")) {
+      const normalizedEmail = normalizeEmail(rawIdentifier);
       let latestRequest = getLatestAccessRequestByEmail(normalizedEmail);
       if (!latestRequest && isMySqlStateEnabled()) {
         latestRequest = await getLatestAccessRequestByEmailFromMySql(normalizedEmail);
       }
-      if (latestRequest?.passwordHash && latestRequest.passwordHash === attemptedHash) {
+      if (latestRequest?.passwordHash && matchesStoredPasswordHash(latestRequest.passwordHash, password)) {
         if (latestRequest.status === "pending") {
           res.status(403).json({ message: "Your access request is pending admin approval." });
           return;
@@ -2227,7 +2346,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
     }
-    const user = await authenticateCredentials(normalizedEmail, password);
+    const user = await authenticateCredentials(rawIdentifier, password);
     if (!user) {
       res.status(401).json({ message: "Invalid credentials" });
       return;
@@ -2238,16 +2357,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.post("/api/auth/token", async (req, res) => {
-    const { email, password } = req.body as { email?: string; password?: string };
-    if (!email || !password) {
-      res.status(400).json({ message: "Email and password are required" });
+    const { email, login, username, identifier, password } = req.body as {
+      email?: string;
+      login?: string;
+      username?: string;
+      identifier?: string;
+      password?: string;
+    };
+    const rawIdentifier =
+      (identifier || "").trim() ||
+      (email || "").trim() ||
+      (login || "").trim() ||
+      (username || "").trim();
+    if (!rawIdentifier || !password) {
+      res.status(400).json({ message: "Email/username and password are required" });
       return;
     }
     await initAuthUsersStore();
-    const normalizedEmail = normalizeEmail(email);
-    const authRecord = authUsersByEmail.get(normalizedEmail);
-    const attemptedHash = hashPassword(password);
-    if (authRecord && authRecord.passwordHash === attemptedHash) {
+    const authRecord = getAuthUserByIdentifier(rawIdentifier);
+    if (authRecord && matchesStoredPasswordHash(authRecord.passwordHash, password)) {
       const status = resolveApprovalStatus(authRecord);
       if (status === "pending") {
         res.status(403).json({ message: "Your access request is pending admin approval." });
@@ -2257,12 +2385,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(403).json({ message: "Your access request was rejected by admin." });
         return;
       }
-    } else {
+    } else if (rawIdentifier.includes("@")) {
+      const normalizedEmail = normalizeEmail(rawIdentifier);
       let latestRequest = getLatestAccessRequestByEmail(normalizedEmail);
       if (!latestRequest && isMySqlStateEnabled()) {
         latestRequest = await getLatestAccessRequestByEmailFromMySql(normalizedEmail);
       }
-      if (latestRequest?.passwordHash && latestRequest.passwordHash === attemptedHash) {
+      if (latestRequest?.passwordHash && matchesStoredPasswordHash(latestRequest.passwordHash, password)) {
         if (latestRequest.status === "pending") {
           res.status(403).json({ message: "Your access request is pending admin approval." });
           return;
@@ -2273,7 +2402,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
     }
-    const user = await authenticateCredentials(normalizedEmail, password);
+    const user = await authenticateCredentials(rawIdentifier, password);
     if (!user) {
       res.status(401).json({ message: "Invalid credentials" });
       return;
@@ -2289,7 +2418,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
     await initAuthUsersStore();
-    const record = authUsersByEmail.get(normalizeEmail(email));
+    const identifier = email.endsWith("@dolibarr.local") ? email.split("@")[0] || email : email;
+    const record =
+      (await syncAuthUserCacheForEmail(identifier)) || getAuthUserByIdentifier(identifier);
     if (!record) {
       res.status(404).json({ message: "User not found" });
       return;
