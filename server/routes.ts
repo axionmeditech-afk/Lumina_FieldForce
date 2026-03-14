@@ -629,6 +629,8 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
   const employeeFlag = user.role === "admin" ? 0 : 1;
   const phone = normalizeWhitespace(user.phone || "");
   const passwordHash = isLikelyMd5(record.passwordHash) ? record.passwordHash.trim().toLowerCase() : "";
+  const approvalStatus = resolveApprovalStatus(record);
+  const statutFlag = approvalStatus === "approved" ? 1 : 0;
 
   const [rows] = await conn.query<any[]>(
     `SELECT rowid, login FROM nmy5_user WHERE email = ? OR login = ? LIMIT 1`,
@@ -640,7 +642,7 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
       `UPDATE nmy5_user
        SET login = ?, email = ?, firstname = ?, lastname = ?, admin = ?, employee = ?,
            office_phone = ?, user_mobile = ?, pass_crypted = COALESCE(?, pass_crypted),
-           statut = 1, tms = NOW()
+           statut = ?, tms = NOW()
        WHERE rowid = ?`,
       [
         login,
@@ -652,6 +654,7 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
         phone || null,
         phone || null,
         passwordHash || null,
+        statutFlag,
         rowid,
       ]
     );
@@ -663,7 +666,7 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
       `INSERT INTO nmy5_user (
         login, email, firstname, lastname, pass_crypted, admin, employee, statut, entity,
         office_phone, user_mobile, datec, tms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, NOW(), NOW())`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NOW(), NOW())`,
       [
         nextLogin,
         safeEmail,
@@ -672,6 +675,7 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
         passwordHash || null,
         adminFlag,
         employeeFlag,
+        statutFlag,
         phone || null,
         phone || null,
       ]
@@ -1325,8 +1329,9 @@ function buildAuthRecordFromMySqlRow(row: any): AuthUserRecord | null {
   const lastName = normalizeWhitespace(String(row?.lastname || ""));
   const fullName = normalizeWhitespace(`${firstName} ${lastName}`) || loginValue;
   const phone = normalizeWhitespace(String(row?.user_mobile || row?.office_phone || "+91 00000 00000"));
-  const statusValue = typeof row?.statut === "number" ? row.statut : Number(row?.statut || 1);
-  const approvalStatus: "approved" | "rejected" = statusValue === 1 ? "approved" : "rejected";
+  const statusValue = typeof row?.statut === "number" ? row.statut : Number(row?.statut ?? 1);
+  const approvalStatus: "approved" | "pending" | "rejected" =
+    statusValue === 1 ? "approved" : statusValue === 0 ? "pending" : "rejected";
   const user: AppUser = {
     id: normalizeWhitespace(String(row?.rowid || randomUUID())),
     name: fullName,
@@ -2039,13 +2044,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
 
     const pendingPasswordHash = hashPassword(password);
-    setAuthUserRecord({
+    const pendingAuthRecord: AuthUserRecord = {
       user: pendingUser,
       passwordHash: pendingPasswordHash,
       createdAt: existingRecord?.createdAt || now,
       updatedAt: now,
       approvalStatus: "pending",
-    });
+    };
+    setAuthUserRecord(pendingAuthRecord);
 
     const pendingRequest: AccessRequestRecord = {
       id: randomUUID(),
@@ -2070,6 +2076,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     accessRequestsById.set(pendingRequest.id, pendingRequest);
     try {
       await insertAccessRequestInMySql(pendingRequest);
+      await upsertAuthUserInMySql(pendingAuthRecord, normalizedCompanyName);
     } catch (error) {
       console.error("Failed to persist access request in MySQL", error);
       res.status(500).json({
@@ -2083,7 +2090,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     res.status(202).json({
       ok: true,
-      message: "Signup request submitted. Wait for admin approval before signing in.",
+      message:
+        "Signup request submitted. Your Dolibarr user is created in disabled state. Wait for admin approval before signing in.",
       request: toPublicAccessRequest(pendingRequest),
     });
   });

@@ -104,7 +104,8 @@ export default function LoginScreen() {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           Alert.alert(
             "Request Submitted",
-            signupResult.message || "Your request was sent to admin. Login after approval."
+            signupResult.message ||
+              "Your request was sent to admin. Your Dolibarr user stays disabled until approval."
           );
           setMode("signin");
           setPassword("");
