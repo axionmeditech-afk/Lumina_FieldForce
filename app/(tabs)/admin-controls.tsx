@@ -499,6 +499,8 @@ export default function AdminControlsScreen() {
                   role: selectedRole,
                   department: request.requestedDepartment,
                   branch: request.requestedBranch,
+                  location: request.requestedBranch,
+                  pincode: request.requestedPincode,
                 });
               const firstAttempt = await attemptSync();
               if (!firstAttempt.ok) {
@@ -716,6 +718,9 @@ export default function AdminControlsScreen() {
                   </Text>
                   <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
                     Requested company: {request.requestedCompanyName || "Not specified"}
+                  </Text>
+                  <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
+                    Location: {request.requestedBranch || "Not specified"} · Pincode: {request.requestedPincode || "—"}
                   </Text>
                   {selectedRole !== request.requestedRole ? (
                     <Text style={[styles.requestMeta, { color: colors.success }]}>

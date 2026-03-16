@@ -83,6 +83,11 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_salaries",
   "@trackforce_tasks",
   "@trackforce_expenses",
+  "@trackforce_stockists",
+  "@trackforce_stock_transfers",
+  "@trackforce_incentive_goal_plans",
+  "@trackforce_incentive_product_plans",
+  "@trackforce_incentive_payouts",
   "@trackforce_conversations",
   "@trackforce_audit_logs",
   "@trackforce_settings",
@@ -94,6 +99,13 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_dolibarr_sync_logs",
   "@trackforce_notifications",
   "@trackforce_support_threads",
+]);
+const NORMALIZED_STATE_KEYS = new Set([
+  "@trackforce_stockists",
+  "@trackforce_stock_transfers",
+  "@trackforce_incentive_goal_plans",
+  "@trackforce_incentive_product_plans",
+  "@trackforce_incentive_payouts",
 ]);
 
 function firstString(value: unknown): string {
@@ -1187,8 +1199,509 @@ function isRemoteStateKeyAllowed(key: string): boolean {
   return REMOTE_STATE_ALLOWED_KEYS.has(key);
 }
 
+function isNormalizedStateKey(key: string): boolean {
+  return NORMALIZED_STATE_KEYS.has(key);
+}
+
+function toNullableText(value: unknown): string | null {
+  const normalized = normalizeWhitespace(String(value ?? ""));
+  return normalized ? normalized : null;
+}
+
+function toRequiredText(value: unknown, fallback: string): string {
+  return normalizeWhitespace(String(value ?? "")) || fallback;
+}
+
+function toStringId(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+}
+
+async function listStockistsFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT id, company_id, name, phone, location, pincode, notes, created_at, updated_at
+    FROM lff_stockists
+    ORDER BY updated_at DESC
+  `);
+  const nowIso = new Date().toISOString();
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    name: toRequiredText(row.name, "Channel Partner"),
+    phone: row.phone ? String(row.phone) : undefined,
+    location: row.location ? String(row.location) : undefined,
+    pincode: row.pincode ? String(row.pincode) : undefined,
+    notes: row.notes ? String(row.notes) : undefined,
+    createdAt: toIsoTimestamp(row.created_at, nowIso),
+    updatedAt: toIsoTimestamp(row.updated_at, nowIso),
+  }));
+}
+
+async function listStockTransfersFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT id, company_id, stockist_id, stockist_name, transfer_type, item_name, item_id,
+           quantity, unit_label, salesperson_id, salesperson_name, note, created_at
+    FROM lff_stock_transfers
+    ORDER BY created_at DESC
+  `);
+  const nowIso = new Date().toISOString();
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    stockistId: row.stockist_id ? String(row.stockist_id) : "",
+    stockistName: toRequiredText(row.stockist_name, "Channel Partner"),
+    type: row.transfer_type === "out" ? "out" : "in",
+    itemName: toRequiredText(row.item_name, "Item"),
+    itemId: row.item_id ? String(row.item_id) : undefined,
+    quantity: Number.isFinite(Number(row.quantity)) ? Number(row.quantity) : 0,
+    unitLabel: row.unit_label ? String(row.unit_label) : undefined,
+    salespersonId: row.salesperson_id ? String(row.salesperson_id) : undefined,
+    salespersonName: row.salesperson_name ? String(row.salesperson_name) : undefined,
+    note: row.note ? String(row.note) : undefined,
+    createdAt: toIsoTimestamp(row.created_at, nowIso),
+  }));
+}
+
+let incentiveTablesEnsured = false;
+
+async function ensureIncentiveTables(): Promise<void> {
+  if (incentiveTablesEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_incentive_goal_plans\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`title\` VARCHAR(191) NOT NULL,
+      \`period\` ENUM('daily','weekly','monthly') NOT NULL DEFAULT 'monthly',
+      \`target_qty\` INT NOT NULL DEFAULT 0,
+      \`threshold_percent\` DECIMAL(5,2) NOT NULL DEFAULT 0,
+      \`per_unit_amount\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`active\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`created_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_incentive_goal_company\` (\`company_id\`),
+      KEY \`idx_lff_incentive_goal_period\` (\`period\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_incentive_product_plans\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`product_id\` VARCHAR(64) NULL,
+      \`product_name\` VARCHAR(191) NOT NULL,
+      \`per_unit_amount\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`active\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`created_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_incentive_product_company\` (\`company_id\`),
+      KEY \`idx_lff_incentive_product_product\` (\`product_id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_incentive_payouts\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`salesperson_id\` VARCHAR(64) NOT NULL,
+      \`salesperson_name\` VARCHAR(191) NOT NULL,
+      \`range_key\` ENUM('daily','weekly','monthly') NOT NULL DEFAULT 'monthly',
+      \`range_start\` DATE NOT NULL,
+      \`range_end\` DATE NOT NULL,
+      \`goal_amount\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`product_amount\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`total_amount\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`status\` ENUM('pending','paid') NOT NULL DEFAULT 'pending',
+      \`note\` LONGTEXT NULL,
+      \`created_at\` DATETIME NOT NULL,
+      \`created_by_id\` VARCHAR(64) NULL,
+      \`created_by_name\` VARCHAR(191) NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_incentive_payout_company\` (\`company_id\`),
+      KEY \`idx_lff_incentive_payout_salesperson\` (\`salesperson_id\`),
+      KEY \`idx_lff_incentive_payout_range\` (\`range_key`, \`range_start`, \`range_end`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  incentiveTablesEnsured = true;
+}
+
+async function listIncentiveGoalPlansFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureIncentiveTables();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT id, company_id, title, period, target_qty, threshold_percent, per_unit_amount,
+           active, created_at, updated_at
+    FROM lff_incentive_goal_plans
+    ORDER BY updated_at DESC
+  `);
+  const nowIso = new Date().toISOString();
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    title: toRequiredText(row.title, "Incentive Plan"),
+    period: row.period === "daily" || row.period === "weekly" ? row.period : "monthly",
+    targetQty: Number.isFinite(Number(row.target_qty)) ? Number(row.target_qty) : 0,
+    thresholdPercent: Number.isFinite(Number(row.threshold_percent))
+      ? Number(row.threshold_percent)
+      : 0,
+    perUnitAmount: Number.isFinite(Number(row.per_unit_amount)) ? Number(row.per_unit_amount) : 0,
+    active: Boolean(row.active),
+    createdAt: toIsoTimestamp(row.created_at, nowIso),
+    updatedAt: toIsoTimestamp(row.updated_at, nowIso),
+  }));
+}
+
+async function listIncentiveProductPlansFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureIncentiveTables();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT id, company_id, product_id, product_name, per_unit_amount, active, created_at, updated_at
+    FROM lff_incentive_product_plans
+    ORDER BY updated_at DESC
+  `);
+  const nowIso = new Date().toISOString();
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    productId: row.product_id ? String(row.product_id) : undefined,
+    productName: toRequiredText(row.product_name, "Product"),
+    perUnitAmount: Number.isFinite(Number(row.per_unit_amount)) ? Number(row.per_unit_amount) : 0,
+    active: Boolean(row.active),
+    createdAt: toIsoTimestamp(row.created_at, nowIso),
+    updatedAt: toIsoTimestamp(row.updated_at, nowIso),
+  }));
+}
+
+async function listIncentivePayoutsFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureIncentiveTables();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT id, company_id, salesperson_id, salesperson_name, range_key, range_start, range_end,
+           goal_amount, product_amount, total_amount, status, note, created_at,
+           created_by_id, created_by_name
+    FROM lff_incentive_payouts
+    ORDER BY created_at DESC
+  `);
+  const nowIso = new Date().toISOString();
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    salespersonId: row.salesperson_id ? String(row.salesperson_id) : "",
+    salespersonName: toRequiredText(row.salesperson_name, "Salesperson"),
+    rangeKey: row.range_key === "daily" || row.range_key === "weekly" ? row.range_key : "monthly",
+    rangeStart: row.range_start ? new Date(row.range_start).toISOString().slice(0, 10) : nowIso.slice(0, 10),
+    rangeEnd: row.range_end ? new Date(row.range_end).toISOString().slice(0, 10) : nowIso.slice(0, 10),
+    goalAmount: Number.isFinite(Number(row.goal_amount)) ? Number(row.goal_amount) : 0,
+    productAmount: Number.isFinite(Number(row.product_amount)) ? Number(row.product_amount) : 0,
+    totalAmount: Number.isFinite(Number(row.total_amount)) ? Number(row.total_amount) : 0,
+    createdAt: toIsoTimestamp(row.created_at, nowIso),
+    createdById: row.created_by_id ? String(row.created_by_id) : undefined,
+    createdByName: row.created_by_name ? String(row.created_by_name) : undefined,
+    status: row.status === "paid" ? "paid" : "pending",
+    note: row.note ? String(row.note) : undefined,
+  }));
+}
+
+async function replaceStockistsInMySql(entries: unknown[]): Promise<void> {
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_stockists");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const id = toStringId((entry as any).id);
+      if (!id) continue;
+      const companyId = toNullableText((entry as any).companyId);
+      const name = toRequiredText((entry as any).name, "Channel Partner");
+      const phone = toNullableText((entry as any).phone);
+      const location = toNullableText((entry as any).location);
+      const pincode = toNullableText((entry as any).pincode);
+      const notes = toNullableText((entry as any).notes);
+      const createdAt = toSqlTimestamp((entry as any).createdAt);
+      const updatedAt = toSqlTimestamp((entry as any).updatedAt ?? (entry as any).createdAt);
+      await conn.execute(
+        `INSERT INTO lff_stockists
+          (id, company_id, name, phone, location, pincode, notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, companyId, name, phone, location, pincode, notes, createdAt, updatedAt]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function replaceStockTransfersInMySql(entries: unknown[]): Promise<void> {
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_stock_transfers");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const id = toStringId((entry as any).id);
+      const stockistId = toStringId((entry as any).stockistId);
+      if (!id || !stockistId) continue;
+      const companyId = toNullableText((entry as any).companyId);
+      const stockistName = toRequiredText((entry as any).stockistName, "Channel Partner");
+      const transferType = (entry as any).type === "out" ? "out" : "in";
+      const itemName = toRequiredText((entry as any).itemName, "Item");
+      const itemId = toNullableText((entry as any).itemId);
+      const quantity = toSqlNumber((entry as any).quantity);
+      const unitLabel = toNullableText((entry as any).unitLabel);
+      const salespersonId = toNullableText((entry as any).salespersonId);
+      const salespersonName = toNullableText((entry as any).salespersonName);
+      const note = toNullableText((entry as any).note);
+      const createdAt = toSqlTimestamp((entry as any).createdAt);
+      await conn.execute(
+        `INSERT INTO lff_stock_transfers
+          (id, company_id, stockist_id, stockist_name, transfer_type, item_name, item_id,
+           quantity, unit_label, salesperson_id, salesperson_name, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          companyId,
+          stockistId,
+          stockistName,
+          transferType,
+          itemName,
+          itemId,
+          quantity,
+          unitLabel,
+          salespersonId,
+          salespersonName,
+          note,
+          createdAt,
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function replaceIncentiveGoalPlansInMySql(entries: unknown[]): Promise<void> {
+  await ensureIncentiveTables();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_incentive_goal_plans");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const id = toStringId((entry as any).id);
+      if (!id) continue;
+      const companyId = toNullableText((entry as any).companyId);
+      const title = toRequiredText((entry as any).title, "Incentive Plan");
+      const periodRaw = (entry as any).period;
+      const period =
+        periodRaw === "daily" || periodRaw === "weekly" || periodRaw === "monthly"
+          ? periodRaw
+          : "monthly";
+      const targetQty = Math.max(0, Math.floor(toSqlNumber((entry as any).targetQty)));
+      const thresholdPercent = Math.max(0, toSqlNumber((entry as any).thresholdPercent));
+      const perUnitAmount = Math.max(0, toSqlNumber((entry as any).perUnitAmount));
+      const active = toSqlBoolean((entry as any).active, true);
+      const createdAt = toSqlTimestamp((entry as any).createdAt);
+      const updatedAt = toSqlTimestamp((entry as any).updatedAt ?? (entry as any).createdAt);
+      await conn.execute(
+        `INSERT INTO lff_incentive_goal_plans
+          (id, company_id, title, period, target_qty, threshold_percent, per_unit_amount, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          companyId,
+          title,
+          period,
+          targetQty,
+          thresholdPercent,
+          perUnitAmount,
+          active,
+          createdAt,
+          updatedAt,
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function replaceIncentiveProductPlansInMySql(entries: unknown[]): Promise<void> {
+  await ensureIncentiveTables();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_incentive_product_plans");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const id = toStringId((entry as any).id);
+      if (!id) continue;
+      const companyId = toNullableText((entry as any).companyId);
+      const productId = toNullableText((entry as any).productId);
+      const productName = toRequiredText((entry as any).productName, "Product");
+      const perUnitAmount = Math.max(0, toSqlNumber((entry as any).perUnitAmount));
+      const active = toSqlBoolean((entry as any).active, true);
+      const createdAt = toSqlTimestamp((entry as any).createdAt);
+      const updatedAt = toSqlTimestamp((entry as any).updatedAt ?? (entry as any).createdAt);
+      await conn.execute(
+        `INSERT INTO lff_incentive_product_plans
+          (id, company_id, product_id, product_name, per_unit_amount, active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, companyId, productId, productName, perUnitAmount, active, createdAt, updatedAt]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function replaceIncentivePayoutsInMySql(entries: unknown[]): Promise<void> {
+  await ensureIncentiveTables();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_incentive_payouts");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const id = toStringId((entry as any).id);
+      if (!id) continue;
+      const companyId = toNullableText((entry as any).companyId);
+      const salespersonId = toStringId((entry as any).salespersonId) || "";
+      const salespersonName = toRequiredText((entry as any).salespersonName, "Salesperson");
+      const rangeKeyRaw = (entry as any).rangeKey;
+      const rangeKey =
+        rangeKeyRaw === "daily" || rangeKeyRaw === "weekly" || rangeKeyRaw === "monthly"
+          ? rangeKeyRaw
+          : "monthly";
+      const rangeStart = toSqlDateOnly((entry as any).rangeStart);
+      const rangeEnd = toSqlDateOnly((entry as any).rangeEnd);
+      const goalAmount = Math.max(0, toSqlNumber((entry as any).goalAmount));
+      const productAmount = Math.max(0, toSqlNumber((entry as any).productAmount));
+      const totalAmount = Math.max(0, toSqlNumber((entry as any).totalAmount));
+      const status = (entry as any).status === "paid" ? "paid" : "pending";
+      const note = toNullableText((entry as any).note);
+      const createdAt = toSqlTimestamp((entry as any).createdAt);
+      const createdById = toNullableText((entry as any).createdById);
+      const createdByName = toNullableText((entry as any).createdByName);
+      await conn.execute(
+        `INSERT INTO lff_incentive_payouts
+          (id, company_id, salesperson_id, salesperson_name, range_key, range_start, range_end,
+           goal_amount, product_amount, total_amount, status, note, created_at, created_by_id, created_by_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          companyId,
+          salespersonId,
+          salespersonName,
+          rangeKey,
+          rangeStart,
+          rangeEnd,
+          goalAmount,
+          productAmount,
+          totalAmount,
+          status,
+          note,
+          createdAt,
+          createdById,
+          createdByName,
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
+  if (!isNormalizedStateKey(key)) return undefined;
+  if (key === "@trackforce_stockists") return listStockistsFromMySql();
+  if (key === "@trackforce_stock_transfers") return listStockTransfersFromMySql();
+  if (key === "@trackforce_incentive_goal_plans") return listIncentiveGoalPlansFromMySql();
+  if (key === "@trackforce_incentive_product_plans") return listIncentiveProductPlansFromMySql();
+  if (key === "@trackforce_incentive_payouts") return listIncentivePayoutsFromMySql();
+  return undefined;
+}
+
+async function writeNormalizedState(key: string, jsonValue: string): Promise<boolean> {
+  if (!isNormalizedStateKey(key)) return false;
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(jsonValue);
+  } catch {
+    parsed = null;
+  }
+  const entries = Array.isArray(parsed) ? parsed : [];
+  if (key === "@trackforce_stockists") {
+    await replaceStockistsInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_stock_transfers") {
+    await replaceStockTransfersInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_incentive_goal_plans") {
+    await replaceIncentiveGoalPlansInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_incentive_product_plans") {
+    await replaceIncentiveProductPlansInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_incentive_payouts") {
+    await replaceIncentivePayoutsInMySql(entries);
+    return true;
+  }
+  return false;
+}
+
 async function readRemoteState(key: string): Promise<string | null> {
   if (isMySqlStateEnabled()) {
+    try {
+      const normalized = await readNormalizedState(key);
+      if (typeof normalized !== "undefined") {
+        return JSON.stringify(normalized ?? null);
+      }
+    } catch {
+      // fall through to legacy app state below
+    }
     try {
       return await getMySqlStateValue(key);
     } catch {
@@ -1200,6 +1713,17 @@ async function readRemoteState(key: string): Promise<string | null> {
 
 async function writeRemoteState(key: string, jsonValue: string): Promise<void> {
   if (isMySqlStateEnabled()) {
+    let handled = false;
+    try {
+      handled = await writeNormalizedState(key, jsonValue);
+    } catch {
+      handled = false;
+    }
+    // keep legacy state table populated for compatibility and fallback
+    if (!handled) {
+      await setMySqlStateValue(key, jsonValue);
+      return;
+    }
     await setMySqlStateValue(key, jsonValue);
   } else {
     inMemoryStateStore.set(key, jsonValue);
@@ -1260,6 +1784,49 @@ function toIsoTimestamp(value: unknown, fallbackIso: string): string {
     return value.toISOString();
   }
   return fallbackIso;
+}
+
+function toSqlTimestamp(value: unknown): string {
+  if (typeof value === "string") {
+    const parsed = parseIsoDate(value);
+    if (parsed) return parsed.toISOString().slice(0, 19).replace("T", " ");
+  }
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.toISOString().slice(0, 19).replace("T", " ");
+  }
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
+function toSqlDateOnly(value: unknown): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+      return trimmed.slice(0, 10);
+    }
+    const parsed = parseIsoDate(trimmed);
+    if (parsed) return parsed.toISOString().slice(0, 10);
+  }
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  return new Date().toISOString().slice(0, 10);
+}
+
+function toSqlNumber(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return parsed;
+}
+
+function toSqlBoolean(value: unknown, defaultValue = true): number {
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "number") return value === 0 ? 0 : 1;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["0", "false", "no", "off"].includes(normalized)) return 0;
+    if (["1", "true", "yes", "on"].includes(normalized)) return 1;
+  }
+  return defaultValue ? 1 : 0;
 }
 
 function normalizeNotificationAudience(value: unknown): NotificationAudience {

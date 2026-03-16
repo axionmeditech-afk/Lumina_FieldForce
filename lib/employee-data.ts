@@ -38,6 +38,7 @@ function userToEmployee(user: AppUser): Employee {
     email: user.email,
     phone: user.phone,
     branch: user.branch,
+    pincode: user.pincode,
     joinDate: user.joinDate,
     avatar: user.avatar,
     managerId: user.managerId,
@@ -87,6 +88,7 @@ function mergeEmployees(
         branch: existing.branch || extra.branch,
         phone: existing.phone || extra.phone,
         status: existing.status || extra.status,
+        pincode: existing.pincode || extra.pincode,
       };
       const idx = merged.findIndex((entry) => entry.id === existing.id);
       if (idx >= 0) merged[idx] = next;
@@ -108,6 +110,9 @@ function mapDolibarrUsersToEmployees(
     lastname?: string;
     login?: string;
     email?: string;
+    zip?: string;
+    town?: string;
+    address?: string;
     statut?: number | string;
     status?: number | string;
   }>,
@@ -133,6 +138,10 @@ function mapDolibarrUsersToEmployees(
       const last = normalizeText(user.lastname);
       const name = normalizeText(`${first} ${last}`) || normalizeText(user.login) || "Employee";
       const email = normalizeEmail(user.email);
+      const pincode = normalizeText(user.zip ? String(user.zip) : "");
+      const location =
+        normalizeText(user.town ? String(user.town) : "") ||
+        normalizeText(user.address ? String(user.address) : "");
       const idValue = user.id ? String(user.id) : normalizeText(user.login) || email || name;
       const role = currentUser && email && normalizeEmail(currentUser.email) === email
         ? currentUser.role
@@ -146,7 +155,8 @@ function mapDolibarrUsersToEmployees(
         status: "active",
         email: email || `${idValue}@dolibarr.local`,
         phone: "",
-        branch,
+        branch: location || branch,
+        pincode: pincode || undefined,
         joinDate: joined,
       } as Employee;
     })

@@ -267,6 +267,48 @@ export default function SidebarLayout() {
         }}
       />
       <Drawer.Screen
+        name="admin-reports"
+        options={{
+          title: "Admin Reports",
+          drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon
+              icon="stats-chart-outline"
+              activeIcon="stats-chart"
+              focused={focused}
+              size={size}
+              offsetX={18}
+            />
+          ),
+        }}
+      />
+      <Drawer.Screen
+        name="admin-incentives"
+        options={{
+          title: "Admin Incentives",
+          drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon
+              icon="ribbon-outline"
+              activeIcon="ribbon"
+              focused={focused}
+              size={size}
+              offsetX={18}
+            />
+          ),
+        }}
+      />
+      <Drawer.Screen
+        name="admin-stock"
+        options={{
+          title: "Admin Stock",
+          drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon icon="cube-outline" activeIcon="cube" focused={focused} size={size} offsetX={18} />
+          ),
+        }}
+      />
+      <Drawer.Screen
         name="route-tracking-admin"
         options={{
           title: "Route Tracking",

@@ -12,6 +12,7 @@ export interface AppUser {
   department: string;
   branch: string;
   phone: string;
+  pincode?: string;
   joinDate: string;
   avatar?: string;
   managerId?: string;
@@ -27,6 +28,7 @@ export interface UserAccessRequest {
   approvedRole?: UserRole | null;
   requestedDepartment: string;
   requestedBranch: string;
+  requestedPincode?: string;
   requestedCompanyName?: string;
   status: "pending" | "approved" | "rejected";
   requestedAt: string;
@@ -87,6 +89,7 @@ export interface Employee {
   email: string;
   phone: string;
   branch: string;
+  pincode?: string;
   joinDate: string;
   avatar?: string;
   managerId?: string;
@@ -172,6 +175,78 @@ export interface Expense {
   status: "pending" | "approved" | "rejected";
   date: string;
   receipt?: string;
+}
+
+export interface StockistProfile {
+  id: string;
+  companyId?: string;
+  name: string;
+  phone?: string;
+  location?: string;
+  pincode?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockTransfer {
+  id: string;
+  companyId?: string;
+  stockistId: string;
+  stockistName: string;
+  type: "in" | "out";
+  itemName: string;
+  itemId?: string;
+  quantity: number;
+  unitLabel?: string;
+  salespersonId?: string;
+  salespersonName?: string;
+  note?: string;
+  createdAt: string;
+}
+
+export type IncentivePeriod = "daily" | "weekly" | "monthly";
+
+export interface IncentiveGoalPlan {
+  id: string;
+  companyId?: string;
+  title: string;
+  period: IncentivePeriod;
+  targetQty: number;
+  thresholdPercent: number;
+  perUnitAmount: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IncentiveProductPlan {
+  id: string;
+  companyId?: string;
+  productId?: string;
+  productName: string;
+  perUnitAmount: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IncentivePayout {
+  id: string;
+  companyId?: string;
+  salespersonId: string;
+  salespersonName: string;
+  rangeKey: IncentivePeriod;
+  rangeStart: string;
+  rangeEnd: string;
+  goalAmount: number;
+  productAmount: number;
+  totalAmount: number;
+  createdAt: string;
+  createdById?: string;
+  createdByName?: string;
+  status: "pending" | "paid";
+  note?: string;
 }
 
 export interface Conversation {

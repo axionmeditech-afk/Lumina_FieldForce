@@ -45,6 +45,9 @@ export interface DolibarrThirdParty {
   name?: string;
   nom?: string;
   email?: string;
+  zip?: string;
+  town?: string;
+  address?: string;
   status?: number | string;
   client?: number | string;
 }
@@ -55,6 +58,9 @@ export interface DolibarrUser {
   lastname?: string;
   login?: string;
   email?: string;
+  zip?: string;
+  town?: string;
+  address?: string;
   statut?: number | string;
   status?: number | string;
 }
@@ -78,6 +84,23 @@ export interface DolibarrOrder {
   fk_user_author?: number | string;
   fk_user_salesman?: number | string;
   fk_user?: number | string;
+}
+
+export interface DolibarrOrderLine {
+  id?: number | string;
+  fk_product?: number | string;
+  product_label?: string;
+  label?: string;
+  desc?: string;
+  qty?: number | string;
+  subprice?: number | string;
+  total_ht?: number | string;
+  total_ttc?: number | string;
+  tva_tx?: number | string;
+}
+
+export interface DolibarrOrderDetail extends DolibarrOrder {
+  lines?: DolibarrOrderLine[];
 }
 
 export interface DolibarrOrderLineInput {
@@ -434,6 +457,7 @@ export interface AccessRequestPayload {
   department?: string;
   branch?: string;
   phone?: string;
+  pincode?: string;
 }
 
 async function fetchJsonWithTimeout<T>(
@@ -525,6 +549,7 @@ export async function registerApiUser(payload: {
   department?: string;
   branch?: string;
   phone?: string;
+  pincode?: string;
 }, options?: AuthRequestOptions): Promise<string | null> {
   const timeoutMs = Math.max(300, options?.timeoutMs ?? 2200);
   try {
@@ -779,6 +804,8 @@ export interface DolibarrEmployeeSyncPayload {
   department?: string | null;
   branch?: string | null;
   phone?: string | null;
+  pincode?: string | null;
+  location?: string | null;
   enabled?: boolean;
   endpoint?: string | null;
   apiKey?: string | null;
@@ -801,6 +828,9 @@ interface DolibarrEmployeeCreatePayload {
   office_phone?: string;
   user_mobile?: string;
   job?: string;
+  address?: string;
+  zip?: string;
+  town?: string;
 }
 
 function normalizeDolibarrText(value: string | null | undefined): string {
@@ -1040,6 +1070,15 @@ function buildDolibarrCreatePayload(
   const job = buildDolibarrJobTitle(payload);
   if (job) {
     nextPayload.job = job;
+  }
+  const address = normalizeDolibarrText(payload.location ?? payload.branch ?? "");
+  if (address) {
+    nextPayload.address = address;
+    nextPayload.town = address;
+  }
+  const zip = normalizeDolibarrText(payload.pincode ?? "");
+  if (zip) {
+    nextPayload.zip = zip;
   }
   return nextPayload;
 }
@@ -1519,6 +1558,17 @@ export async function getDolibarrOrders(options?: {
   const query = params.toString();
   return fetchJson<DolibarrOrder[]>(
     `/dolibarr/proxy/orders${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export async function getDolibarrOrderDetail(
+  orderId: number | string
+): Promise<DolibarrOrderDetail> {
+  return fetchJson<DolibarrOrderDetail>(
+    `/dolibarr/proxy/orders/${encodeURIComponent(String(orderId))}`,
     {
       method: "GET",
     }

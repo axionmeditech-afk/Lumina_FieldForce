@@ -26,6 +26,7 @@ interface SignupInput {
   department?: string;
   branch?: string;
   phone?: string;
+  pincode?: string;
   industry?: string;
   headquarters?: string;
 }
@@ -75,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             department: authUser.department,
             branch: authUser.branch,
             phone: authUser.phone,
+            pincode: authUser.pincode,
           },
           { timeoutMs: 1600 }
         );
@@ -181,6 +183,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         department: input.department,
         branch: input.branch,
         phone: input.phone,
+        pincode: input.pincode,
       },
       { timeoutMs: 2600 }
     );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Redirect } from "expo-router";
 import { useAuth } from "@/contexts/AuthContext";
 import { StartScreen } from "@/components/StartScreen";
@@ -12,22 +12,8 @@ export default function IndexScreen() {
     return () => clearTimeout(fallback);
   }, []);
 
-  const subtitle = useMemo(() => {
-    if (isLoading) return "Preparing your workspace";
-    return "Final checks before launch";
-  }, [isLoading]);
-
-  const hint = useMemo(() => {
-    if (isLoading) return "Securing data and syncing live tools";
-    return "Optimizing your session";
-  }, [isLoading]);
-
-  if (!videoComplete) {
+  if (!videoComplete || isLoading) {
     return <StartScreen showVideo onVideoFinish={() => setVideoComplete(true)} />;
-  }
-
-  if (isLoading) {
-    return <StartScreen subtitle={subtitle} hint={hint} />;
   }
 
   if (user) {

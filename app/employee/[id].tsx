@@ -89,6 +89,9 @@ export default function EmployeeDetailScreen() {
           <InfoItem icon="mail-outline" label="Email" value={employee.email} colors={colors} />
           <InfoItem icon="call-outline" label="Phone" value={employee.phone} colors={colors} />
           <InfoItem icon="business-outline" label="Branch" value={employee.branch} colors={colors} />
+          {employee.pincode ? (
+            <InfoItem icon="pin-outline" label="Pincode" value={employee.pincode} colors={colors} />
+          ) : null}
           <InfoItem icon="shield-outline" label="Role" value={employee.role.toUpperCase()} colors={colors} />
           <InfoItem
             icon="calendar-outline"

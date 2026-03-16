@@ -39,6 +39,7 @@ export default function LoginScreen() {
   const [fullName, setFullName] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [branch, setBranch] = useState("");
+  const [pincode, setPincode] = useState("");
   const [role, setRole] = useState<UserRole>("salesperson");
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [email, setEmail] = useState("");
@@ -70,6 +71,10 @@ export default function LoginScreen() {
         Alert.alert("Missing Fields", "Please enter full name and company name");
         return;
       }
+      if (role === "salesperson" && (!branch.trim() || !pincode.trim())) {
+        Alert.alert("Missing Fields", "Please enter location and pincode for sales staff");
+        return;
+      }
     }
 
     setLoading(true);
@@ -91,6 +96,7 @@ export default function LoginScreen() {
           name: fullName.trim(),
           companyName: companyName.trim(),
           branch: branch.trim() || "Main Branch",
+          pincode: pincode.trim(),
           role,
           email: email.trim().toLowerCase(),
           password,
@@ -218,11 +224,20 @@ export default function LoginScreen() {
                 />
                 <InputField
                   colors={colors}
-                  label="Primary Branch"
-                  placeholder="e.g. Ahmedabad Branch"
+                  label="Location / Area"
+                  placeholder="e.g. Maninagar, Ahmedabad"
                   icon="location-outline"
                   value={branch}
                   onChangeText={setBranch}
+                />
+                <InputField
+                  colors={colors}
+                  label="Pincode"
+                  placeholder="e.g. 380015"
+                  icon="navigate-outline"
+                  value={pincode}
+                  onChangeText={setPincode}
+                  keyboardType="number-pad"
                 />
                 <View style={styles.inputWrapper}>
                   <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>Role</Text>
@@ -378,7 +393,7 @@ function InputField({
   icon: keyof typeof Ionicons.glyphMap;
   value: string;
   onChangeText: (value: string) => void;
-  keyboardType?: "default" | "email-address";
+  keyboardType?: "default" | "email-address" | "number-pad";
   autoCapitalize?: "none" | "sentences" | "words" | "characters";
   autoCorrect?: boolean;
 }) {

@@ -9,6 +9,11 @@ import type {
   SalaryRecord,
   Task,
   Expense,
+  StockistProfile,
+  StockTransfer,
+  IncentiveGoalPlan,
+  IncentiveProductPlan,
+  IncentivePayout,
   Conversation,
   AuditLog,
   Geofence,
@@ -54,6 +59,11 @@ const KEYS = {
   DOLIBARR_SYNC_LOGS: "@trackforce_dolibarr_sync_logs",
   NOTIFICATIONS: "@trackforce_notifications",
   SUPPORT_THREADS: "@trackforce_support_threads",
+  STOCKISTS: "@trackforce_stockists",
+  STOCK_TRANSFERS: "@trackforce_stock_transfers",
+  INCENTIVE_GOAL_PLANS: "@trackforce_incentive_goal_plans",
+  INCENTIVE_PRODUCT_PLANS: "@trackforce_incentive_product_plans",
+  INCENTIVE_PAYOUTS: "@trackforce_incentive_payouts",
   ACCESS_REQUESTS: "@trackforce_access_requests",
   ATTENDANCE_QUEUE: "@trackforce_attendance_queue",
   DEVICE_ID: "@trackforce_device_id",
@@ -135,6 +145,11 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
   KEYS.SALARIES,
   KEYS.TASKS,
   KEYS.EXPENSES,
+  KEYS.STOCKISTS,
+  KEYS.STOCK_TRANSFERS,
+  KEYS.INCENTIVE_GOAL_PLANS,
+  KEYS.INCENTIVE_PRODUCT_PLANS,
+  KEYS.INCENTIVE_PAYOUTS,
   KEYS.CONVERSATIONS,
   KEYS.AUDIT_LOGS,
   KEYS.SETTINGS,
@@ -443,6 +458,7 @@ export interface RegisterUserInput {
   department?: string;
   branch?: string;
   phone?: string;
+  pincode?: string;
   industry?: string;
   headquarters?: string;
 }
@@ -485,6 +501,11 @@ function hasAnyLegacyDemoProfile(
 function normalizePhone(value?: string): string {
   const cleaned = normalizeWhitespace(value ?? "");
   return cleaned || "+91 00000 00000";
+}
+
+function normalizePincode(value?: string): string | undefined {
+  const cleaned = normalizeWhitespace(value ?? "").replace(/\s+/g, "");
+  return cleaned || undefined;
 }
 
 function normalizeRole(role?: UserRole): UserRole {
@@ -610,6 +631,7 @@ function normalizeUserProfile(user: AppUser): AppUser {
     department: normalizeWhitespace(user.department),
     branch: normalizeWhitespace(user.branch),
     phone: normalizePhone(user.phone),
+    pincode: normalizePincode(user.pincode),
     managerId: managerId || undefined,
     managerName: managerName || undefined,
     approvalStatus,
@@ -714,6 +736,7 @@ function normalizeAccessRequest(entry: UserAccessRequest): UserAccessRequest {
     approvedRole,
     requestedDepartment: normalizeWhitespace(entry.requestedDepartment),
     requestedBranch: normalizeWhitespace(entry.requestedBranch),
+    requestedPincode: normalizePincode(entry.requestedPincode),
     requestedCompanyName: entry.requestedCompanyName
       ? sanitizeCompanyName(entry.requestedCompanyName)
       : undefined,
@@ -1236,6 +1259,7 @@ async function upsertEmployeeForCompany(user: AppUser, company: CompanyProfile):
     email: user.email,
     phone: user.phone,
     branch: user.branch || company.primaryBranch,
+    pincode: user.pincode,
     joinDate: user.joinDate,
     avatar: user.avatar,
     managerId: user.managerId,
@@ -1274,6 +1298,8 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
   const email = normalizeEmail(input.email);
   const password = input.password;
   const requestedCompanyName = sanitizeCompanyName(input.companyName);
+  const requestedBranch = normalizeWhitespace(input.branch ?? "");
+  const requestedPincode = normalizePincode(input.pincode);
 
   if (!name) {
     return { ok: false, message: "Name is required" };
@@ -1294,6 +1320,9 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
   const role = normalizeRole(input.role);
   const now = new Date().toISOString();
   const adminAlreadyExists = hasAnyApprovedAdmin(authUsers);
+  if (role === "salesperson" && (!requestedBranch || !requestedPincode)) {
+    return { ok: false, message: "Location and pincode are required for salesperson signup" };
+  }
   if (role === "admin" && !adminAlreadyExists) {
     const adminCompany = await ensurePendingCompanyProfile();
     const adminUser = normalizeUserProfile({
@@ -1305,8 +1334,9 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
       companyName: adminCompany.name,
       companyIds: [adminCompany.id],
       department: normalizeWhitespace(input.department ?? "") || roleToDepartment("admin"),
-      branch: normalizeWhitespace(input.branch ?? "") || adminCompany.primaryBranch,
+      branch: requestedBranch || adminCompany.primaryBranch,
       phone: normalizePhone(input.phone),
+      pincode: requestedPincode,
       joinDate: now.slice(0, 10),
       approvalStatus: "approved",
     });
@@ -1339,8 +1369,9 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
     companyName: fallbackCompany.name,
     companyIds: [fallbackCompany.id],
     department: normalizeWhitespace(input.department ?? "") || roleToDepartment(role),
-    branch: normalizeWhitespace(input.branch ?? "") || fallbackCompany.primaryBranch,
+    branch: requestedBranch || fallbackCompany.primaryBranch,
     phone: normalizePhone(input.phone),
+    pincode: requestedPincode,
     joinDate: now.slice(0, 10),
     approvalStatus: "pending",
   });
@@ -1364,6 +1395,7 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
     approvedRole: null,
     requestedDepartment: pendingUser.department,
     requestedBranch: pendingUser.branch,
+    requestedPincode: pendingUser.pincode,
     requestedCompanyName,
     status: "pending",
     requestedAt: now,
@@ -2007,6 +2039,308 @@ export async function updateExpenseStatus(
     expenses[idx].status = status;
     await setItem(KEYS.EXPENSES, expenses);
   }
+}
+
+function normalizeStockistName(value: string): string {
+  return normalizeWhitespace(value) || "Channel Partner";
+}
+
+function normalizeItemName(value: string): string {
+  return normalizeWhitespace(value) || "Item";
+}
+
+function normalizeUnitLabel(value?: string): string | undefined {
+  const cleaned = normalizeWhitespace(value ?? "");
+  return cleaned || undefined;
+}
+
+function normalizeIncentiveTitle(value: string): string {
+  return normalizeWhitespace(value) || "Incentive Plan";
+}
+
+function normalizeIncentiveProductName(value: string): string {
+  return normalizeWhitespace(value) || "Product";
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(100, Math.max(0, value));
+}
+
+export async function getStockists(): Promise<StockistProfile[]> {
+  const companyId = await getActiveCompanyId();
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  return stockists.filter((stockist) => matchesCompany(stockist, companyId));
+}
+
+export async function addStockist(
+  input: Omit<StockistProfile, "companyId" | "createdAt" | "updatedAt"> & { id?: string }
+): Promise<StockistProfile> {
+  const companyId = await getActiveCompanyId();
+  const now = new Date().toISOString();
+  const candidate: StockistProfile = withCompanyId<StockistProfile>(
+    {
+      id: input.id || makeId("stockist"),
+      name: normalizeStockistName(input.name),
+      phone: normalizeWhitespace(input.phone ?? "") || undefined,
+      location: normalizeWhitespace(input.location ?? "") || undefined,
+      pincode: normalizePincode(input.pincode),
+      notes: normalizeWhitespace(input.notes ?? "") || undefined,
+      createdAt: now,
+      updatedAt: now,
+    },
+    companyId
+  );
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  stockists.unshift(candidate);
+  await setItem(KEYS.STOCKISTS, stockists);
+  return candidate;
+}
+
+export async function updateStockist(
+  stockistId: string,
+  updates: Partial<StockistProfile>
+): Promise<StockistProfile | null> {
+  const companyId = await getActiveCompanyId();
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const idx = stockists.findIndex(
+    (stockist) => stockist.id === stockistId && matchesCompany(stockist, companyId)
+  );
+  if (idx === -1) return null;
+  const current = stockists[idx];
+  const updated: StockistProfile = {
+    ...current,
+    name: updates.name ? normalizeStockistName(updates.name) : current.name,
+    phone:
+      updates.phone !== undefined
+        ? normalizeWhitespace(updates.phone) || undefined
+        : current.phone,
+    location:
+      updates.location !== undefined
+        ? normalizeWhitespace(updates.location) || undefined
+        : current.location,
+    pincode: updates.pincode !== undefined ? normalizePincode(updates.pincode) : current.pincode,
+    notes:
+      updates.notes !== undefined
+        ? normalizeWhitespace(updates.notes) || undefined
+        : current.notes,
+    updatedAt: new Date().toISOString(),
+  };
+  stockists[idx] = updated;
+  await setItem(KEYS.STOCKISTS, stockists);
+  return updated;
+}
+
+export async function removeStockist(stockistId: string): Promise<boolean> {
+  const companyId = await getActiveCompanyId();
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const nextStockists = stockists.filter(
+    (stockist) => !(stockist.id === stockistId && matchesCompany(stockist, companyId))
+  );
+  if (nextStockists.length === stockists.length) return false;
+  await setItem(KEYS.STOCKISTS, nextStockists);
+
+  const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
+  const nextTransfers = transfers.filter(
+    (transfer) => !(transfer.stockistId === stockistId && matchesCompany(transfer, companyId))
+  );
+  if (nextTransfers.length !== transfers.length) {
+    await setItem(KEYS.STOCK_TRANSFERS, nextTransfers);
+  }
+  return true;
+}
+
+export async function getStockTransfers(): Promise<StockTransfer[]> {
+  const companyId = await getActiveCompanyId();
+  const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
+  return transfers.filter((transfer) => matchesCompany(transfer, companyId));
+}
+
+export async function addStockTransfer(transfer: StockTransfer): Promise<void> {
+  const companyId = await getActiveCompanyId();
+  const now = new Date().toISOString();
+  const candidate: StockTransfer = withCompanyId<StockTransfer>(
+    {
+      ...transfer,
+      id: transfer.id || makeId("stock_transfer"),
+      stockistId: transfer.stockistId,
+      stockistName: normalizeStockistName(transfer.stockistName),
+      itemName: normalizeItemName(transfer.itemName),
+      unitLabel: normalizeUnitLabel(transfer.unitLabel),
+      note: normalizeWhitespace(transfer.note ?? "") || undefined,
+      quantity: Number.isFinite(transfer.quantity) ? Math.max(0, transfer.quantity) : 0,
+      createdAt: transfer.createdAt || now,
+    },
+    companyId
+  );
+  const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
+  transfers.unshift(candidate);
+  await setItem(KEYS.STOCK_TRANSFERS, transfers.slice(0, 5000));
+}
+
+export async function getIncentiveGoalPlans(): Promise<IncentiveGoalPlan[]> {
+  const companyId = await getActiveCompanyId();
+  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  return plans.filter((plan) => matchesCompany(plan, companyId));
+}
+
+export async function addIncentiveGoalPlan(
+  input: Omit<IncentiveGoalPlan, "companyId" | "createdAt" | "updatedAt"> & { id?: string }
+): Promise<IncentiveGoalPlan> {
+  const companyId = await getActiveCompanyId();
+  const now = new Date().toISOString();
+  const candidate: IncentiveGoalPlan = withCompanyId<IncentiveGoalPlan>(
+    {
+      ...input,
+      id: input.id || makeId("goal_incentive"),
+      title: normalizeIncentiveTitle(input.title),
+      targetQty: Number.isFinite(input.targetQty) ? Math.max(0, input.targetQty) : 0,
+      thresholdPercent: clampPercent(input.thresholdPercent),
+      perUnitAmount: Number.isFinite(input.perUnitAmount) ? Math.max(0, input.perUnitAmount) : 0,
+      active: input.active ?? true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    companyId
+  );
+  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  plans.unshift(candidate);
+  await setItem(KEYS.INCENTIVE_GOAL_PLANS, plans);
+  return candidate;
+}
+
+export async function updateIncentiveGoalPlan(
+  planId: string,
+  updates: Partial<IncentiveGoalPlan>
+): Promise<IncentiveGoalPlan | null> {
+  const companyId = await getActiveCompanyId();
+  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  const idx = plans.findIndex((plan) => plan.id === planId && matchesCompany(plan, companyId));
+  if (idx === -1) return null;
+  const current = plans[idx];
+  const updated: IncentiveGoalPlan = {
+    ...current,
+    title: updates.title ? normalizeIncentiveTitle(updates.title) : current.title,
+    targetQty:
+      updates.targetQty !== undefined
+        ? Math.max(0, Number(updates.targetQty) || 0)
+        : current.targetQty,
+    thresholdPercent:
+      updates.thresholdPercent !== undefined
+        ? clampPercent(Number(updates.thresholdPercent))
+        : current.thresholdPercent,
+    perUnitAmount:
+      updates.perUnitAmount !== undefined
+        ? Math.max(0, Number(updates.perUnitAmount) || 0)
+        : current.perUnitAmount,
+    active: updates.active !== undefined ? updates.active : current.active,
+    period: updates.period || current.period,
+    updatedAt: new Date().toISOString(),
+  };
+  plans[idx] = updated;
+  await setItem(KEYS.INCENTIVE_GOAL_PLANS, plans);
+  return updated;
+}
+
+export async function removeIncentiveGoalPlan(planId: string): Promise<boolean> {
+  const companyId = await getActiveCompanyId();
+  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  const nextPlans = plans.filter((plan) => !(plan.id === planId && matchesCompany(plan, companyId)));
+  if (nextPlans.length === plans.length) return false;
+  await setItem(KEYS.INCENTIVE_GOAL_PLANS, nextPlans);
+  return true;
+}
+
+export async function getIncentiveProductPlans(): Promise<IncentiveProductPlan[]> {
+  const companyId = await getActiveCompanyId();
+  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  return plans.filter((plan) => matchesCompany(plan, companyId));
+}
+
+export async function addIncentiveProductPlan(
+  input: Omit<IncentiveProductPlan, "companyId" | "createdAt" | "updatedAt"> & { id?: string }
+): Promise<IncentiveProductPlan> {
+  const companyId = await getActiveCompanyId();
+  const now = new Date().toISOString();
+  const candidate: IncentiveProductPlan = withCompanyId<IncentiveProductPlan>(
+    {
+      ...input,
+      id: input.id || makeId("product_incentive"),
+      productName: normalizeIncentiveProductName(input.productName),
+      perUnitAmount: Number.isFinite(input.perUnitAmount) ? Math.max(0, input.perUnitAmount) : 0,
+      active: input.active ?? true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    companyId
+  );
+  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  plans.unshift(candidate);
+  await setItem(KEYS.INCENTIVE_PRODUCT_PLANS, plans);
+  return candidate;
+}
+
+export async function updateIncentiveProductPlan(
+  planId: string,
+  updates: Partial<IncentiveProductPlan>
+): Promise<IncentiveProductPlan | null> {
+  const companyId = await getActiveCompanyId();
+  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  const idx = plans.findIndex((plan) => plan.id === planId && matchesCompany(plan, companyId));
+  if (idx === -1) return null;
+  const current = plans[idx];
+  const updated: IncentiveProductPlan = {
+    ...current,
+    productName: updates.productName
+      ? normalizeIncentiveProductName(updates.productName)
+      : current.productName,
+    productId: updates.productId !== undefined ? updates.productId : current.productId,
+    perUnitAmount:
+      updates.perUnitAmount !== undefined
+        ? Math.max(0, Number(updates.perUnitAmount) || 0)
+        : current.perUnitAmount,
+    active: updates.active !== undefined ? updates.active : current.active,
+    updatedAt: new Date().toISOString(),
+  };
+  plans[idx] = updated;
+  await setItem(KEYS.INCENTIVE_PRODUCT_PLANS, plans);
+  return updated;
+}
+
+export async function removeIncentiveProductPlan(planId: string): Promise<boolean> {
+  const companyId = await getActiveCompanyId();
+  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  const nextPlans = plans.filter(
+    (plan) => !(plan.id === planId && matchesCompany(plan, companyId))
+  );
+  if (nextPlans.length === plans.length) return false;
+  await setItem(KEYS.INCENTIVE_PRODUCT_PLANS, nextPlans);
+  return true;
+}
+
+export async function getIncentivePayouts(): Promise<IncentivePayout[]> {
+  const companyId = await getActiveCompanyId();
+  const payouts = await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+  return payouts.filter((payout) => matchesCompany(payout, companyId));
+}
+
+export async function addIncentivePayout(payout: IncentivePayout): Promise<void> {
+  const companyId = await getActiveCompanyId();
+  const payouts = await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+  payouts.unshift(withCompanyId(payout, companyId));
+  await setItem(KEYS.INCENTIVE_PAYOUTS, payouts.slice(0, 2000));
+}
+
+export async function updateIncentivePayoutStatus(
+  payoutId: string,
+  status: IncentivePayout["status"]
+): Promise<void> {
+  const companyId = await getActiveCompanyId();
+  const payouts = await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+  const idx = payouts.findIndex((payout) => payout.id === payoutId && matchesCompany(payout, companyId));
+  if (idx === -1) return;
+  payouts[idx].status = status;
+  await setItem(KEYS.INCENTIVE_PAYOUTS, payouts);
 }
 
 export async function getConversations(): Promise<Conversation[]> {

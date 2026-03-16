@@ -364,3 +364,90 @@ CREATE TABLE IF NOT EXISTS `lff_app_state` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`state_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `lff_stockists` (
+  `id` VARCHAR(64) NOT NULL,
+  `company_id` VARCHAR(64) NULL,
+  `name` VARCHAR(191) NOT NULL,
+  `phone` VARCHAR(40) NULL,
+  `location` VARCHAR(191) NULL,
+  `pincode` VARCHAR(20) NULL,
+  `notes` LONGTEXT NULL,
+  `created_at` DATETIME NOT NULL,
+  `updated_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_stockists_company` (`company_id`),
+  KEY `idx_lff_stockists_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `lff_stock_transfers` (
+  `id` VARCHAR(64) NOT NULL,
+  `company_id` VARCHAR(64) NULL,
+  `stockist_id` VARCHAR(64) NOT NULL,
+  `stockist_name` VARCHAR(191) NOT NULL,
+  `transfer_type` ENUM('in','out') NOT NULL DEFAULT 'in',
+  `item_name` VARCHAR(191) NOT NULL,
+  `item_id` VARCHAR(64) NULL,
+  `quantity` DECIMAL(12,2) NOT NULL DEFAULT 0,
+  `unit_label` VARCHAR(40) NULL,
+  `salesperson_id` VARCHAR(64) NULL,
+  `salesperson_name` VARCHAR(191) NULL,
+  `note` LONGTEXT NULL,
+  `created_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_stock_transfers_company` (`company_id`),
+  KEY `idx_lff_stock_transfers_stockist` (`stockist_id`),
+  KEY `idx_lff_stock_transfers_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `lff_incentive_goal_plans` (
+  `id` VARCHAR(64) NOT NULL,
+  `company_id` VARCHAR(64) NULL,
+  `title` VARCHAR(191) NOT NULL,
+  `period` ENUM('daily','weekly','monthly') NOT NULL DEFAULT 'monthly',
+  `target_qty` INT NOT NULL DEFAULT 0,
+  `threshold_percent` DECIMAL(5,2) NOT NULL DEFAULT 0,
+  `per_unit_amount` DECIMAL(12,2) NOT NULL DEFAULT 0,
+  `active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL,
+  `updated_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_incentive_goal_company` (`company_id`),
+  KEY `idx_lff_incentive_goal_period` (`period`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `lff_incentive_product_plans` (
+  `id` VARCHAR(64) NOT NULL,
+  `company_id` VARCHAR(64) NULL,
+  `product_id` VARCHAR(64) NULL,
+  `product_name` VARCHAR(191) NOT NULL,
+  `per_unit_amount` DECIMAL(12,2) NOT NULL DEFAULT 0,
+  `active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL,
+  `updated_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_incentive_product_company` (`company_id`),
+  KEY `idx_lff_incentive_product_product` (`product_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `lff_incentive_payouts` (
+  `id` VARCHAR(64) NOT NULL,
+  `company_id` VARCHAR(64) NULL,
+  `salesperson_id` VARCHAR(64) NOT NULL,
+  `salesperson_name` VARCHAR(191) NOT NULL,
+  `range_key` ENUM('daily','weekly','monthly') NOT NULL DEFAULT 'monthly',
+  `range_start` DATE NOT NULL,
+  `range_end` DATE NOT NULL,
+  `goal_amount` DECIMAL(12,2) NOT NULL DEFAULT 0,
+  `product_amount` DECIMAL(12,2) NOT NULL DEFAULT 0,
+  `total_amount` DECIMAL(12,2) NOT NULL DEFAULT 0,
+  `status` ENUM('pending','paid') NOT NULL DEFAULT 'pending',
+  `note` LONGTEXT NULL,
+  `created_at` DATETIME NOT NULL,
+  `created_by_id` VARCHAR(64) NULL,
+  `created_by_name` VARCHAR(191) NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_incentive_payout_company` (`company_id`),
+  KEY `idx_lff_incentive_payout_salesperson` (`salesperson_id`),
+  KEY `idx_lff_incentive_payout_range` (`range_key`, `range_start`, `range_end`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

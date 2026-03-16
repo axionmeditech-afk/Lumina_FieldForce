@@ -17,9 +17,9 @@ import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import Colors from "@/constants/colors";
-import { addAuditLog, updateSalaryStatus } from "@/lib/storage";
+import { addAuditLog, getIncentivePayouts, updateSalaryStatus } from "@/lib/storage";
 import { getEmployees, getSalaries, saveSalaryRecord } from "@/lib/employee-data";
-import type { Employee, SalaryRecord } from "@/lib/types";
+import type { Employee, IncentivePayout, SalaryRecord } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { useAuth } from "@/contexts/AuthContext";
@@ -44,6 +44,68 @@ function formatPeriodLabel(start?: string, end?: string): string | null {
 function formatCurrency(value: number): string {
   return `INR ${value.toLocaleString()}`;
 }
+
+function normalizeKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function parseDateOnly(value?: string): Date | null {
+  const clean = (value || "").trim();
+  if (!clean) return null;
+  const date = new Date(`${clean}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function getMonthRange(monthKey: string): { start: Date; end: Date } {
+  const start = new Date(`${monthKey}-01T00:00:00`);
+  if (Number.isNaN(start.getTime())) {
+    const fallback = new Date();
+    fallback.setDate(1);
+    fallback.setHours(0, 0, 0, 0);
+    const end = new Date(fallback);
+    end.setMonth(end.getMonth() + 1);
+    end.setDate(0);
+    end.setHours(23, 59, 59, 999);
+    return { start: fallback, end };
+  }
+  const end = new Date(start);
+  end.setMonth(end.getMonth() + 1);
+  end.setDate(0);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function getSalaryRange(salary: SalaryRecord): { start: Date; end: Date } {
+  const monthRange = getMonthRange(salary.month);
+  const start = parseDateOnly(salary.periodStart) || monthRange.start;
+  const end = parseDateOnly(salary.periodEnd) || monthRange.end;
+  if (end < start) return { start: end, end: start };
+  return { start, end };
+}
+
+function buildMatchKeys(id: string, name: string): Set<string> {
+  const keys = new Set<string>();
+  const cleanId = id.trim();
+  if (cleanId) {
+    keys.add(cleanId);
+    if (cleanId.startsWith("dolibarr_")) {
+      keys.add(cleanId.replace("dolibarr_", ""));
+    } else {
+      keys.add(`dolibarr_${cleanId}`);
+    }
+  }
+  const nameKey = normalizeKey(name);
+  if (nameKey) keys.add(nameKey);
+  return keys;
+}
+
+type IncentiveSummary = {
+  total: number;
+  goal: number;
+  product: number;
+  payouts: IncentivePayout[];
+};
 
 function parseAmountInput(value: string): number {
   const cleaned = value.replace(/[^0-9.]/g, "");
@@ -73,12 +135,16 @@ function escapeHtml(value: string): string {
 
 function buildSalarySlipHtml(input: {
   salary: SalaryRecord;
+  incentives?: IncentiveSummary;
   companyName: string;
   generatedBy: string;
   generatedAtISO: string;
 }): string {
   const monthLabel = formatMonthLabel(input.salary.month);
   const slipNumber = getSalarySlipNumber(input.salary);
+  const incentiveTotal = input.incentives?.total || 0;
+  const grossWithIncentives = input.salary.grossPay + incentiveTotal;
+  const netWithIncentives = input.salary.netPay + incentiveTotal;
   const row = (label: string, value: number, weight: "normal" | "bold" = "normal") =>
     `<tr><td style="padding:8px 0;color:#475569;font-weight:${weight};">${escapeHtml(label)}</td><td style="padding:8px 0;text-align:right;font-weight:${weight};">${escapeHtml(formatCurrency(value))}</td></tr>`;
 
@@ -127,7 +193,10 @@ function buildSalarySlipHtml(input: {
           ${row("Medical", input.salary.medical)}
           ${row("Bonus", input.salary.bonus)}
           ${row("Overtime", input.salary.overtime)}
-          ${row("Gross Pay", input.salary.grossPay, "bold")}
+          ${input.incentives?.goal ? row("Incentive - Target", input.incentives.goal) : ""}
+          ${input.incentives?.product ? row("Incentive - Product", input.incentives.product) : ""}
+          ${incentiveTotal ? row("Incentives Total", incentiveTotal, "bold") : ""}
+          ${row(incentiveTotal ? "Gross Pay (incl. incentives)" : "Gross Pay", grossWithIncentives, "bold")}
         </table>
       </div>
 
@@ -142,8 +211,8 @@ function buildSalarySlipHtml(input: {
       </div>
 
       <div class="net">
-        <span>Net Pay</span>
-        <span>${escapeHtml(formatCurrency(input.salary.netPay))}</span>
+        <span>${incentiveTotal ? "Net Pay (incl. incentives)" : "Net Pay"}</span>
+        <span>${escapeHtml(formatCurrency(netWithIncentives))}</span>
       </div>
       <div class="footer">This is a system-generated salary slip.</div>
     </div>
@@ -153,6 +222,7 @@ function buildSalarySlipHtml(input: {
 
 function SalaryBreakdown({
   salary,
+  incentives,
   colors,
   isAdmin,
   onMarkPaid,
@@ -161,6 +231,7 @@ function SalaryBreakdown({
   printingSlipId,
 }: {
   salary: SalaryRecord;
+  incentives?: IncentiveSummary;
   colors: typeof Colors.light;
   isAdmin: boolean;
   onMarkPaid: (salaryId: string) => void;
@@ -175,6 +246,9 @@ function SalaryBreakdown({
   const isPrinting = printingSlipId === salary.id;
   const label = salary.label?.trim() || formatMonthLabel(salary.month);
   const periodLabel = formatPeriodLabel(salary.periodStart, salary.periodEnd);
+  const incentiveTotal = incentives?.total || 0;
+  const grossWithIncentives = salary.grossPay + incentiveTotal;
+  const netWithIncentives = salary.netPay + incentiveTotal;
 
   return (
     <Pressable
@@ -200,8 +274,13 @@ function SalaryBreakdown({
         </View>
         <View style={styles.salaryHeaderRight}>
           <Text style={[styles.netPay, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-            {formatCurrency(salary.netPay)}
+            {formatCurrency(netWithIncentives)}
           </Text>
+          {incentiveTotal ? (
+            <Text style={[styles.incentiveTag, { color: colors.success, fontFamily: "Inter_500Medium" }]}>
+              +{formatCurrency(incentiveTotal)} incentives
+            </Text>
+          ) : null}
           <View style={[styles.statusChip, { backgroundColor: statusColor + "15" }]}>
             <Text style={[styles.statusText, { color: statusColor, fontFamily: "Inter_500Medium" }]}>
               {salary.status}
@@ -222,7 +301,21 @@ function SalaryBreakdown({
           <BreakdownRow label="Medical" value={salary.medical} colors={colors} />
           <BreakdownRow label="Bonus" value={salary.bonus} colors={colors} />
           <BreakdownRow label="Overtime" value={salary.overtime} colors={colors} />
-          <BreakdownRow label="Gross Pay" value={salary.grossPay} colors={colors} bold />
+          {incentives?.goal ? (
+            <BreakdownRow label="Incentive - Target" value={incentives.goal} colors={colors} />
+          ) : null}
+          {incentives?.product ? (
+            <BreakdownRow label="Incentive - Product" value={incentives.product} colors={colors} />
+          ) : null}
+          {incentiveTotal ? (
+            <BreakdownRow label="Incentives Total" value={incentiveTotal} colors={colors} bold />
+          ) : null}
+          <BreakdownRow
+            label={incentiveTotal ? "Gross Pay (incl. incentives)" : "Gross Pay"}
+            value={grossWithIncentives}
+            colors={colors}
+            bold
+          />
 
           <Text style={[styles.breakdownSection, { color: colors.danger, fontFamily: "Inter_600SemiBold", marginTop: 12 }]}>
             Deductions
@@ -233,9 +326,11 @@ function SalaryBreakdown({
           <BreakdownRow label="Total Deductions" value={salary.totalDeductions} colors={colors} bold />
 
           <View style={[styles.netPayRow, { borderTopColor: colors.border }]}>
-            <Text style={[styles.netPayLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Net Pay</Text>
+            <Text style={[styles.netPayLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+              {incentiveTotal ? "Net Pay (incl. incentives)" : "Net Pay"}
+            </Text>
             <Text style={[styles.netPayValue, { color: colors.success, fontFamily: "Inter_700Bold" }]}>
-              {formatCurrency(salary.netPay)}
+              {formatCurrency(netWithIncentives)}
             </Text>
           </View>
 
@@ -331,6 +426,7 @@ function BreakdownRow({
 function SalarySlipModal({
   visible,
   salary,
+  incentives,
   colors,
   companyName,
   printing,
@@ -339,6 +435,7 @@ function SalarySlipModal({
 }: {
   visible: boolean;
   salary: SalaryRecord | null;
+  incentives?: IncentiveSummary;
   colors: typeof Colors.light;
   companyName: string;
   printing: boolean;
@@ -353,6 +450,9 @@ function SalarySlipModal({
   const statusColor =
     salary.status === "paid" ? colors.success :
     salary.status === "approved" ? colors.primary : colors.warning;
+  const incentiveTotal = incentives?.total || 0;
+  const grossWithIncentives = salary.grossPay + incentiveTotal;
+  const netWithIncentives = salary.netPay + incentiveTotal;
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -428,7 +528,21 @@ function SalarySlipModal({
               <BreakdownRow label="Medical" value={salary.medical} colors={colors} />
               <BreakdownRow label="Bonus" value={salary.bonus} colors={colors} />
               <BreakdownRow label="Overtime" value={salary.overtime} colors={colors} />
-              <BreakdownRow label="Gross Pay" value={salary.grossPay} colors={colors} bold />
+              {incentives?.goal ? (
+                <BreakdownRow label="Incentive - Target" value={incentives.goal} colors={colors} />
+              ) : null}
+              {incentives?.product ? (
+                <BreakdownRow label="Incentive - Product" value={incentives.product} colors={colors} />
+              ) : null}
+              {incentiveTotal ? (
+                <BreakdownRow label="Incentives Total" value={incentiveTotal} colors={colors} bold />
+              ) : null}
+              <BreakdownRow
+                label={incentiveTotal ? "Gross Pay (incl. incentives)" : "Gross Pay"}
+                value={grossWithIncentives}
+                colors={colors}
+                bold
+              />
             </View>
 
             <View style={[styles.slipSection, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
@@ -443,10 +557,10 @@ function SalarySlipModal({
 
             <View style={[styles.slipNetCard, { borderColor: colors.success + "45", backgroundColor: colors.success + "10" }]}>
               <Text style={[styles.slipNetLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                Net Pay
+                {incentiveTotal ? "Net Pay (incl. incentives)" : "Net Pay"}
               </Text>
               <Text style={[styles.slipNetValue, { color: colors.success, fontFamily: "Inter_700Bold" }]}>
-                {formatCurrency(salary.netPay)}
+                {formatCurrency(netWithIncentives)}
               </Text>
             </View>
           </ScrollView>
@@ -569,6 +683,7 @@ export default function SalaryScreen() {
   const { colors } = useAppTheme();
   const [salaries, setSalaries] = useState<SalaryRecord[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [incentivePayouts, setIncentivePayouts] = useState<IncentivePayout[]>([]);
   const [selectedSlip, setSelectedSlip] = useState<SalaryRecord | null>(null);
   const [printingSlipId, setPrintingSlipId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -587,13 +702,19 @@ export default function SalaryScreen() {
   const isAdmin = user?.role === "admin";
 
   const loadData = useCallback(async () => {
-    const [salaryData, employees] = await Promise.all([getSalaries(), getEmployees()]);
+    const [salaryData, employees, payouts] = await Promise.all([
+      getSalaries(),
+      getEmployees(),
+      getIncentivePayouts(),
+    ]);
     if (!user) {
       setSalaries([]);
       setEmployees([]);
+      setIncentivePayouts([]);
       return;
     }
     setEmployees(employees);
+    setIncentivePayouts(Array.isArray(payouts) ? payouts : []);
     if (isAdmin) {
       setSalaries(salaryData);
       return;
@@ -697,6 +818,52 @@ export default function SalaryScreen() {
       );
     });
   }, [createSearch, selectableEmployees]);
+
+  const incentivesBySalaryId = useMemo(() => {
+    const map = new Map<string, IncentiveSummary>();
+    if (!salaries.length || !incentivePayouts.length) return map;
+
+    const paidPayouts = incentivePayouts.filter((payout) => payout.status === "paid");
+    if (!paidPayouts.length) return map;
+
+    for (const salary of salaries) {
+      const matchKeys = buildMatchKeys(salary.employeeId, salary.employeeName);
+      const { start, end } = getSalaryRange(salary);
+      let goal = 0;
+      let product = 0;
+      const payouts: IncentivePayout[] = [];
+
+      for (const payout of paidPayouts) {
+        const payoutKeys = buildMatchKeys(payout.salespersonId, payout.salespersonName);
+        let matched = false;
+        for (const key of payoutKeys) {
+          if (matchKeys.has(key)) {
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) continue;
+
+        const payoutStart = parseDateOnly(payout.rangeStart);
+        const payoutEnd = parseDateOnly(payout.rangeEnd);
+        if (!payoutStart || !payoutEnd) continue;
+        const payoutEndInclusive = new Date(payoutEnd);
+        payoutEndInclusive.setHours(23, 59, 59, 999);
+        if (payoutStart > end || payoutEndInclusive < start) continue;
+
+        goal += payout.goalAmount || 0;
+        product += payout.productAmount || 0;
+        payouts.push(payout);
+      }
+
+      const total = goal + product;
+      if (total) {
+        map.set(salary.id, { total, goal, product, payouts });
+      }
+    }
+
+    return map;
+  }, [incentivePayouts, salaries]);
 
   const handleCreateSalary = useCallback(async () => {
     if (!isAdmin || !user) return;
@@ -830,8 +997,10 @@ export default function SalaryScreen() {
       const companyName = user?.companyName || "Lumina FieldForce";
       setPrintingSlipId(salary.id);
       try {
+        const incentives = incentivesBySalaryId.get(salary.id);
         const html = buildSalarySlipHtml({
           salary,
+          incentives,
           companyName,
           generatedBy: user?.name || "Payroll Admin",
           generatedAtISO: new Date().toISOString(),
@@ -845,7 +1014,7 @@ export default function SalaryScreen() {
         setPrintingSlipId((current) => (current === salary.id ? null : current));
       }
     },
-    [user?.companyName, user?.name]
+    [incentivesBySalaryId, user?.companyName, user?.name]
   );
 
   return (
@@ -878,6 +1047,7 @@ export default function SalaryScreen() {
         renderItem={({ item }) => (
           <SalaryBreakdown
             salary={item}
+            incentives={incentivesBySalaryId.get(item.id)}
             colors={colors}
             isAdmin={isAdmin}
             onMarkPaid={handleMarkPaid}
@@ -899,6 +1069,7 @@ export default function SalaryScreen() {
       <SalarySlipModal
         visible={Boolean(selectedSlip)}
         salary={selectedSlip}
+        incentives={selectedSlip ? incentivesBySalaryId.get(selectedSlip.id) : undefined}
         colors={colors}
         companyName={user?.companyName || "Lumina FieldForce"}
         printing={selectedSlip ? printingSlipId === selectedSlip.id : false}
@@ -1091,6 +1262,7 @@ const styles = StyleSheet.create({
   salaryPeriod: { fontSize: 11 },
   salaryHeaderRight: { alignItems: "flex-end", gap: 4 },
   netPay: { fontSize: 16 },
+  incentiveTag: { fontSize: 10, textTransform: "uppercase" as const, letterSpacing: 0.4 },
   statusChip: {
     paddingHorizontal: 8,
     paddingVertical: 3,
