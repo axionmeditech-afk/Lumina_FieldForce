@@ -1330,7 +1330,7 @@ async function ensureIncentiveTables(): Promise<void> {
       PRIMARY KEY (\`id\`),
       KEY \`idx_lff_incentive_payout_company\` (\`company_id\`),
       KEY \`idx_lff_incentive_payout_salesperson\` (\`salesperson_id\`),
-      KEY \`idx_lff_incentive_payout_range\` (\`range_key`, \`range_start`, \`range_end`)
+      KEY \`idx_lff_incentive_payout_range\` (\`range_key\`, \`range_start\`, \`range_end\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   incentiveTablesEnsured = true;
