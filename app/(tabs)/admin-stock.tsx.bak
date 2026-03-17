@@ -49,7 +49,6 @@ type TransferType = (typeof TRANSFER_TYPES)[number]["key"];
 const ITEMWISE_BATCH = 12;
 const DIRECT_AREA_KEY = "__direct__";
 const PRODUCT_DROPDOWN_PAGE = 20;
-const PREFETCH_PRODUCT_STOCK_COUNT = 60;
 
 type StockistSummary = {
   stockist: StockistProfile;
@@ -245,8 +244,7 @@ export default function AdminStockScreen() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [products, setProducts] = useState<DolibarrProduct[]>([]);
-  const [productStockById, setProductStockById] = useState<Record<string, number | null>>({});
-  const [companyStockError, setCompanyStockError] = useState<string | null>(null);
+  const [productStockById, setProductStockById] = useState<Record<string, number>>({});
   const loadingStockIds = useRef<Set<string>>(new Set());
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [orders, setOrders] = useState<DolibarrOrder[]>([]);
@@ -306,323 +304,6 @@ export default function AdminStockScreen() {
       setLoading(false);
     }
   }, [canAccess, loadEmployees]);
-
-  useEffect(() => {
-    void loadData();
-  }, [loadData]);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadData();
-    }, [loadData])
-  );
-
-  useEffect(() => {
-    if (!canAccess || orders.length === 0) return;
-    if (orderLinesLoading) return;
-    const orderIds = orders
-      .map((order) => parseNumericId(order.id))
-      .filter((id): id is number => Boolean(id));
-    const missing = orderIds.filter((id) => !orderLinesById[String(id)]);
-    if (!missing.length) return;
-
-    let active = true;
-    setOrderLinesLoading(true);
-    setOrderLinesError(null);
-
-    const loadLines = async () => {
-      for (let i = 0; i < missing.length; i += ITEMWISE_BATCH) {
-        const chunk = missing.slice(i, i + ITEMWISE_BATCH);
-        const results = await Promise.all(
-          chunk.map(async (orderId) => {
-            try {
-              const detail = await getDolibarrOrderDetail(orderId);
-              return { id: String(orderId), lines: detail.lines || [] };
-            } catch (err) {
-              const message = err instanceof Error ? err.message : "Unable to load order details.";
-              return { id: String(orderId), lines: [], error: message };
-            }
-          })
-        );
-
-        if (!active) return;
-        setOrderLinesById((current) => {
-          const next = { ...current };
-          for (const entry of results) {
-            next[entry.id] = entry.lines;
-          }
-          return next;
-        });
-      }
-    };
-
-    loadLines()
-      .catch(() => {
-        if (active) setOrderLinesError("Unable to load order items for deductions.");
-      })
-      .finally(() => {
-        if (active) setOrderLinesLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [canAccess, orderLinesById, orderLinesLoading, orders]);
-
-  const stockistMap = useMemo(() => {
-    const map = new Map<string, StockistProfile>();
-    for (const stockist of stockists) {
-      map.set(stockist.id, stockist);
-    }
-    return map;
-  }, [stockists]);
-
-  const salespeopleMap = useMemo(() => {
-    const map = new Map<string, Employee>();
-    for (const employee of employees) {
-      map.set(employee.id, employee);
-    }
-    return map;
-  }, [employees]);
-
-  const productsById = useMemo(() => {
-    const map = new Map<number, DolibarrProduct>();
-    for (const product of products) {
-      const id = parseNumericId(product.id);
-      if (id) map.set(id, product);
-    }
-    return map;
-  }, [products]);
-
-  const salespersonAreaMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const employee of employees) {
-      const area = normalizeKey(employee.pincode || "") || normalizeKey(employee.branch || "");
-      if (!area) continue;
-      if (employee.id.startsWith("dolibarr_")) {
-        const rawId = employee.id.replace("dolibarr_", "").trim();
-        if (rawId) map.set(rawId, area);
-      } else if (/^\d+$/.test(employee.id)) {
-        map.set(employee.id, area);
-      }
-    }
-    return map;
-  }, [employees]);
-
-  const stockistAreaMap = useMemo(() => {
-    const map = new Map<string, string>();
-    const duplicates = new Set<string>();
-    for (const stockist of stockists) {
-      const area = normalizeKey(stockist.pincode || "") || normalizeKey(stockist.location || "");
-      if (!area) continue;
-      if (map.has(area) && map.get(area) !== stockist.id) {
-        duplicates.add(area);
-      } else {
-        map.set(area, stockist.id);
-      }
-    }
-    return { map, duplicates };
-  }, [stockists]);
-
-  const salesByArea = useMemo(() => {
-    const map = new Map<
-      string,
-      { totalQty: number; items: Map<string, { name: string; qty: number }> }
-    >();
-
-    for (const order of orders) {
-      const orderId = parseNumericId(order.id);
-      const salespersonId = getOrderSalespersonId(order);
-      if (!orderId || !salespersonId) continue;
-      const areaKey = salespersonAreaMap.get(String(salespersonId)) || DIRECT_AREA_KEY;
-      const lines = orderLinesById[String(orderId)] || [];
-
-      for (const line of lines) {
-        const qty = parseNumber(String(line.qty ?? 0));
-        if (!qty) continue;
-        const label = getLineLabel(line, productsById);
-        const itemKey = normalizeKey(label);
-        const bucket = map.get(areaKey) || { totalQty: 0, items: new Map() };
-        bucket.totalQty += qty;
-        const current = bucket.items.get(itemKey) || { name: label, qty: 0 };
-        current.qty += qty;
-        bucket.items.set(itemKey, current);
-        map.set(areaKey, bucket);
-      }
-    }
-
-    return map;
-  }, [orderLinesById, orders, productsById, salespersonAreaMap]);
-
-  const autoSales = useMemo(() => {
-    const byStockist = new Map<string, { totalQty: number; items: Map<string, { name: string; qty: number }> }>();
-    const direct = { totalQty: 0, items: new Map<string, { name: string; qty: number }>() };
-
-    const mergeItems = (
-      target: { totalQty: number; items: Map<string, { name: string; qty: number }> },
-      source: { totalQty: number; items: Map<string, { name: string; qty: number }> }
-    ) => {
-      target.totalQty += source.totalQty;
-      for (const [key, item] of source.items.entries()) {
-        const current = target.items.get(key) || { name: item.name, qty: 0 };
-        current.qty += item.qty;
-        target.items.set(key, current);
-      }
-    };
-
-    for (const [areaKey, summary] of salesByArea.entries()) {
-      const mappedStockist = stockistAreaMap.map.get(areaKey);
-      if (areaKey === DIRECT_AREA_KEY || !mappedStockist) {
-        mergeItems(direct, summary);
-        continue;
-      }
-
-      const target = byStockist.get(mappedStockist) || { totalQty: 0, items: new Map() };
-      mergeItems(target, summary);
-      byStockist.set(mappedStockist, target);
-    }
-
-    return { byStockist, direct };
-  }, [salesByArea, stockistAreaMap]);
-
-  const stockistSummaries = useMemo<StockistSummary[]>(() => {
-    return stockists.map((stockist) => {
-      const relevantTransfers = transfers.filter((entry) => entry.stockistId === stockist.id);
-      let totalIn = 0;
-      let totalOut = 0;
-      const itemMap = new Map<
-        string,
-        { balance: number; unitLabel?: string; displayName: string }
-      >();
-      let lastMovementAt: Date | null = null;
-
-      for (const entry of relevantTransfers) {
-        const qty = Number.isFinite(entry.quantity) ? entry.quantity : 0;
-        if (entry.type === "in") {
-          totalIn += qty;
-        } else {
-          totalOut += qty;
-        }
-
-        const rawItemName = entry.itemName || "Item";
-        const itemKey = rawItemName.toLowerCase();
-        const current = itemMap.get(itemKey) || {
-          balance: 0,
-          unitLabel: entry.unitLabel,
-          displayName: rawItemName,
-        };
-        const nextBalance = entry.type === "in" ? current.balance + qty : current.balance - qty;
-        itemMap.set(itemKey, {
-          balance: nextBalance,
-          unitLabel: current.unitLabel || entry.unitLabel,
-          displayName: current.displayName || rawItemName,
-        });
-
-        if (entry.createdAt) {
-          const date = new Date(entry.createdAt);
-          if (!Number.isNaN(date.getTime())) {
-            if (!lastMovementAt || date > lastMovementAt) {
-              lastMovementAt = date;
-            }
-          }
-        }
-      }
-
-      const autoSummary = autoSales.byStockist.get(stockist.id);
-      const autoOut = autoSummary?.totalQty || 0;
-      if (autoSummary) {
-        totalOut += autoOut;
-        for (const [, item] of autoSummary.items.entries()) {
-          const itemKey = normalizeKey(item.name);
-          const current = itemMap.get(itemKey) || {
-            balance: 0,
-            unitLabel: undefined,
-            displayName: item.name,
-          };
-          itemMap.set(itemKey, {
-            balance: current.balance - item.qty,
-            unitLabel: current.unitLabel,
-            displayName: current.displayName || item.name,
-          });
-        }
-      }
-
-      const items = Array.from(itemMap.entries())
-        .map(([, value]) => ({
-          name: value.displayName,
-          balance: value.balance,
-          unitLabel: value.unitLabel,
-        }))
-        .filter((item) => item.balance !== 0)
-        .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
-
-      return {
-        stockist,
-        totalIn,
-        totalOut,
-        balance: totalIn - totalOut,
-        items,
-        autoOut,
-        autoItems: autoSummary
-          ? Array.from(autoSummary.items.values()).map((entry) => ({
-              name: entry.name,
-              qty: entry.qty,
-            }))
-          : [],
-        lastMovementAt,
-        recentTransfers: relevantTransfers.slice(0, 4),
-      };
-    });
-  }, [autoSales.byStockist, stockists, transfers]);
-
-  const totalStock = stockistSummaries.reduce((sum, entry) => sum + entry.balance, 0);
-  const totalTransfers = transfers.length;
-  const totalCompanyStock = useMemo(
-    () => Object.values(productStockById).reduce((sum, value) => sum + (value ?? 0), 0),
-    [productStockById]
-  );
-  const companyStockCount = useMemo(
-    () => Object.values(productStockById).filter((value) => typeof value === "number").length,
-    [productStockById]
-  );
-  const companyStockErrorMessage = useMemo(() => {
-    if (!companyStockError) return null;
-    if (/cannot get \/api\/stock\/products/i.test(companyStockError)) {
-      return "Company stock API missing. Redeploy backend to enable stock sync.";
-    }
-    if (/not configured/i.test(companyStockError)) {
-      return "Company stock store not configured on backend.";
-    }
-    return "Company stock sync failed. Please check backend connection.";
-  }, [companyStockError]);
-  const directSalesSummary = useMemo(() => {
-    const items = Array.from(autoSales.direct.items.values()).sort((a, b) => b.qty - a.qty);
-    return { totalQty: autoSales.direct.totalQty, items };
-  }, [autoSales]);
-
-  const selectedStockist = selectedStockistId ? stockistMap.get(selectedStockistId) : undefined;
-  const selectedSalesperson = selectedSalespersonId
-    ? salespeopleMap.get(selectedSalespersonId)
-    : undefined;
-
-  const matchingProducts = useMemo(() => {
-    const query = itemSearch.trim().toLowerCase();
-    if (!query) return products;
-    return products
-      .filter((product) => {
-        const label = (product.label || "").toString().toLowerCase();
-        const ref = (product.ref || "").toString().toLowerCase();
-        return label.includes(query) || ref.includes(query);
-      });
-  }, [itemSearch, products]);
-  const filteredProducts = useMemo(
-    () => matchingProducts.slice(0, productLimit),
-    [matchingProducts, productLimit]
-  );
-  const hasMoreProducts = filteredProducts.length < matchingProducts.length;
-
-
-
 
     useEffect(() => {
     const targetIds = new Set<string>();
@@ -928,13 +609,7 @@ export default function AdminStockScreen() {
               Company stock loaded: {companyStockCount} items · Total {formatQty(totalCompanyStock)}
             </Text>
           ) : null}
-            {companyStockErrorMessage ? (
-              <Text
-                style={[styles.helperText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}
-              >
-                {companyStockErrorMessage}
-              </Text>
-            ) : null}
+
           {loading ? (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={colors.primary} />
@@ -1169,7 +844,7 @@ export default function AdminStockScreen() {
                         const hasCachedStock =
                           productId &&
                           Object.prototype.hasOwnProperty.call(productStockById, productId);
-                        const stockQty = hasCachedStock ? productStockById[productId] : undefined;
+                        const stockQty = hasCachedStock ? productStockById[productId] : null;
                         return (
                           <Pressable
                             key={String(product.id || label)}
@@ -1185,21 +860,13 @@ export default function AdminStockScreen() {
                             ]}
                           >
                             <View style={styles.dropdownRowHeader}>
-                                <Text style={[styles.dropdownText, { color: colors.text }]}>{label}</Text>
-                                {stockQty === undefined ? (
-                                  <Text style={[styles.dropdownStockText, { color: colors.textSecondary }]}>
-                                    Stock: Loading...
-                                  </Text>
-                                ) : stockQty === null ? (
-                                  <Text style={[styles.dropdownStockText, { color: colors.textSecondary }]}>
-                                    Stock: Unavailable
-                                  </Text>
-                                ) : (
-                                  <Text style={[styles.dropdownStockText, { color: colors.textSecondary }]}>
-                                    Stock: {formatQty(stockQty)}
-                                  </Text>
-                                )}
-                              </View>
+                              <Text style={[styles.dropdownText, { color: colors.text }]}>{label}</Text>
+                              {stockQty !== null ? (
+                                <Text style={[styles.dropdownStockText, { color: colors.textSecondary }]}>
+                                  Stock: {formatQty(stockQty)}
+                                </Text>
+                              ) : null}
+                            </View>
                             {product.ref ? (
                               <Text style={[styles.dropdownMeta, { color: colors.textSecondary }]}>
                                 {product.ref}
@@ -1215,13 +882,7 @@ export default function AdminStockScreen() {
           </View>
           {itemProductId ? (
             <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              Company stock available: {
-                selectedProductStock === undefined
-                  ? "Loading..."
-                  : selectedProductStock === null
-                    ? "Unavailable"
-                    : formatQty(selectedProductStock)
-              }
+              Company stock available: {selectedProductStock !== null ? formatQty(selectedProductStock) : "Loading..."}
             </Text>
           ) : null}
           <View style={styles.inputRow}>

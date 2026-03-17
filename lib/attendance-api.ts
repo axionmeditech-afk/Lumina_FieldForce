@@ -38,6 +38,12 @@ export interface DolibarrProduct {
   tva_tx?: number | string;
   type?: number | string;
   status?: number | string;
+  stock?: number | string;
+  stock_reel?: number | string;
+  stock_real?: number | string;
+  stock_qty?: number | string;
+  qty?: number | string;
+  stock_warehouse?: Record<string, unknown> | unknown[];
 }
 
 export interface DolibarrThirdParty {
@@ -307,10 +313,25 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
       return false;
     }
   });
+  const publicHttpsSettingsApiBases = settingsUrl
+    ? toApiBaseUrls(settingsUrl).filter((base) => {
+        try {
+          const parsed = new URL(base);
+          return parsed.protocol === "https:" && !isPrivateApiBaseUrl(base);
+        } catch {
+          return false;
+        }
+      })
+    : [];
 
-  // Hard-pin to public HTTPS env API URL in production.
-  if (!isExpoDevRuntime && publicHttpsEnvApiBases.length > 0) {
-    return publicHttpsEnvApiBases;
+  // In production, prefer a user-provided public HTTPS API base if available.
+  if (!isExpoDevRuntime) {
+    if (publicHttpsSettingsApiBases.length > 0) {
+      return [...publicHttpsSettingsApiBases, ...publicHttpsEnvApiBases];
+    }
+    if (publicHttpsEnvApiBases.length > 0) {
+      return publicHttpsEnvApiBases;
+    }
   }
 
   // In dev runtime keep env URL first, but still allow LAN/localhost fallback.
@@ -368,6 +389,24 @@ function buildHeaders(token: string | null, extra?: HeadersInit): HeadersInit {
   };
 }
 
+function parseJsonBody(text: string): { parsed: unknown | null; isValid: boolean } {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { parsed: null, isValid: true };
+  }
+  try {
+    return { parsed: JSON.parse(text), isValid: true };
+  } catch {
+    return { parsed: null, isValid: false };
+  }
+}
+
+function buildBodyPreview(text: string): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "";
+  return trimmed.length > 140 ? `${trimmed.slice(0, 140)}...` : trimmed;
+}
+
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const apiBases = await getApiBaseUrlCandidates();
   const token = await getApiToken();
@@ -389,9 +428,15 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
         ...init,
         headers,
       });
+      const text = await response.text();
+      const contentType = response.headers.get("content-type") || "";
+      const { parsed, isValid } = parseJsonBody(text);
       if (!response.ok) {
-        const text = await response.text();
-        const normalized = (text || "").toLowerCase();
+        const messageFromJson =
+          parsed && typeof parsed === "object" && "message" in parsed
+            ? String((parsed as { message?: unknown }).message ?? "")
+            : "";
+        const normalized = (messageFromJson || text || "").toLowerCase();
         const isTokenError =
           response.status === 401 &&
           /invalid or expired token|missing authorization bearer token|missing authorization/i.test(
@@ -414,12 +459,25 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
           response.status === 503 ||
           response.status === 504;
         if (shouldTryNextBase) {
-          applicationFailures.push(`${apiBase} -> HTTP ${response.status}: ${text || "empty body"}`);
+          const failureBody = buildBodyPreview(messageFromJson || text || "");
+          applicationFailures.push(
+            `${apiBase} -> HTTP ${response.status}: ${failureBody || "empty body"}`
+          );
           continue;
         }
-        throw new Error(text || `HTTP ${response.status}`);
+        throw new Error(messageFromJson || text || `HTTP ${response.status}`);
       }
-      return response.json() as Promise<T>;
+      if (!isValid) {
+        const preview = buildBodyPreview(text);
+        const inferredType =
+          contentType.split(";")[0] ||
+          (preview.startsWith("<") ? "text/html" : "text/plain");
+        applicationFailures.push(
+          `${apiBase} -> Expected JSON but received ${inferredType}${preview ? `: ${preview}` : ""}`
+        );
+        continue;
+      }
+      return (parsed ?? null) as T;
     } catch (error) {
       if (init.signal?.aborted) {
         throw error instanceof Error ? error : new Error("Request aborted.");
@@ -1430,6 +1488,7 @@ export async function getDolibarrProducts(options?: {
   sortfield?: string;
   sortorder?: "asc" | "desc";
   page?: number;
+  includestockdata?: number | boolean;
 }): Promise<DolibarrProduct[]> {
   const params = new URLSearchParams();
   if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
@@ -1437,6 +1496,11 @@ export async function getDolibarrProducts(options?: {
   }
   if (typeof options?.page === "number" && Number.isFinite(options.page)) {
     params.set("page", String(Math.max(0, Math.floor(options.page))));
+  }
+  if (typeof options?.includestockdata === "number") {
+    params.set("includestockdata", String(options.includestockdata));
+  } else if (options?.includestockdata === true) {
+    params.set("includestockdata", "1");
   }
   if (options?.sortfield) {
     params.set("sortfield", options.sortfield);
@@ -1447,6 +1511,73 @@ export async function getDolibarrProducts(options?: {
   const query = params.toString();
   return fetchJson<DolibarrProduct[]>(`/dolibarr/proxy/products${query ? `?${query}` : ""}`, {
     method: "GET",
+  });
+}
+
+export async function getDolibarrProductById(
+  productId: number | string,
+  options?: { includestockdata?: number | boolean }
+): Promise<DolibarrProduct> {
+  const params = new URLSearchParams();
+  if (typeof options?.includestockdata === "number") {
+    params.set("includestockdata", String(options.includestockdata));
+  } else if (options?.includestockdata === true) {
+    params.set("includestockdata", "1");
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrProduct>(
+    `/dolibarr/proxy/products/${encodeURIComponent(String(productId))}${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export async function getDolibarrProductStock(
+  productId: number | string
+): Promise<unknown> {
+  return fetchJson<unknown>(
+    `/dolibarr/proxy/products/${encodeURIComponent(String(productId))}/stock`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export interface CompanyProductStockItem {
+  productId: string;
+  stock: number;
+}
+
+export async function getCompanyProductStocks(
+  productIds: Array<number | string>
+): Promise<Record<string, number>> {
+  const ids = productIds
+    .map((id) => String(id ?? "").trim())
+    .filter(Boolean);
+  if (!ids.length) return {};
+  const params = new URLSearchParams({ ids: ids.join(",") });
+  const response = await fetchJsonWithTimeout<{
+    items: Array<{ productId: string; stock: number | string }>;
+  }>(`/stock/products?${params.toString()}`, { method: "GET" }, 6500);
+  const map: Record<string, number> = {};
+  for (const item of response.items || []) {
+    const key = String(item.productId ?? "");
+    if (!key) continue;
+    const parsed = Number(item.stock);
+    map[key] = Number.isFinite(parsed) ? parsed : 0;
+  }
+  return map;
+}
+
+export async function adjustCompanyProductStock(payload: {
+  productId: number | string;
+  delta: number;
+  reason?: string;
+}): Promise<{ productId: string; stock: number }> {
+  return fetchJson<{ productId: string; stock: number }>("/stock/products/adjust", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -1927,4 +2058,5 @@ export async function flushAttendanceQueue(): Promise<void> {
   }
   await setAttendanceQueue(remaining);
 }
+
 

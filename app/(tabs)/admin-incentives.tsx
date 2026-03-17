@@ -800,6 +800,7 @@ export default function AdminIncentivesScreen() {
         <ScrollView
           contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 16 }]}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="always"
         >
           <View style={styles.navToggleWrap}>
             <DrawerToggleButton />
@@ -1109,7 +1110,7 @@ export default function AdminIncentivesScreen() {
                       style={styles.dropdownScroll}
                       contentContainerStyle={styles.dropdownContent}
                       nestedScrollEnabled
-                      keyboardShouldPersistTaps="handled"
+                      keyboardShouldPersistTaps="always"
                       scrollEventThrottle={16}
                       onScroll={({ nativeEvent }) => {
                         if (!hasMoreProducts || loadMoreBusy.current) return;

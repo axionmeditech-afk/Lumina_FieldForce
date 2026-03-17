@@ -394,12 +394,20 @@ async function fetchStateRemote<T>(key: string): Promise<T | null | undefined> {
         },
         signal: controller.signal,
       });
+      const text = await response.text();
       if (!response.ok) {
         if (response.status >= 500) continue;
         return undefined;
       }
-      const payload = (await response.json()) as { value?: unknown };
-      return (payload.value ?? null) as T | null;
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+      try {
+        const payload = JSON.parse(text) as { value?: unknown };
+        return (payload?.value ?? null) as T | null;
+      } catch {
+        // invalid JSON from backend, try next candidate
+        continue;
+      }
     } catch {
       // try next backend candidate
     } finally {
@@ -2185,7 +2193,7 @@ export async function getIncentiveGoalPlans(): Promise<IncentiveGoalPlan[]> {
 }
 
 export async function addIncentiveGoalPlan(
-  input: Omit<IncentiveGoalPlan, "companyId" | "createdAt" | "updatedAt"> & { id?: string }
+  input: Omit<IncentiveGoalPlan, "id" | "companyId" | "createdAt" | "updatedAt"> & { id?: string }
 ): Promise<IncentiveGoalPlan> {
   const companyId = await getActiveCompanyId();
   const now = new Date().toISOString();
@@ -2258,7 +2266,7 @@ export async function getIncentiveProductPlans(): Promise<IncentiveProductPlan[]
 }
 
 export async function addIncentiveProductPlan(
-  input: Omit<IncentiveProductPlan, "companyId" | "createdAt" | "updatedAt"> & { id?: string }
+  input: Omit<IncentiveProductPlan, "id" | "companyId" | "createdAt" | "updatedAt"> & { id?: string }
 ): Promise<IncentiveProductPlan> {
   const companyId = await getActiveCompanyId();
   const now = new Date().toISOString();

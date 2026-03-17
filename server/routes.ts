@@ -1,4 +1,5 @@
 import express, { type Express, type Request } from "express";
+import type { Pool } from "mysql2/promise";
 import { createServer, type Server } from "node:http";
 import { createHash, randomUUID } from "crypto";
 import type {
@@ -76,6 +77,14 @@ const DOLIBARR_PROXY_RULES: Array<{
   { prefix: "/orders", roles: ["admin", "hr", "manager", "salesperson"] },
   { prefix: "/invoices", roles: ["admin", "hr", "manager"] },
 ];
+const PRODUCT_STOCK_TABLE = "nmy5_product_stock";
+type ProductStockSchema = {
+  productIdCol: string;
+  qtyCol: string;
+  rowIdCol: string | null;
+  warehouseCol: string | null;
+};
+let cachedProductStockSchema: ProductStockSchema | null = null;
 const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_companies",
   "@trackforce_employees",
@@ -118,6 +127,77 @@ function firstString(value: unknown): string {
 function normalizeApiSecret(value: string | undefined | null): string {
   if (!value) return "";
   return value.trim().replace(/^['"]+|['"]+$/g, "");
+}
+
+function pickProductStockColumn(
+  columnMap: Map<string, string>,
+  candidates: string[]
+): string | null {
+  for (const name of candidates) {
+    const hit = columnMap.get(name.toLowerCase());
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function resolveProductStockSchema(conn: Pool): Promise<ProductStockSchema> {
+  if (cachedProductStockSchema) return cachedProductStockSchema;
+  const [rows] = await conn.query<Array<Record<string, unknown>>>(
+    `SHOW COLUMNS FROM \`${PRODUCT_STOCK_TABLE}\``
+  );
+  if (!rows || !rows.length) {
+    throw new Error(`Stock table ${PRODUCT_STOCK_TABLE} not found.`);
+  }
+  const columnMap = new Map<string, string>();
+  for (const row of rows) {
+    const name = String((row as { Field?: unknown; COLUMN_NAME?: unknown }).Field ?? (row as { COLUMN_NAME?: unknown }).COLUMN_NAME ?? "");
+    if (name) {
+      columnMap.set(name.toLowerCase(), name);
+    }
+  }
+  const productIdCol = pickProductStockColumn(columnMap, [
+    "fk_product",
+    "product_id",
+    "productid",
+    "fk_product_id",
+    "product",
+  ]);
+  const qtyCol = pickProductStockColumn(columnMap, [
+    "reel",
+    "stock",
+    "qty",
+    "quantity",
+    "stock_qty",
+    "stock_reel",
+    "stock_real",
+  ]);
+  const rowIdCol = pickProductStockColumn(columnMap, [
+    "rowid",
+    "id",
+    "pk",
+    "product_stock_id",
+  ]);
+  const warehouseCol = pickProductStockColumn(columnMap, [
+    "fk_entrepot",
+    "warehouse_id",
+    "fk_warehouse",
+    "entrepot_id",
+  ]);
+  if (!productIdCol || !qtyCol) {
+    throw new Error(`Unable to resolve columns for ${PRODUCT_STOCK_TABLE}.`);
+  }
+  cachedProductStockSchema = { productIdCol, qtyCol, rowIdCol, warehouseCol };
+  return cachedProductStockSchema;
+}
+
+function normalizeProductIds(raw: unknown): number[] {
+  const value = firstString(raw);
+  if (!value) return [];
+  const ids = value
+    .split(/[,\s]+/)
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isFinite(entry));
+  return Array.from(new Set(ids));
 }
 
 function parseIsoDate(value: string | null | undefined): Date | null {
@@ -3317,6 +3397,130 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     res.json({ user: record.user });
   });
+
+  app.get(
+    "/api/stock/products",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      if (!isMySqlStateEnabled()) {
+        res.status(503).json({ message: "MySQL stock store is not configured." });
+        return;
+      }
+      const ids = normalizeProductIds(req.query.ids);
+      if (!ids.length) {
+        res.status(400).json({ message: "Product ids are required." });
+        return;
+      }
+      try {
+        const conn = await getMySqlPool();
+        const schema = await resolveProductStockSchema(conn);
+        const placeholders = ids.map(() => "?").join(", ");
+        const query = `SELECT \`${schema.productIdCol}\` AS productId, SUM(COALESCE(\`${schema.qtyCol}\`, 0)) AS stock
+          FROM \`${PRODUCT_STOCK_TABLE}\`
+          WHERE \`${schema.productIdCol}\` IN (${placeholders})
+          GROUP BY \`${schema.productIdCol}\``;
+        const [rows] = await conn.execute<Array<Record<string, unknown>>>(query, ids);
+        const stockMap = new Map<string, number>();
+        for (const row of rows || []) {
+          const productId = String(row.productId ?? "");
+          const stock = Number(row.stock);
+          if (!productId) continue;
+          stockMap.set(productId, Number.isFinite(stock) ? stock : 0);
+        }
+        const items = ids.map((id) => ({
+          productId: String(id),
+          stock: stockMap.get(String(id)) ?? 0,
+        }));
+        res.json({ items });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to read product stock.";
+        res.status(500).json({ message });
+      }
+    }
+  );
+
+  app.post(
+    "/api/stock/products/adjust",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      if (!isMySqlStateEnabled()) {
+        res.status(503).json({ message: "MySQL stock store is not configured." });
+        return;
+      }
+      const body = req.body as { productId?: unknown; delta?: unknown };
+      const productId = Number(body.productId);
+      const delta = Number(body.delta);
+      if (!Number.isFinite(productId)) {
+        res.status(400).json({ message: "Valid productId is required." });
+        return;
+      }
+      if (!Number.isFinite(delta) || delta === 0) {
+        res.status(400).json({ message: "Valid stock delta is required." });
+        return;
+      }
+      try {
+        const conn = await getMySqlPool();
+        const schema = await resolveProductStockSchema(conn);
+        const selectParts = [
+          `\`${schema.qtyCol}\` AS stock`,
+          schema.rowIdCol ? `\`${schema.rowIdCol}\` AS rowId` : "",
+          schema.warehouseCol ? `\`${schema.warehouseCol}\` AS warehouseId` : "",
+        ].filter(Boolean);
+        const orderBy = schema.warehouseCol ? ` ORDER BY \`${schema.warehouseCol}\` ASC` : "";
+        const selectQuery = `SELECT ${selectParts.join(", ")}
+          FROM \`${PRODUCT_STOCK_TABLE}\`
+          WHERE \`${schema.productIdCol}\` = ?
+          ${orderBy}
+          LIMIT 1`;
+        const [rows] = await conn.execute<Array<Record<string, unknown>>>(selectQuery, [productId]);
+        if (!rows.length) {
+          res.status(404).json({ message: "Product stock row not found." });
+          return;
+        }
+        const current = Number(rows[0].stock);
+        const nextStock = Math.max(0, (Number.isFinite(current) ? current : 0) + delta);
+
+        if (schema.rowIdCol && rows[0].rowId !== undefined) {
+          await conn.execute(
+            `UPDATE \`${PRODUCT_STOCK_TABLE}\`
+             SET \`${schema.qtyCol}\` = ?
+             WHERE \`${schema.rowIdCol}\` = ?`,
+            [nextStock, rows[0].rowId]
+          );
+        } else if (schema.warehouseCol && rows[0].warehouseId !== undefined) {
+          await conn.execute(
+            `UPDATE \`${PRODUCT_STOCK_TABLE}\`
+             SET \`${schema.qtyCol}\` = ?
+             WHERE \`${schema.productIdCol}\` = ? AND \`${schema.warehouseCol}\` = ?`,
+            [nextStock, productId, rows[0].warehouseId]
+          );
+        } else {
+          await conn.execute(
+            `UPDATE \`${PRODUCT_STOCK_TABLE}\`
+             SET \`${schema.qtyCol}\` = ?
+             WHERE \`${schema.productIdCol}\` = ?`,
+            [nextStock, productId]
+          );
+        }
+
+        const [totalRows] = await conn.execute<Array<Record<string, unknown>>>(
+          `SELECT SUM(COALESCE(\`${schema.qtyCol}\`, 0)) AS stock
+           FROM \`${PRODUCT_STOCK_TABLE}\`
+           WHERE \`${schema.productIdCol}\` = ?`,
+          [productId]
+        );
+        const total = Number(totalRows[0]?.stock);
+        res.json({ productId: String(productId), stock: Number.isFinite(total) ? total : 0 });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to update product stock.";
+        res.status(500).json({ message });
+      }
+    }
+  );
 
   app.get("/api/state/:key", requireAuth, async (req, res) => {
     const key = decodeURIComponent(firstString(req.params.key) || "").trim();
