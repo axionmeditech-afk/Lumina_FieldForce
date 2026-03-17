@@ -17,6 +17,8 @@ export interface AppUser {
   avatar?: string;
   managerId?: string;
   managerName?: string;
+  stockistId?: string;
+  stockistName?: string;
   approvalStatus?: "pending" | "approved" | "rejected";
 }
 
@@ -39,6 +41,8 @@ export interface UserAccessRequest {
   assignedCompanyIds?: string[];
   assignedManagerId?: string | null;
   assignedManagerName?: string | null;
+  assignedStockistId?: string | null;
+  assignedStockistName?: string | null;
 }
 
 export interface CompanyProfile {
@@ -94,6 +98,8 @@ export interface Employee {
   avatar?: string;
   managerId?: string;
   managerName?: string;
+  stockistId?: string;
+  stockistName?: string;
 }
 
 export interface SalaryRecord {

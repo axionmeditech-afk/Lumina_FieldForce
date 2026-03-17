@@ -625,6 +625,8 @@ function normalizeUserProfile(user: AppUser): AppUser {
       : "approved";
   const managerId = normalizeWhitespace(user.managerId ?? "");
   const managerName = normalizeWhitespace(user.managerName ?? "");
+  const stockistId = normalizeWhitespace(user.stockistId ?? "");
+  const stockistName = normalizeWhitespace(user.stockistName ?? "");
   const explicitLogin = normalizeWhitespace(user.login ?? "");
   const fallbackLogin =
     explicitLogin || normalizeEmail(user.email).split("@")[0] || slugify(user.name);
@@ -642,6 +644,8 @@ function normalizeUserProfile(user: AppUser): AppUser {
     pincode: normalizePincode(user.pincode),
     managerId: managerId || undefined,
     managerName: managerName || undefined,
+    stockistId: stockistId || undefined,
+    stockistName: stockistName || undefined,
     approvalStatus,
   };
 }
@@ -736,6 +740,8 @@ async function setAuthUsersRaw(users: StoredAuthUser[]): Promise<void> {
 function normalizeAccessRequest(entry: UserAccessRequest): UserAccessRequest {
   const assignedManagerId = normalizeWhitespace(entry.assignedManagerId ?? "");
   const assignedManagerName = normalizeWhitespace(entry.assignedManagerName ?? "");
+  const assignedStockistId = normalizeWhitespace(entry.assignedStockistId ?? "");
+  const assignedStockistName = normalizeWhitespace(entry.assignedStockistName ?? "");
   const approvedRole = entry.approvedRole ? normalizeRole(entry.approvedRole) : null;
   return {
     ...entry,
@@ -753,6 +759,8 @@ function normalizeAccessRequest(entry: UserAccessRequest): UserAccessRequest {
     ),
     assignedManagerId: assignedManagerId || null,
     assignedManagerName: assignedManagerName || null,
+    assignedStockistId: assignedStockistId || null,
+    assignedStockistName: assignedStockistName || null,
   };
 }
 
@@ -1249,6 +1257,118 @@ export async function createCompanyProfile(
   return created;
 }
 
+export async function removeCompanyProfile(companyId: string): Promise<boolean> {
+  await seedDataIfNeeded();
+  const targetId = normalizeWhitespace(companyId);
+  if (!targetId) return false;
+  const companies = await getCompanyProfiles();
+  const target = companies.find((company) => company.id === targetId);
+  if (!target) return false;
+  const remaining = companies.filter((company) => company.id !== targetId);
+  if (remaining.length === 0) return false;
+
+  const companyById = new Map(remaining.map((company) => [company.id, company]));
+  const fallbackCompany = remaining[0];
+
+  await setItem(KEYS.COMPANIES, remaining);
+
+  const settingsStore = await getSettingsStore();
+  if (targetId in settingsStore) {
+    const { [targetId]: _, ...rest } = settingsStore;
+    await setItem(KEYS.SETTINGS, rest);
+  }
+
+  const authUsers = await getAuthUsersRaw();
+  let authChanged = false;
+  const nextAuthUsers = authUsers.map((entry) => {
+    const currentUser = entry.user;
+    const filteredCompanyIds = (currentUser.companyIds || [])
+      .map((id) => normalizeWhitespace(id))
+      .filter((id) => id && id !== targetId && companyById.has(id));
+    let nextCompanyId = normalizeWhitespace(currentUser.companyId);
+    if (!nextCompanyId || nextCompanyId === targetId || !companyById.has(nextCompanyId)) {
+      nextCompanyId = filteredCompanyIds[0] || fallbackCompany.id;
+    }
+    const nextCompanyName =
+      companyById.get(nextCompanyId)?.name || fallbackCompany.name || DEFAULT_COMPANY_NAME;
+    const normalized = normalizeUserProfile({
+      ...currentUser,
+      companyId: nextCompanyId,
+      companyName: nextCompanyName,
+      companyIds: normalizeCompanyIds(filteredCompanyIds, nextCompanyId),
+    });
+    const companyIdsChanged =
+      JSON.stringify(normalized.companyIds || []) !== JSON.stringify(currentUser.companyIds || []);
+    if (
+      normalized.companyId !== currentUser.companyId ||
+      normalized.companyName !== currentUser.companyName ||
+      companyIdsChanged
+    ) {
+      authChanged = true;
+      return {
+        ...entry,
+        user: normalized,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    return entry;
+  });
+  if (authChanged) {
+    await setAuthUsersRaw(nextAuthUsers);
+  }
+
+  const currentUser = await getItem<AppUser>(KEYS.USER);
+  if (currentUser) {
+    const filteredCompanyIds = (currentUser.companyIds || [])
+      .map((id) => normalizeWhitespace(id))
+      .filter((id) => id && id !== targetId && companyById.has(id));
+    let nextCompanyId = normalizeWhitespace(currentUser.companyId);
+    if (!nextCompanyId || nextCompanyId === targetId || !companyById.has(nextCompanyId)) {
+      nextCompanyId = filteredCompanyIds[0] || fallbackCompany.id;
+    }
+    const nextCompanyName =
+      companyById.get(nextCompanyId)?.name || fallbackCompany.name || DEFAULT_COMPANY_NAME;
+    const normalized = normalizeUserProfile({
+      ...currentUser,
+      companyId: nextCompanyId,
+      companyName: nextCompanyName,
+      companyIds: normalizeCompanyIds(filteredCompanyIds, nextCompanyId),
+    });
+    const companyIdsChanged =
+      JSON.stringify(normalized.companyIds || []) !== JSON.stringify(currentUser.companyIds || []);
+    if (
+      normalized.companyId !== currentUser.companyId ||
+      normalized.companyName !== currentUser.companyName ||
+      companyIdsChanged
+    ) {
+      await setItem(KEYS.USER, normalized);
+    }
+  }
+
+  const employees = await getRawList<Employee>(KEYS.EMPLOYEES);
+  const filteredEmployees = employees.filter((employee) => employee.companyId !== targetId);
+  if (filteredEmployees.length !== employees.length) {
+    await setItem(KEYS.EMPLOYEES, filteredEmployees);
+  }
+
+  const accessRequests = await getAccessRequestsRaw();
+  let accessChanged = false;
+  const filteredRequests = accessRequests.map((request) => {
+    if (!request.assignedCompanyIds?.length) return request;
+    const nextIds = request.assignedCompanyIds.filter(
+      (id) => id !== targetId && companyById.has(id)
+    );
+    if (nextIds.length === request.assignedCompanyIds.length) return request;
+    accessChanged = true;
+    return { ...request, assignedCompanyIds: nextIds };
+  });
+  if (accessChanged) {
+    await setAccessRequestsRaw(filteredRequests);
+  }
+
+  return true;
+}
+
 async function upsertEmployeeForCompany(user: AppUser, company: CompanyProfile): Promise<void> {
   const employees = await getRawList<Employee>(KEYS.EMPLOYEES);
   const existingIndex = employees.findIndex(
@@ -1272,6 +1392,8 @@ async function upsertEmployeeForCompany(user: AppUser, company: CompanyProfile):
     avatar: user.avatar,
     managerId: user.managerId,
     managerName: user.managerName,
+    stockistId: user.stockistId,
+    stockistName: user.stockistName,
   };
 
   if (existingIndex >= 0) {
@@ -1414,6 +1536,8 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
     assignedCompanyIds: [],
     assignedManagerId: null,
     assignedManagerName: null,
+    assignedStockistId: null,
+    assignedStockistName: null,
   });
   await setAccessRequestsRaw(accessRequests);
 
@@ -1441,6 +1565,8 @@ export async function reviewUserAccessRequest(
     comment?: string;
     managerId?: string;
     managerName?: string;
+    stockistId?: string;
+    stockistName?: string;
     role?: UserRole;
   }
 ): Promise<UserAccessRequest | null> {
@@ -1463,8 +1589,16 @@ export async function reviewUserAccessRequest(
       ? normalizeRole(options?.role || currentRequest.requestedRole)
       : null;
   const finalApprovedRole = approvedRole || currentRequest.requestedRole;
-  const normalizedManagerId = normalizeWhitespace(options?.managerId ?? "");
-  const normalizedManagerName = normalizeWhitespace(options?.managerName ?? "");
+  const isSalesperson = action === "approved" && finalApprovedRole === "salesperson";
+  const shouldAssignManager = action === "approved" && finalApprovedRole !== "salesperson";
+  const normalizedManagerId = shouldAssignManager ? normalizeWhitespace(options?.managerId ?? "") : "";
+  const normalizedManagerName = shouldAssignManager
+    ? normalizeWhitespace(options?.managerName ?? "")
+    : "";
+  const normalizedStockistId = isSalesperson ? normalizeWhitespace(options?.stockistId ?? "") : "";
+  const normalizedStockistName = isSalesperson
+    ? normalizeWhitespace(options?.stockistName ?? "")
+    : "";
   if (action === "approved" && normalizedCompanyIds.length === 0) {
     throw new Error("Select at least one company before approval.");
   }
@@ -1488,16 +1622,17 @@ export async function reviewUserAccessRequest(
   }
 
   const employees = await getRawList<Employee>(KEYS.EMPLOYEES);
-  const selectedManager = normalizedManagerId
-    ? employees.find(
-        (employee) => employee.id === normalizedManagerId && employee.role === "manager"
-      ) || null
-    : null;
-  if (action === "approved" && normalizedManagerId && !selectedManager) {
+  const selectedManager =
+    shouldAssignManager && normalizedManagerId
+      ? employees.find(
+          (employee) => employee.id === normalizedManagerId && employee.role === "manager"
+        ) || null
+      : null;
+  if (shouldAssignManager && normalizedManagerId && !selectedManager) {
     throw new Error("Selected manager is invalid.");
   }
   if (
-    action === "approved" &&
+    shouldAssignManager &&
     normalizedManagerId &&
     selectedManager &&
     normalizedCompanyIds.length > 0 &&
@@ -1505,11 +1640,31 @@ export async function reviewUserAccessRequest(
   ) {
     throw new Error("Selected manager must belong to an assigned company.");
   }
-  const assignedManagerId = action === "approved" ? normalizedManagerId || null : null;
-  const assignedManagerName =
-    action === "approved"
-      ? selectedManager?.name || normalizedManagerName || null
+  const assignedManagerId = shouldAssignManager ? normalizedManagerId || null : null;
+  const assignedManagerName = shouldAssignManager
+    ? selectedManager?.name || normalizedManagerName || null
+    : null;
+
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const selectedStockist =
+    isSalesperson && normalizedStockistId
+      ? stockists.find((stockist) => stockist.id === normalizedStockistId) || null
       : null;
+  if (isSalesperson && normalizedStockistId && !selectedStockist) {
+    throw new Error("Selected channel partner is invalid.");
+  }
+  if (
+    isSalesperson &&
+    selectedStockist?.companyId &&
+    normalizedCompanyIds.length > 0 &&
+    !normalizedCompanyIds.includes(normalizeWhitespace(selectedStockist.companyId))
+  ) {
+    throw new Error("Selected channel partner must belong to an assigned company.");
+  }
+  const assignedStockistId = isSalesperson ? normalizedStockistId || null : null;
+  const assignedStockistName = isSalesperson
+    ? selectedStockist?.name || normalizedStockistName || null
+    : null;
 
   const currentAuth = authUsers[authIndex];
   if (action === "approved") {
@@ -1524,6 +1679,8 @@ export async function reviewUserAccessRequest(
       branch: currentAuth.user.branch || primaryCompany.primaryBranch,
       managerId: assignedManagerId || undefined,
       managerName: assignedManagerName || undefined,
+      stockistId: assignedStockistId || undefined,
+      stockistName: assignedStockistName || undefined,
       approvalStatus: "approved",
     });
     authUsers[authIndex] = {
@@ -1576,6 +1733,8 @@ export async function reviewUserAccessRequest(
     assignedCompanyIds: action === "approved" ? normalizedCompanyIds : [],
     assignedManagerId,
     assignedManagerName,
+    assignedStockistId,
+    assignedStockistName,
   };
   requests[requestIndex] = reviewedRequest;
   await setAccessRequestsRaw(requests);
@@ -2103,6 +2262,20 @@ export async function addStockist(
   stockists.unshift(candidate);
   await setItem(KEYS.STOCKISTS, stockists);
   return candidate;
+}
+
+export async function syncStockistsToBackend(options?: { force?: boolean }): Promise<boolean> {
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  if (!options?.force && !shouldSyncRemoteStateKey(KEYS.STOCKISTS)) {
+    return false;
+  }
+  const pushed = await pushStateRemote(KEYS.STOCKISTS, stockists);
+  if (!pushed) {
+    await enqueuePendingRemoteStateWrite(KEYS.STOCKISTS, stockists);
+    return false;
+  }
+  await removePendingRemoteStateWrite(KEYS.STOCKISTS);
+  return true;
 }
 
 export async function updateStockist(

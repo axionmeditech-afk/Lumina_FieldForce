@@ -26,8 +26,10 @@ import {
   getAllEmployees,
   getCompanyNotifications,
   getCompanyProfiles,
+  getStockists,
   getSettings,
   getUserAccessRequests,
+  removeCompanyProfile,
   reviewUserAccessRequest,
   updateSettings,
 } from "@/lib/storage";
@@ -36,6 +38,7 @@ import type {
   CompanyProfile,
   Employee,
   NotificationAudience,
+  StockistProfile,
   UserRole,
   UserAccessRequest,
 } from "@/lib/types";
@@ -95,16 +98,20 @@ function normalizeDolibarrWarning(message: string): string {
 export default function AdminControlsScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
-  const { user } = useAuth();
+  const { user, refreshSession } = useAuth();
   const [recentNotifications, setRecentNotifications] = useState<AppNotification[]>([]);
   const [companyProfiles, setCompanyProfiles] = useState<CompanyProfile[]>([]);
   const [managerEmployees, setManagerEmployees] = useState<Employee[]>([]);
+  const [companyStockists, setCompanyStockists] = useState<StockistProfile[]>([]);
   const [pendingAccessRequests, setPendingAccessRequests] = useState<UserAccessRequest[]>([]);
   const [selectedCompanyIdsByRequest, setSelectedCompanyIdsByRequest] = useState<
     Record<string, string[]>
   >({});
   const [selectedRoleByRequest, setSelectedRoleByRequest] = useState<Record<string, UserRole>>({});
   const [selectedManagerIdByRequest, setSelectedManagerIdByRequest] = useState<
+    Record<string, string>
+  >({});
+  const [selectedStockistIdByRequest, setSelectedStockistIdByRequest] = useState<
     Record<string, string>
   >({});
   const [newCompanyName, setNewCompanyName] = useState("");
@@ -120,21 +127,30 @@ export default function AdminControlsScreen() {
   const [busySavePolicy, setBusySavePolicy] = useState(false);
   const [busyAnnouncement, setBusyAnnouncement] = useState(false);
   const [busyCreateCompany, setBusyCreateCompany] = useState(false);
+  const [busyDeleteCompanyId, setBusyDeleteCompanyId] = useState<string | null>(null);
   const [busyAccessRequestId, setBusyAccessRequestId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const canAccess = canAccessAdminControls(user?.role);
 
   const loadData = useCallback(async () => {
-    const [settings, notifications, companies, localPendingRequests, allEmployees, remotePendingRequests] =
-      await Promise.all([
-        getSettings(),
-        getCompanyNotifications(),
-        getCompanyProfiles(),
-        getUserAccessRequests("pending"),
-        getAllEmployees(),
-        getAdminAccessRequests("pending").catch(() => []),
-      ]);
+    const [
+      settings,
+      notifications,
+      companies,
+      localPendingRequests,
+      allEmployees,
+      stockists,
+      remotePendingRequests,
+    ] = await Promise.all([
+      getSettings(),
+      getCompanyNotifications(),
+      getCompanyProfiles(),
+      getUserAccessRequests("pending"),
+      getAllEmployees(),
+      getStockists(),
+      getAdminAccessRequests("pending").catch(() => []),
+    ]);
     const pendingRequests = mergePendingRequests(localPendingRequests, remotePendingRequests);
 
     setNotificationsEnabled(settings.notifications !== "false");
@@ -148,6 +164,7 @@ export default function AdminControlsScreen() {
     );
     setCompanyProfiles(companies);
     setManagerEmployees(allEmployees.filter((employee) => employee.role === "manager"));
+    setCompanyStockists(stockists);
     setPendingAccessRequests(pendingRequests);
     setSelectedRoleByRequest((current) => {
       const next = { ...current };
@@ -166,8 +183,20 @@ export default function AdminControlsScreen() {
       }
       return changed ? next : current;
     });
+    const validCompanyIds = new Set(companies.map((company) => company.id));
     setSelectedCompanyIdsByRequest((current) => {
       const next = { ...current };
+      let changed = false;
+
+      for (const [requestId, companyIds] of Object.entries(next)) {
+        if (!companyIds?.length) continue;
+        const filtered = companyIds.filter((companyId) => validCompanyIds.has(companyId));
+        if (filtered.length !== companyIds.length) {
+          next[requestId] = filtered;
+          changed = true;
+        }
+      }
+
       for (const request of pendingRequests) {
         if (next[request.id]?.length) continue;
         const matchingCompanyId = request.requestedCompanyName
@@ -177,8 +206,34 @@ export default function AdminControlsScreen() {
             )?.id
           : undefined;
         next[request.id] = matchingCompanyId ? [matchingCompanyId] : [];
+        changed = true;
       }
-      return next;
+
+      for (const requestId of Object.keys(next)) {
+        const stillPending = pendingRequests.some((request) => request.id === requestId);
+        if (!stillPending) {
+          delete next[requestId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    setSelectedStockistIdByRequest((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const request of pendingRequests) {
+        if (next[request.id] !== undefined) continue;
+        next[request.id] = request.assignedStockistId || "";
+        changed = true;
+      }
+      for (const requestId of Object.keys(next)) {
+        const stillPending = pendingRequests.some((request) => request.id === requestId);
+        if (!stillPending) {
+          delete next[requestId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
     });
     setLoading(false);
   }, []);
@@ -200,6 +255,17 @@ export default function AdminControlsScreen() {
       return managerEmployees.filter((manager) => selectedCompanyIds.includes(manager.companyId));
     },
     [managerEmployees, selectedCompanyIdsByRequest]
+  );
+
+  const getStockistsForRequest = useCallback(
+    (requestId: string): StockistProfile[] => {
+      const selectedCompanyIds = selectedCompanyIdsByRequest[requestId] || [];
+      if (!selectedCompanyIds.length) return companyStockists;
+      return companyStockists.filter((stockist) =>
+        stockist.companyId ? selectedCompanyIds.includes(stockist.companyId) : true
+      );
+    },
+    [companyStockists, selectedCompanyIdsByRequest]
   );
 
   useEffect(() => {
@@ -243,6 +309,43 @@ export default function AdminControlsScreen() {
       return changed ? next : current;
     });
   }, [getManagersForRequest, pendingAccessRequests]);
+
+  useEffect(() => {
+    if (!pendingAccessRequests.length) {
+      setSelectedStockistIdByRequest({});
+      return;
+    }
+
+    setSelectedStockistIdByRequest((current) => {
+      const next = { ...current };
+      let changed = false;
+
+      for (const request of pendingAccessRequests) {
+        const availableStockists = getStockistsForRequest(request.id);
+        const currentSelection = next[request.id] ?? "";
+        const isValidSelection =
+          !currentSelection || availableStockists.some((stockist) => stockist.id === currentSelection);
+        if (!isValidSelection) {
+          next[request.id] = "";
+          changed = true;
+        }
+        if (next[request.id] === undefined) {
+          next[request.id] = request.assignedStockistId || "";
+          changed = true;
+        }
+      }
+
+      for (const requestId of Object.keys(next)) {
+        const stillPending = pendingAccessRequests.some((request) => request.id === requestId);
+        if (!stillPending) {
+          delete next[requestId];
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [getStockistsForRequest, pendingAccessRequests]);
 
   const handleSavePolicy = useCallback(async () => {
     if (!user || busySavePolicy) return;
@@ -359,6 +462,75 @@ export default function AdminControlsScreen() {
     user,
   ]);
 
+  const handleDeleteCompany = useCallback(
+    async (company: CompanyProfile) => {
+      if (!user || busyDeleteCompanyId) return;
+      if (companyProfiles.length <= 1) {
+        Alert.alert("Cannot Delete", "At least one company environment is required.");
+        return;
+      }
+
+      setBusyDeleteCompanyId(company.id);
+      try {
+        const removed = await removeCompanyProfile(company.id);
+        if (!removed) {
+          Alert.alert(
+            "Unable to Delete",
+            "This company environment cannot be deleted right now."
+          );
+          return;
+        }
+        await addAuditLog({
+          id: `audit_admin_company_delete_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          userId: user.id,
+          userName: user.name,
+          action: "Company Environment Deleted",
+          details: `${company.name} (${company.primaryBranch})`,
+          timestamp: new Date().toISOString(),
+          module: "Admin Controls",
+        });
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        await Promise.all([loadData(), refreshSession()]);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to delete company environment.";
+        Alert.alert("Delete Failed", message);
+      } finally {
+        setBusyDeleteCompanyId(null);
+      }
+    },
+    [
+      busyDeleteCompanyId,
+      companyProfiles.length,
+      loadData,
+      refreshSession,
+      user,
+    ]
+  );
+
+  const confirmDeleteCompany = useCallback(
+    (company: CompanyProfile) => {
+      if (busyDeleteCompanyId) return;
+      if (companyProfiles.length <= 1) {
+        Alert.alert("Cannot Delete", "At least one company environment is required.");
+        return;
+      }
+      Alert.alert(
+        "Delete Company Environment",
+        `Are you sure you want to delete ${company.name}? This will remove access for all assigned users.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: () => void handleDeleteCompany(company),
+          },
+        ]
+      );
+    },
+    [busyDeleteCompanyId, companyProfiles.length, handleDeleteCompany]
+  );
+
   const toggleCompanySelection = useCallback((requestId: string, companyId: string) => {
     setSelectedCompanyIdsByRequest((current) => {
       const selected = current[requestId] || [];
@@ -373,6 +545,13 @@ export default function AdminControlsScreen() {
     setSelectedManagerIdByRequest((current) => ({
       ...current,
       [requestId]: managerId,
+    }));
+  }, []);
+
+  const selectStockistForRequest = useCallback((requestId: string, stockistId: string) => {
+    setSelectedStockistIdByRequest((current) => ({
+      ...current,
+      [requestId]: stockistId,
     }));
   }, []);
 
@@ -403,6 +582,12 @@ export default function AdminControlsScreen() {
       delete next[requestId];
       return next;
     });
+    setSelectedStockistIdByRequest((current) => {
+      if (!(requestId in current)) return current;
+      const next = { ...current };
+      delete next[requestId];
+      return next;
+    });
   }, []);
 
   const handleReviewAccessRequest = useCallback(
@@ -411,16 +596,28 @@ export default function AdminControlsScreen() {
       const selectedRole = selectedRoleByRequest[request.id] || request.requestedRole;
       const selectedCompanyIds = selectedCompanyIdsByRequest[request.id] || [];
       const selectedManagerId = (selectedManagerIdByRequest[request.id] || "").trim();
+      const isSalesperson = selectedRole === "salesperson";
+      const selectedStockistId = (selectedStockistIdByRequest[request.id] || "").trim();
       const eligibleManagers = getManagersForRequest(request.id);
-      const selectedManager = selectedManagerId
-        ? eligibleManagers.find((manager) => manager.id === selectedManagerId) || null
-        : null;
+      const eligibleStockists = getStockistsForRequest(request.id);
+      const selectedManager =
+        !isSalesperson && selectedManagerId
+          ? eligibleManagers.find((manager) => manager.id === selectedManagerId) || null
+          : null;
+      const selectedStockist =
+        isSalesperson && selectedStockistId
+          ? eligibleStockists.find((stockist) => stockist.id === selectedStockistId) || null
+          : null;
       if (action === "approved" && selectedCompanyIds.length === 0) {
         Alert.alert("Select Companies", "Choose at least one company before approval.");
         return;
       }
-      if (action === "approved" && selectedManagerId && !selectedManager) {
+      if (!isSalesperson && action === "approved" && selectedManagerId && !selectedManager) {
         Alert.alert("Invalid Manager", "Selected manager is not valid for this request.");
+        return;
+      }
+      if (isSalesperson && action === "approved" && selectedStockistId && !selectedStockist) {
+        Alert.alert("Invalid Channel Partner", "Selected channel partner is not valid.");
         return;
       }
 
@@ -436,6 +633,8 @@ export default function AdminControlsScreen() {
             companyIds: selectedCompanyIds,
             managerId: selectedManager?.id,
             managerName: selectedManager?.name,
+            stockistId: selectedStockist?.id,
+            stockistName: selectedStockist?.name,
           });
           remoteReviewed = true;
         } catch (error) {
@@ -461,6 +660,8 @@ export default function AdminControlsScreen() {
                 companyIds: selectedCompanyIds,
                 managerId: selectedManager?.id,
                 managerName: selectedManager?.name,
+                stockistId: selectedStockist?.id,
+                stockistName: selectedStockist?.name,
               }
             );
             localReviewed = true;
@@ -530,11 +731,13 @@ export default function AdminControlsScreen() {
     [
       busyAccessRequestId,
       getManagersForRequest,
+      getStockistsForRequest,
       loadData,
       removePendingRequestFromState,
       selectedCompanyIdsByRequest,
       selectedRoleByRequest,
       selectedManagerIdByRequest,
+      selectedStockistIdByRequest,
       user,
     ]
   );
@@ -614,6 +817,27 @@ export default function AdminControlsScreen() {
                       {company.primaryBranch} | {company.headquarters}
                     </Text>
                   </View>
+                  <Pressable
+                    onPress={() => confirmDeleteCompany(company)}
+                    disabled={busyDeleteCompanyId === company.id}
+                    style={[
+                      styles.companyDeleteButton,
+                      {
+                        borderColor: colors.danger,
+                        backgroundColor: colors.danger + "12",
+                      },
+                    ]}
+                  >
+                    {busyDeleteCompanyId === company.id ? (
+                      <ActivityIndicator size="small" color={colors.danger} />
+                    ) : (
+                      <Ionicons
+                        name="trash-outline"
+                        size={16}
+                        color={colors.danger}
+                      />
+                    )}
+                  </Pressable>
                 </View>
               ))
             )}
@@ -695,6 +919,8 @@ export default function AdminControlsScreen() {
               const selectedCompanyIds = selectedCompanyIdsByRequest[request.id] || [];
               const selectedManagerId = selectedManagerIdByRequest[request.id] || "";
               const managersForRequest = getManagersForRequest(request.id);
+              const stockistsForRequest = getStockistsForRequest(request.id);
+              const selectedStockistId = selectedStockistIdByRequest[request.id] || "";
               const isBusy = busyAccessRequestId === request.id;
               return (
                 <View
@@ -794,28 +1020,28 @@ export default function AdminControlsScreen() {
                     })}
                   </View>
 
-                  <Text style={[styles.assignLabel, { color: colors.textSecondary }]}>
-                    Assign reporting manager (optional)
-                  </Text>
-                  {managersForRequest.length === 0 ? (
-                    <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
-                      No manager available for selected company.
-                    </Text>
-                  ) : (
-                    <View style={styles.assignChipRow}>
-                      {managersForRequest.map((manager) => {
-                        const selected = manager.id === selectedManagerId;
-                        return (
+                  {selectedRole === "salesperson" ? (
+                    <>
+                      <Text style={[styles.assignLabel, { color: colors.textSecondary }]}>
+                        Assign channel partner (optional)
+                      </Text>
+                      {stockistsForRequest.length === 0 ? (
+                        <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
+                          No channel partners available. Salesperson will report directly to company.
+                        </Text>
+                      ) : (
+                        <View style={styles.assignChipRow}>
                           <Pressable
-                            key={`${request.id}_manager_${manager.id}`}
-                            onPress={() => selectManagerForRequest(request.id, manager.id)}
+                            key={`${request.id}_stockist_direct`}
+                            onPress={() => selectStockistForRequest(request.id, "")}
                             style={[
                               styles.assignChip,
                               {
-                                borderColor: selected ? colors.success : colors.border,
-                                backgroundColor: selected
-                                  ? colors.success + "16"
-                                  : colors.backgroundElevated,
+                                borderColor: selectedStockistId === "" ? colors.success : colors.border,
+                                backgroundColor:
+                                  selectedStockistId === ""
+                                    ? colors.success + "16"
+                                    : colors.backgroundElevated,
                                 opacity: isBusy ? 0.7 : 1,
                               },
                             ]}
@@ -824,15 +1050,88 @@ export default function AdminControlsScreen() {
                             <Text
                               style={[
                                 styles.assignChipText,
-                                { color: selected ? colors.success : colors.textSecondary },
+                                { color: selectedStockistId === "" ? colors.success : colors.textSecondary },
                               ]}
                             >
-                              {manager.name} ({manager.branch})
+                              Direct (Company)
                             </Text>
                           </Pressable>
-                        );
-                      })}
-                    </View>
+                          {stockistsForRequest.map((stockist) => {
+                            const selected = stockist.id === selectedStockistId;
+                            return (
+                              <Pressable
+                                key={`${request.id}_stockist_${stockist.id}`}
+                                onPress={() => selectStockistForRequest(request.id, stockist.id)}
+                                style={[
+                                  styles.assignChip,
+                                  {
+                                    borderColor: selected ? colors.primary : colors.border,
+                                    backgroundColor: selected
+                                      ? colors.primary + "16"
+                                      : colors.backgroundElevated,
+                                    opacity: isBusy ? 0.7 : 1,
+                                  },
+                                ]}
+                                disabled={isBusy}
+                              >
+                                <Text
+                                  style={[
+                                    styles.assignChipText,
+                                    { color: selected ? colors.primary : colors.textSecondary },
+                                  ]}
+                                >
+                                  {stockist.name}
+                                  {stockist.location ? ` (${stockist.location})` : ""}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <Text style={[styles.assignLabel, { color: colors.textSecondary }]}>
+                        Assign reporting manager (optional)
+                      </Text>
+                      {managersForRequest.length === 0 ? (
+                        <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
+                          No manager available for selected company.
+                        </Text>
+                      ) : (
+                        <View style={styles.assignChipRow}>
+                          {managersForRequest.map((manager) => {
+                            const selected = manager.id === selectedManagerId;
+                            return (
+                              <Pressable
+                                key={`${request.id}_manager_${manager.id}`}
+                                onPress={() => selectManagerForRequest(request.id, manager.id)}
+                                style={[
+                                  styles.assignChip,
+                                  {
+                                    borderColor: selected ? colors.success : colors.border,
+                                    backgroundColor: selected
+                                      ? colors.success + "16"
+                                      : colors.backgroundElevated,
+                                    opacity: isBusy ? 0.7 : 1,
+                                  },
+                                ]}
+                                disabled={isBusy}
+                              >
+                                <Text
+                                  style={[
+                                    styles.assignChipText,
+                                    { color: selected ? colors.success : colors.textSecondary },
+                                  ]}
+                                >
+                                  {manager.name} ({manager.branch})
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      )}
+                    </>
                   )}
 
                   <View style={styles.requestActionRow}>
@@ -1207,6 +1506,10 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 9,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
   },
   companyName: {
     fontFamily: "Inter_600SemiBold",
@@ -1216,6 +1519,14 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontFamily: "Inter_400Regular",
     fontSize: 11.5,
+  },
+  companyDeleteButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
   },
   divider: {
     marginVertical: 12,

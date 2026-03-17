@@ -664,6 +664,8 @@ export async function reviewAdminAccessRequest(payload: {
   companyIds?: string[];
   managerId?: string;
   managerName?: string;
+  stockistId?: string;
+  stockistName?: string;
   comment?: string;
 }): Promise<UserAccessRequest> {
   return fetchJson<UserAccessRequest>(
@@ -676,6 +678,8 @@ export async function reviewAdminAccessRequest(payload: {
         companyIds: payload.companyIds,
         managerId: payload.managerId,
         managerName: payload.managerName,
+        stockistId: payload.stockistId,
+        stockistName: payload.stockistName,
         comment: payload.comment,
       }),
     }

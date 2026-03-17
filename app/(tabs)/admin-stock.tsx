@@ -22,6 +22,7 @@ import {
   addAuditLog,
   addStockist,
   addStockTransfer,
+  syncStockistsToBackend,
   getAllEmployees,
   getStockists,
   getStockTransfers,
@@ -729,6 +730,11 @@ export default function AdminStockScreen() {
           module: "Stock",
         });
       }
+
+      const synced = await syncStockistsToBackend({ force: true });
+      if (!synced) {
+        Alert.alert("Saved Locally", "Channel partner saved on this device. Backend sync is pending. Please check backend connection.");
+      }
     } finally {
       setCreatingStockist(false);
     }
@@ -821,6 +827,11 @@ export default function AdminStockScreen() {
           timestamp: now,
           module: "Stock",
         });
+      }
+
+      const synced = await syncStockistsToBackend({ force: true });
+      if (!synced) {
+        Alert.alert("Saved Locally", "Channel partner saved on this device. Backend sync is pending. Please check backend connection.");
       }
     } finally {
       setCreatingTransfer(false);
@@ -1784,4 +1795,7 @@ const styles = StyleSheet.create({
     lineHeight: 19,
   },
 });
+
+
+
 
