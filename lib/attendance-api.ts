@@ -9,6 +9,7 @@ import type {
   RouteDirections,
   RouteDistanceMatrix,
   RouteTimeline,
+  StockistProfile,
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
@@ -684,6 +685,15 @@ export async function reviewAdminAccessRequest(payload: {
       }),
     }
   );
+}
+
+export async function createStockist(
+  payload: StockistProfile
+): Promise<StockistProfile> {
+  return fetchJson<StockistProfile>("/stockists", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getUserGeofences(userId: string): Promise<Geofence[]> {

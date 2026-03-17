@@ -417,6 +417,49 @@ async function fetchStateRemote<T>(key: string): Promise<T | null | undefined> {
   return undefined;
 }
 
+async function fetchStockistsRemote(): Promise<StockistProfile[] | null | undefined> {
+  const token = await getApiToken();
+  if (!token) return undefined;
+
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/stockists`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        if (response.status >= 500) continue;
+        return undefined;
+      }
+      const trimmed = text.trim();
+      if (!trimmed) return [];
+      try {
+        const payload = JSON.parse(text) as { items?: unknown } | unknown[];
+        if (Array.isArray(payload)) return payload as StockistProfile[];
+        if (payload && typeof payload === "object" && Array.isArray((payload as any).items)) {
+          return (payload as any).items as StockistProfile[];
+        }
+        return [];
+      } catch {
+        continue;
+      }
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return undefined;
+}
+
 async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
   const token = await getApiToken();
   if (!token) return false;
@@ -2276,6 +2319,37 @@ export async function syncStockistsToBackend(options?: { force?: boolean }): Pro
   }
   await removePendingRemoteStateWrite(KEYS.STOCKISTS);
   return true;
+}
+
+export async function refreshStockistsFromBackend(): Promise<StockistProfile[] | null> {
+  await seedDataIfNeeded();
+  const direct = await fetchStockistsRemote();
+  if (typeof direct !== "undefined") {
+    const normalized = Array.isArray(direct) ? direct : [];
+    await setItem(KEYS.STOCKISTS, normalized);
+    return normalized;
+  }
+  const remote = await fetchStateRemote<StockistProfile[]>(KEYS.STOCKISTS);
+  if (typeof remote === "undefined") return null;
+  const normalized = Array.isArray(remote) ? remote : [];
+  await setItem(KEYS.STOCKISTS, normalized);
+  return normalized;
+}
+
+export async function clearLocalStockists(): Promise<void> {
+  await AsyncStorage.setItem(KEYS.STOCKISTS, JSON.stringify([]));
+  await removePendingRemoteStateWrite(KEYS.STOCKISTS);
+  const event: StorageUpdateEvent = {
+    key: KEYS.STOCKISTS,
+    updatedAt: new Date().toISOString(),
+  };
+  for (const listener of storageUpdateListeners) {
+    try {
+      listener(event);
+    } catch {
+      // ignore listener errors
+    }
+  }
 }
 
 export async function updateStockist(

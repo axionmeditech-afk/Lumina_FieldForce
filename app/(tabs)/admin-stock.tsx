@@ -22,7 +22,9 @@ import {
   addAuditLog,
   addStockist,
   addStockTransfer,
-  syncStockistsToBackend,
+  removeStockist,
+  refreshStockistsFromBackend,
+  clearLocalStockists,
   getAllEmployees,
   getStockists,
   getStockTransfers,
@@ -31,6 +33,8 @@ import { getEmployees as getMergedEmployees } from "@/lib/employee-data";
 import type { Employee, StockistProfile, StockTransfer } from "@/lib/types";
 import {
   adjustCompanyProductStock,
+  createStockist,
+  isApiAuthRequiredError,
   getCompanyProductStocks,
   getDolibarrOrderDetail,
   getDolibarrOrders,
@@ -291,14 +295,40 @@ export default function AdminStockScreen() {
     if (!canAccess) return;
     setLoading(true);
     try {
-      const [stockistResult, transferResult, employeeResult, productResult, ordersResult] = await Promise.all([
-        getStockists(),
+      const [
+        remoteStockists,
+        transferResult,
+        employeeResult,
+        productResult,
+        ordersResult,
+        localStockists,
+      ] = await Promise.all([
+        refreshStockistsFromBackend(),
         getStockTransfers(),
         loadEmployees(),
-        getDolibarrProducts({ limit: 400, sortfield: "label", sortorder: "asc", includestockdata: 1 }).catch(() => []),
+        getDolibarrProducts({
+          limit: 400,
+          sortfield: "label",
+          sortorder: "asc",
+          includestockdata: 1,
+        }).catch(() => []),
         getDolibarrOrders({ limit: 400, sortfield: "date_commande", sortorder: "desc" }).catch(() => []),
+        getStockists(),
       ]);
-      setStockists(stockistResult);
+      let resolvedStockists = remoteStockists ?? localStockists;
+      if (!remoteStockists) {
+        if (localStockists.length > 0) {
+          await clearLocalStockists();
+        }
+        resolvedStockists = [];
+      } else if (remoteStockists.length === 0 && localStockists.length > 0) {
+        await clearLocalStockists();
+        resolvedStockists = [];
+      }
+      setStockists(resolvedStockists);
+      if (resolvedStockists.length === 0) {
+        setSelectedStockistId("");
+      }
       setTransfers(transferResult);
       setEmployees(employeeResult.filter((entry) => entry.role === "salesperson"));
       setProducts(Array.isArray(productResult) ? productResult : []);
@@ -729,11 +759,25 @@ export default function AdminStockScreen() {
           timestamp: new Date().toISOString(),
           module: "Stock",
         });
-      }
-
-      const synced = await syncStockistsToBackend({ force: true });
-      if (!synced) {
-        Alert.alert("Saved Locally", "Channel partner saved on this device. Backend sync is pending. Please check backend connection.");
+      }      try {
+        await createStockist(created);
+        const remoteStockists = await refreshStockistsFromBackend();
+        if (remoteStockists) {
+          setStockists(remoteStockists);
+        } else {
+          await removeStockist(created.id);
+          setStockists((current) => current.filter((entry) => entry.id !== created.id));
+          Alert.alert("Backend Sync Pending", "Unable to confirm the channel partner in the database yet.");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to sync channel partner.";
+        await removeStockist(created.id);
+        setStockists((current) => current.filter((entry) => entry.id !== created.id));
+        if (isApiAuthRequiredError(error)) {
+          Alert.alert("Backend Login Required", message);
+        } else {
+          Alert.alert("Backend Save Failed", message);
+        }
       }
     } finally {
       setCreatingStockist(false);
@@ -827,13 +871,7 @@ export default function AdminStockScreen() {
           timestamp: now,
           module: "Stock",
         });
-      }
-
-      const synced = await syncStockistsToBackend({ force: true });
-      if (!synced) {
-        Alert.alert("Saved Locally", "Channel partner saved on this device. Backend sync is pending. Please check backend connection.");
-      }
-    } finally {
+      }    } finally {
       setCreatingTransfer(false);
     }
   }, [
@@ -1795,6 +1833,20 @@ const styles = StyleSheet.create({
     lineHeight: 19,
   },
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

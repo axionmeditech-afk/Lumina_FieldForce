@@ -3399,6 +3399,90 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get(
+    "/api/stockists",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      if (!isMySqlStateEnabled()) {
+        res.status(503).json({ message: "MySQL state store is not configured." });
+        return;
+      }
+      const companyId = toNullableText(req.query.companyId);
+      try {
+        const items = await listStockistsFromMySql();
+        const filtered = companyId
+          ? items.filter(
+              (entry) => entry && typeof entry === "object" && (entry as any).companyId === companyId
+            )
+          : items;
+        res.json({ items: filtered });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to load channel partners.";
+        res.status(500).json({ message });
+      }
+    }
+  );
+
+  app.post(
+    "/api/stockists",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      if (!isMySqlStateEnabled()) {
+        res.status(503).json({ message: "MySQL state store is not configured." });
+        return;
+      }
+      const body = (req.body || {}) as Record<string, unknown>;
+      const id = toStringId(body.id);
+      if (!id) {
+        res.status(400).json({ message: "Stockist id is required." });
+        return;
+      }
+      const companyId = toNullableText(body.companyId);
+      const name = toRequiredText(body.name, "Channel Partner");
+      const phone = toNullableText(body.phone);
+      const location = toNullableText(body.location);
+      const pincode = toNullableText(body.pincode);
+      const notes = toNullableText(body.notes);
+      const createdAt = toSqlTimestamp(body.createdAt);
+      const updatedAt = toSqlTimestamp(body.updatedAt ?? body.createdAt);
+
+      try {
+        const conn = await getMySqlPool();
+        await conn.execute(
+          `INSERT INTO lff_stockists
+            (id, company_id, name, phone, location, pincode, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             name = VALUES(name),
+             phone = VALUES(phone),
+             location = VALUES(location),
+             pincode = VALUES(pincode),
+             notes = VALUES(notes),
+             updated_at = VALUES(updated_at)`,
+          [id, companyId, name, phone, location, pincode, notes, createdAt, updatedAt]
+        );
+        res.json({
+          id,
+          companyId: companyId || undefined,
+          name,
+          phone: phone || undefined,
+          location: location || undefined,
+          pincode: pincode || undefined,
+          notes: notes || undefined,
+          createdAt: new Date(createdAt).toISOString(),
+          updatedAt: new Date(updatedAt).toISOString(),
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to save channel partner.";
+        res.status(500).json({ message });
+      }
+    }
+  );
+
+  app.get(
     "/api/stock/products",
     requireAuth,
     requireRoles("admin", "hr", "manager"),
