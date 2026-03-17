@@ -40,9 +40,11 @@ import {
   getDolibarrOrderDetail,
   getDolibarrOrders,
   getDolibarrProducts,
+  getDolibarrWarehouses,
   type DolibarrOrder,
   type DolibarrOrderLine,
   type DolibarrProduct,
+  type DolibarrWarehouse,
 } from "@/lib/attendance-api";
 
 const TRANSFER_TYPES = [
@@ -52,10 +54,15 @@ const TRANSFER_TYPES = [
 
 type TransferType = (typeof TRANSFER_TYPES)[number]["key"];
 
-const ITEMWISE_BATCH = 12;
+const ITEMWISE_BATCH = 8;
+const ITEMWISE_CONCURRENCY = 2;
+const ITEMWISE_INITIAL = 32;
+const ITEMWISE_PAUSE_MS = 120;
 const DIRECT_AREA_KEY = "__direct__";
 const PRODUCT_DROPDOWN_PAGE = 20;
-const PREFETCH_PRODUCT_STOCK_COUNT = 60;
+const PREFETCH_PRODUCT_STOCK_COUNT = 20;
+const STOCK_FETCH_BATCH = 25;
+const STOCK_FETCH_CONCURRENCY = 2;
 
 type StockistSummary = {
   stockist: StockistProfile;
@@ -108,6 +115,16 @@ function getLineLabel(line: DolibarrOrderLine, productsById: Map<number, Dolibar
   return line.product_label?.trim() || line.label?.trim() || line.desc?.trim() || "Item";
 }
 
+function getWarehouseLabel(warehouse: DolibarrWarehouse): string {
+  const label = warehouse.label?.toString().trim();
+  if (label) return label;
+  const ref = warehouse.ref?.toString().trim();
+  if (ref) return ref;
+  if (warehouse.id !== undefined && warehouse.id !== null) {
+    return "Warehouse " + warehouse.id;
+  }
+  return "Warehouse";
+}
 function parseStockNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
@@ -251,8 +268,11 @@ export default function AdminStockScreen() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [products, setProducts] = useState<DolibarrProduct[]>([]);
+  const [warehouses, setWarehouses] = useState<DolibarrWarehouse[]>([]);
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState("");
   const [productStockById, setProductStockById] = useState<Record<string, number | null>>({});
   const [companyStockError, setCompanyStockError] = useState<string | null>(null);
+  const [stockPrefetchDone, setStockPrefetchDone] = useState(false);
   const loadingStockIds = useRef<Set<string>>(new Set());
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [orders, setOrders] = useState<DolibarrOrder[]>([]);
@@ -302,19 +322,19 @@ export default function AdminStockScreen() {
         transferResult,
         employeeResult,
         productResult,
-        ordersResult,
+        warehouseResult,
         localStockists,
       ] = await Promise.all([
         refreshStockistsFromBackend(),
         getStockTransfers(),
         loadEmployees(),
         getDolibarrProducts({
-          limit: 400,
+          limit: 200,
           sortfield: "label",
           sortorder: "asc",
-          includestockdata: 1,
+          includestockdata: 0,
         }).catch(() => []),
-        getDolibarrOrders({ limit: 400, sortfield: "date_commande", sortorder: "desc" }).catch(() => []),
+        getDolibarrWarehouses({ limit: 200, sortfield: "label", sortorder: "asc" }).catch(() => []),
         getStockists(),
       ]);
       let resolvedStockists = remoteStockists ?? localStockists;
@@ -334,24 +354,24 @@ export default function AdminStockScreen() {
       setTransfers(transferResult);
       setEmployees(employeeResult.filter((entry) => entry.role === "salesperson"));
       setProducts(Array.isArray(productResult) ? productResult : []);
-      setOrders(Array.isArray(ordersResult) ? ordersResult : []);
+      setStockPrefetchDone(false);
+      setWarehouses(Array.isArray(warehouseResult) ? warehouseResult : []);
+      void (async () => {
+        try {
+          const ordersResult = await getDolibarrOrders({ limit: 300, sortfield: "date_commande", sortorder: "desc" });
+          setOrders(Array.isArray(ordersResult) ? ordersResult : []);
+        } catch {
+          setOrders([]);
+        }
+      })();
     } finally {
       setLoading(false);
     }
   }, [canAccess, loadEmployees]);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadData();
-    }, [loadData])
-  );
-
-  useEffect(() => {
     if (!canAccess || orders.length === 0) return;
+    if (!stockPrefetchDone) return;
     if (orderLinesLoading) return;
     const orderIds = orders
       .map((order) => parseNumericId(order.id))
@@ -363,29 +383,49 @@ export default function AdminStockScreen() {
     setOrderLinesLoading(true);
     setOrderLinesError(null);
 
-    const loadLines = async () => {
-      for (let i = 0; i < missing.length; i += ITEMWISE_BATCH) {
-        const chunk = missing.slice(i, i + ITEMWISE_BATCH);
-        const results = await Promise.all(
-          chunk.map(async (orderId) => {
-            try {
-              const detail = await getDolibarrOrderDetail(orderId);
-              return { id: String(orderId), lines: detail.lines || [] };
-            } catch (err) {
-              const message = err instanceof Error ? err.message : "Unable to load order details.";
-              return { id: String(orderId), lines: [], error: message };
-            }
-          })
-        );
-
-        if (!active) return;
-        setOrderLinesById((current) => {
-          const next = { ...current };
-          for (const entry of results) {
-            next[entry.id] = entry.lines;
+    const fetchChunk = async (chunk: number[]) => {
+      const results = await Promise.all(
+        chunk.map(async (orderId) => {
+          try {
+            const detail = await getDolibarrOrderDetail(orderId);
+            return { id: String(orderId), lines: detail.lines || [] };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Unable to load order details.";
+            return { id: String(orderId), lines: [], error: message };
           }
-          return next;
-        });
+        })
+      );
+
+      if (!active) return;
+      setOrderLinesById((current) => {
+        const next = { ...current };
+        for (const entry of results) {
+          next[entry.id] = entry.lines;
+        }
+        return next;
+      });
+    };
+
+    const loadLines = async () => {
+      const initial = missing.slice(0, ITEMWISE_INITIAL);
+      const rest = missing.slice(ITEMWISE_INITIAL);
+      const initialQueue = [...initial];
+      const workerCount = Math.min(ITEMWISE_CONCURRENCY, Math.max(1, Math.ceil(initialQueue.length / ITEMWISE_BATCH)));
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (initialQueue.length > 0) {
+          const chunk = initialQueue.splice(0, ITEMWISE_BATCH);
+          await fetchChunk(chunk);
+        }
+      });
+      await Promise.all(workers);
+
+      if (!active || rest.length === 0) return;
+      const restQueue = [...rest];
+      while (restQueue.length > 0) {
+        const chunk = restQueue.splice(0, ITEMWISE_BATCH);
+        await fetchChunk(chunk);
+        if (!active) return;
+        await new Promise((resolve) => setTimeout(resolve, ITEMWISE_PAUSE_MS));
       }
     };
 
@@ -400,7 +440,7 @@ export default function AdminStockScreen() {
     return () => {
       active = false;
     };
-  }, [canAccess, orderLinesById, orderLinesLoading, orders]);
+  }, [canAccess, orderLinesById, orderLinesLoading, orders, stockPrefetchDone]);
 
   const stockistMap = useMemo(() => {
     const map = new Map<string, StockistProfile>();
@@ -656,8 +696,7 @@ export default function AdminStockScreen() {
 
 
 
-
-    useEffect(() => {
+  useEffect(() => {
     const targetIds = new Set<string>();
     if (showItemDropdown) {
       for (const product of filteredProducts) {
@@ -668,13 +707,17 @@ export default function AdminStockScreen() {
     if (itemProductId) {
       targetIds.add(itemProductId);
     }
-    if (!showItemDropdown && !itemProductId && Object.keys(productStockById).length === 0) {
+    const isInitialPrefetch = !showItemDropdown && !itemProductId && Object.keys(productStockById).length === 0;
+    if (isInitialPrefetch) {
       for (const product of products.slice(0, PREFETCH_PRODUCT_STOCK_COUNT)) {
         if (product.id === undefined || product.id === null) continue;
         targetIds.add(String(product.id));
       }
     }
-    if (targetIds.size === 0) return;
+    if (targetIds.size === 0) {
+      if (isInitialPrefetch) setStockPrefetchDone(true);
+      return;
+    }
     const pendingIds: string[] = [];
     for (const id of targetIds) {
       if (Object.prototype.hasOwnProperty.call(productStockById, id)) continue;
@@ -686,17 +729,31 @@ export default function AdminStockScreen() {
     let active = true;
     const loadStock = async () => {
       try {
-        const stockMap = await getCompanyProductStocks(pendingIds);
-        if (!active) return;
-        setCompanyStockError(null);
-        setProductStockById((current) => {
-          const next = { ...current };
-          for (const id of pendingIds) {
-            const parsed = parseStockNumber(stockMap[id]);
-            next[id] = parsed !== null ? parsed : 0;
+        const queue = [...pendingIds];
+        const workerCount = Math.min(
+          STOCK_FETCH_CONCURRENCY,
+          Math.max(1, Math.ceil(queue.length / STOCK_FETCH_BATCH))
+        );
+        const workers = Array.from({ length: workerCount }, async () => {
+          while (queue.length > 0) {
+            const chunk = queue.splice(0, STOCK_FETCH_BATCH);
+            const stockMap = await getCompanyProductStocks(chunk);
+            if (!active) return;
+            setCompanyStockError(null);
+            setProductStockById((current) => {
+              const next = { ...current };
+              for (const id of chunk) {
+                const parsed = parseStockNumber(stockMap[id]);
+                next[id] = parsed !== null ? parsed : 0;
+              }
+              return next;
+            });
           }
-          return next;
         });
+        await Promise.all(workers);
+        if (isInitialPrefetch) {
+          setStockPrefetchDone(true);
+        }
       } catch (error) {
         if (!active) return;
         const message = error instanceof Error ? error.message : "Unable to load company stock.";
@@ -1197,6 +1254,37 @@ export default function AdminStockScreen() {
             Sales are auto-deducted by pincode. Use "Sent to Salesperson" only for manual adjustments.
           </Text>
 
+          <Text style={[styles.fieldLabel, { color: colors.textSecondary }]}>Choose warehouse</Text>
+          {warehouses.length > 0 ? (
+            <View style={styles.chipRow}>
+              {warehouses.map((warehouse) => {
+                const warehouseId = warehouse.id ? String(warehouse.id) : "";
+                if (!warehouseId) return null;
+                const active = warehouseId === selectedWarehouseId;
+                return (
+                  <Pressable
+                    key={warehouseId}
+                    onPress={() => setSelectedWarehouseId(warehouseId)}
+                    style={[
+                      styles.chip,
+                      {
+                        borderColor: active ? colors.primary : colors.border,
+                        backgroundColor: active ? colors.primary + "15" : colors.surface,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
+                      {getWarehouseLabel(warehouse)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : (
+            <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+              No warehouses loaded from Dolibarr.
+            </Text>
+          )}
           <View style={styles.dropdownWrap}>
             <TextInput
               value={itemSearch}
@@ -1211,7 +1299,7 @@ export default function AdminStockScreen() {
                 setShowItemDropdown(true);
                 if (!products.length && !loadingProducts) {
                   setLoadingProducts(true);
-                  getDolibarrProducts({ limit: 400, sortfield: "label", sortorder: "asc", includestockdata: 1 })
+                  getDolibarrProducts({ limit: 400, sortfield: "label", sortorder: "asc", includestockdata: 0 })
                     .then((result) => {
                       setProducts(Array.isArray(result) ? result : []);
                     })

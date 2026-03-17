@@ -41,9 +41,11 @@ import {
   addTask,
   addAuditLog,
   addConversation,
+  addStockTransfer,
   getAttendance,
   getConversations,
   getLocationLogs,
+  getStockists,
   getTasks,
   removeTask,
   updateTask,
@@ -112,6 +114,10 @@ function normalizeSpeechRmsValue(rmsValue: number): number {
   const normalized = (rmsValue + 2) / 12;
   // Slight curve so speech peaks pop while low noise remains subdued.
   return clamp01(Math.pow(clamp01(normalized), 0.8));
+}
+
+function normalizeAreaKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
 }
 
 function normalizeMeteringDbValue(dbValue: number): number {
@@ -3052,6 +3058,69 @@ export default function SalesScreen() {
         throw new Error(result.message || "Sales order created but ID missing.");
       }
       await validateDolibarrSalesOrder(result.orderId);
+
+      const deductionItems = cartItems
+        .map((entry) => {
+          const productId = getDolibarrProductId(entry.product);
+          if (!productId) return null;
+          return {
+            productId,
+            name: getDolibarrProductLabel(entry.product),
+            qty: entry.qty,
+          };
+        })
+        .filter((entry): entry is { productId: number; name: string; qty: number } => Boolean(entry));
+
+      if (deductionItems.length > 0) {
+        const stockists = await getStockists();
+        let assignedStockist: { id: string; name: string } | null =
+          user?.stockistId
+            ? stockists.find((entry) => entry.id === user.stockistId) ||
+              (user.stockistName
+                ? { id: user.stockistId, name: user.stockistName }
+                : null)
+            : null;
+
+        if (!assignedStockist) {
+          const areaKey = normalizeAreaKey(user?.pincode || user?.branch || "");
+          if (areaKey) {
+            assignedStockist =
+              stockists.find((entry) => normalizeAreaKey(entry.pincode || "") === areaKey) ||
+              stockists.find((entry) => normalizeAreaKey(entry.location || "") === areaKey) ||
+              null;
+          }
+        }
+
+        const now = new Date().toISOString();
+        const transferPayloads = assignedStockist
+          ? deductionItems.map((item) => ({
+              id: `pos_sale_${result.orderId}_${item.productId}_${Date.now()}`,
+              stockistId: assignedStockist!.id,
+              stockistName: assignedStockist!.name,
+              type: "out" as const,
+              itemName: item.name,
+              itemId: String(item.productId),
+              quantity: item.qty,
+              salespersonId: user?.id,
+              salespersonName: user?.name,
+              note: `POS Order #${result.orderId}`,
+              createdAt: now,
+            }))
+          : [];
+
+        const transferResults = transferPayloads.length
+          ? await Promise.allSettled(transferPayloads.map((payload) => addStockTransfer(payload)))
+          : [];
+
+        const transferFailed = transferResults.some((entry) => entry.status === "rejected");
+        if (transferFailed) {
+          Alert.alert(
+            "Stock Update Warning",
+            "Order created but channel partner stock could not be fully updated."
+          );
+        }
+      }
+
       setPosSuccess(`Sales order #${result.orderId} created and validated.`);
       setPosCart({});
     } catch (error) {
@@ -3062,7 +3131,7 @@ export default function SalesScreen() {
     } finally {
       setPosSubmitting(false);
     }
-  }, [cartItems, posSubmitting, selectedCustomer]);
+  }, [cartItems, posSubmitting, selectedCustomer, user]);
 
   return (
     <AppCanvas>

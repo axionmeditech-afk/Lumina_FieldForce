@@ -75,6 +75,8 @@ const DOLIBARR_PROXY_RULES: Array<{
   { prefix: "/products", roles: ["admin", "hr", "manager", "salesperson"] },
   { prefix: "/thirdparties", roles: ["admin", "hr", "manager", "salesperson"] },
   { prefix: "/orders", roles: ["admin", "hr", "manager", "salesperson"] },
+  { prefix: "/warehouses", roles: ["admin", "hr", "manager"] },
+  { prefix: "/stockmovements", roles: ["admin", "hr", "manager"] },
   { prefix: "/invoices", roles: ["admin", "hr", "manager"] },
 ];
 const PRODUCT_STOCK_TABLE = "nmy5_product_stock";
@@ -3561,7 +3563,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post(
     "/api/stock/products/adjust",
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
+    requireRoles("admin", "hr", "manager", "salesperson"),
     async (req, res) => {
       if (!isMySqlStateEnabled()) {
         res.status(503).json({ message: "MySQL stock store is not configured." });

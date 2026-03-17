@@ -47,6 +47,17 @@ export interface DolibarrProduct {
   stock_warehouse?: Record<string, unknown> | unknown[];
 }
 
+export interface DolibarrWarehouse {
+  id?: number | string;
+  ref?: string;
+  label?: string;
+  description?: string;
+  address?: string;
+  town?: string;
+  zip?: string;
+  status?: number | string;
+}
+
 export interface DolibarrThirdParty {
   id?: number | string;
   name?: string;
@@ -104,6 +115,26 @@ export interface DolibarrOrderLine {
   total_ht?: number | string;
   total_ttc?: number | string;
   tva_tx?: number | string;
+}
+
+export interface DolibarrStockMovement {
+  id?: number | string;
+  rowid?: number | string;
+  fk_product?: number | string;
+  product_id?: number | string;
+  product_ref?: string;
+  product_label?: string;
+  label?: string;
+  movementcode?: string;
+  movementlabel?: string;
+  inventorycode?: string;
+  type_mouvement?: number | string;
+  movement?: number | string;
+  qty?: number | string;
+  value?: number | string;
+  datem?: number | string;
+  date?: number | string;
+  tms?: number | string;
 }
 
 export interface DolibarrOrderDetail extends DolibarrOrder {
@@ -1534,6 +1565,79 @@ export async function getDolibarrProducts(options?: {
   });
 }
 
+export async function getDolibarrWarehouses(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+  page?: number;
+}): Promise<DolibarrWarehouse[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (typeof options?.page === "number" && Number.isFinite(options.page)) {
+    params.set("page", String(Math.max(0, Math.floor(options.page))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  const response = await fetchJson<unknown>(
+    `/dolibarr/proxy/warehouses${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+  if (Array.isArray(response)) return response as DolibarrWarehouse[];
+  if (response && typeof response === "object") {
+    const payload = response as Record<string, unknown>;
+    const candidates = [
+      payload.warehouses,
+      payload.items,
+      payload.data,
+      payload.results,
+      payload.result,
+    ];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate)) {
+        return candidate as DolibarrWarehouse[];
+      }
+    }
+  }
+  return [];
+}
+
+export async function getDolibarrStockMovements(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+  page?: number;
+}): Promise<DolibarrStockMovement[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (typeof options?.page === "number" && Number.isFinite(options.page)) {
+    params.set("page", String(Math.max(0, Math.floor(options.page))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrStockMovement[]>(
+    `/dolibarr/proxy/stockmovements${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
 export async function getDolibarrProductById(
   productId: number | string,
   options?: { includestockdata?: number | boolean }
@@ -1599,6 +1703,53 @@ export async function adjustCompanyProductStock(payload: {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export async function createDolibarrStockMovement(payload: {
+  productId: number | string;
+  warehouseId: number | string;
+  qty: number;
+  direction: "in" | "out";
+  code?: string;
+  label?: string;
+  price?: number;
+}): Promise<Record<string, unknown>> {
+  const resolvedQty = Number(payload.qty);
+  const qty = Number.isFinite(resolvedQty) ? Math.abs(resolvedQty) : 0;
+  const movement = payload.direction === "out" ? 1 : 0;
+  const baseBody = {
+    product_id: payload.productId,
+    warehouse_id: payload.warehouseId,
+    qty: movement === 1 ? -qty : qty,
+    movement,
+    type: movement,
+    movementcode: payload.code,
+    movementlabel: payload.label,
+    price: payload.price,
+  };
+
+  const cleanedBody: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(baseBody)) {
+    if (value !== undefined && value !== null && value !== "") {
+      cleanedBody[key] = value;
+    }
+  }
+
+  try {
+    return await fetchJson<Record<string, unknown>>("/dolibarr/proxy/stockmovements", {
+      method: "POST",
+      body: JSON.stringify(cleanedBody),
+    });
+  } catch (error) {
+    const fallbackBody = {
+      ...cleanedBody,
+      qty: movement === 1 ? qty : qty,
+    };
+    return await fetchJson<Record<string, unknown>>("/dolibarr/proxy/stockmovements", {
+      method: "POST",
+      body: JSON.stringify(fallbackBody),
+    });
+  }
 }
 
 export async function getDolibarrThirdParties(options?: {
