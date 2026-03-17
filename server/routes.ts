@@ -3482,6 +3482,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   );
 
+  app.delete(
+    "/api/stockists/:id",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      if (!isMySqlStateEnabled()) {
+        res.status(503).json({ message: "MySQL state store is not configured." });
+        return;
+      }
+      const stockistId = toStringId(req.params.id);
+      if (!stockistId) {
+        res.status(400).json({ message: "Channel partner id is required." });
+        return;
+      }
+      try {
+        const conn = await getMySqlPool();
+        const [result] = await conn.execute<any>(
+          "DELETE FROM lff_stockists WHERE id = ?",
+          [stockistId]
+        );
+        if (!result?.affectedRows) {
+          res.status(404).json({ message: "Channel partner not found." });
+          return;
+        }
+        res.json({ id: stockistId });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to delete channel partner.";
+        res.status(500).json({ message });
+      }
+    }
+  );
+
   app.get(
     "/api/stock/products",
     requireAuth,

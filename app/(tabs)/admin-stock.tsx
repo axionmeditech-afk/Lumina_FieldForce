@@ -34,6 +34,7 @@ import type { Employee, StockistProfile, StockTransfer } from "@/lib/types";
 import {
   adjustCompanyProductStock,
   createStockist,
+  deleteStockist,
   isApiAuthRequiredError,
   getCompanyProductStocks,
   getDolibarrOrderDetail,
@@ -265,6 +266,7 @@ export default function AdminStockScreen() {
   const [newStockistPincode, setNewStockistPincode] = useState("");
   const [newStockistNotes, setNewStockistNotes] = useState("");
   const [creatingStockist, setCreatingStockist] = useState(false);
+  const [deletingStockistId, setDeletingStockistId] = useState<string | null>(null);
 
   const [selectedStockistId, setSelectedStockistId] = useState("");
   const [transferType, setTransferType] = useState<TransferType>("in");
@@ -791,6 +793,51 @@ export default function AdminStockScreen() {
     newStockistPincode,
     user,
   ]);
+
+  const handleDeleteStockist = useCallback(
+    (stockist: StockistProfile) => {
+      if (deletingStockistId) return;
+      Alert.alert(
+        "Delete Channel Partner",
+        `Delete ${stockist.name}? This removes the partner from the app.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: () => {
+              if (deletingStockistId) return;
+              void (async () => {
+                setDeletingStockistId(stockist.id);
+                try {
+                  await deleteStockist(stockist.id);
+                  await removeStockist(stockist.id);
+                  setStockists((current) => current.filter((entry) => entry.id !== stockist.id));
+                  setTransfers((current) =>
+                    current.filter((entry) => entry.stockistId !== stockist.id)
+                  );
+                  if (selectedStockistId === stockist.id) {
+                    setSelectedStockistId("");
+                  }
+                } catch (error) {
+                  const message =
+                    error instanceof Error ? error.message : "Unable to delete channel partner.";
+                  if (isApiAuthRequiredError(error)) {
+                    Alert.alert("Backend Login Required", message);
+                  } else {
+                    Alert.alert("Delete Failed", message);
+                  }
+                } finally {
+                  setDeletingStockistId(null);
+                }
+              })();
+            },
+          },
+        ]
+      );
+    },
+    [deletingStockistId, selectedStockistId]
+  );
 
   const handleAddTransfer = useCallback(async () => {
     if (!selectedStockist) {

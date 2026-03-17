@@ -696,6 +696,12 @@ export async function createStockist(
   });
 }
 
+export async function deleteStockist(stockistId: string): Promise<{ id: string }> {
+  return fetchJson<{ id: string }>(`/stockists/${encodeURIComponent(stockistId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getUserGeofences(userId: string): Promise<Geofence[]> {
   return fetchJson<Geofence[]>(`/geofences/user/${encodeURIComponent(userId)}`, {
     method: "GET",
