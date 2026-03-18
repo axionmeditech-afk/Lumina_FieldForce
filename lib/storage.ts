@@ -76,6 +76,7 @@ const DEMO_EMAIL_SUFFIX = "@trackforce.ai";
 
 type ThemePreference = "system" | "light" | "dark";
 type CompanyScoped = { companyId?: string | null };
+type CompanyScopeMode = "active" | "accessible";
 type CompanySettingsStore = Record<string, Record<string, string>>;
 type SettingsSnapshot = Record<string, string>;
 type SettingsListener = (settings: SettingsSnapshot) => void;
@@ -702,6 +703,38 @@ function matchesCompany(item: CompanyScoped, companyId: string | null): boolean 
   if (!companyId) return true;
   if (!item.companyId) return true;
   return item.companyId === companyId;
+}
+
+function matchesCompanySet(item: CompanyScoped, companyIds: Set<string>): boolean {
+  if (!companyIds.size) return true;
+  if (!item.companyId) return true;
+  return companyIds.has(item.companyId);
+}
+
+function canDirectlyReadRemoteStockists(role?: UserRole | null): boolean {
+  return role === "admin" || role === "hr" || role === "manager";
+}
+
+async function filterByCompanyScope<T extends CompanyScoped>(
+  items: T[],
+  scope: CompanyScopeMode = "active"
+): Promise<T[]> {
+  if (scope === "active") {
+    const companyId = await getActiveCompanyId();
+    return items.filter((item) => matchesCompany(item, companyId));
+  }
+
+  const currentUser = await getCurrentUser();
+  if (!currentUser || currentUser.role === "admin") {
+    return items;
+  }
+
+  const allowedCompanyIds = new Set(
+    (currentUser.companyIds || [currentUser.companyId])
+      .map((companyId) => normalizeWhitespace(companyId))
+      .filter((companyId) => Boolean(companyId))
+  );
+  return items.filter((item) => matchesCompanySet(item, allowedCompanyIds));
 }
 
 async function getItem<T>(key: string): Promise<T | null> {
@@ -2277,14 +2310,25 @@ function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
 }
 
-export async function getStockists(): Promise<StockistProfile[]> {
-  const companyId = await getActiveCompanyId();
-  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
-  return stockists.filter((stockist) => matchesCompany(stockist, companyId));
+export async function getStockists(options?: {
+  scope?: CompanyScopeMode;
+  refreshRemote?: boolean;
+}): Promise<StockistProfile[]> {
+  let stockists: StockistProfile[] | null | undefined = undefined;
+
+  if (options?.refreshRemote) {
+    const currentUser = await getCurrentUser();
+    if (canDirectlyReadRemoteStockists(currentUser?.role)) {
+      stockists = await fetchStockistsRemote();
+    }
+  }
+
+  const resolved = Array.isArray(stockists) ? stockists : await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  return filterByCompanyScope(resolved, options?.scope ?? "active");
 }
 
 export async function addStockist(
-  input: Omit<StockistProfile, "companyId" | "createdAt" | "updatedAt"> & { id?: string }
+  input: Omit<StockistProfile, "id" | "companyId" | "createdAt" | "updatedAt"> & { id?: string }
 ): Promise<StockistProfile> {
   const companyId = await getActiveCompanyId();
   const now = new Date().toISOString();
@@ -2325,15 +2369,11 @@ export async function refreshStockistsFromBackend(): Promise<StockistProfile[] |
   await seedDataIfNeeded();
   const direct = await fetchStockistsRemote();
   if (typeof direct !== "undefined") {
-    const normalized = Array.isArray(direct) ? direct : [];
-    await setItem(KEYS.STOCKISTS, normalized);
-    return normalized;
+    return Array.isArray(direct) ? direct : [];
   }
   const remote = await fetchStateRemote<StockistProfile[]>(KEYS.STOCKISTS);
   if (typeof remote === "undefined") return null;
-  const normalized = Array.isArray(remote) ? remote : [];
-  await setItem(KEYS.STOCKISTS, normalized);
-  return normalized;
+  return Array.isArray(remote) ? remote : [];
 }
 
 export async function clearLocalStockists(): Promise<void> {
@@ -2405,10 +2445,11 @@ export async function removeStockist(stockistId: string): Promise<boolean> {
   return true;
 }
 
-export async function getStockTransfers(): Promise<StockTransfer[]> {
-  const companyId = await getActiveCompanyId();
+export async function getStockTransfers(options?: {
+  scope?: CompanyScopeMode;
+}): Promise<StockTransfer[]> {
   const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
-  return transfers.filter((transfer) => matchesCompany(transfer, companyId));
+  return filterByCompanyScope(transfers, options?.scope ?? "active");
 }
 
 export async function addStockTransfer(transfer: StockTransfer): Promise<void> {

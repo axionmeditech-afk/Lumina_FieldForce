@@ -41,6 +41,7 @@ import {
   addTask,
   addAuditLog,
   addConversation,
+  addStockist,
   addStockTransfer,
   getAttendance,
   getConversations,
@@ -3073,13 +3074,27 @@ export default function SalesScreen() {
 
       if (deductionItems.length > 0) {
         const stockists = await getStockists();
-        let assignedStockist: { id: string; name: string } | null =
-          user?.stockistId
-            ? stockists.find((entry) => entry.id === user.stockistId) ||
-              (user.stockistName
-                ? { id: user.stockistId, name: user.stockistName }
-                : null)
-            : null;
+        let assignedStockist: { id: string; name: string } | null = null;
+        if (user?.stockistId) {
+          const matched = stockists.find((entry) => entry.id === user.stockistId);
+          if (matched) {
+            assignedStockist = { id: matched.id, name: matched.name };
+          } else {
+            const fallbackName = user.stockistName || "Channel Partner";
+            try {
+              const created = await addStockist({
+                id: user.stockistId,
+                name: fallbackName,
+                pincode: user.pincode,
+                location: user.branch || undefined,
+                phone: user.phone || undefined,
+              });
+              assignedStockist = { id: created.id, name: created.name };
+            } catch {
+              assignedStockist = { id: user.stockistId, name: fallbackName };
+            }
+          }
+        }
 
         if (!assignedStockist) {
           const areaKey = normalizeAreaKey(user?.pincode || user?.branch || "");

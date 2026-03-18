@@ -191,6 +191,10 @@ export interface StockistProfile {
   location?: string;
   pincode?: string;
   notes?: string;
+  stockIn?: number;
+  stockOut?: number;
+  stockBalance?: number;
+  lastStockUpdate?: string;
   createdAt: string;
   updatedAt: string;
 }

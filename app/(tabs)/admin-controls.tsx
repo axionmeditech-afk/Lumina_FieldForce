@@ -148,7 +148,7 @@ export default function AdminControlsScreen() {
       getCompanyProfiles(),
       getUserAccessRequests("pending"),
       getAllEmployees(),
-      getStockists(),
+      getStockists({ scope: "accessible", refreshRemote: true }),
       getAdminAccessRequests("pending").catch(() => []),
     ]);
     const pendingRequests = mergePendingRequests(localPendingRequests, remotePendingRequests);

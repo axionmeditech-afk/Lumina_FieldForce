@@ -644,6 +644,7 @@ const authUsersByEmail = new Map<string, AuthUserRecord>();
 const authUsersByLogin = new Map<string, AuthUserRecord>();
 const accessRequestsById = new Map<string, AccessRequestRecord>();
 const inMemoryStateStore = new Map<string, string>();
+let accessRequestAssignmentColumnsEnsured = false;
 
 function setAuthUserRecord(record: AuthUserRecord): void {
   const emailKey = normalizeEmailKey(record.user.email);
@@ -796,8 +797,21 @@ function toPublicAccessRequest(entry: AccessRequestRecord): UserAccessRequest {
   return rest;
 }
 
+async function ensureAccessRequestAssignmentColumns(): Promise<void> {
+  if (accessRequestAssignmentColumnsEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    ALTER TABLE lff_access_requests
+      ADD COLUMN IF NOT EXISTS assigned_stockist_id VARCHAR(64) NULL AFTER assigned_manager_name,
+      ADD COLUMN IF NOT EXISTS assigned_stockist_name VARCHAR(191) NULL AFTER assigned_stockist_id
+  `);
+  accessRequestAssignmentColumnsEnsured = true;
+}
+
 async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
   if (!isMySqlStateEnabled()) return;
+  await ensureAccessRequestAssignmentColumns();
   const conn = await getMySqlPool();
   try {
     await conn.execute(
@@ -805,8 +819,8 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
         id, name, email, requested_role, approved_role, requested_department, requested_branch,
         requested_company_name, status, requested_at, reviewed_at, reviewed_by_id, reviewed_by_name,
         review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name,
-        password_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        assigned_stockist_id, assigned_stockist_name, password_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         approved_role = VALUES(approved_role),
         status = VALUES(status),
@@ -817,6 +831,8 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
         assigned_company_ids_json = VALUES(assigned_company_ids_json),
         assigned_manager_id = VALUES(assigned_manager_id),
         assigned_manager_name = VALUES(assigned_manager_name),
+        assigned_stockist_id = VALUES(assigned_stockist_id),
+        assigned_stockist_name = VALUES(assigned_stockist_name),
         password_hash = VALUES(password_hash)`,
       [
         entry.id,
@@ -836,6 +852,8 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
         JSON.stringify(entry.assignedCompanyIds || []),
         entry.assignedManagerId ?? null,
         entry.assignedManagerName ?? null,
+        entry.assignedStockistId ?? null,
+        entry.assignedStockistName ?? null,
         entry.passwordHash ?? null,
       ]
     );
@@ -848,8 +866,9 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
       `INSERT INTO lff_access_requests (
         id, name, email, requested_role, approved_role, requested_department, requested_branch,
         requested_company_name, status, requested_at, reviewed_at, reviewed_by_id, reviewed_by_name,
-        review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        review_comment, assigned_company_ids_json, assigned_manager_id, assigned_manager_name,
+        assigned_stockist_id, assigned_stockist_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         approved_role = VALUES(approved_role),
         status = VALUES(status),
@@ -859,7 +878,9 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
         review_comment = VALUES(review_comment),
         assigned_company_ids_json = VALUES(assigned_company_ids_json),
         assigned_manager_id = VALUES(assigned_manager_id),
-        assigned_manager_name = VALUES(assigned_manager_name)`,
+        assigned_manager_name = VALUES(assigned_manager_name),
+        assigned_stockist_id = VALUES(assigned_stockist_id),
+        assigned_stockist_name = VALUES(assigned_stockist_name)`,
       [
         entry.id,
         entry.name,
@@ -878,6 +899,8 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
         JSON.stringify(entry.assignedCompanyIds || []),
         entry.assignedManagerId ?? null,
         entry.assignedManagerName ?? null,
+        entry.assignedStockistId ?? null,
+        entry.assignedStockistName ?? null,
       ]
     );
   }
@@ -886,6 +909,8 @@ async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<v
 async function listAccessRequestsFromMySql(
   status: UserAccessRequest["status"] | null
 ): Promise<AccessRequestRecord[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureAccessRequestAssignmentColumns();
   const conn = await getMySqlPool();
   const params: unknown[] = [];
   let sql = `SELECT * FROM lff_access_requests`;
@@ -920,12 +945,15 @@ async function listAccessRequestsFromMySql(
     })(),
     assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
     assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    assignedStockistId: row.assigned_stockist_id ? String(row.assigned_stockist_id) : null,
+    assignedStockistName: row.assigned_stockist_name ? String(row.assigned_stockist_name) : null,
     passwordHash: row.password_hash ? String(row.password_hash) : undefined,
   }));
 }
 
 async function getAccessRequestByIdFromMySql(id: string): Promise<AccessRequestRecord | null> {
   if (!isMySqlStateEnabled()) return null;
+  await ensureAccessRequestAssignmentColumns();
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_access_requests WHERE id = ? LIMIT 1`,
@@ -958,6 +986,8 @@ async function getAccessRequestByIdFromMySql(id: string): Promise<AccessRequestR
     })(),
     assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
     assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    assignedStockistId: row.assigned_stockist_id ? String(row.assigned_stockist_id) : null,
+    assignedStockistName: row.assigned_stockist_name ? String(row.assigned_stockist_name) : null,
     passwordHash: row.password_hash ? String(row.password_hash) : undefined,
   };
 }
@@ -1041,6 +1071,59 @@ function resolveApprovalStatus(
     return record.user.approvalStatus;
   }
   return "approved";
+}
+
+function mergeApprovedAccessRequestIntoUser(
+  user: AppUser,
+  request: AccessRequestRecord | null
+): AppUser {
+  if (!request || request.status !== "approved") return user;
+  const mergedRole = normalizeRole(request.approvedRole || request.requestedRole || user.role);
+  const mergedCompanyName = normalizeCompanyName(
+    request.requestedCompanyName || user.companyName || DEFAULT_COMPANY_NAME
+  );
+  const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
+  const existingCompanyIds = normalizeCompanyIds(user.companyIds);
+  const mergedCompanyId =
+    assignedCompanyIds[0] ||
+    normalizeWhitespace(user.companyId || "") ||
+    getCompanyIdFromName(mergedCompanyName);
+  const mergedCompanyIds =
+    assignedCompanyIds.length > 0
+      ? assignedCompanyIds
+      : existingCompanyIds.length > 0
+        ? existingCompanyIds
+        : [mergedCompanyId];
+  const isSalesperson = mergedRole === "salesperson";
+
+  return {
+    ...user,
+    role: mergedRole,
+    companyId: mergedCompanyId,
+    companyName: mergedCompanyName,
+    companyIds: mergedCompanyIds,
+    department:
+      normalizeWhitespace(request.requestedDepartment || "") ||
+      normalizeWhitespace(user.department || "") ||
+      roleToDepartment(mergedRole),
+    branch:
+      normalizeWhitespace(request.requestedBranch || "") ||
+      normalizeWhitespace(user.branch || "") ||
+      "Main Branch",
+    managerId: isSalesperson
+      ? undefined
+      : request.assignedManagerId || user.managerId || undefined,
+    managerName: isSalesperson
+      ? undefined
+      : request.assignedManagerName || user.managerName || undefined,
+    stockistId: isSalesperson
+      ? request.assignedStockistId || user.stockistId || undefined
+      : undefined,
+    stockistName: isSalesperson
+      ? request.assignedStockistName || user.stockistName || undefined
+      : undefined,
+    approvalStatus: "approved",
+  };
 }
 
 function getLatestPendingAccessRequestByEmail(email: string): UserAccessRequest | null {
@@ -1193,6 +1276,7 @@ async function getLatestAccessRequestByEmailFromMySql(
   email: string
 ): Promise<AccessRequestRecord | null> {
   if (!isMySqlStateEnabled()) return null;
+  await ensureAccessRequestAssignmentColumns();
   const normalized = normalizeEmail(email);
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
@@ -1229,6 +1313,8 @@ async function getLatestAccessRequestByEmailFromMySql(
     })(),
     assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
     assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    assignedStockistId: row.assigned_stockist_id ? String(row.assigned_stockist_id) : null,
+    assignedStockistName: row.assigned_stockist_name ? String(row.assigned_stockist_name) : null,
     passwordHash: row.password_hash ? String(row.password_hash) : undefined,
   };
 }
@@ -1237,6 +1323,7 @@ async function getLatestPendingAccessRequestByEmailFromMySql(
   email: string
 ): Promise<AccessRequestRecord | null> {
   if (!isMySqlStateEnabled()) return null;
+  await ensureAccessRequestAssignmentColumns();
   const normalized = normalizeEmail(email);
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
@@ -1273,8 +1360,35 @@ async function getLatestPendingAccessRequestByEmailFromMySql(
     })(),
     assignedManagerId: row.assigned_manager_id ? String(row.assigned_manager_id) : null,
     assignedManagerName: row.assigned_manager_name ? String(row.assigned_manager_name) : null,
+    assignedStockistId: row.assigned_stockist_id ? String(row.assigned_stockist_id) : null,
+    assignedStockistName: row.assigned_stockist_name ? String(row.assigned_stockist_name) : null,
     passwordHash: row.password_hash ? String(row.password_hash) : undefined,
   };
+}
+
+async function refreshStockistBalancesInMySql(
+  executor?: {
+    execute: (sql: string) => Promise<unknown>;
+  }
+): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const target = executor ?? (await getMySqlPool());
+  await target.execute(`
+    UPDATE lff_stockists s
+    LEFT JOIN (
+      SELECT stockist_id, company_id,
+             SUM(CASE WHEN transfer_type = 'in' THEN quantity ELSE 0 END) AS stock_in,
+             SUM(CASE WHEN transfer_type = 'out' THEN quantity ELSE 0 END) AS stock_out,
+             MAX(created_at) AS last_stock_update
+      FROM lff_stock_transfers
+      GROUP BY stockist_id, company_id
+    ) t
+      ON t.stockist_id = s.id AND (s.company_id <=> t.company_id)
+    SET s.stock_in = COALESCE(t.stock_in, 0),
+        s.stock_out = COALESCE(t.stock_out, 0),
+        s.stock_balance = COALESCE(t.stock_in, 0) - COALESCE(t.stock_out, 0),
+        s.last_stock_update = t.last_stock_update
+  `);
 }
 
 function isRemoteStateKeyAllowed(key: string): boolean {
@@ -1308,8 +1422,11 @@ function toStringId(value: unknown): string | null {
 async function listStockistsFromMySql(): Promise<unknown[]> {
   if (!isMySqlStateEnabled()) return [];
   const conn = await getMySqlPool();
+  await refreshStockistBalancesInMySql(conn);
   const [rows] = await conn.query<any[]>(`
-    SELECT id, company_id, name, phone, location, pincode, notes, created_at, updated_at
+    SELECT id, company_id, name, phone, location, pincode, notes,
+           stock_in, stock_out, stock_balance, last_stock_update,
+           created_at, updated_at
     FROM lff_stockists
     ORDER BY updated_at DESC
   `);
@@ -1322,6 +1439,10 @@ async function listStockistsFromMySql(): Promise<unknown[]> {
     location: row.location ? String(row.location) : undefined,
     pincode: row.pincode ? String(row.pincode) : undefined,
     notes: row.notes ? String(row.notes) : undefined,
+    stockIn: Number.isFinite(Number(row.stock_in)) ? Number(row.stock_in) : 0,
+    stockOut: Number.isFinite(Number(row.stock_out)) ? Number(row.stock_out) : 0,
+    stockBalance: Number.isFinite(Number(row.stock_balance)) ? Number(row.stock_balance) : 0,
+    lastStockUpdate: row.last_stock_update ? toIsoTimestamp(row.last_stock_update, nowIso) : undefined,
     createdAt: toIsoTimestamp(row.created_at, nowIso),
     updatedAt: toIsoTimestamp(row.updated_at, nowIso),
   }));
@@ -1523,6 +1644,7 @@ async function replaceStockistsInMySql(entries: unknown[]): Promise<void> {
         [id, companyId, name, phone, location, pincode, notes, createdAt, updatedAt]
       );
     }
+    await refreshStockistBalancesInMySql(conn);
     await conn.commit();
   } catch (error) {
     await conn.rollback();
@@ -1576,6 +1698,8 @@ async function replaceStockTransfersInMySql(entries: unknown[]): Promise<void> {
         ]
       );
     }
+
+    await refreshStockistBalancesInMySql(conn);
     await conn.commit();
   } catch (error) {
     await conn.rollback();
@@ -2108,11 +2232,25 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
       office_phone, user_mobile, pass_crypted, pass, datec, tms
     FROM nmy5_user`
   );
+  const latestAccessRequestByEmail = new Map<string, AccessRequestRecord>();
+  const accessRequests = await listAccessRequestsFromMySql(null);
+  for (const request of accessRequests) {
+    const emailKey = normalizeEmailKey(request.email);
+    if (emailKey && !latestAccessRequestByEmail.has(emailKey)) {
+      latestAccessRequestByEmail.set(emailKey, request);
+    }
+  }
 
   for (const row of rows) {
     const record = buildAuthRecordFromMySqlRow(row);
     if (!record) continue;
-    setAuthUserRecord(record);
+    const latestRequest = latestAccessRequestByEmail.get(normalizeEmailKey(record.user.email)) || null;
+    const hydratedRecord: AuthUserRecord = {
+      ...record,
+      user: mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
+      approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
+    };
+    setAuthUserRecord(hydratedRecord);
   }
 }
 
@@ -2203,8 +2341,14 @@ async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord 
       removeAuthUserByEmail(normalized);
       return null;
     }
-    setAuthUserRecord(record);
-    return record;
+    const latestRequest = await getLatestAccessRequestByEmailFromMySql(normalized);
+    const hydratedRecord: AuthUserRecord = {
+      ...record,
+      user: mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
+      approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
+    };
+    setAuthUserRecord(hydratedRecord);
+    return hydratedRecord;
   } catch {
     return authUsersByEmail.get(normalized) ?? null;
   }
@@ -2231,7 +2375,16 @@ function buildLoginFromEmailAndName(email: string, name: string): string {
 
 async function authenticateCredentials(identifier: string, password: string): Promise<AppUser | null> {
   await initAuthUsersStore();
-  const record = getAuthUserByIdentifier(identifier);
+  const cachedRecord = getAuthUserByIdentifier(identifier);
+  const syncEmail = identifier.includes("@")
+    ? normalizeEmail(identifier)
+    : cachedRecord?.user.email
+      ? normalizeEmail(cachedRecord.user.email)
+      : "";
+  const record =
+    syncEmail && isMySqlStateEnabled()
+      ? (await syncAuthUserCacheForEmail(syncEmail)) || getAuthUserByIdentifier(identifier)
+      : cachedRecord;
   if (!record) return null;
   if (!matchesStoredPasswordHash(record.passwordHash, password)) return null;
   if (resolveApprovalStatus(record) !== "approved") return null;
@@ -3010,6 +3163,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       assignedCompanyIds: [],
       assignedManagerId: null,
       assignedManagerName: null,
+      assignedStockistId: null,
+      assignedStockistName: null,
       passwordHash: pendingPasswordHash,
     };
     accessRequestsById.set(pendingRequest.id, pendingRequest);
@@ -3093,6 +3248,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         companyIds?: unknown;
         managerId?: string;
         managerName?: string;
+        stockistId?: string;
+        stockistName?: string;
         comment?: string;
       };
       const action = body?.action;
@@ -3123,15 +3280,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
           ? normalizeRole(body?.role || currentRequest.requestedRole)
           : null;
       const finalRole = approvedRole || currentRequest.requestedRole;
+      const isSalespersonApproval = action === "approved" && finalRole === "salesperson";
       const assignedCompanyIds =
         action === "approved" ? normalizeCompanyIds(body?.companyIds) : [];
       const assignedManagerId =
-        action === "approved"
+        action === "approved" && finalRole !== "salesperson"
           ? normalizeWhitespace(typeof body?.managerId === "string" ? body.managerId : "") || null
           : null;
       const assignedManagerName =
-        action === "approved"
+        action === "approved" && finalRole !== "salesperson"
           ? normalizeWhitespace(typeof body?.managerName === "string" ? body.managerName : "") ||
+            null
+          : null;
+      const assignedStockistId =
+        isSalespersonApproval
+          ? normalizeWhitespace(typeof body?.stockistId === "string" ? body.stockistId : "") ||
+            null
+          : null;
+      const assignedStockistName =
+        isSalespersonApproval
+          ? normalizeWhitespace(typeof body?.stockistName === "string" ? body.stockistName : "") ||
             null
           : null;
       const reviewComment = normalizeWhitespace(
@@ -3166,6 +3334,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         setAuthUserRecord(authRecord);
       }
 
+      let reviewedUser: AppUser | null = null;
       if (action === "approved") {
         const effectiveCompanyName = normalizeCompanyName(
           currentRequest.requestedCompanyName || authRecord?.user.companyName || DEFAULT_COMPANY_NAME
@@ -3174,7 +3343,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           assignedCompanyIds[0] ||
           authRecord?.user.companyId ||
           getCompanyIdFromName(effectiveCompanyName);
-        const reviewedUser: AppUser = {
+        reviewedUser = {
           ...(authRecord?.user ?? buildUserFromRegistration({
             name: currentRequest.name,
             email: normalizedEmail,
@@ -3195,6 +3364,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           companyIds: assignedCompanyIds.length ? assignedCompanyIds : [effectiveCompanyId],
           managerId: assignedManagerId || undefined,
           managerName: assignedManagerName || undefined,
+          stockistId: assignedStockistId || undefined,
+          stockistName: assignedStockistName || undefined,
           approvalStatus: "approved",
         };
 
@@ -3231,13 +3402,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         assignedCompanyIds,
         assignedManagerId,
         assignedManagerName,
+        assignedStockistId,
+        assignedStockistName,
         passwordHash: action === "approved" ? null : currentRequest.passwordHash ?? null,
       };
       accessRequestsById.set(requestId, reviewedRequest);
       try {
         const latestAuthRecord = getAuthUserByIdentifier(normalizedEmail);
         const fallbackAuthRecord =
-          !latestAuthRecord && action === "approved"
+          !latestAuthRecord && action === "approved" && reviewedUser
             ? ({
                 user: {
                   ...reviewedUser,
