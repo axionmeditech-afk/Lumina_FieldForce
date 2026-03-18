@@ -27,6 +27,7 @@ import {
   getDolibarrProducts,
   getDolibarrThirdParties,
   createDolibarrSalesOrder,
+  adjustCompanyProductStock,
   validateDolibarrSalesOrder,
   getMapplsRoutePreview,
   searchMapplsAutosuggest,
@@ -41,13 +42,12 @@ import {
   addTask,
   addAuditLog,
   addConversation,
-  addStockist,
   addStockTransfer,
   getAttendance,
   getConversations,
   getLocationLogs,
-  getStockists,
   getTasks,
+  resolveAssignedStockistForUser,
   removeTask,
   updateTask,
 } from "@/lib/storage";
@@ -115,10 +115,6 @@ function normalizeSpeechRmsValue(rmsValue: number): number {
   const normalized = (rmsValue + 2) / 12;
   // Slight curve so speech peaks pop while low noise remains subdued.
   return clamp01(Math.pow(clamp01(normalized), 0.8));
-}
-
-function normalizeAreaKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, "");
 }
 
 function normalizeMeteringDbValue(dbValue: number): number {
@@ -3073,45 +3069,14 @@ export default function SalesScreen() {
         .filter((entry): entry is { productId: number; name: string; qty: number } => Boolean(entry));
 
       if (deductionItems.length > 0) {
-        const stockists = await getStockists();
-        let assignedStockist: { id: string; name: string } | null = null;
-        if (user?.stockistId) {
-          const matched = stockists.find((entry) => entry.id === user.stockistId);
-          if (matched) {
-            assignedStockist = { id: matched.id, name: matched.name };
-          } else {
-            const fallbackName = user.stockistName || "Channel Partner";
-            try {
-              const created = await addStockist({
-                id: user.stockistId,
-                name: fallbackName,
-                pincode: user.pincode,
-                location: user.branch || undefined,
-                phone: user.phone || undefined,
-              });
-              assignedStockist = { id: created.id, name: created.name };
-            } catch {
-              assignedStockist = { id: user.stockistId, name: fallbackName };
-            }
-          }
-        }
-
-        if (!assignedStockist) {
-          const areaKey = normalizeAreaKey(user?.pincode || user?.branch || "");
-          if (areaKey) {
-            assignedStockist =
-              stockists.find((entry) => normalizeAreaKey(entry.pincode || "") === areaKey) ||
-              stockists.find((entry) => normalizeAreaKey(entry.location || "") === areaKey) ||
-              null;
-          }
-        }
+        const assignedStockist = user ? await resolveAssignedStockistForUser(user) : null;
 
         const now = new Date().toISOString();
         const transferPayloads = assignedStockist
           ? deductionItems.map((item) => ({
               id: `pos_sale_${result.orderId}_${item.productId}_${Date.now()}`,
-              stockistId: assignedStockist!.id,
-              stockistName: assignedStockist!.name,
+              stockistId: assignedStockist.id,
+              stockistName: assignedStockist.name,
               type: "out" as const,
               itemName: item.name,
               itemId: String(item.productId),
@@ -3122,16 +3087,33 @@ export default function SalesScreen() {
               createdAt: now,
             }))
           : [];
+        const directCompanyAdjustments = !assignedStockist
+          ? deductionItems.map((item) =>
+              adjustCompanyProductStock({
+                productId: item.productId,
+                delta: -item.qty,
+                reason: `POS Order #${result.orderId} direct sale by ${user?.name || "salesperson"}`,
+              })
+            )
+          : [];
 
         const transferResults = transferPayloads.length
           ? await Promise.allSettled(transferPayloads.map((payload) => addStockTransfer(payload)))
           : [];
+        const companyAdjustmentResults = directCompanyAdjustments.length
+          ? await Promise.allSettled(directCompanyAdjustments)
+          : [];
 
         const transferFailed = transferResults.some((entry) => entry.status === "rejected");
-        if (transferFailed) {
+        const companyAdjustmentFailed = companyAdjustmentResults.some(
+          (entry) => entry.status === "rejected"
+        );
+        if (transferFailed || companyAdjustmentFailed) {
           Alert.alert(
             "Stock Update Warning",
-            "Order created but channel partner stock could not be fully updated."
+            assignedStockist
+              ? "Order created but channel partner stock could not be fully updated."
+              : "Order created but company stock could not be fully updated."
           );
         }
       }

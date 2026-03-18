@@ -375,6 +375,7 @@ CREATE TABLE IF NOT EXISTS `lff_stockists` (
   `location` VARCHAR(191) NULL,
   `pincode` VARCHAR(20) NULL,
   `notes` LONGTEXT NULL,
+  `assigned_salesperson_ids_json` LONGTEXT NULL,
   `stock_in` DECIMAL(14,2) NOT NULL DEFAULT 0,
   `stock_out` DECIMAL(14,2) NOT NULL DEFAULT 0,
   `stock_balance` DECIMAL(14,2) NOT NULL DEFAULT 0,

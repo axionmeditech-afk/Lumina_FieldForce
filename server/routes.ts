@@ -645,6 +645,7 @@ const authUsersByLogin = new Map<string, AuthUserRecord>();
 const accessRequestsById = new Map<string, AccessRequestRecord>();
 const inMemoryStateStore = new Map<string, string>();
 let accessRequestAssignmentColumnsEnsured = false;
+let stockistAssignmentColumnsEnsured = false;
 
 function setAuthUserRecord(record: AuthUserRecord): void {
   const emailKey = normalizeEmailKey(record.user.email);
@@ -807,6 +808,17 @@ async function ensureAccessRequestAssignmentColumns(): Promise<void> {
       ADD COLUMN IF NOT EXISTS assigned_stockist_name VARCHAR(191) NULL AFTER assigned_stockist_id
   `);
   accessRequestAssignmentColumnsEnsured = true;
+}
+
+async function ensureStockistAssignmentColumns(): Promise<void> {
+  if (stockistAssignmentColumnsEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    ALTER TABLE lff_stockists
+      ADD COLUMN IF NOT EXISTS assigned_salesperson_ids_json LONGTEXT NULL AFTER notes
+  `);
+  stockistAssignmentColumnsEnsured = true;
 }
 
 async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
@@ -1051,6 +1063,26 @@ function normalizeCompanyIds(value: unknown): string[] {
     if (normalized) output.push(normalized);
   }
   return Array.from(new Set(output));
+}
+
+function parseStringArrayJson(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return Array.from(
+      new Set(
+        value
+          .filter((entry): entry is string => typeof entry === "string")
+          .map((entry) => normalizeWhitespace(entry))
+          .filter(Boolean)
+      )
+    );
+  }
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return parseStringArrayJson(parsed);
+  } catch {
+    return [];
+  }
 }
 
 function resolveApprovalStatus(
@@ -1403,6 +1435,47 @@ async function refreshStockistBalancesInMySql(
   `);
 }
 
+async function syncStockistSalespersonAssignmentInMySql(
+  salespersonId: string,
+  nextStockistId: string | null
+): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const normalizedSalespersonId = normalizeWhitespace(salespersonId);
+  if (!normalizedSalespersonId) return;
+  await ensureStockistAssignmentColumns();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query<any[]>(
+      `SELECT id, assigned_salesperson_ids_json FROM lff_stockists`
+    );
+    const normalizedNextStockistId = normalizeWhitespace(nextStockistId ?? "");
+    for (const row of rows || []) {
+      const stockistId = row?.id ? String(row.id) : "";
+      if (!stockistId) continue;
+      const currentIds = parseStringArrayJson(row.assigned_salesperson_ids_json);
+      let nextIds = currentIds.filter((entry) => entry !== normalizedSalespersonId);
+      if (normalizedNextStockistId && stockistId === normalizedNextStockistId) {
+        nextIds = Array.from(new Set([...nextIds, normalizedSalespersonId]));
+      }
+      if (JSON.stringify(nextIds) === JSON.stringify(currentIds)) continue;
+      await conn.execute(
+        `UPDATE lff_stockists
+         SET assigned_salesperson_ids_json = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [JSON.stringify(nextIds), stockistId]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
 function isRemoteStateKeyAllowed(key: string): boolean {
   return REMOTE_STATE_ALLOWED_KEYS.has(key);
 }
@@ -1433,10 +1506,11 @@ function toStringId(value: unknown): string | null {
 
 async function listStockistsFromMySql(): Promise<unknown[]> {
   if (!isMySqlStateEnabled()) return [];
+  await ensureStockistAssignmentColumns();
   const conn = await getMySqlPool();
   await refreshStockistBalancesInMySql(conn);
   const [rows] = await conn.query<any[]>(`
-    SELECT id, company_id, name, phone, location, pincode, notes,
+    SELECT id, company_id, name, phone, location, pincode, notes, assigned_salesperson_ids_json,
            stock_in, stock_out, stock_balance, last_stock_update,
            created_at, updated_at
     FROM lff_stockists
@@ -1451,6 +1525,7 @@ async function listStockistsFromMySql(): Promise<unknown[]> {
     location: row.location ? String(row.location) : undefined,
     pincode: row.pincode ? String(row.pincode) : undefined,
     notes: row.notes ? String(row.notes) : undefined,
+    assignedSalespersonIds: parseStringArrayJson(row.assigned_salesperson_ids_json),
     stockIn: Number.isFinite(Number(row.stock_in)) ? Number(row.stock_in) : 0,
     stockOut: Number.isFinite(Number(row.stock_out)) ? Number(row.stock_out) : 0,
     stockBalance: Number.isFinite(Number(row.stock_balance)) ? Number(row.stock_balance) : 0,
@@ -1633,10 +1708,20 @@ async function listIncentivePayoutsFromMySql(): Promise<unknown[]> {
 }
 
 async function replaceStockistsInMySql(entries: unknown[]): Promise<void> {
+  await ensureStockistAssignmentColumns();
   const pool = await getMySqlPool();
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    const [existingRows] = await conn.query<any[]>(
+      `SELECT id, assigned_salesperson_ids_json FROM lff_stockists`
+    );
+    const existingAssignmentsById = new Map<string, string[]>();
+    for (const row of existingRows || []) {
+      const stockistId = row?.id ? String(row.id) : "";
+      if (!stockistId) continue;
+      existingAssignmentsById.set(stockistId, parseStringArrayJson(row.assigned_salesperson_ids_json));
+    }
     await conn.execute("DELETE FROM lff_stockists");
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
@@ -1648,13 +1733,20 @@ async function replaceStockistsInMySql(entries: unknown[]): Promise<void> {
       const location = toNullableText((entry as any).location);
       const pincode = toNullableText((entry as any).pincode);
       const notes = toNullableText((entry as any).notes);
+      const providedAssignedSalespersonIds =
+        "assignedSalespersonIds" in (entry as Record<string, unknown>)
+          ? parseStringArrayJson((entry as any).assignedSalespersonIds)
+          : existingAssignmentsById.get(id) || [];
+      const assignedSalespersonIds = JSON.stringify(
+        providedAssignedSalespersonIds
+      );
       const createdAt = toSqlTimestamp((entry as any).createdAt);
       const updatedAt = toSqlTimestamp((entry as any).updatedAt ?? (entry as any).createdAt);
       await conn.execute(
         `INSERT INTO lff_stockists
-          (id, company_id, name, phone, location, pincode, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, companyId, name, phone, location, pincode, notes, createdAt, updatedAt]
+          (id, company_id, name, phone, location, pincode, notes, assigned_salesperson_ids_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, companyId, name, phone, location, pincode, notes, assignedSalespersonIds, createdAt, updatedAt]
       );
     }
     await refreshStockistBalancesInMySql(conn);
@@ -3458,6 +3550,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             reviewedRequest.requestedCompanyName
           );
         }
+        const reviewedSalespersonId =
+          action === "approved" && reviewedUser ? reviewedUser.id : authRecord?.user.id || "";
+        if (reviewedSalespersonId) {
+          await syncStockistSalespersonAssignmentInMySql(
+            reviewedSalespersonId,
+            action === "approved" && finalRole === "salesperson" ? assignedStockistId : null
+          );
+        }
         await insertAccessRequestInMySql(reviewedRequest);
       } catch (error) {
         console.error("Failed to persist reviewed access request in MySQL", error);
@@ -3637,6 +3737,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(503).json({ message: "MySQL state store is not configured." });
         return;
       }
+      await ensureStockistAssignmentColumns();
       const body = (req.body || {}) as Record<string, unknown>;
       const id = toStringId(body.id);
       if (!id) {
@@ -3649,23 +3750,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const location = toNullableText(body.location);
       const pincode = toNullableText(body.pincode);
       const notes = toNullableText(body.notes);
+      const assignedSalespersonIdsProvided = Object.prototype.hasOwnProperty.call(
+        body,
+        "assignedSalespersonIds"
+      );
       const createdAt = toSqlTimestamp(body.createdAt);
       const updatedAt = toSqlTimestamp(body.updatedAt ?? body.createdAt);
 
       try {
         const conn = await getMySqlPool();
+        let assignedSalespersonIds = assignedSalespersonIdsProvided
+          ? parseStringArrayJson(body.assignedSalespersonIds)
+          : [];
+        if (!assignedSalespersonIdsProvided) {
+          const [existingRows] = await conn.query<any[]>(
+            `SELECT assigned_salesperson_ids_json FROM lff_stockists WHERE id = ? LIMIT 1`,
+            [id]
+          );
+          if (existingRows && existingRows.length > 0) {
+            assignedSalespersonIds = parseStringArrayJson(
+              existingRows[0].assigned_salesperson_ids_json
+            );
+          }
+        }
         await conn.execute(
           `INSERT INTO lff_stockists
-            (id, company_id, name, phone, location, pincode, notes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, company_id, name, phone, location, pincode, notes, assigned_salesperson_ids_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE
              name = VALUES(name),
              phone = VALUES(phone),
              location = VALUES(location),
              pincode = VALUES(pincode),
              notes = VALUES(notes),
+             assigned_salesperson_ids_json = VALUES(assigned_salesperson_ids_json),
              updated_at = VALUES(updated_at)`,
-          [id, companyId, name, phone, location, pincode, notes, createdAt, updatedAt]
+          [
+            id,
+            companyId,
+            name,
+            phone,
+            location,
+            pincode,
+            notes,
+            JSON.stringify(assignedSalespersonIds),
+            createdAt,
+            updatedAt,
+          ]
         );
         res.json({
           id,
@@ -3675,6 +3806,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           location: location || undefined,
           pincode: pincode || undefined,
           notes: notes || undefined,
+          assignedSalespersonIds,
           createdAt: new Date(createdAt).toISOString(),
           updatedAt: new Date(updatedAt).toISOString(),
         });

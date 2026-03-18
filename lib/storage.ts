@@ -602,6 +602,13 @@ function normalizeCompanyIds(companyIds: string[] | undefined, fallbackCompanyId
   return Array.from(new Set(normalized));
 }
 
+function normalizeStringIdList(values: string[] | undefined | null): string[] {
+  if (!Array.isArray(values)) return [];
+  return Array.from(
+    new Set(values.map((value) => normalizeWhitespace(value)).filter((value) => Boolean(value)))
+  );
+}
+
 function buildDefaultCompanyProfile(): CompanyProfile {
   const now = new Date().toISOString();
   return {
@@ -1780,6 +1787,7 @@ export async function reviewUserAccessRequest(
         company
       );
     }
+    await syncStockistSalespersonAssignmentLocal(approvedUser.id, assignedStockistId);
 
     const activeUser = await getItem<AppUser>(KEYS.USER);
     if (activeUser && normalizeEmail(activeUser.email) === normalizeEmail(approvedUser.email)) {
@@ -1796,6 +1804,7 @@ export async function reviewUserAccessRequest(
       updatedAt: now,
     };
     await setAuthUsersRaw(authUsers);
+    await syncStockistSalespersonAssignmentLocal(currentAuth.user.id, null);
   }
 
   const reviewedRequest: UserAccessRequest = {
@@ -2340,6 +2349,7 @@ export async function addStockist(
       location: normalizeWhitespace(input.location ?? "") || undefined,
       pincode: normalizePincode(input.pincode),
       notes: normalizeWhitespace(input.notes ?? "") || undefined,
+      assignedSalespersonIds: normalizeStringIdList(input.assignedSalespersonIds),
       createdAt: now,
       updatedAt: now,
     },
@@ -2419,11 +2429,85 @@ export async function updateStockist(
       updates.notes !== undefined
         ? normalizeWhitespace(updates.notes) || undefined
         : current.notes,
+    assignedSalespersonIds:
+      updates.assignedSalespersonIds !== undefined
+        ? normalizeStringIdList(updates.assignedSalespersonIds)
+        : normalizeStringIdList(current.assignedSalespersonIds),
     updatedAt: new Date().toISOString(),
   };
   stockists[idx] = updated;
   await setItem(KEYS.STOCKISTS, stockists);
   return updated;
+}
+
+async function syncStockistSalespersonAssignmentLocal(
+  salespersonId: string,
+  nextStockistId: string | null
+): Promise<void> {
+  const normalizedSalespersonId = normalizeWhitespace(salespersonId);
+  if (!normalizedSalespersonId) return;
+  const normalizedNextStockistId = normalizeWhitespace(nextStockistId ?? "");
+  const timestamp = new Date().toISOString();
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  let changed = false;
+  const nextStockists = stockists.map((stockist) => {
+    const currentIds = normalizeStringIdList(stockist.assignedSalespersonIds);
+    let nextIds = currentIds.filter((id) => id !== normalizedSalespersonId);
+    if (normalizedNextStockistId && stockist.id === normalizedNextStockistId) {
+      nextIds = normalizeStringIdList([...nextIds, normalizedSalespersonId]);
+    }
+    if (JSON.stringify(nextIds) === JSON.stringify(currentIds)) {
+      return stockist;
+    }
+    changed = true;
+    return {
+      ...stockist,
+      assignedSalespersonIds: nextIds,
+      updatedAt: timestamp,
+    };
+  });
+  if (changed) {
+    await setItem(KEYS.STOCKISTS, nextStockists);
+  }
+}
+
+export async function resolveAssignedStockistForUser(
+  user: Pick<AppUser, "id" | "companyId" | "companyIds" | "stockistId"> | null | undefined
+): Promise<StockistProfile | null> {
+  const normalizedUserId = normalizeWhitespace(user?.id ?? "");
+  const normalizedUserStockistId = normalizeWhitespace(user?.stockistId ?? "");
+  if (!normalizedUserId && !normalizedUserStockistId) return null;
+
+  const fallbackCompanyId =
+    normalizeWhitespace(user?.companyId ?? DEFAULT_COMPANY_ID) || DEFAULT_COMPANY_ID;
+  const allowedCompanyIds = new Set(normalizeCompanyIds(user?.companyIds, fallbackCompanyId));
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+
+  const byMappedSalesperson = normalizedUserId
+    ? stockists.find(
+        (stockist) =>
+          normalizeStringIdList(stockist.assignedSalespersonIds).includes(normalizedUserId) &&
+          matchesCompanySet(stockist, allowedCompanyIds)
+      ) || null
+    : null;
+  if (byMappedSalesperson) return byMappedSalesperson;
+
+  if (normalizedUserStockistId) {
+    const matchedStockist =
+      stockists.find(
+        (stockist) =>
+          stockist.id === normalizedUserStockistId && matchesCompanySet(stockist, allowedCompanyIds)
+      ) || null;
+    if (matchedStockist && normalizedUserId) {
+      const assignedIds = normalizeStringIdList(matchedStockist.assignedSalespersonIds);
+      if (!assignedIds.includes(normalizedUserId)) {
+        await syncStockistSalespersonAssignmentLocal(normalizedUserId, matchedStockist.id);
+      }
+    }
+    return matchedStockist;
+  }
+
+  return null;
 }
 
 export async function removeStockist(stockistId: string): Promise<boolean> {

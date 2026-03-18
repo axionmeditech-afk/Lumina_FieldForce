@@ -191,6 +191,7 @@ export interface StockistProfile {
   location?: string;
   pincode?: string;
   notes?: string;
+  assignedSalespersonIds?: string[];
   stockIn?: number;
   stockOut?: number;
   stockBalance?: number;
