@@ -2452,26 +2452,58 @@ export async function getStockTransfers(options?: {
   return filterByCompanyScope(transfers, options?.scope ?? "active");
 }
 
+function applyStockTransferToStockist(
+  stockist: StockistProfile,
+  transfer: StockTransfer
+): StockistProfile {
+  const quantity = Number.isFinite(transfer.quantity) ? Math.max(0, transfer.quantity) : 0;
+  const currentIn = Number.isFinite(stockist.stockIn ?? Number.NaN) ? Number(stockist.stockIn) : 0;
+  const currentOut = Number.isFinite(stockist.stockOut ?? Number.NaN) ? Number(stockist.stockOut) : 0;
+  const nextIn = transfer.type === "in" ? currentIn + quantity : currentIn;
+  const nextOut = transfer.type === "out" ? currentOut + quantity : currentOut;
+  const timestamp = transfer.createdAt || new Date().toISOString();
+  return {
+    ...stockist,
+    companyId: stockist.companyId || transfer.companyId,
+    stockIn: nextIn,
+    stockOut: nextOut,
+    stockBalance: nextIn - nextOut,
+    lastStockUpdate: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
 export async function addStockTransfer(transfer: StockTransfer): Promise<void> {
-  const companyId = await getActiveCompanyId();
+  const activeCompanyId = await getActiveCompanyId();
   const now = new Date().toISOString();
-  const candidate: StockTransfer = withCompanyId<StockTransfer>(
-    {
-      ...transfer,
-      id: transfer.id || makeId("stock_transfer"),
-      stockistId: transfer.stockistId,
-      stockistName: normalizeStockistName(transfer.stockistName),
-      itemName: normalizeItemName(transfer.itemName),
-      unitLabel: normalizeUnitLabel(transfer.unitLabel),
-      note: normalizeWhitespace(transfer.note ?? "") || undefined,
-      quantity: Number.isFinite(transfer.quantity) ? Math.max(0, transfer.quantity) : 0,
-      createdAt: transfer.createdAt || now,
-    },
-    companyId
-  );
+  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const matchedStockist = stockists.find((entry) => entry.id === transfer.stockistId) || null;
+  const resolvedCompanyId =
+    normalizeWhitespace(
+      matchedStockist?.companyId ?? transfer.companyId ?? activeCompanyId ?? DEFAULT_COMPANY_ID
+    ) || DEFAULT_COMPANY_ID;
+  const resolvedStockistName = normalizeStockistName(matchedStockist?.name ?? transfer.stockistName);
+  const candidate: StockTransfer = {
+    ...transfer,
+    id: transfer.id || makeId("stock_transfer"),
+    companyId: resolvedCompanyId,
+    stockistId: transfer.stockistId,
+    stockistName: resolvedStockistName,
+    itemName: normalizeItemName(transfer.itemName),
+    unitLabel: normalizeUnitLabel(transfer.unitLabel),
+    note: normalizeWhitespace(transfer.note ?? "") || undefined,
+    quantity: Number.isFinite(transfer.quantity) ? Math.max(0, transfer.quantity) : 0,
+    createdAt: transfer.createdAt || now,
+  };
   const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
   transfers.unshift(candidate);
   await setItem(KEYS.STOCK_TRANSFERS, transfers.slice(0, 5000));
+  if (matchedStockist) {
+    const nextStockists = stockists.map((stockist) =>
+      stockist.id === matchedStockist.id ? applyStockTransferToStockist(stockist, candidate) : stockist
+    );
+    await setItem(KEYS.STOCKISTS, nextStockists);
+  }
 }
 
 export async function getIncentiveGoalPlans(): Promise<IncentiveGoalPlan[]> {

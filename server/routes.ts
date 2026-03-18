@@ -1368,22 +1368,34 @@ async function getLatestPendingAccessRequestByEmailFromMySql(
 
 async function refreshStockistBalancesInMySql(
   executor?: {
-    execute: (sql: string) => Promise<unknown>;
+    execute: (...args: any[]) => Promise<unknown>;
   }
 ): Promise<void> {
   if (!isMySqlStateEnabled()) return;
   const target = executor ?? (await getMySqlPool());
   await target.execute(`
+    UPDATE lff_stock_transfers t
+    INNER JOIN lff_stockists s
+      ON s.id = t.stockist_id
+    SET t.company_id = s.company_id,
+        t.stockist_name = CASE
+          WHEN TRIM(COALESCE(s.name, '')) <> '' THEN s.name
+          ELSE t.stockist_name
+        END
+    WHERE NOT (t.company_id <=> s.company_id)
+       OR TRIM(COALESCE(t.stockist_name, '')) <> TRIM(COALESCE(s.name, ''))
+  `);
+  await target.execute(`
     UPDATE lff_stockists s
     LEFT JOIN (
-      SELECT stockist_id, company_id,
+      SELECT stockist_id,
              SUM(CASE WHEN transfer_type = 'in' THEN quantity ELSE 0 END) AS stock_in,
              SUM(CASE WHEN transfer_type = 'out' THEN quantity ELSE 0 END) AS stock_out,
              MAX(created_at) AS last_stock_update
       FROM lff_stock_transfers
-      GROUP BY stockist_id, company_id
+      GROUP BY stockist_id
     ) t
-      ON t.stockist_id = s.id AND (s.company_id <=> t.company_id)
+      ON t.stockist_id = s.id
     SET s.stock_in = COALESCE(t.stock_in, 0),
         s.stock_out = COALESCE(t.stock_out, 0),
         s.stock_balance = COALESCE(t.stock_in, 0) - COALESCE(t.stock_out, 0),
@@ -1451,6 +1463,7 @@ async function listStockistsFromMySql(): Promise<unknown[]> {
 async function listStockTransfersFromMySql(): Promise<unknown[]> {
   if (!isMySqlStateEnabled()) return [];
   const conn = await getMySqlPool();
+  await refreshStockistBalancesInMySql(conn);
   const [rows] = await conn.query<any[]>(`
     SELECT id, company_id, stockist_id, stockist_name, transfer_type, item_name, item_id,
            quantity, unit_label, salesperson_id, salesperson_name, note, created_at
@@ -1660,13 +1673,29 @@ async function replaceStockTransfersInMySql(entries: unknown[]): Promise<void> {
   try {
     await conn.beginTransaction();
     await conn.execute("DELETE FROM lff_stock_transfers");
+    const [stockistRows] = await conn.query<any[]>(
+      `SELECT id, company_id, name FROM lff_stockists`
+    );
+    const stockistById = new Map<string, { companyId: string | null; name: string | null }>();
+    for (const row of stockistRows || []) {
+      const stockistId = row?.id ? String(row.id) : "";
+      if (!stockistId) continue;
+      stockistById.set(stockistId, {
+        companyId: row.company_id ? String(row.company_id) : null,
+        name: row.name ? String(row.name) : null,
+      });
+    }
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
       const id = toStringId((entry as any).id);
       const stockistId = toStringId((entry as any).stockistId);
       if (!id || !stockistId) continue;
-      const companyId = toNullableText((entry as any).companyId);
-      const stockistName = toRequiredText((entry as any).stockistName, "Channel Partner");
+      const stockistMeta = stockistById.get(stockistId);
+      const companyId = stockistMeta?.companyId ?? toNullableText((entry as any).companyId);
+      const stockistName = toRequiredText(
+        stockistMeta?.name ?? (entry as any).stockistName,
+        "Channel Partner"
+      );
       const transferType = (entry as any).type === "out" ? "out" : "in";
       const itemName = toRequiredText((entry as any).itemName, "Item");
       const itemId = toNullableText((entry as any).itemId);
