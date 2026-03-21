@@ -9,6 +9,7 @@ import { getCurrentUser, getSettings } from "@/lib/storage";
 const BACKGROUND_LOCATION_TASK = "trackforce-background-location-task-v1";
 const BACKGROUND_QUEUE_KEY = "@trackforce_background_location_queue";
 const MAX_BATCH_SIZE = 25;
+const BACKGROUND_LOCATION_INTERVAL_MS = 20 * 1000;
 
 interface QueuedLocationPoint {
   userId: string;
@@ -200,9 +201,9 @@ export async function ensureBackgroundLocationTracking(): Promise<{
   if (!alreadyStarted) {
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.Balanced,
-      timeInterval: 120_000,
+      timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
       distanceInterval: 0,
-      deferredUpdatesInterval: 120_000,
+      deferredUpdatesInterval: BACKGROUND_LOCATION_INTERVAL_MS,
       deferredUpdatesDistance: 0,
       pausesUpdatesAutomatically: true,
       showsBackgroundLocationIndicator: false,

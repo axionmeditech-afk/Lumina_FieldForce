@@ -42,7 +42,12 @@ import {
   getUserGeofences,
   queueAttendanceRequest,
 } from "@/lib/attendance-api";
-import { flushBackgroundLocationQueue, queueLocationPoint } from "@/lib/background-location";
+import {
+  ensureBackgroundLocationTracking,
+  flushBackgroundLocationQueue,
+  queueLocationPoint,
+  stopBackgroundLocationTracking,
+} from "@/lib/background-location";
 import {
   ensureLocationServicesEnabled,
   getVerifiedLocationEvidence,
@@ -57,12 +62,12 @@ import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns } from "@/lib/role-access";
 
-const LOCATION_REFRESH_MS = 1 * 60 * 1000;
+const LOCATION_REFRESH_MS = 15 * 1000;
 const STRICT_LOCATION_ACCURACY_METERS = 180;
 const RELAXED_LOCATION_ACCURACY_METERS = 220;
-const TRACKING_TIME_INTERVAL_MS = 1 * 60 * 1000;
+const TRACKING_TIME_INTERVAL_MS = 15 * 1000;
 const TRACKING_DISTANCE_INTERVAL_METERS = 0;
-const ROUTE_POINT_PERSIST_INTERVAL_MS = 1 * 60 * 1000;
+const ROUTE_POINT_PERSIST_INTERVAL_MS = 15 * 1000;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 
@@ -497,6 +502,9 @@ export default function AttendanceScreen() {
   const beginTracking = useCallback(async () => {
     if (!user?.id) return;
     if (locationWatchRef.current || heartbeatRef.current) return;
+    void ensureBackgroundLocationTracking().catch(() => {
+      // foreground tracking can still continue even if background registration fails
+    });
     try {
       locationWatchRef.current = await startSignificantLocationTracking(handleLocationUpdate, {
         timeIntervalMs: TRACKING_TIME_INTERVAL_MS,
@@ -521,6 +529,9 @@ export default function AttendanceScreen() {
       clearInterval(heartbeatRef.current);
       heartbeatRef.current = null;
     }
+    void stopBackgroundLocationTracking().catch(() => {
+      // keep UI stable if background task stop fails
+    });
   }, []);
 
   useEffect(() => {
@@ -545,6 +556,7 @@ export default function AttendanceScreen() {
   }, [
     beginTracking,
     checkedInState,
+    locationReady,
     refreshLocation,
     stopTracking,
     user?.id,
@@ -812,12 +824,12 @@ export default function AttendanceScreen() {
       geofences,
       isSalespersonFieldCheckIn,
       loadBaseData,
+      openAppSettings,
       refreshLocation,
       stopTracking,
       triggerPostCheckInServices,
       user?.id,
       user?.name,
-      user?.role,
     ]
   );
 

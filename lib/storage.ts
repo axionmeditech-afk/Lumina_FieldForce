@@ -122,11 +122,14 @@ const HUGGINGFACE_ENV_DEFAULTS = {
     readTrimmedEnv("HUGGINGFACE_TOKEN"),
 };
 
+const RELEASE_BACKEND_FALLBACK_URL = "https://api.axionmeditech.com";
+
 const BACKEND_ENV_DEFAULTS = {
   apiBaseUrl:
     readTrimmedEnv("EXPO_PUBLIC_API_URL") ||
     readTrimmedEnv("EXPO_PUBLIC_BACKEND_URL") ||
-    readTrimmedEnv("EXPO_PUBLIC_DOMAIN"),
+    readTrimmedEnv("EXPO_PUBLIC_DOMAIN") ||
+    RELEASE_BACKEND_FALLBACK_URL,
 };
 
 const DOLIBARR_ENV_DEFAULTS = {
@@ -303,6 +306,10 @@ async function getLocalSettingsApiBaseUrl(): Promise<string> {
 
 async function getRemoteStateApiCandidates(): Promise<string[]> {
   const candidates = new Set<string>();
+  const isExpoDevRuntime =
+    __DEV__ ||
+    Constants.appOwnership === "expo" ||
+    Boolean(Constants.expoConfig?.hostUri);
   const settingsApiUrl = await getLocalSettingsApiBaseUrl();
   const envUrl = BACKEND_ENV_DEFAULTS.apiBaseUrl;
   for (const rawUrl of [settingsApiUrl, envUrl]) {
@@ -313,11 +320,13 @@ async function getRemoteStateApiCandidates(): Promise<string[]> {
   }
 
   const expoLanBase = getExpoLanApiBaseUrl();
-  if (expoLanBase) {
+  if (isExpoDevRuntime && expoLanBase) {
     candidates.add(expoLanBase);
   }
 
-  candidates.add("http://localhost:5000/api");
+  if (isExpoDevRuntime) {
+    candidates.add("http://localhost:5000/api");
+  }
   return Array.from(candidates);
 }
 
@@ -490,6 +499,26 @@ async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
     }
   }
   return false;
+}
+
+async function refreshRemoteStateList<T>(key: string): Promise<T[] | null> {
+  const remote = await fetchStateRemote<T[]>(key);
+  if (typeof remote === "undefined") return null;
+  const normalized = Array.isArray(remote) ? remote : [];
+  await AsyncStorage.setItem(key, JSON.stringify(normalized));
+  return normalized;
+}
+
+async function getLatestRemoteSyncedList<T>(
+  key: string,
+  refresh?: () => Promise<T[] | null>
+): Promise<T[]> {
+  if (!shouldSyncRemoteStateKey(key)) {
+    return getRawList<T>(key);
+  }
+  const remote = refresh ? await refresh() : await refreshRemoteStateList<T>(key);
+  if (Array.isArray(remote)) return remote;
+  return getRawList<T>(key);
 }
 
 interface StoredAuthUser {
@@ -718,6 +747,58 @@ function matchesCompanySet(item: CompanyScoped, companyIds: Set<string>): boolea
   return companyIds.has(item.companyId);
 }
 
+function employeeMatchesUserIdentity(employee: Employee, user: AppUser): boolean {
+  if (!employee || !user) return false;
+  const employeeId = normalizeWhitespace(employee.id);
+  const userId = normalizeWhitespace(user.id);
+  if (employeeId && userId && employeeId === userId) {
+    return true;
+  }
+
+  const employeeEmail = normalizeEmail(employee.email);
+  const userEmail = normalizeEmail(user.email);
+  if (employeeEmail && userEmail && employeeEmail === userEmail) {
+    return true;
+  }
+
+  const employeeName = normalizeWhitespace(employee.name).toLowerCase();
+  const userName = normalizeWhitespace(user.name).toLowerCase();
+  return Boolean(employeeName && userName && employeeName === userName);
+}
+
+function mergeEmployeeWriteForSalesperson(
+  remoteEmployees: Employee[],
+  localEmployees: Employee[],
+  currentUser: AppUser
+): Employee[] {
+  const nextEmployees = [...remoteEmployees];
+  const localSelfEntries = localEmployees.filter((employee) =>
+    employeeMatchesUserIdentity(employee, currentUser)
+  );
+
+  for (const localEmployee of localSelfEntries) {
+    const matchIndex = nextEmployees.findIndex((remoteEmployee) =>
+      employeeMatchesUserIdentity(remoteEmployee, currentUser)
+    );
+    if (matchIndex >= 0) {
+      nextEmployees[matchIndex] = {
+        ...nextEmployees[matchIndex],
+        ...localEmployee,
+        id: nextEmployees[matchIndex].id || localEmployee.id,
+        email: nextEmployees[matchIndex].email || localEmployee.email,
+        name: nextEmployees[matchIndex].name || localEmployee.name,
+        role: nextEmployees[matchIndex].role || localEmployee.role,
+        companyId: nextEmployees[matchIndex].companyId || localEmployee.companyId,
+      };
+      continue;
+    }
+
+    nextEmployees.unshift(localEmployee);
+  }
+
+  return nextEmployees;
+}
+
 function canDirectlyReadRemoteStockists(role?: UserRole | null): boolean {
   return role === "admin" || role === "hr" || role === "manager";
 }
@@ -775,9 +856,25 @@ async function getItem<T>(key: string): Promise<T | null> {
 async function setItem<T>(key: string, value: T): Promise<void> {
   await AsyncStorage.setItem(key, JSON.stringify(value));
   if (shouldSyncRemoteStateKey(key)) {
-    const pushed = await pushStateRemote(key, value);
+    let remoteValue = value;
+
+    if (key === KEYS.EMPLOYEES && Array.isArray(value)) {
+      const currentUser = await getCurrentUser().catch(() => null);
+      if (!currentUser) {
+        remoteValue = (await fetchStateRemote<T>(key)) ?? value;
+      } else if (currentUser.role === "salesperson") {
+        const remoteEmployees = (await fetchStateRemote<Employee[]>(key)) || [];
+        remoteValue = mergeEmployeeWriteForSalesperson(
+          remoteEmployees,
+          value as Employee[],
+          currentUser
+        ) as T;
+      }
+    }
+
+    const pushed = await pushStateRemote(key, remoteValue);
     if (!pushed) {
-      await enqueuePendingRemoteStateWrite(key, value);
+      await enqueuePendingRemoteStateWrite(key, remoteValue);
     } else {
       await removePendingRemoteStateWrite(key);
       void flushPendingRemoteStateWrites();
@@ -2326,10 +2423,7 @@ export async function getStockists(options?: {
   let stockists: StockistProfile[] | null | undefined = undefined;
 
   if (options?.refreshRemote) {
-    const currentUser = await getCurrentUser();
-    if (canDirectlyReadRemoteStockists(currentUser?.role)) {
-      stockists = await fetchStockistsRemote();
-    }
+    stockists = await refreshStockistsFromBackend();
   }
 
   const resolved = Array.isArray(stockists) ? stockists : await getRawList<StockistProfile>(KEYS.STOCKISTS);
@@ -2355,7 +2449,10 @@ export async function addStockist(
     },
     companyId
   );
-  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const stockists = await getLatestRemoteSyncedList<StockistProfile>(
+    KEYS.STOCKISTS,
+    refreshStockistsFromBackend
+  );
   stockists.unshift(candidate);
   await setItem(KEYS.STOCKISTS, stockists);
   return candidate;
@@ -2379,11 +2476,15 @@ export async function refreshStockistsFromBackend(): Promise<StockistProfile[] |
   await seedDataIfNeeded();
   const direct = await fetchStockistsRemote();
   if (typeof direct !== "undefined") {
-    return Array.isArray(direct) ? direct : [];
+    const normalized = Array.isArray(direct) ? direct : [];
+    await AsyncStorage.setItem(KEYS.STOCKISTS, JSON.stringify(normalized));
+    return normalized;
   }
   const remote = await fetchStateRemote<StockistProfile[]>(KEYS.STOCKISTS);
   if (typeof remote === "undefined") return null;
-  return Array.isArray(remote) ? remote : [];
+  const normalized = Array.isArray(remote) ? remote : [];
+  await AsyncStorage.setItem(KEYS.STOCKISTS, JSON.stringify(normalized));
+  return normalized;
 }
 
 export async function clearLocalStockists(): Promise<void> {
@@ -2407,7 +2508,10 @@ export async function updateStockist(
   updates: Partial<StockistProfile>
 ): Promise<StockistProfile | null> {
   const companyId = await getActiveCompanyId();
-  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const stockists = await getLatestRemoteSyncedList<StockistProfile>(
+    KEYS.STOCKISTS,
+    refreshStockistsFromBackend
+  );
   const idx = stockists.findIndex(
     (stockist) => stockist.id === stockistId && matchesCompany(stockist, companyId)
   );
@@ -2448,7 +2552,10 @@ async function syncStockistSalespersonAssignmentLocal(
   if (!normalizedSalespersonId) return;
   const normalizedNextStockistId = normalizeWhitespace(nextStockistId ?? "");
   const timestamp = new Date().toISOString();
-  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const stockists = await getLatestRemoteSyncedList<StockistProfile>(
+    KEYS.STOCKISTS,
+    refreshStockistsFromBackend
+  );
   let changed = false;
   const nextStockists = stockists.map((stockist) => {
     const currentIds = normalizeStringIdList(stockist.assignedSalespersonIds);
@@ -2512,14 +2619,20 @@ export async function resolveAssignedStockistForUser(
 
 export async function removeStockist(stockistId: string): Promise<boolean> {
   const companyId = await getActiveCompanyId();
-  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const stockists = await getLatestRemoteSyncedList<StockistProfile>(
+    KEYS.STOCKISTS,
+    refreshStockistsFromBackend
+  );
   const nextStockists = stockists.filter(
     (stockist) => !(stockist.id === stockistId && matchesCompany(stockist, companyId))
   );
   if (nextStockists.length === stockists.length) return false;
   await setItem(KEYS.STOCKISTS, nextStockists);
 
-  const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
+  const transfers = await getLatestRemoteSyncedList<StockTransfer>(
+    KEYS.STOCK_TRANSFERS,
+    refreshStockTransfersFromBackend
+  );
   const nextTransfers = transfers.filter(
     (transfer) => !(transfer.stockistId === stockistId && matchesCompany(transfer, companyId))
   );
@@ -2531,9 +2644,17 @@ export async function removeStockist(stockistId: string): Promise<boolean> {
 
 export async function getStockTransfers(options?: {
   scope?: CompanyScopeMode;
+  refreshRemote?: boolean;
 }): Promise<StockTransfer[]> {
-  const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
+  const transfers = options?.refreshRemote
+    ? (await refreshStockTransfersFromBackend()) ??
+      (await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS))
+    : await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
   return filterByCompanyScope(transfers, options?.scope ?? "active");
+}
+
+export async function refreshStockTransfersFromBackend(): Promise<StockTransfer[] | null> {
+  return refreshRemoteStateList<StockTransfer>(KEYS.STOCK_TRANSFERS);
 }
 
 function applyStockTransferToStockist(
@@ -2560,7 +2681,10 @@ function applyStockTransferToStockist(
 export async function addStockTransfer(transfer: StockTransfer): Promise<void> {
   const activeCompanyId = await getActiveCompanyId();
   const now = new Date().toISOString();
-  const stockists = await getRawList<StockistProfile>(KEYS.STOCKISTS);
+  const stockists = await getLatestRemoteSyncedList<StockistProfile>(
+    KEYS.STOCKISTS,
+    refreshStockistsFromBackend
+  );
   const matchedStockist = stockists.find((entry) => entry.id === transfer.stockistId) || null;
   const resolvedCompanyId =
     normalizeWhitespace(
@@ -2579,7 +2703,10 @@ export async function addStockTransfer(transfer: StockTransfer): Promise<void> {
     quantity: Number.isFinite(transfer.quantity) ? Math.max(0, transfer.quantity) : 0,
     createdAt: transfer.createdAt || now,
   };
-  const transfers = await getRawList<StockTransfer>(KEYS.STOCK_TRANSFERS);
+  const transfers = await getLatestRemoteSyncedList<StockTransfer>(
+    KEYS.STOCK_TRANSFERS,
+    refreshStockTransfersFromBackend
+  );
   transfers.unshift(candidate);
   await setItem(KEYS.STOCK_TRANSFERS, transfers.slice(0, 5000));
   if (matchedStockist) {
@@ -2590,9 +2717,18 @@ export async function addStockTransfer(transfer: StockTransfer): Promise<void> {
   }
 }
 
-export async function getIncentiveGoalPlans(): Promise<IncentiveGoalPlan[]> {
+export async function refreshIncentiveGoalPlansFromBackend(): Promise<IncentiveGoalPlan[] | null> {
+  return refreshRemoteStateList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+}
+
+export async function getIncentiveGoalPlans(options?: {
+  refreshRemote?: boolean;
+}): Promise<IncentiveGoalPlan[]> {
   const companyId = await getActiveCompanyId();
-  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  const plans = options?.refreshRemote
+    ? (await refreshIncentiveGoalPlansFromBackend()) ??
+      (await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS))
+    : await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
   return plans.filter((plan) => matchesCompany(plan, companyId));
 }
 
@@ -2615,7 +2751,10 @@ export async function addIncentiveGoalPlan(
     },
     companyId
   );
-  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  const plans = await getLatestRemoteSyncedList<IncentiveGoalPlan>(
+    KEYS.INCENTIVE_GOAL_PLANS,
+    refreshIncentiveGoalPlansFromBackend
+  );
   plans.unshift(candidate);
   await setItem(KEYS.INCENTIVE_GOAL_PLANS, plans);
   return candidate;
@@ -2626,7 +2765,10 @@ export async function updateIncentiveGoalPlan(
   updates: Partial<IncentiveGoalPlan>
 ): Promise<IncentiveGoalPlan | null> {
   const companyId = await getActiveCompanyId();
-  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  const plans = await getLatestRemoteSyncedList<IncentiveGoalPlan>(
+    KEYS.INCENTIVE_GOAL_PLANS,
+    refreshIncentiveGoalPlansFromBackend
+  );
   const idx = plans.findIndex((plan) => plan.id === planId && matchesCompany(plan, companyId));
   if (idx === -1) return null;
   const current = plans[idx];
@@ -2656,16 +2798,28 @@ export async function updateIncentiveGoalPlan(
 
 export async function removeIncentiveGoalPlan(planId: string): Promise<boolean> {
   const companyId = await getActiveCompanyId();
-  const plans = await getRawList<IncentiveGoalPlan>(KEYS.INCENTIVE_GOAL_PLANS);
+  const plans = await getLatestRemoteSyncedList<IncentiveGoalPlan>(
+    KEYS.INCENTIVE_GOAL_PLANS,
+    refreshIncentiveGoalPlansFromBackend
+  );
   const nextPlans = plans.filter((plan) => !(plan.id === planId && matchesCompany(plan, companyId)));
   if (nextPlans.length === plans.length) return false;
   await setItem(KEYS.INCENTIVE_GOAL_PLANS, nextPlans);
   return true;
 }
 
-export async function getIncentiveProductPlans(): Promise<IncentiveProductPlan[]> {
+export async function refreshIncentiveProductPlansFromBackend(): Promise<IncentiveProductPlan[] | null> {
+  return refreshRemoteStateList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+}
+
+export async function getIncentiveProductPlans(options?: {
+  refreshRemote?: boolean;
+}): Promise<IncentiveProductPlan[]> {
   const companyId = await getActiveCompanyId();
-  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  const plans = options?.refreshRemote
+    ? (await refreshIncentiveProductPlansFromBackend()) ??
+      (await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS))
+    : await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
   return plans.filter((plan) => matchesCompany(plan, companyId));
 }
 
@@ -2686,7 +2840,10 @@ export async function addIncentiveProductPlan(
     },
     companyId
   );
-  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  const plans = await getLatestRemoteSyncedList<IncentiveProductPlan>(
+    KEYS.INCENTIVE_PRODUCT_PLANS,
+    refreshIncentiveProductPlansFromBackend
+  );
   plans.unshift(candidate);
   await setItem(KEYS.INCENTIVE_PRODUCT_PLANS, plans);
   return candidate;
@@ -2697,7 +2854,10 @@ export async function updateIncentiveProductPlan(
   updates: Partial<IncentiveProductPlan>
 ): Promise<IncentiveProductPlan | null> {
   const companyId = await getActiveCompanyId();
-  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  const plans = await getLatestRemoteSyncedList<IncentiveProductPlan>(
+    KEYS.INCENTIVE_PRODUCT_PLANS,
+    refreshIncentiveProductPlansFromBackend
+  );
   const idx = plans.findIndex((plan) => plan.id === planId && matchesCompany(plan, companyId));
   if (idx === -1) return null;
   const current = plans[idx];
@@ -2721,7 +2881,10 @@ export async function updateIncentiveProductPlan(
 
 export async function removeIncentiveProductPlan(planId: string): Promise<boolean> {
   const companyId = await getActiveCompanyId();
-  const plans = await getRawList<IncentiveProductPlan>(KEYS.INCENTIVE_PRODUCT_PLANS);
+  const plans = await getLatestRemoteSyncedList<IncentiveProductPlan>(
+    KEYS.INCENTIVE_PRODUCT_PLANS,
+    refreshIncentiveProductPlansFromBackend
+  );
   const nextPlans = plans.filter(
     (plan) => !(plan.id === planId && matchesCompany(plan, companyId))
   );
@@ -2730,15 +2893,27 @@ export async function removeIncentiveProductPlan(planId: string): Promise<boolea
   return true;
 }
 
-export async function getIncentivePayouts(): Promise<IncentivePayout[]> {
+export async function refreshIncentivePayoutsFromBackend(): Promise<IncentivePayout[] | null> {
+  return refreshRemoteStateList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+}
+
+export async function getIncentivePayouts(options?: {
+  refreshRemote?: boolean;
+}): Promise<IncentivePayout[]> {
   const companyId = await getActiveCompanyId();
-  const payouts = await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+  const payouts = options?.refreshRemote
+    ? (await refreshIncentivePayoutsFromBackend()) ??
+      (await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS))
+    : await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
   return payouts.filter((payout) => matchesCompany(payout, companyId));
 }
 
 export async function addIncentivePayout(payout: IncentivePayout): Promise<void> {
   const companyId = await getActiveCompanyId();
-  const payouts = await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+  const payouts = await getLatestRemoteSyncedList<IncentivePayout>(
+    KEYS.INCENTIVE_PAYOUTS,
+    refreshIncentivePayoutsFromBackend
+  );
   payouts.unshift(withCompanyId(payout, companyId));
   await setItem(KEYS.INCENTIVE_PAYOUTS, payouts.slice(0, 2000));
 }
@@ -2748,7 +2923,10 @@ export async function updateIncentivePayoutStatus(
   status: IncentivePayout["status"]
 ): Promise<void> {
   const companyId = await getActiveCompanyId();
-  const payouts = await getRawList<IncentivePayout>(KEYS.INCENTIVE_PAYOUTS);
+  const payouts = await getLatestRemoteSyncedList<IncentivePayout>(
+    KEYS.INCENTIVE_PAYOUTS,
+    refreshIncentivePayoutsFromBackend
+  );
   const idx = payouts.findIndex((payout) => payout.id === payoutId && matchesCompany(payout, companyId));
   if (idx === -1) return;
   payouts[idx].status = status;

@@ -15,7 +15,7 @@ import {
   stopBackgroundLocationTracking,
 } from "@/lib/background-location";
 import { flushAttendanceQueue } from "@/lib/attendance-api";
-import { getSettings, subscribeSettingsUpdates } from "@/lib/storage";
+import { getSettings, isCheckedIn, subscribeSettingsUpdates } from "@/lib/storage";
 import { applyHapticsPolicy } from "@/lib/haptics-policy";
 import {
   initializeDeviceNotifications,
@@ -32,15 +32,19 @@ import {
 
 SplashScreen.preventAutoHideAsync();
 
+function FragmentKeyboardProvider({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+
 const KeyboardProviderSafe: React.ComponentType<{ children: React.ReactNode }> =
   Platform.OS === "android"
-    ? ({ children }) => <>{children}</>
+    ? FragmentKeyboardProvider
     : (() => {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           return require("react-native-keyboard-controller").KeyboardProvider;
         } catch {
-          return ({ children }: { children: React.ReactNode }) => <>{children}</>;
+          return FragmentKeyboardProvider;
         }
       })();
 
@@ -84,6 +88,12 @@ function AppShell() {
       }
 
       if (settings.locationTracking === "false") {
+        await stopBackgroundLocationTracking();
+        return;
+      }
+
+      const checkedIn = await isCheckedIn();
+      if (!checkedIn) {
         await stopBackgroundLocationTracking();
         return;
       }

@@ -260,9 +260,9 @@ export default function AdminIncentivesScreen() {
         getDolibarrOrders({ limit: 400, sortfield: "date_commande", sortorder: "desc" }),
         getDolibarrUsers({ limit: 300, sortfield: "lastname", sortorder: "asc" }),
         getDolibarrProducts({ limit: 400, sortfield: "label", sortorder: "asc" }),
-        getIncentiveGoalPlans(),
-        getIncentiveProductPlans(),
-        getIncentivePayouts(),
+        getIncentiveGoalPlans({ refreshRemote: true }),
+        getIncentiveProductPlans({ refreshRemote: true }),
+        getIncentivePayouts({ refreshRemote: true }),
       ]);
 
       setOrders(Array.isArray(ordersResult) ? ordersResult : []);

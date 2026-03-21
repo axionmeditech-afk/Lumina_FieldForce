@@ -826,6 +826,7 @@ export async function postLocationBatch(
 
 export interface LiveMapPoint {
   id: string;
+  companyId?: string | null;
   userId: string;
   latitude: number;
   longitude: number;
@@ -853,13 +854,30 @@ export interface AdminLiveMapRoutesResponse {
   routes: AdminLiveMapRoute[];
 }
 
+interface AdminRouteFetchOptions {
+  intervalMinutes?: number;
+  raw?: boolean;
+}
+
+function normalizeAdminRouteFetchOptions(
+  options?: AdminRouteFetchOptions | number
+): AdminRouteFetchOptions {
+  if (typeof options === "number" && Number.isFinite(options)) {
+    return { intervalMinutes: options };
+  }
+  return options || {};
+}
+
 export async function getAdminLiveMapRoutes(
   date: string,
-  intervalMinutes = 1
+  options?: AdminRouteFetchOptions | number
 ): Promise<AdminLiveMapRoutesResponse> {
+  const normalizedOptions = normalizeAdminRouteFetchOptions(options);
+  const intervalMinutes = normalizedOptions.intervalMinutes ?? 1;
   const query = new URLSearchParams({
     date,
     interval_minutes: String(Math.max(1, Math.floor(intervalMinutes))),
+    ...(normalizedOptions.raw ? { raw: "1" } : {}),
     _ts: String(Date.now()),
   });
   return fetchJson<AdminLiveMapRoutesResponse>(`/admin/live-map/routes?${query.toString()}`, {
@@ -1336,11 +1354,14 @@ async function syncApprovedEmployeeToDolibarrDirect(
 export async function getAdminRouteTimeline(
   userId: string,
   date: string,
-  intervalMinutes = 1
+  options?: AdminRouteFetchOptions | number
 ): Promise<AdminRouteTimelineResponse> {
+  const normalizedOptions = normalizeAdminRouteFetchOptions(options);
+  const intervalMinutes = normalizedOptions.intervalMinutes ?? 1;
   const query = new URLSearchParams({
     date,
     interval_minutes: String(Math.max(1, Math.floor(intervalMinutes))),
+    ...(normalizedOptions.raw ? { raw: "1" } : {}),
   });
   return fetchJson<AdminRouteTimelineResponse>(
     `/admin/route/${encodeURIComponent(userId)}?${query.toString()}`,

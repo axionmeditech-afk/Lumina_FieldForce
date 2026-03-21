@@ -22,6 +22,7 @@ import {
   getAdminLiveMapPoints,
   getAdminLiveMapRoutes,
   getAdminRouteTimeline,
+  getRemoteState,
   type LiveMapPoint,
   type AdminRouteTimelineResponse,
 } from "@/lib/attendance-api";
@@ -93,6 +94,47 @@ function normalizeIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+function addTrackedUserIdAliases(bucket: Set<string>, value: string | null | undefined): void {
+  const normalized = (value || "").trim();
+  if (!normalized) return;
+  bucket.add(normalized);
+  if (/^\d+$/.test(normalized)) {
+    bucket.add(`dolibarr_${normalized}`);
+  }
+  const dolibarrMatch = normalized.match(/^dolibarr_(.+)$/i);
+  const rawDolibarrId = dolibarrMatch?.[1]?.trim() || "";
+  if (rawDolibarrId) {
+    bucket.add(rawDolibarrId);
+  }
+}
+
+function dedupeById<T extends { id: string }>(entries: T[]): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const entry of entries) {
+    if (!entry?.id || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+function filterCompanyScoped<T extends { companyId?: string | null }>(
+  entries: T[],
+  companyId: string | null | undefined
+): T[] {
+  if (!companyId) return entries;
+  return entries.filter((entry) => !entry.companyId || entry.companyId === companyId);
+}
+
+function buildUserIdCandidates(...values: (string | null | undefined)[]): string[] {
+  const ids = new Set<string>();
+  for (const value of values) {
+    addTrackedUserIdAliases(ids, value);
+  }
+  return Array.from(ids);
+}
+
 function buildSelectedUserAliases(
   selectedEmployee: Employee | null,
   currentUser: { id: string; name: string; email: string } | null,
@@ -100,19 +142,23 @@ function buildSelectedUserAliases(
   selectedUserId: string
 ): Set<string> {
   const aliases = new Set<string>();
-  if (selectedUserId) aliases.add(selectedUserId);
-  if (selectedEmployee?.id) aliases.add(selectedEmployee.id);
+  const selectedIdAliases = new Set<string>();
+  addTrackedUserIdAliases(selectedIdAliases, selectedUserId);
+  addTrackedUserIdAliases(selectedIdAliases, selectedEmployee?.id);
+  for (const alias of selectedIdAliases) {
+    aliases.add(alias);
+  }
   const employeeName = normalizeIdentity(selectedEmployee?.name);
   const employeeEmail = normalizeIdentity(selectedEmployee?.email);
 
   for (const entry of attendance) {
     if (!entry?.userId) continue;
-    if (entry.userId === selectedUserId || entry.userId === selectedEmployee?.id) {
-      aliases.add(entry.userId);
+    if (selectedIdAliases.has(entry.userId)) {
+      addTrackedUserIdAliases(aliases, entry.userId);
       continue;
     }
     if (employeeName && normalizeIdentity(entry.userName) === employeeName) {
-      aliases.add(entry.userId);
+      addTrackedUserIdAliases(aliases, entry.userId);
     }
   }
 
@@ -120,10 +166,9 @@ function buildSelectedUserAliases(
     const userMatchesEmployee =
       (employeeEmail && normalizeIdentity(currentUser.email) === employeeEmail) ||
       (employeeName && normalizeIdentity(currentUser.name) === employeeName) ||
-      currentUser.id === selectedUserId ||
-      currentUser.id === selectedEmployee?.id;
+      selectedIdAliases.has(currentUser.id);
     if (userMatchesEmployee) {
-      aliases.add(currentUser.id);
+      addTrackedUserIdAliases(aliases, currentUser.id);
     }
   }
 
@@ -144,15 +189,27 @@ function toMs(value: string): number {
 
 function resolveRouteSessionWindow(attendanceEvents: AttendanceRecord[]): RouteSessionWindow {
   const ordered = [...attendanceEvents].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  const firstCheckIn = ordered.find((entry) => entry.type === "checkin");
-  if (!firstCheckIn) return { startAt: null, endAt: null };
-  const firstCheckOut = ordered.find(
-    (entry) => entry.type === "checkout" && entry.timestamp >= firstCheckIn.timestamp
-  );
-  return {
-    startAt: firstCheckIn.timestamp,
-    endAt: firstCheckOut?.timestamp ?? null,
-  };
+  let activeStartAt: string | null = null;
+  let lastCompletedWindow: RouteSessionWindow = { startAt: null, endAt: null };
+
+  for (const entry of ordered) {
+    if (entry.type === "checkin") {
+      activeStartAt = entry.timestamp;
+      continue;
+    }
+    if (entry.type === "checkout" && activeStartAt) {
+      lastCompletedWindow = {
+        startAt: activeStartAt,
+        endAt: entry.timestamp,
+      };
+      activeStartAt = null;
+    }
+  }
+
+  if (activeStartAt) {
+    return { startAt: activeStartAt, endAt: null };
+  }
+  return lastCompletedWindow;
 }
 
 function filterPointsToSessionWindow(
@@ -221,6 +278,44 @@ function normalizeTimelineForInterval(
   };
 }
 
+type RouteAttendanceStatusEvent = AdminRouteTimelineResponse["attendanceEvents"][number];
+
+function mergeRouteAttendanceEvents(
+  ...lists: RouteAttendanceStatusEvent[][]
+): RouteAttendanceStatusEvent[] {
+  const merged = new Map<string, RouteAttendanceStatusEvent>();
+  for (const list of lists) {
+    for (const event of list) {
+      if (!event) continue;
+      const key = event.id || `${event.type}_${event.at}_${event.latitude ?? ""}_${event.longitude ?? ""}`;
+      if (!merged.has(key)) {
+        merged.set(key, event);
+      }
+    }
+  }
+  return Array.from(merged.values()).sort((a, b) => a.at.localeCompare(b.at));
+}
+
+function getLatestRouteAttendanceEvent(
+  events: RouteAttendanceStatusEvent[]
+): RouteAttendanceStatusEvent | null {
+  return events.length ? [...events].sort((a, b) => a.at.localeCompare(b.at)).at(-1) ?? null : null;
+}
+
+function getTimelineLatestActivityAt(timeline: AdminRouteTimelineResponse | null | undefined): string {
+  if (!timeline) return "";
+  const latestPointAt = [...(timeline.points || [])]
+    .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+    .at(-1)?.capturedAt;
+  const latestAttendanceAt = [...(timeline.attendanceEvents || [])]
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .at(-1)?.at;
+  return [latestPointAt, latestAttendanceAt]
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => a.localeCompare(b))
+    .at(-1) || "";
+}
+
 function mapLivePointToLocationLog(point: LiveMapPoint): LocationLog {
   return {
     id: point.id,
@@ -285,7 +380,7 @@ export default function RouteTrackingScreen() {
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
   const resolvingLocationKeysRef = useRef(new Set<string>());
-  const LIVE_REFRESH_INTERVAL_MS = 1 * 60 * 1000;
+  const LIVE_REFRESH_INTERVAL_MS = 15 * 1000;
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "osm")
     .trim()
@@ -300,8 +395,7 @@ export default function RouteTrackingScreen() {
   const visibleEmployees = useMemo(() => {
     if (!user) return [];
     if (isPrivilegedViewer) {
-      const salesEmployees = employees.filter((entry) => entry.role === "salesperson");
-      return salesEmployees.length ? salesEmployees : employees;
+      return employees.filter((entry) => entry.role === "salesperson");
     }
 
     const selfById = employees.find((entry) => entry.id === user.id);
@@ -370,10 +464,15 @@ export default function RouteTrackingScreen() {
   }, []);
 
   const persistCurrentLocationPointIfMoved = useCallback(
-    async (existingDayPoints: LocationLog[], aliases: Set<string>): Promise<boolean> => {
+    async (
+      existingDayPoints: LocationLog[],
+      aliases: Set<string>,
+      isTrackingActive: boolean
+    ): Promise<boolean> => {
       if (!user || !selectedEmployee) return false;
       const todayKey = toMumbaiDateKey(new Date());
       if (selectedDate !== todayKey) return false;
+      if (!isTrackingActive) return false;
       const canUseDeviceLocation = selectedUserId === user.id || aliases.has(user.id);
       if (!canUseDeviceLocation) return false;
 
@@ -544,20 +643,47 @@ export default function RouteTrackingScreen() {
         }));
       setPlannedStops(plannedStopsForDay);
 
-      const [logsSnapshot, attendanceSnapshot] = await Promise.all([getLocationLogs(), getAttendance()]);
+      const [
+        logsSnapshot,
+        attendanceSnapshot,
+        remoteLogsState,
+        remoteAttendanceState,
+      ] = await Promise.all([
+        getLocationLogs(),
+        getAttendance(),
+        isPrivilegedViewer
+          ? getRemoteState<LocationLog[]>("@trackforce_location_logs").catch(() => ({ value: null }))
+          : Promise.resolve({ value: null }),
+        isPrivilegedViewer
+          ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance").catch(() => ({ value: null }))
+          : Promise.resolve({ value: null }),
+      ]);
+      const remoteLogs = Array.isArray(remoteLogsState.value)
+        ? filterCompanyScoped(remoteLogsState.value, user?.companyId)
+        : [];
+      const remoteAttendance = Array.isArray(remoteAttendanceState.value)
+        ? filterCompanyScoped(remoteAttendanceState.value, user?.companyId)
+        : [];
+      const mergedLogsSnapshot = dedupeById([...remoteLogs, ...logsSnapshot]);
+      const mergedAttendanceSnapshot = dedupeById([...remoteAttendance, ...attendanceSnapshot]);
       const aliases = buildSelectedUserAliases(
         selectedEmployee,
         user ? { id: user.id, name: user.name, email: user.email } : null,
-        attendanceSnapshot,
+        mergedAttendanceSnapshot,
         selectedUserId
       );
-      const selectedUserAttendance = attendanceSnapshot
+      const selectedUserAttendance = mergedAttendanceSnapshot
         .filter((entry) => aliases.has(entry.userId))
         .filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate))
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
       const sessionWindow = resolveRouteSessionWindow(selectedUserAttendance);
+      const latestLocalSelectedAttendance =
+        selectedUserAttendance.length > 0
+          ? selectedUserAttendance[selectedUserAttendance.length - 1]
+          : null;
+      const isLocallyTrackingActive = latestLocalSelectedAttendance?.type === "checkin";
 
-      let allLocalLogsForAliases = logsSnapshot
+      let allLocalLogsForAliases = mergedLogsSnapshot
         .filter((log) => aliases.has(log.userId))
         .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
       let dayLocalPointsRaw = allLocalLogsForAliases.filter((log) =>
@@ -568,7 +694,11 @@ export default function RouteTrackingScreen() {
         ROUTE_POINT_INTERVAL_MINUTES
       );
 
-      const createdCurrentPoint = await persistCurrentLocationPointIfMoved(dayLocalPoints, aliases);
+      const createdCurrentPoint = await persistCurrentLocationPointIfMoved(
+        dayLocalPoints,
+        aliases,
+        isLocallyTrackingActive
+      );
       if (createdCurrentPoint) {
         const refreshedLogs = await getLocationLogs();
         allLocalLogsForAliases = refreshedLogs
@@ -586,7 +716,8 @@ export default function RouteTrackingScreen() {
       if (
         !dayLocalPoints.length &&
         selectedDate === toMumbaiDateKey(new Date()) &&
-        allLocalLogsForAliases.length
+        allLocalLogsForAliases.length &&
+        isLocallyTrackingActive
       ) {
         // Show at least latest known user location on today's map even before movement timeline forms.
         dayLocalPoints = [allLocalLogsForAliases[allLocalLogsForAliases.length - 1]];
@@ -594,7 +725,7 @@ export default function RouteTrackingScreen() {
 
       const localTimeline = buildRouteTimeline(selectedUserId, selectedDate, dayLocalPoints);
       const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
-      const localAttendanceEvents = attendanceSnapshot
+      const localAttendanceEvents = mergedAttendanceSnapshot
         .filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate))
         .filter(
           (entry) =>
@@ -617,10 +748,11 @@ export default function RouteTrackingScreen() {
         attendanceEvents: localAttendanceEvents,
       };
 
-      const remoteCandidates = [
+      const remoteCandidates = buildUserIdCandidates(
         selectedUserId,
-        ...Array.from(aliases).filter((alias) => alias !== selectedUserId),
-      ];
+        selectedEmployee?.id,
+        ...Array.from(aliases)
+      );
       let remoteTimeline: AdminRouteTimelineResponse | null = null;
       let remoteFailure: unknown = null;
       for (const candidateUserId of remoteCandidates) {
@@ -630,38 +762,71 @@ export default function RouteTrackingScreen() {
             selectedDate,
             ROUTE_POINT_INTERVAL_MINUTES
           );
-          if (!remoteTimeline) {
+          const currentLatestActivity = getTimelineLatestActivityAt(currentRemote);
+          const resolvedLatestActivity = getTimelineLatestActivityAt(remoteTimeline);
+          const currentPointCount = currentRemote.points?.length ?? 0;
+          const resolvedPointCount = remoteTimeline?.points?.length ?? 0;
+          if (
+            !remoteTimeline ||
+            currentLatestActivity.localeCompare(resolvedLatestActivity) > 0 ||
+            (currentLatestActivity === resolvedLatestActivity && currentPointCount > resolvedPointCount)
+          ) {
             remoteTimeline = currentRemote;
-          }
-          if ((currentRemote.points?.length ?? 0) > 0 || (currentRemote.attendanceEvents?.length ?? 0) > 0) {
-            remoteTimeline = currentRemote;
-            break;
           }
         } catch (candidateError) {
           remoteFailure = candidateError;
         }
       }
 
+      const mergedAttendanceEvents = mergeRouteAttendanceEvents(
+        localAttendanceEvents,
+        remoteTimeline?.attendanceEvents || []
+      );
+      const latestEffectiveAttendance = getLatestRouteAttendanceEvent(mergedAttendanceEvents);
+      const isTrackingActive = latestEffectiveAttendance?.type === "checkin";
+
+      if (!isTrackingActive) {
+        setTimeline({
+          ...buildRouteTimeline(selectedUserId, selectedDate, []),
+          attendanceEvents: mergedAttendanceEvents,
+        });
+        setError(null);
+        return;
+      }
+
       if (remoteTimeline && (remoteTimeline.points?.length ?? 0) > 0) {
-        setTimeline(normalizeTimelineForInterval(remoteTimeline, ROUTE_POINT_INTERVAL_MINUTES));
+        setTimeline(
+          normalizeTimelineForInterval(
+            {
+              ...remoteTimeline,
+              attendanceEvents: mergedAttendanceEvents,
+            },
+            ROUTE_POINT_INTERVAL_MINUTES
+          )
+        );
         return;
       }
 
       const hasLocalData =
         (localResolvedTimeline.points?.length ?? 0) > 0 ||
-        (localResolvedTimeline.attendanceEvents?.length ?? 0) > 0;
+        mergedAttendanceEvents.length > 0;
 
       if (hasLocalData) {
-        setTimeline(normalizeTimelineForInterval(localResolvedTimeline, ROUTE_POINT_INTERVAL_MINUTES));
+        setTimeline(
+          normalizeTimelineForInterval(
+            {
+              ...localResolvedTimeline,
+              attendanceEvents: mergedAttendanceEvents,
+            },
+            ROUTE_POINT_INTERVAL_MINUTES
+          )
+        );
         setError("Showing current/local route points while live API catches up.");
         return;
       }
 
       if (isPrivilegedViewer) {
-        const fallbackAttendanceEvents =
-          remoteTimeline && remoteTimeline.attendanceEvents.length > 0
-            ? remoteTimeline.attendanceEvents
-            : localAttendanceEvents;
+        const fallbackAttendanceEvents = mergedAttendanceEvents;
 
         // Fallback for alias mismatch or delayed route timeline API hydration:
         // resolve selected salesperson route from all admin routes for selected date.
@@ -722,7 +887,15 @@ export default function RouteTrackingScreen() {
       }
 
       if (remoteTimeline) {
-        setTimeline(remoteTimeline);
+        setTimeline(
+          normalizeTimelineForInterval(
+            {
+              ...remoteTimeline,
+              attendanceEvents: mergedAttendanceEvents,
+            },
+            ROUTE_POINT_INTERVAL_MINUTES
+          )
+        );
         return;
       }
 
@@ -925,6 +1098,19 @@ export default function RouteTrackingScreen() {
   const latestRoutePoint = routePointRows.length
     ? routePointRows[routePointRows.length - 1]
     : null;
+  const latestAttendanceEvent = useMemo(() => {
+    const events = timeline?.attendanceEvents ?? [];
+    if (!events.length) return null;
+    return [...events].sort((a, b) => a.at.localeCompare(b.at))[events.length - 1];
+  }, [timeline?.attendanceEvents]);
+  const isTrackingVisible = latestAttendanceEvent?.type === "checkin";
+  const isCheckedOutView = latestAttendanceEvent?.type === "checkout";
+  const mapStatusTitle = isCheckedOutView ? "Checked Out" : "Not Checked In";
+  const mapStatusText = isCheckedOutView
+    ? `${selectedEmployee?.name || "This salesperson"} checked out${
+        latestAttendanceEvent?.at ? ` at ${toTime(latestAttendanceEvent.at)}` : ""
+      }. Map is hidden until next check-in.`
+    : `${selectedEmployee?.name || "This salesperson"} is not checked in for this date.`;
 
   if (!canViewTracking) {
     return (
@@ -1142,7 +1328,7 @@ export default function RouteTrackingScreen() {
           </View>
         ) : null}
 
-        <Animated.View entering={FadeInDown.duration(350).delay(50)}>
+        <Animated.View entering={FadeInDown.duration(350).delay(50)} style={styles.mapShell}>
           <RouteMapNative
             points={timeline?.points ?? []}
             halts={timeline?.halts ?? []}
@@ -1152,6 +1338,33 @@ export default function RouteTrackingScreen() {
             colors={colors}
             height={Platform.OS === "web" ? 240 : 270}
           />
+          {!isTrackingVisible ? (
+            <View style={styles.mapOverlay}>
+              <View
+                style={[
+                  styles.mapOverlayCard,
+                  {
+                    borderColor: colors.warning + "55",
+                    backgroundColor: colors.backgroundElevated + "F2",
+                  },
+                ]}
+              >
+                <Text
+                  style={[styles.mapOverlayTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}
+                >
+                  {mapStatusTitle}
+                </Text>
+                <Text
+                  style={[
+                    styles.mapOverlayText,
+                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                  ]}
+                >
+                  {mapStatusText}
+                </Text>
+              </View>
+            </View>
+          ) : null}
         </Animated.View>
 
         <Animated.View entering={FadeInDown.duration(350).delay(80)} style={styles.summaryRow}>
@@ -1190,10 +1403,12 @@ export default function RouteTrackingScreen() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.currentLocationTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-              Current Location
+              {isTrackingVisible ? "Current Location" : "Attendance Status"}
             </Text>
             <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {latestRoutePoint
+              {!isTrackingVisible
+                ? mapStatusText
+                : latestRoutePoint
                 ? `${latestRoutePoint.locationName || latestRoutePoint.geofenceName || "Resolving location..."} | ${toTime(
                     latestRoutePoint.at
                   )}${latestRoutePoint.battery ? ` | ${latestRoutePoint.battery}` : ""}`
@@ -1438,6 +1653,36 @@ const styles = StyleSheet.create({
     fontSize: 12,
     flex: 1,
   },
+  mapShell: {
+    position: "relative",
+    overflow: "hidden",
+    borderRadius: 22,
+  },
+  mapOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  mapOverlayCard: {
+    width: "100%",
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  mapOverlayTitle: {
+    fontSize: 18,
+    textAlign: "center",
+  },
+  mapOverlayText: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: "center",
+  },
   summaryRow: {
     flexDirection: "row",
     gap: 10,
@@ -1556,5 +1801,3 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
   },
 });
-
-

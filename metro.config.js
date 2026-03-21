@@ -7,7 +7,19 @@ const enableNativeMappls = process.env.EXPO_PUBLIC_ENABLE_MAPPLS_NATIVE === "tru
 config.resolver = config.resolver || {};
 config.resolver.extraNodeModules = {
   ...(config.resolver.extraNodeModules || {}),
+  "@": __dirname,
   "expo-keep-awake": path.resolve(__dirname, "shims/expo-keep-awake.js"),
+};
+
+const defaultResolveRequest = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (moduleName.startsWith("@/")) {
+    return context.resolveRequest(context, path.join(__dirname, moduleName.slice(2)), platform);
+  }
+  if (defaultResolveRequest) {
+    return defaultResolveRequest(context, moduleName, platform);
+  }
+  return context.resolveRequest(context, moduleName, platform);
 };
 
 if (!enableNativeMappls) {

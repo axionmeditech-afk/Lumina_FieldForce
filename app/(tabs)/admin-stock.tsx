@@ -25,6 +25,7 @@ import {
   getAllEmployees,
   getStockists,
   getStockTransfers,
+  removeStockist,
 } from "@/lib/storage";
 import { getEmployees as getMergedEmployees } from "@/lib/employee-data";
 import type { Employee, StockistProfile, StockTransfer } from "@/lib/types";
@@ -275,6 +276,7 @@ export default function AdminStockScreen() {
   const [newStockistPincode, setNewStockistPincode] = useState("");
   const [newStockistNotes, setNewStockistNotes] = useState("");
   const [creatingStockist, setCreatingStockist] = useState(false);
+  const [deletingStockistId, setDeletingStockistId] = useState<string | null>(null);
 
   const [selectedStockistId, setSelectedStockistId] = useState("");
   const [transferType, setTransferType] = useState<TransferType>("in");
@@ -315,7 +317,7 @@ export default function AdminStockScreen() {
           [] as StockistProfile[]
         ),
         withTimeout(
-          getStockTransfers({ scope: "accessible" }),
+          getStockTransfers({ scope: "accessible", refreshRemote: true }),
           STOCK_DATA_LOAD_TIMEOUT_MS,
           [] as StockTransfer[]
         ),
@@ -587,11 +589,13 @@ export default function AdminStockScreen() {
           module: "Stock",
         });
       }
+      await loadData();
     } finally {
       setCreatingStockist(false);
     }
   }, [
     creatingStockist,
+    loadData,
     newStockistLocation,
     newStockistName,
     newStockistNotes,
@@ -680,12 +684,14 @@ export default function AdminStockScreen() {
           module: "Stock",
         });
       }
+      await loadData();
     } finally {
       setCreatingTransfer(false);
     }
   }, [
     creatingTransfer,
     itemName,
+    loadData,
     quantity,
     selectedSalesperson,
     selectedStockist,
@@ -694,6 +700,53 @@ export default function AdminStockScreen() {
     unitLabel,
     user,
   ]);
+
+  const handleDeleteStockist = useCallback(
+    (stockist: StockistProfile) => {
+      if (deletingStockistId) return;
+      Alert.alert(
+        "Delete Channel Partner",
+        `Delete ${stockist.name}? This will also remove linked stock movements for this channel partner.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: () => {
+              void (async () => {
+                setDeletingStockistId(stockist.id);
+                try {
+                  const removed = await removeStockist(stockist.id);
+                  if (!removed) {
+                    Alert.alert("Delete failed", "Channel partner could not be removed.");
+                    return;
+                  }
+                  if (selectedStockistId === stockist.id) {
+                    setSelectedStockistId("");
+                  }
+                  await loadData();
+                  if (user) {
+                    await addAuditLog({
+                      id: `audit_stockist_delete_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      userId: user.id,
+                      userName: user.name,
+                      action: "Channel Partner Deleted",
+                      details: stockist.name,
+                      timestamp: new Date().toISOString(),
+                      module: "Stock",
+                    });
+                  }
+                } finally {
+                  setDeletingStockistId(null);
+                }
+              })();
+            },
+          },
+        ]
+      );
+    },
+    [deletingStockistId, loadData, selectedStockistId, user]
+  );
 
   const toggleStockist = useCallback((stockistId: string) => {
     setExpandedStockists((current) => ({
@@ -1259,15 +1312,42 @@ export default function AdminStockScreen() {
                     </View>
                   </View>
 
-                  <Pressable
-                    onPress={() => toggleStockist(summary.stockist.id)}
-                    style={[styles.expandButton, { borderColor: colors.border, backgroundColor: colors.surface }]}
-                  >
-                    <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={16} color={colors.textSecondary} />
-                    <Text style={[styles.expandText, { color: colors.textSecondary }]}> 
-                      {expanded ? "Hide details" : "View details"}
-                    </Text>
-                  </Pressable>
+                  <View style={styles.actionRow}>
+                    <Pressable
+                      onPress={() => toggleStockist(summary.stockist.id)}
+                      style={[styles.expandButton, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                    >
+                      <Ionicons
+                        name={expanded ? "chevron-up" : "chevron-down"}
+                        size={16}
+                        color={colors.textSecondary}
+                      />
+                      <Text style={[styles.expandText, { color: colors.textSecondary }]}> 
+                        {expanded ? "Hide details" : "View details"}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => handleDeleteStockist(summary.stockist)}
+                      disabled={deletingStockistId === summary.stockist.id}
+                      style={[
+                        styles.deleteButton,
+                        {
+                          borderColor: colors.error + "55",
+                          backgroundColor: colors.error + "10",
+                          opacity: deletingStockistId === summary.stockist.id ? 0.7 : 1,
+                        },
+                      ]}
+                    >
+                      {deletingStockistId === summary.stockist.id ? (
+                        <ActivityIndicator size="small" color={colors.error} />
+                      ) : (
+                        <>
+                          <Ionicons name="trash-outline" size={15} color={colors.error} />
+                          <Text style={[styles.deleteButtonText, { color: colors.error }]}>Delete</Text>
+                        </>
+                      )}
+                    </Pressable>
+                  </View>
 
                   {expanded ? (
                     <View style={[styles.detailCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}> 
@@ -1548,6 +1628,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
   },
+  actionRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 14,
+  },
   summaryMiniCard: {
     flex: 1,
     borderWidth: 1,
@@ -1570,6 +1655,7 @@ const styles = StyleSheet.create({
   summaryLabelSmall: { fontSize: 11, fontFamily: "Inter_500Medium" },
   summaryValueSmall: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
   expandButton: {
+    flex: 1,
     borderWidth: 1,
     borderRadius: 999,
     paddingHorizontal: 12,
@@ -1579,6 +1665,18 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   expandText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  deleteButton: {
+    minWidth: 104,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  deleteButtonText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
   detailCard: {
     borderWidth: 1,
     borderRadius: 12,

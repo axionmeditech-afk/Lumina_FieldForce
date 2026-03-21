@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
+import Constants from "expo-constants";
 import type { AppUser, CompanyProfile, UserRole } from "@/lib/types";
 import {
   getCurrentUser,
@@ -46,10 +47,16 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function shouldPrioritizeBackendSession(role?: UserRole | null): boolean {
+  return role === "admin" || role === "hr" || role === "manager";
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [company, setCompany] = useState<CompanyProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const isStandaloneRuntime =
+    !__DEV__ && Constants.appOwnership !== "expo" && !Constants.expoConfig?.hostUri;
 
   const hydrateApiSession = useCallback(
     async (
@@ -57,16 +64,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: string,
       password: string,
       allowRegistration: boolean
-    ): Promise<void> => {
+    ): Promise<boolean> => {
+      const tokenTimeoutMs = isStandaloneRuntime ? 9000 : 1200;
+      const registerTimeoutMs = isStandaloneRuntime ? 12000 : 1600;
       try {
         const normalizedEmail = email.trim().toLowerCase();
 
-        const token = await issueApiToken(normalizedEmail, password, { timeoutMs: 1200 });
+        let token = await issueApiToken(normalizedEmail, password, { timeoutMs: tokenTimeoutMs });
         if (token || !allowRegistration) {
-          return;
+          return Boolean(token);
         }
 
-        const registerToken = await registerApiUser(
+        token = await registerApiUser(
           {
             name: authUser.name,
             email: authUser.email,
@@ -78,16 +87,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             phone: authUser.phone,
             pincode: authUser.pincode,
           },
-          { timeoutMs: 1600 }
+          { timeoutMs: registerTimeoutMs }
         );
-        if (!registerToken) {
-          await issueApiToken(normalizedEmail, password, { timeoutMs: 1200 });
+        if (!token) {
+          token = await issueApiToken(normalizedEmail, password, { timeoutMs: tokenTimeoutMs });
         }
+        return Boolean(token);
       } catch {
         // Keep login/signup fast when backend is slow or unreachable.
+        return false;
       }
     },
-    []
+    [isStandaloneRuntime]
   );
 
   const refreshSession = useCallback(async () => {
@@ -116,12 +127,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ? rawIdentifier.toLowerCase()
       : rawIdentifier;
     const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const tokenTimeoutMs = isStandaloneRuntime ? 9000 : 4200;
+    const remoteUserTimeoutMs = isStandaloneRuntime ? 7000 : 3200;
     const attemptToken = async (value: string): Promise<string | null> => {
       if (!value) return null;
-      let issued = await issueApiToken(value, password, { timeoutMs: 4200 });
+      let issued = await issueApiToken(value, password, { timeoutMs: tokenTimeoutMs });
       if (!issued) {
-        await delay(350);
-        issued = await issueApiToken(value, password, { timeoutMs: 4200 });
+        await delay(isStandaloneRuntime ? 650 : 350);
+        issued = await issueApiToken(value, password, { timeoutMs: tokenTimeoutMs });
+      }
+      if (!issued && isStandaloneRuntime) {
+        await delay(900);
+        issued = await issueApiToken(value, password, { timeoutMs: tokenTimeoutMs });
       }
       return issued;
     };
@@ -134,10 +151,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token = await attemptToken(rawIdentifier.toLowerCase());
     }
     if (token) {
-      let remoteUser = await getAuthenticatedApiUser({ timeoutMs: 3200 });
+      let remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });
       if (!remoteUser) {
-        await delay(250);
-        remoteUser = await getAuthenticatedApiUser({ timeoutMs: 3200 });
+        await delay(isStandaloneRuntime ? 500 : 250);
+        remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });
       }
       if (remoteUser) {
         const hydrated = await syncBackendAuthenticatedUser(remoteUser);
@@ -150,6 +167,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const u = await authenticateUser(rawIdentifier, password);
     if (u) {
+      if (isStandaloneRuntime && shouldPrioritizeBackendSession(u.role)) {
+        const hasBackendSession = await hydrateApiSession(u, rawIdentifier, password, true);
+        if (hasBackendSession) {
+          const remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });
+          if (remoteUser) {
+            const hydrated = await syncBackendAuthenticatedUser(remoteUser);
+            setUser(hydrated);
+            const activeCompany = await getCurrentCompanyProfile();
+            setCompany(activeCompany);
+            return true;
+          }
+        }
+      }
       setUser(u);
       const activeCompany = await getCurrentCompanyProfile();
       setCompany(activeCompany);

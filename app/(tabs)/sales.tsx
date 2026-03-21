@@ -24,8 +24,11 @@ import * as FileSystem from "expo-file-system/legacy";
 import Colors from "@/constants/colors";
 import {
   getApiBaseUrlCandidates,
+  getAdminLiveMapRoutes,
+  getAdminRouteTimeline,
   getDolibarrProducts,
   getDolibarrThirdParties,
+  getRemoteState,
   createDolibarrSalesOrder,
   adjustCompanyProductStock,
   validateDolibarrSalesOrder,
@@ -37,6 +40,7 @@ import {
   type DolibarrOrderLineInput,
   type MapplsPlaceSuggestion,
   type MapplsRoutePreviewResponse,
+  type AdminRouteTimelineResponse,
 } from "@/lib/attendance-api";
 import {
   addTask,
@@ -858,6 +862,7 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
 }
 
 const ROUTE_POINT_INTERVAL_MINUTES = 1;
+const LIVE_ROUTE_REFRESH_MS = 15 * 1000;
 
 function toMs(value: string): number {
   const parsed = new Date(value).getTime();
@@ -868,6 +873,47 @@ function normalizeIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+function addTrackedUserIdAliases(bucket: Set<string>, value: string | null | undefined): void {
+  const normalized = (value || "").trim();
+  if (!normalized) return;
+  bucket.add(normalized);
+  if (/^\d+$/.test(normalized)) {
+    bucket.add(`dolibarr_${normalized}`);
+  }
+  const dolibarrMatch = normalized.match(/^dolibarr_(.+)$/i);
+  const rawDolibarrId = dolibarrMatch?.[1]?.trim() || "";
+  if (rawDolibarrId) {
+    bucket.add(rawDolibarrId);
+  }
+}
+
+function dedupeById<T extends { id: string }>(entries: T[]): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const entry of entries) {
+    if (!entry?.id || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+function filterCompanyScoped<T extends { companyId?: string | null }>(
+  entries: T[],
+  companyId: string | null | undefined
+): T[] {
+  if (!companyId) return entries;
+  return entries.filter((entry) => !entry.companyId || entry.companyId === companyId);
+}
+
+function buildUserIdCandidates(...values: (string | null | undefined)[]): string[] {
+  const ids = new Set<string>();
+  for (const value of values) {
+    addTrackedUserIdAliases(ids, value);
+  }
+  return Array.from(ids);
+}
+
 function buildSelectedUserAliases(
   selectedEmployee: Employee | null,
   currentUser: { id: string; name: string; email: string } | null,
@@ -875,19 +921,23 @@ function buildSelectedUserAliases(
   selectedUserId: string
 ): Set<string> {
   const aliases = new Set<string>();
-  if (selectedUserId) aliases.add(selectedUserId);
-  if (selectedEmployee?.id) aliases.add(selectedEmployee.id);
+  const selectedIdAliases = new Set<string>();
+  addTrackedUserIdAliases(selectedIdAliases, selectedUserId);
+  addTrackedUserIdAliases(selectedIdAliases, selectedEmployee?.id);
+  for (const alias of selectedIdAliases) {
+    aliases.add(alias);
+  }
   const employeeName = normalizeIdentity(selectedEmployee?.name);
   const employeeEmail = normalizeIdentity(selectedEmployee?.email);
 
   for (const entry of attendance) {
     if (!entry?.userId) continue;
-    if (entry.userId === selectedUserId || entry.userId === selectedEmployee?.id) {
-      aliases.add(entry.userId);
+    if (selectedIdAliases.has(entry.userId)) {
+      addTrackedUserIdAliases(aliases, entry.userId);
       continue;
     }
     if (employeeName && normalizeIdentity(entry.userName) === employeeName) {
-      aliases.add(entry.userId);
+      addTrackedUserIdAliases(aliases, entry.userId);
     }
   }
 
@@ -895,10 +945,9 @@ function buildSelectedUserAliases(
     const userMatchesEmployee =
       (employeeEmail && normalizeIdentity(currentUser.email) === employeeEmail) ||
       (employeeName && normalizeIdentity(currentUser.name) === employeeName) ||
-      currentUser.id === selectedUserId ||
-      currentUser.id === selectedEmployee?.id;
+      selectedIdAliases.has(currentUser.id);
     if (userMatchesEmployee) {
-      aliases.add(currentUser.id);
+      addTrackedUserIdAliases(aliases, currentUser.id);
     }
   }
 
@@ -912,15 +961,27 @@ interface RouteSessionWindow {
 
 function resolveRouteSessionWindow(attendanceEvents: AttendanceRecord[]): RouteSessionWindow {
   const ordered = [...attendanceEvents].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  const firstCheckIn = ordered.find((entry) => entry.type === "checkin");
-  if (!firstCheckIn) return { startAt: null, endAt: null };
-  const firstCheckOut = ordered.find(
-    (entry) => entry.type === "checkout" && entry.timestamp >= firstCheckIn.timestamp
-  );
-  return {
-    startAt: firstCheckIn.timestamp,
-    endAt: firstCheckOut?.timestamp ?? null,
-  };
+  let activeStartAt: string | null = null;
+  let lastCompletedWindow: RouteSessionWindow = { startAt: null, endAt: null };
+
+  for (const entry of ordered) {
+    if (entry.type === "checkin") {
+      activeStartAt = entry.timestamp;
+      continue;
+    }
+    if (entry.type === "checkout" && activeStartAt) {
+      lastCompletedWindow = {
+        startAt: activeStartAt,
+        endAt: entry.timestamp,
+      };
+      activeStartAt = null;
+    }
+  }
+
+  if (activeStartAt) {
+    return { startAt: activeStartAt, endAt: null };
+  }
+  return lastCompletedWindow;
 }
 
 function filterPointsToSessionWindow(
@@ -974,6 +1035,31 @@ function normalizePointsForInterval(points: LocationLog[], intervalMinutes: numb
   }
 
   return downsamplePointsByInterval(deduped, intervalMinutes);
+}
+
+function getTimelineLatestActivityAt(timeline: AdminRouteTimelineResponse | null | undefined): string {
+  if (!timeline) return "";
+  const latestPointAt = [...(timeline.points || [])]
+    .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+    .at(-1)?.capturedAt;
+  const latestAttendanceAt = [...(timeline.attendanceEvents || [])]
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .at(-1)?.at;
+  return [latestPointAt, latestAttendanceAt]
+    .filter((value): value is string => Boolean(value))
+    .sort((a, b) => a.localeCompare(b))
+    .at(-1) || "";
+}
+
+function getLatestAttendanceStatus(
+  localAttendance: AttendanceRecord[],
+  remoteAttendanceEvents: { type: "checkin" | "checkout"; at: string }[]
+): { type: "checkin" | "checkout"; timestamp: string } | null {
+  const combined = [
+    ...localAttendance.map((entry) => ({ type: entry.type, timestamp: entry.timestamp })),
+    ...remoteAttendanceEvents.map((entry) => ({ type: entry.type, timestamp: entry.at })),
+  ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return combined.at(-1) ?? null;
 }
 
 function getVisitStatus(task: Task): "pending" | "in_progress" | "completed" {
@@ -1129,6 +1215,7 @@ export default function SalesScreen() {
   const [routePreviewBusy, setRoutePreviewBusy] = useState(false);
   const [routePreviewError, setRoutePreviewError] = useState<string | null>(null);
   const [routePreview, setRoutePreview] = useState<MapplsRoutePreviewResponse | null>(null);
+  const [adminRouteTimeline, setAdminRouteTimeline] = useState<AdminRouteTimelineResponse | null>(null);
   const [voicePulseBars, setVoicePulseBars] = useState<number[]>(VOICE_PULSE_BASELINE);
   const [voicePulseState, setVoicePulseState] = useState<"idle" | "listening" | "speaking">("idle");
   const [posProducts, setPosProducts] = useState<DolibarrProduct[]>([]);
@@ -1190,12 +1277,26 @@ export default function SalesScreen() {
   );
 
   const loadData = useCallback(async () => {
-    const [convos, taskData, employeeData, logs, attendance] = await Promise.all([
+    const [
+      convos,
+      taskData,
+      employeeData,
+      logs,
+      attendance,
+      remoteLogsState,
+      remoteAttendanceState,
+    ] = await Promise.all([
       getConversations(),
       getTasks(),
       getEmployees(),
       getLocationLogs(),
       getAttendance(),
+      isAdminViewer
+        ? getRemoteState<LocationLog[]>("@trackforce_location_logs").catch(() => ({ value: null }))
+        : Promise.resolve({ value: null }),
+      isAdminViewer
+        ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance").catch(() => ({ value: null }))
+        : Promise.resolve({ value: null }),
     ]);
     if (!user) {
       setConversations([]);
@@ -1216,14 +1317,19 @@ export default function SalesScreen() {
 
     setTasks(taskData);
     setEmployees(employeeData);
-    setLocationLogs(logs);
-    setAttendanceRecords(attendance);
+    const remoteLogs = Array.isArray(remoteLogsState.value)
+      ? filterCompanyScoped(remoteLogsState.value, user.companyId)
+      : [];
+    const remoteAttendance = Array.isArray(remoteAttendanceState.value)
+      ? filterCompanyScoped(remoteAttendanceState.value, user.companyId)
+      : [];
+    setLocationLogs(dedupeById([...remoteLogs, ...logs]));
+    setAttendanceRecords(dedupeById([...remoteAttendance, ...attendance]));
 
     const salesEmployees = employeeData.filter((entry) => entry.role === "salesperson");
     if (isAdminViewer) {
-      const selectable = salesEmployees.length ? salesEmployees : employeeData;
       setSelectedSalespersonId((current) =>
-        selectable.some((entry) => entry.id === current) ? current : selectable[0]?.id ?? ""
+        salesEmployees.some((entry) => entry.id === current) ? current : salesEmployees[0]?.id ?? ""
       );
       return;
     }
@@ -1278,7 +1384,7 @@ export default function SalesScreen() {
   useEffect(() => {
     const timer = setInterval(() => {
       void loadData();
-    }, ROUTE_POINT_INTERVAL_MINUTES * 60_000);
+    }, LIVE_ROUTE_REFRESH_MS);
     return () => clearInterval(timer);
   }, [loadData]);
 
@@ -1470,8 +1576,7 @@ export default function SalesScreen() {
   const selectableSalespeople = useMemo(() => {
     if (!user) return [] as Employee[];
     if (isAdminViewer) {
-      const salesEmployees = employees.filter((entry) => entry.role === "salesperson");
-      return salesEmployees.length ? salesEmployees : employees;
+      return employees.filter((entry) => entry.role === "salesperson");
     }
     const selfEmployee =
       employees.find((entry) => entry.id === selectedSalespersonId) ||
@@ -1622,35 +1727,180 @@ export default function SalesScreen() {
     [isAdminViewer, plannedStops, plannerPreviewStops, routePlanDate, routePlanDirty, todayDateKey]
   );
 
-  const routeTimeline = useMemo(() => {
-    if (!user || !selectedSalespersonId) {
-      return buildRouteTimeline("", todayDateKey, []);
-    }
-    const aliases = buildSelectedUserAliases(
+  const selectedSalespersonAliases = useMemo(() => {
+    if (!user || !selectedSalespersonId) return new Set<string>();
+    return buildSelectedUserAliases(
       selectedSalesperson,
       { id: user.id, name: user.name, email: user.email },
       attendanceRecords,
       selectedSalespersonId
     );
-    const selectedAttendance = attendanceRecords
-      .filter((entry) => aliases.has(entry.userId))
-      .filter((entry) => isMumbaiDateKey(entry.timestamp, todayDateKey))
-      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    const sessionWindow = resolveRouteSessionWindow(selectedAttendance);
+  }, [attendanceRecords, selectedSalesperson, selectedSalespersonId, user]);
+
+  const selectedSalespersonAttendance = useMemo(
+    () =>
+      attendanceRecords
+        .filter((entry) => selectedSalespersonAliases.has(entry.userId))
+        .filter((entry) => isMumbaiDateKey(entry.timestamp, todayDateKey))
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+    [attendanceRecords, selectedSalespersonAliases, todayDateKey]
+  );
+
+  const latestSelectedSalespersonStatus = useMemo(
+    () =>
+      getLatestAttendanceStatus(
+        selectedSalespersonAttendance,
+        adminRouteTimeline?.attendanceEvents || []
+      ),
+    [adminRouteTimeline?.attendanceEvents, selectedSalespersonAttendance]
+  );
+
+  const isSelectedSalespersonTrackingActive = latestSelectedSalespersonStatus?.type === "checkin";
+  const isSelectedSalespersonCheckedOut = latestSelectedSalespersonStatus?.type === "checkout";
+  const selectedSalespersonTrackingTitle = isSelectedSalespersonCheckedOut ? "Checked Out" : "Not Checked In";
+  const selectedSalespersonTrackingMessage = isSelectedSalespersonCheckedOut
+    ? `${selectedSalesperson?.name || "This salesperson"} checked out${
+        latestSelectedSalespersonStatus?.timestamp
+          ? ` at ${formatMumbaiTime(latestSelectedSalespersonStatus.timestamp)}`
+          : ""
+      }. Map is hidden until next check-in.`
+    : `${selectedSalesperson?.name || "This salesperson"} has not checked in yet for today.`;
+
+  const localRouteTimeline = useMemo(() => {
+    if (!user || !selectedSalespersonId) {
+      return buildRouteTimeline("", todayDateKey, []);
+    }
+    if (!isSelectedSalespersonTrackingActive) {
+      return buildRouteTimeline(selectedSalespersonId, todayDateKey, []);
+    }
+    const sessionWindow = resolveRouteSessionWindow(selectedSalespersonAttendance);
     const selectedDayPoints = locationLogs
-      .filter((entry) => aliases.has(entry.userId))
+      .filter((entry) => selectedSalespersonAliases.has(entry.userId))
       .filter((entry) => isMumbaiDateKey(entry.capturedAt, todayDateKey));
     const normalizedPoints = normalizePointsForInterval(
       filterPointsToSessionWindow(selectedDayPoints, sessionWindow),
       ROUTE_POINT_INTERVAL_MINUTES
     );
     return buildRouteTimeline(selectedSalespersonId, todayDateKey, normalizedPoints);
-  }, [attendanceRecords, locationLogs, selectedSalesperson, selectedSalespersonId, todayDateKey, user]);
+  }, [
+    isSelectedSalespersonTrackingActive,
+    locationLogs,
+    selectedSalespersonAliases,
+    selectedSalespersonAttendance,
+    selectedSalespersonId,
+    todayDateKey,
+    user,
+  ]);
+
+  useEffect(() => {
+    setAdminRouteTimeline(null);
+    if (!isAdminViewer || !selectedSalespersonId) {
+      return;
+    }
+
+    let cancelled = false;
+    const candidateIds = buildUserIdCandidates(
+      selectedSalespersonId,
+      selectedSalesperson?.id,
+      ...Array.from(selectedSalespersonAliases)
+    );
+
+    void (async () => {
+      let resolvedTimeline: AdminRouteTimelineResponse | null = null;
+
+      for (const candidateId of candidateIds) {
+        try {
+          const currentTimeline = await getAdminRouteTimeline(
+            candidateId,
+            todayDateKey,
+            ROUTE_POINT_INTERVAL_MINUTES
+          );
+          const currentLatestActivity = getTimelineLatestActivityAt(currentTimeline);
+          const resolvedLatestActivity = getTimelineLatestActivityAt(resolvedTimeline);
+          const currentPointCount = currentTimeline.points?.length ?? 0;
+          const resolvedPointCount = resolvedTimeline?.points?.length ?? 0;
+          if (
+            !resolvedTimeline ||
+            currentLatestActivity.localeCompare(resolvedLatestActivity) > 0 ||
+            (currentLatestActivity === resolvedLatestActivity && currentPointCount > resolvedPointCount)
+          ) {
+            resolvedTimeline = currentTimeline;
+          }
+        } catch {
+          // try next candidate
+        }
+      }
+
+      if ((!resolvedTimeline || (resolvedTimeline.points?.length ?? 0) === 0) && candidateIds.length) {
+        try {
+          const liveRoutes = await getAdminLiveMapRoutes(todayDateKey, ROUTE_POINT_INTERVAL_MINUTES);
+          const matchingRoute = (liveRoutes.routes || [])
+            .filter((route) => candidateIds.includes(route.userId) && (route.points?.length ?? 0) > 0)
+            .sort((a, b) => {
+              const aTime = a.latestPoint?.capturedAt || "";
+              const bTime = b.latestPoint?.capturedAt || "";
+              return bTime.localeCompare(aTime);
+            })[0];
+          if (matchingRoute) {
+            resolvedTimeline = {
+              ...buildRouteTimeline(selectedSalespersonId, todayDateKey, matchingRoute.points),
+              attendanceEvents: resolvedTimeline?.attendanceEvents || [],
+            };
+          }
+        } catch {
+          // keep best-effort local/admin timeline fallback
+        }
+      }
+
+      if (!cancelled) {
+        setAdminRouteTimeline(resolvedTimeline);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    attendanceRecords,
+    isAdminViewer,
+    locationLogs,
+    selectedSalesperson?.id,
+    selectedSalespersonAliases,
+    selectedSalespersonId,
+    todayDateKey,
+  ]);
+
+  const routeTimeline = useMemo(() => {
+    if (!isSelectedSalespersonTrackingActive) {
+      return buildRouteTimeline(selectedSalespersonId || "", todayDateKey, []);
+    }
+    if (isAdminViewer) {
+      return adminRouteTimeline && (adminRouteTimeline.points?.length ?? 0) > 0
+        ? adminRouteTimeline
+        : localRouteTimeline;
+    }
+    return localRouteTimeline;
+  }, [
+    adminRouteTimeline,
+    isAdminViewer,
+    isSelectedSalespersonTrackingActive,
+    localRouteTimeline,
+    selectedSalespersonId,
+    todayDateKey,
+  ]);
 
   const latestRoutePoint = useMemo(() => {
     if (!routeTimeline.points.length) return null;
     return [...routeTimeline.points].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
   }, [routeTimeline.points]);
+
+  const currentLocationMeta = latestRoutePoint
+    ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
+        latestRoutePoint.batteryLevel
+      )}`
+    : isSelectedSalespersonTrackingActive
+      ? "Waiting for live GPS point..."
+      : selectedSalespersonTrackingMessage;
 
   const navigationStops = useMemo<RoutePlannerStop[]>(() => {
     const taskBackedStops = todaysVisitTasks
@@ -3472,14 +3722,46 @@ export default function SalesScreen() {
                   </View>
                 ) : null}
 
-                <RouteMapNative
-                  points={routeTimeline.points}
-                  halts={routeTimeline.halts}
-                  plannedStops={visiblePlannedStops}
-                  routePath={routePreviewPath}
-                  colors={colors}
-                  height={255}
-                />
+                <View style={styles.routeMapShell}>
+                  <RouteMapNative
+                    points={routeTimeline.points}
+                    halts={routeTimeline.halts}
+                    plannedStops={visiblePlannedStops}
+                    routePath={routePreviewPath}
+                    colors={colors}
+                    height={255}
+                  />
+                  {!isSelectedSalespersonTrackingActive ? (
+                    <View style={styles.routeMapOverlay}>
+                      <View
+                        style={[
+                          styles.routeMapOverlayCard,
+                          {
+                            borderColor: colors.warning + "55",
+                            backgroundColor: colors.backgroundElevated + "F2",
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.routeMapOverlayTitle,
+                            { color: colors.text, fontFamily: "Inter_700Bold" },
+                          ]}
+                        >
+                          {selectedSalespersonTrackingTitle}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.routeMapOverlayText,
+                            { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                          ]}
+                        >
+                          {selectedSalespersonTrackingMessage}
+                        </Text>
+                      </View>
+                    </View>
+                  ) : null}
+                </View>
 
                 <View
                   style={[
@@ -3594,7 +3876,7 @@ export default function SalesScreen() {
                         { color: colors.text, fontFamily: "Inter_600SemiBold" },
                       ]}
                     >
-                      Current Location
+                      {isSelectedSalespersonTrackingActive ? "Current Location" : "Attendance Status"}
                     </Text>
                     <Text
                       style={[
@@ -3602,11 +3884,7 @@ export default function SalesScreen() {
                         { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
                       ]}
                     >
-                      {latestRoutePoint
-                        ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
-                            latestRoutePoint.batteryLevel
-                          )}`
-                        : "Waiting for live GPS point..."}
+                      {currentLocationMeta}
                     </Text>
                   </View>
                 </View>
@@ -3676,14 +3954,46 @@ export default function SalesScreen() {
                       {mumbaiNowLabel}
                     </Text>
                   </View>
-                  <RouteMapNative
-                    points={routeTimeline.points}
-                    halts={routeTimeline.halts}
-                    plannedStops={visiblePlannedStops}
-                    routePath={routePreviewPath}
-                    colors={colors}
-                    height={230}
-                  />
+                  <View style={styles.routeMapShell}>
+                    <RouteMapNative
+                      points={routeTimeline.points}
+                      halts={routeTimeline.halts}
+                      plannedStops={visiblePlannedStops}
+                      routePath={routePreviewPath}
+                      colors={colors}
+                      height={230}
+                    />
+                    {!isSelectedSalespersonTrackingActive ? (
+                      <View style={styles.routeMapOverlay}>
+                        <View
+                          style={[
+                            styles.routeMapOverlayCard,
+                            {
+                              borderColor: colors.warning + "55",
+                              backgroundColor: colors.backgroundElevated + "F2",
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.routeMapOverlayTitle,
+                              { color: colors.text, fontFamily: "Inter_700Bold" },
+                            ]}
+                          >
+                            {selectedSalespersonTrackingTitle}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.routeMapOverlayText,
+                              { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                            ]}
+                          >
+                            {selectedSalespersonTrackingMessage}
+                          </Text>
+                        </View>
+                      </View>
+                    ) : null}
+                  </View>
                 </Animated.View>
 
                 <Animated.View
@@ -3721,13 +4031,11 @@ export default function SalesScreen() {
                     <Ionicons name="locate-outline" size={16} color={colors.secondary} />
                   </View>
                   <View style={styles.salesInfoText}>
-                    <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>Current Location</Text>
+                    <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      {isSelectedSalespersonTrackingActive ? "Current Location" : "Attendance Status"}
+                    </Text>
                     <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                      {latestRoutePoint
-                        ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
-                            latestRoutePoint.batteryLevel
-                          )}`
-                        : "Waiting for live GPS point..."}
+                      {currentLocationMeta}
                     </Text>
                   </View>
                 </Animated.View>
@@ -4814,6 +5122,36 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
+  routeMapShell: {
+    position: "relative",
+    overflow: "hidden",
+    borderRadius: 20,
+  },
+  routeMapOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 18,
+  },
+  routeMapOverlayCard: {
+    width: "100%",
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  routeMapOverlayTitle: {
+    fontSize: 17,
+    textAlign: "center",
+  },
+  routeMapOverlayText: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: "center",
+  },
   routePreviewIconWrap: {
     width: 28,
     height: 28,
@@ -5644,5 +5982,3 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
   },
 });
-
-

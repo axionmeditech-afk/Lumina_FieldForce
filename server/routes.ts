@@ -1,4 +1,4 @@
-import express, { type Express, type Request } from "express";
+import express, { type Express, type Request, type Response } from "express";
 import type { Pool } from "mysql2/promise";
 import { createServer, type Server } from "node:http";
 import { createHash, randomUUID } from "crypto";
@@ -112,6 +112,8 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_support_threads",
 ]);
 const NORMALIZED_STATE_KEYS = new Set([
+  "@trackforce_attendance",
+  "@trackforce_location_logs",
   "@trackforce_stockists",
   "@trackforce_stock_transfers",
   "@trackforce_incentive_goal_plans",
@@ -144,7 +146,7 @@ function pickProductStockColumn(
 
 async function resolveProductStockSchema(conn: Pool): Promise<ProductStockSchema> {
   if (cachedProductStockSchema) return cachedProductStockSchema;
-  const [rows] = await conn.query<Array<Record<string, unknown>>>(
+  const [rows] = await conn.query<any[]>(
     `SHOW COLUMNS FROM \`${PRODUCT_STOCK_TABLE}\``
   );
   if (!rows || !rows.length) {
@@ -389,9 +391,8 @@ async function forwardDolibarrRequest(
             connect: { rejectUnauthorized: false },
           })
         : undefined;
-    const response = await fetch(targetUrl, {
+    const requestInit: RequestInit & { dispatcher?: unknown } = {
       method,
-      dispatcher,
       headers: {
         "Content-Type": "application/json",
         DOLAPIKEY: apiKey,
@@ -399,7 +400,11 @@ async function forwardDolibarrRequest(
       },
       body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(req.body ?? {}),
       signal: controller.signal,
-    });
+    };
+    if (dispatcher) {
+      requestInit.dispatcher = dispatcher;
+    }
+    const response = await fetch(targetUrl, requestInit);
 
     const text = await response.text();
     const contentType = response.headers.get("content-type");
@@ -553,15 +558,27 @@ interface RouteSessionWindow {
 
 function resolveRouteSessionWindow(events: RouteAttendanceEventLike[]): RouteSessionWindow {
   const ordered = [...events].sort((a, b) => a.at.localeCompare(b.at));
-  const firstCheckIn = ordered.find((entry) => entry.type === "checkin");
-  if (!firstCheckIn) return { startAt: null, endAt: null };
-  const firstCheckOut = ordered.find(
-    (entry) => entry.type === "checkout" && entry.at >= firstCheckIn.at
-  );
-  return {
-    startAt: firstCheckIn.at,
-    endAt: firstCheckOut?.at ?? null,
-  };
+  let activeStartAt: string | null = null;
+  let lastCompletedWindow: RouteSessionWindow = { startAt: null, endAt: null };
+
+  for (const entry of ordered) {
+    if (entry.type === "checkin") {
+      activeStartAt = entry.at;
+      continue;
+    }
+    if (entry.type === "checkout" && activeStartAt) {
+      lastCompletedWindow = {
+        startAt: activeStartAt,
+        endAt: entry.at,
+      };
+      activeStartAt = null;
+    }
+  }
+
+  if (activeStartAt) {
+    return { startAt: activeStartAt, endAt: null };
+  }
+  return lastCompletedWindow;
 }
 
 function filterLocationLogsToSessionWindow(
@@ -626,6 +643,14 @@ function parseCheckPayload(req: Request): AttendanceCheckPayload | null {
 function ensureUserMatch(req: Request, userId: string): boolean {
   if (!req.auth) return false;
   return req.auth.sub === userId || ["admin", "hr", "manager"].includes(req.auth.role);
+}
+
+async function resolveRequestCompanyId(req: Request): Promise<string | null> {
+  const email = normalizeEmailKey(req.auth?.email);
+  if (!email) return null;
+  const synced = await syncAuthUserCacheForEmail(email).catch(() => null);
+  const cached = getAuthUserByIdentifier(email);
+  return synced?.user.companyId ?? cached?.user.companyId ?? null;
 }
 
 interface AuthUserRecord {
@@ -1202,6 +1227,231 @@ function getLatestAccessRequestByEmail(email: string): AccessRequestRecord | nul
   return latest;
 }
 
+let attendanceTableEnsured = false;
+let attendanceLegacyStateHydrated = false;
+let locationLogLegacyStateHydrated = false;
+
+async function ensureAttendanceTable(): Promise<void> {
+  if (attendanceTableEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_attendance\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`user_id\` VARCHAR(64) NOT NULL,
+      \`user_name\` VARCHAR(191) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`type\` ENUM('checkin','checkout') NOT NULL,
+      \`timestamp\` DATETIME NOT NULL,
+      \`timestamp_server\` DATETIME NULL,
+      \`lat\` DECIMAL(10,7) NULL,
+      \`lng\` DECIMAL(10,7) NULL,
+      \`geofence_id\` VARCHAR(64) NULL,
+      \`geofence_name\` VARCHAR(191) NULL,
+      \`photo_url\` LONGTEXT NULL,
+      \`device_id\` VARCHAR(128) NULL,
+      \`is_inside_geofence\` TINYINT(1) NULL,
+      \`source\` ENUM('mobile','manual','synced') NULL,
+      \`notes\` LONGTEXT NULL,
+      \`photo\` LONGTEXT NULL,
+      \`approval_status\` ENUM('pending','approved','rejected') NULL,
+      \`approval_reviewed_by_id\` VARCHAR(64) NULL,
+      \`approval_reviewed_by_name\` VARCHAR(191) NULL,
+      \`approval_reviewed_at\` DATETIME NULL,
+      \`approval_comment\` LONGTEXT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_attendance_user_timestamp\` (\`user_id\`, \`timestamp\`),
+      KEY \`idx_lff_attendance_company\` (\`company_id\`),
+      KEY \`idx_lff_attendance_approval\` (\`approval_status\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  attendanceTableEnsured = true;
+}
+
+function mapAttendanceRow(row: any): AttendanceRecord {
+  const location =
+    row.lat === null ||
+    row.lat === undefined ||
+    row.lng === null ||
+    row.lng === undefined
+      ? undefined
+      : {
+          lat: Number(row.lat),
+          lng: Number(row.lng),
+        };
+
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    userName: String(row.user_name || ""),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    type: row.type === "checkout" ? "checkout" : "checkin",
+    timestamp: toIsoTimestamp(row.timestamp, new Date().toISOString()),
+    timestampServer: row.timestamp_server ? toIsoTimestamp(row.timestamp_server, new Date().toISOString()) : null,
+    location,
+    geofenceId: row.geofence_id ? String(row.geofence_id) : null,
+    geofenceName: row.geofence_name ? String(row.geofence_name) : null,
+    photoUrl: row.photo_url ? String(row.photo_url) : null,
+    deviceId: row.device_id ? String(row.device_id) : null,
+    isInsideGeofence:
+      row.is_inside_geofence === null || row.is_inside_geofence === undefined
+        ? undefined
+        : Boolean(row.is_inside_geofence),
+    source: row.source === "manual" || row.source === "synced" ? row.source : "mobile",
+    notes: row.notes ? String(row.notes) : undefined,
+    photo: row.photo ? String(row.photo) : undefined,
+    approvalStatus: normalizeApprovalStatusValue(row.approval_status),
+    approvalReviewedById: row.approval_reviewed_by_id ? String(row.approval_reviewed_by_id) : null,
+    approvalReviewedByName: row.approval_reviewed_by_name ? String(row.approval_reviewed_by_name) : null,
+    approvalReviewedAt: row.approval_reviewed_at ? toIsoTimestamp(row.approval_reviewed_at, new Date().toISOString()) : null,
+    approvalComment: row.approval_comment ? String(row.approval_comment) : null,
+  };
+}
+
+async function insertAttendanceInMySql(record: AttendanceRecord): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureAttendanceTable();
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_attendance (
+      id, user_id, user_name, company_id, type, timestamp, timestamp_server, lat, lng,
+      geofence_id, geofence_name, photo_url, device_id, is_inside_geofence, source, notes,
+      photo, approval_status, approval_reviewed_by_id, approval_reviewed_by_name, approval_reviewed_at,
+      approval_comment
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      user_id = VALUES(user_id),
+      user_name = VALUES(user_name),
+      company_id = VALUES(company_id),
+      type = VALUES(type),
+      timestamp = VALUES(timestamp),
+      timestamp_server = VALUES(timestamp_server),
+      lat = VALUES(lat),
+      lng = VALUES(lng),
+      geofence_id = VALUES(geofence_id),
+      geofence_name = VALUES(geofence_name),
+      photo_url = VALUES(photo_url),
+      device_id = VALUES(device_id),
+      is_inside_geofence = VALUES(is_inside_geofence),
+      source = VALUES(source),
+      notes = VALUES(notes),
+      photo = VALUES(photo),
+      approval_status = VALUES(approval_status),
+      approval_reviewed_by_id = VALUES(approval_reviewed_by_id),
+      approval_reviewed_by_name = VALUES(approval_reviewed_by_name),
+      approval_reviewed_at = VALUES(approval_reviewed_at),
+      approval_comment = VALUES(approval_comment)`,
+    [
+      record.id,
+      record.userId,
+      record.userName,
+      record.companyId ?? null,
+      record.type,
+      toSqlTimestamp(record.timestamp),
+      record.timestampServer ? toSqlTimestamp(record.timestampServer) : null,
+      record.location?.lat ?? null,
+      record.location?.lng ?? null,
+      record.geofenceId ?? null,
+      record.geofenceName ?? null,
+      record.photoUrl ?? null,
+      record.deviceId ?? null,
+      typeof record.isInsideGeofence === "boolean" ? (record.isInsideGeofence ? 1 : 0) : null,
+      record.source ?? null,
+      record.notes ?? null,
+      record.photo ?? null,
+      record.approvalStatus ?? "approved",
+      record.approvalReviewedById ?? null,
+      record.approvalReviewedByName ?? null,
+      record.approvalReviewedAt ? toSqlTimestamp(record.approvalReviewedAt) : null,
+      record.approvalComment ?? null,
+    ]
+  );
+}
+
+async function hydrateAttendanceFromLegacyStateIfNeeded(): Promise<void> {
+  if (attendanceLegacyStateHydrated || !isMySqlStateEnabled()) return;
+  attendanceLegacyStateHydrated = true;
+  const raw = await getMySqlStateValue("@trackforce_attendance").catch(() => null);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length) {
+      await mergeAttendanceInMySql(parsed);
+    }
+  } catch {
+    // ignore malformed legacy state payload
+  }
+}
+
+async function listAttendanceHistoryFromMySql(userId: string): Promise<AttendanceRecord[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureAttendanceTable();
+  const conn = await getMySqlPool();
+  let [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_attendance WHERE user_id = ? ORDER BY \`timestamp\` DESC`,
+    [userId]
+  );
+  if ((!rows || rows.length === 0) && !attendanceLegacyStateHydrated) {
+    await hydrateAttendanceFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_attendance WHERE user_id = ? ORDER BY \`timestamp\` DESC`,
+      [userId]
+    );
+  }
+  return rows.map(mapAttendanceRow);
+}
+
+async function listAttendanceTodayFromMySql(userId: string): Promise<AttendanceRecord[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureAttendanceTable();
+  const range = parseDateKeyToUtcRange(toMumbaiDateKey(new Date()));
+  if (!range) return [];
+  const conn = await getMySqlPool();
+  let [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_attendance
+     WHERE user_id = ? AND \`timestamp\` BETWEEN ? AND ?
+     ORDER BY \`timestamp\` DESC`,
+    [userId, range.start, range.end]
+  );
+  if ((!rows || rows.length === 0) && !attendanceLegacyStateHydrated) {
+    await hydrateAttendanceFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_attendance
+       WHERE user_id = ? AND \`timestamp\` BETWEEN ? AND ?
+       ORDER BY \`timestamp\` DESC`,
+      [userId, range.start, range.end]
+    );
+  }
+  return rows.map(mapAttendanceRow);
+}
+
+async function listAttendanceFromMySql(limit = 10000): Promise<AttendanceRecord[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureAttendanceTable();
+  const conn = await getMySqlPool();
+  const safeLimit = Math.max(1, Math.min(50000, Math.trunc(limit)));
+  let [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_attendance ORDER BY \`timestamp\` DESC LIMIT ${safeLimit}`
+  );
+  if ((!rows || rows.length === 0) && !attendanceLegacyStateHydrated) {
+    await hydrateAttendanceFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_attendance ORDER BY \`timestamp\` DESC LIMIT ${safeLimit}`
+    );
+  }
+  return rows.map(mapAttendanceRow);
+}
+
+async function findActiveAttendanceInMySql(userId: string): Promise<AttendanceRecord | null> {
+  const history = await listAttendanceHistoryFromMySql(userId);
+  const latestCheckIn = history.find((entry) => entry.type === "checkin");
+  if (!latestCheckIn) return null;
+  const checkedOutAfter = history.some(
+    (entry) => entry.type === "checkout" && entry.timestamp >= latestCheckIn.timestamp
+  );
+  return checkedOutAfter ? null : latestCheckIn;
+}
+
 function mapLocationLogRow(row: any): LocationLog {
   return {
     id: String(row.id),
@@ -1221,6 +1471,22 @@ function mapLocationLogRow(row: any): LocationLog {
     isInsideGeofence: Boolean(row.is_inside_geofence),
     capturedAt: new Date(row.captured_at).toISOString(),
   };
+}
+
+async function listLocationLogsFromMySql(limit = 10000): Promise<LocationLog[]> {
+  if (!isMySqlStateEnabled()) return [];
+  const conn = await getMySqlPool();
+  const safeLimit = Math.max(1, Math.min(50000, Math.trunc(limit)));
+  let [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT ${safeLimit}`
+  );
+  if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
+    await hydrateLocationLogsFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT ${safeLimit}`
+    );
+  }
+  return rows.map(mapLocationLogRow);
 }
 
 async function insertLocationLogInMySql(log: LocationLog): Promise<void> {
@@ -1262,9 +1528,15 @@ async function insertLocationLogInMySql(log: LocationLog): Promise<void> {
 
 async function listLocationLogsLatestFromMySql(): Promise<LocationLog[]> {
   const conn = await getMySqlPool();
-  const [rows] = await conn.query<any[]>(
+  let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT 5000`
   );
+  if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
+    await hydrateLocationLogsFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT 5000`
+    );
+  }
   const latestByUser = new Map<string, LocationLog>();
   for (const row of rows) {
     const log = mapLocationLogRow(row);
@@ -1279,12 +1551,21 @@ async function listLocationLogsForDateFromMySql(dateKey: string): Promise<Locati
   const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
   const conn = await getMySqlPool();
-  const [rows] = await conn.query<any[]>(
+  let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs
      WHERE captured_at BETWEEN ? AND ?
      ORDER BY captured_at ASC`,
     [range.start, range.end]
   );
+  if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
+    await hydrateLocationLogsFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_location_logs
+       WHERE captured_at BETWEEN ? AND ?
+       ORDER BY captured_at ASC`,
+      [range.start, range.end]
+    );
+  }
   return rows.map(mapLocationLogRow);
 }
 
@@ -1295,12 +1576,21 @@ async function listLocationLogsForUserDateFromMySql(
   const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
   const conn = await getMySqlPool();
-  const [rows] = await conn.query<any[]>(
+  let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs
      WHERE user_id = ? AND captured_at BETWEEN ? AND ?
      ORDER BY captured_at ASC`,
     [userId, range.start, range.end]
   );
+  if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
+    await hydrateLocationLogsFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_location_logs
+       WHERE user_id = ? AND captured_at BETWEEN ? AND ?
+       ORDER BY captured_at ASC`,
+      [userId, range.start, range.end]
+    );
+  }
   return rows.map(mapLocationLogRow);
 }
 
@@ -1977,8 +2267,115 @@ async function replaceIncentivePayoutsInMySql(entries: unknown[]): Promise<void>
   }
 }
 
+function normalizeAttendanceRecordInput(entry: unknown): AttendanceRecord | null {
+  if (!entry || typeof entry !== "object") return null;
+  const id = toStringId((entry as any).id);
+  const userId = toStringId((entry as any).userId);
+  const type = (entry as any).type === "checkout" ? "checkout" : (entry as any).type === "checkin" ? "checkin" : null;
+  const timestamp = toNullableText((entry as any).timestamp);
+  if (!id || !userId || !type || !timestamp) return null;
+
+  const userName = toRequiredText((entry as any).userName, "Unknown User");
+  const lat = Number((entry as any).location?.lat);
+  const lng = Number((entry as any).location?.lng);
+  const hasLocation = Number.isFinite(lat) && Number.isFinite(lng);
+
+  return {
+    id,
+    userId,
+    userName,
+    companyId: toNullableText((entry as any).companyId) ?? undefined,
+    type,
+    timestamp,
+    timestampServer: toNullableText((entry as any).timestampServer),
+    location: hasLocation ? { lat, lng } : undefined,
+    geofenceId: toNullableText((entry as any).geofenceId),
+    geofenceName: toNullableText((entry as any).geofenceName),
+    photoUrl: toNullableText((entry as any).photoUrl),
+    deviceId: toNullableText((entry as any).deviceId),
+    isInsideGeofence:
+      typeof (entry as any).isInsideGeofence === "boolean"
+        ? Boolean((entry as any).isInsideGeofence)
+        : undefined,
+    source:
+      (entry as any).source === "manual" || (entry as any).source === "synced"
+        ? (entry as any).source
+        : "mobile",
+    notes: toNullableText((entry as any).notes) ?? undefined,
+    photo: toNullableText((entry as any).photo) ?? undefined,
+    approvalStatus: normalizeApprovalStatusValue((entry as any).approvalStatus),
+    approvalReviewedById: toNullableText((entry as any).approvalReviewedById),
+    approvalReviewedByName: toNullableText((entry as any).approvalReviewedByName),
+    approvalReviewedAt: toNullableText((entry as any).approvalReviewedAt),
+    approvalComment: toNullableText((entry as any).approvalComment),
+  };
+}
+
+function normalizeLocationLogInput(entry: unknown): LocationLog | null {
+  if (!entry || typeof entry !== "object") return null;
+  const id = toStringId((entry as any).id);
+  const userId = toStringId((entry as any).userId);
+  const latitude = Number((entry as any).latitude);
+  const longitude = Number((entry as any).longitude);
+  if (!id || !userId || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+
+  const accuracy = Number((entry as any).accuracy);
+  const speed = Number((entry as any).speed);
+  const heading = Number((entry as any).heading);
+  const batteryLevel = Number((entry as any).batteryLevel);
+
+  return {
+    id,
+    companyId: toNullableText((entry as any).companyId) ?? undefined,
+    userId,
+    latitude,
+    longitude,
+    accuracy: Number.isFinite(accuracy) ? accuracy : null,
+    speed: Number.isFinite(speed) ? speed : null,
+    heading: Number.isFinite(heading) ? heading : null,
+    batteryLevel: Number.isFinite(batteryLevel) ? batteryLevel : null,
+    geofenceId: toNullableText((entry as any).geofenceId),
+    geofenceName: toNullableText((entry as any).geofenceName),
+    isInsideGeofence: Boolean((entry as any).isInsideGeofence),
+    capturedAt: toNullableText((entry as any).capturedAt) || new Date().toISOString(),
+  };
+}
+
+async function mergeAttendanceInMySql(entries: unknown[]): Promise<void> {
+  for (const entry of entries) {
+    const record = normalizeAttendanceRecordInput(entry);
+    if (!record) continue;
+    await insertAttendanceInMySql(record);
+  }
+}
+
+async function mergeLocationLogsInMySql(entries: unknown[]): Promise<void> {
+  for (const entry of entries) {
+    const log = normalizeLocationLogInput(entry);
+    if (!log) continue;
+    await insertLocationLogInMySql(log);
+  }
+}
+
+async function hydrateLocationLogsFromLegacyStateIfNeeded(): Promise<void> {
+  if (locationLogLegacyStateHydrated || !isMySqlStateEnabled()) return;
+  locationLogLegacyStateHydrated = true;
+  const raw = await getMySqlStateValue("@trackforce_location_logs").catch(() => null);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length) {
+      await mergeLocationLogsInMySql(parsed);
+    }
+  } catch {
+    // ignore malformed legacy state payload
+  }
+}
+
 async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
   if (!isNormalizedStateKey(key)) return undefined;
+  if (key === "@trackforce_attendance") return listAttendanceFromMySql();
+  if (key === "@trackforce_location_logs") return listLocationLogsFromMySql();
   if (key === "@trackforce_stockists") return listStockistsFromMySql();
   if (key === "@trackforce_stock_transfers") return listStockTransfersFromMySql();
   if (key === "@trackforce_incentive_goal_plans") return listIncentiveGoalPlansFromMySql();
@@ -1996,6 +2393,14 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
     parsed = null;
   }
   const entries = Array.isArray(parsed) ? parsed : [];
+  if (key === "@trackforce_attendance") {
+    await mergeAttendanceInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_location_logs") {
+    await mergeLocationLogsInMySql(entries);
+    return true;
+  }
   if (key === "@trackforce_stockists") {
     await replaceStockistsInMySql(entries);
     return true;
@@ -3873,7 +4278,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           FROM \`${PRODUCT_STOCK_TABLE}\`
           WHERE \`${schema.productIdCol}\` IN (${placeholders})
           GROUP BY \`${schema.productIdCol}\``;
-        const [rows] = await conn.execute<Array<Record<string, unknown>>>(query, ids);
+        const [rows] = await conn.execute<any[]>(query, ids);
         const stockMap = new Map<string, number>();
         for (const row of rows || []) {
           const productId = String(row.productId ?? "");
@@ -3928,7 +4333,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           WHERE \`${schema.productIdCol}\` = ?
           ${orderBy}
           LIMIT 1`;
-        const [rows] = await conn.execute<Array<Record<string, unknown>>>(selectQuery, [productId]);
+        const [rows] = await conn.execute<any[]>(selectQuery, [productId]);
         if (!rows.length) {
           res.status(404).json({ message: "Product stock row not found." });
           return;
@@ -3959,7 +4364,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           );
         }
 
-        const [totalRows] = await conn.execute<Array<Record<string, unknown>>>(
+        const [totalRows] = await conn.execute<any[]>(
           `SELECT SUM(COALESCE(\`${schema.qtyCol}\`, 0)) AS stock
            FROM \`${PRODUCT_STOCK_TABLE}\`
            WHERE \`${schema.productIdCol}\` = ?`,
@@ -4254,7 +4659,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
       }
-      const intervalMinutes = parseIntervalMinutes(req.query.interval_minutes, 1);
+      const useRawPoints = parseBooleanQuery(req.query.raw, false);
+      const intervalMinutes = useRawPoints ? 0 : parseIntervalMinutes(req.query.interval_minutes, 1);
       let allPoints: LocationLog[] = [];
       if (isMySqlStateEnabled()) {
         try {
@@ -4275,7 +4681,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const routes = Array.from(byUser.entries())
         .map(([userId, userPoints]) => {
-          const sampled = downsampleLocationLogsByInterval(userPoints, intervalMinutes);
+          const sampled = useRawPoints
+            ? [...userPoints].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+            : downsampleLocationLogsByInterval(userPoints, intervalMinutes);
           return {
             userId,
             intervalMinutes,
@@ -4319,19 +4727,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
 
-      const intervalMinutes = parseIntervalMinutes(req.query.interval_minutes, 1);
-      let rawPoints: LocationLog[] = [];
+      const useRawPoints = parseBooleanQuery(req.query.raw, false);
+      const intervalMinutes = useRawPoints ? 0 : parseIntervalMinutes(req.query.interval_minutes, 1);
+      let rawLocationPoints: LocationLog[] = [];
       if (isMySqlStateEnabled()) {
         try {
-          rawPoints = await listLocationLogsForUserDateFromMySql(userId, requestedDate);
+          rawLocationPoints = await listLocationLogsForUserDateFromMySql(userId, requestedDate);
         } catch (error) {
           console.error("Failed to read user location logs for date from MySQL", error);
-          rawPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
+          rawLocationPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
         }
       } else {
-        rawPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
+        rawLocationPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
       }
-      const attendance = await storage.getAttendanceHistory(userId);
+      const attendance = isMySqlStateEnabled()
+        ? await listAttendanceHistoryFromMySql(userId).catch(() => storage.getAttendanceHistory(userId))
+        : await storage.getAttendanceHistory(userId);
       const attendanceEvents = attendance
         .filter((record) => isMumbaiDateKey(record.timestamp, requestedDate))
         .map((record) => ({
@@ -4344,8 +4755,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }))
         .sort((a, b) => a.at.localeCompare(b.at));
       const sessionWindow = resolveRouteSessionWindow(attendanceEvents);
-      const windowedPoints = filterLocationLogsToSessionWindow(rawPoints, sessionWindow);
-      const points = downsampleLocationLogsByInterval(windowedPoints, intervalMinutes);
+      const windowedPoints = filterLocationLogsToSessionWindow(rawLocationPoints, sessionWindow);
+      const points = useRawPoints
+        ? [...windowedPoints].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+        : downsampleLocationLogsByInterval(windowedPoints, intervalMinutes);
       const timeline = buildRouteTimeline(userId, requestedDate, points);
       const directions = await getMapplsDirectionsForLogs(points, {
         resource: firstString(req.query.routing_resource) || null,
@@ -4685,7 +5098,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const existing = await storage.findActiveAttendance(payload.userId);
+    const existing = isMySqlStateEnabled()
+      ? await findActiveAttendanceInMySql(payload.userId).catch(() => storage.findActiveAttendance(payload.userId))
+      : await storage.findActiveAttendance(payload.userId);
     if (existing) {
       await recordAnomaly({
         attendanceId: existing.id,
@@ -4739,10 +5154,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       : null;
 
     const now = new Date().toISOString();
+    const companyId = await resolveRequestCompanyId(req);
     const attendanceRecord: AttendanceRecord = {
       id: randomUUID(),
       userId: payload.userId,
       userName: payload.userName,
+      companyId: companyId ?? undefined,
       type: "checkin",
       timestamp: now,
       timestampServer: now,
@@ -4757,8 +5174,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
 
     await storage.createAttendance(attendanceRecord);
-    await storage.addLocationLog({
+    try {
+      await insertAttendanceInMySql(attendanceRecord);
+    } catch (error) {
+      console.error("Failed to persist attendance check-in in MySQL", error);
+    }
+    const checkInLocationLog: LocationLog = {
       id: randomUUID(),
+      companyId: companyId ?? undefined,
       userId: payload.userId,
       latitude: payload.latitude,
       longitude: payload.longitude,
@@ -4769,7 +5192,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       geofenceName: attendanceRecord.geofenceName ?? null,
       isInsideGeofence: attendanceRecord.isInsideGeofence ?? false,
       capturedAt: now,
-    });
+    };
+    await storage.addLocationLog(checkInLocationLog);
+    try {
+      await insertLocationLogInMySql(checkInLocationLog);
+    } catch (error) {
+      console.error("Failed to persist check-in location log in MySQL", error);
+    }
 
     if (photoUrl) {
       await storage.addAttendancePhoto({
@@ -4881,7 +5310,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const active = await storage.findActiveAttendance(payload.userId);
+    const active = isMySqlStateEnabled()
+      ? await findActiveAttendanceInMySql(payload.userId).catch(() => storage.findActiveAttendance(payload.userId))
+      : await storage.findActiveAttendance(payload.userId);
     if (!active) {
       res.status(400).json({ message: "No active check-in found for checkout" });
       return;
@@ -4890,6 +5321,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const userZones = await storage.listGeofencesForUser(payload.userId);
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
     const now = new Date().toISOString();
+    const companyId = await resolveRequestCompanyId(req);
 
     if (!zoneStatus.inside) {
       await recordAnomaly({
@@ -4914,6 +5346,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       id: randomUUID(),
       userId: payload.userId,
       userName: payload.userName,
+      companyId: companyId ?? undefined,
       type: "checkout",
       timestamp: now,
       timestampServer: now,
@@ -4928,6 +5361,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
 
     await storage.createAttendance(checkoutRecord);
+    try {
+      await insertAttendanceInMySql(checkoutRecord);
+    } catch (error) {
+      console.error("Failed to persist attendance check-out in MySQL", error);
+    }
+    const checkOutLocationLog: LocationLog = {
+      id: randomUUID(),
+      companyId: companyId ?? undefined,
+      userId: payload.userId,
+      latitude: payload.latitude,
+      longitude: payload.longitude,
+      accuracy: null,
+      speed: null,
+      heading: null,
+      batteryLevel: null,
+      geofenceId: checkoutRecord.geofenceId ?? null,
+      geofenceName: checkoutRecord.geofenceName ?? null,
+      isInsideGeofence: checkoutRecord.isInsideGeofence ?? false,
+      capturedAt: now,
+    };
+    await storage.addLocationLog(checkOutLocationLog);
+    try {
+      await insertLocationLogInMySql(checkOutLocationLog);
+    } catch (error) {
+      console.error("Failed to persist check-out location log in MySQL", error);
+    }
     if (photoUrl) {
       await storage.addAttendancePhoto({
         id: randomUUID(),
@@ -4959,7 +5418,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(403).json({ message: "Not authorized for this user records" });
       return;
     }
-    const records = await storage.getAttendanceToday(userId);
+    const records = isMySqlStateEnabled()
+      ? await listAttendanceTodayFromMySql(userId).catch(() => storage.getAttendanceToday(userId))
+      : await storage.getAttendanceToday(userId);
     res.json(records);
   });
 
@@ -4973,7 +5434,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(403).json({ message: "Not authorized for this user records" });
       return;
     }
-    const records = await storage.getAttendanceHistory(userId);
+    const records = isMySqlStateEnabled()
+      ? await listAttendanceHistoryFromMySql(userId).catch(() => storage.getAttendanceHistory(userId))
+      : await storage.getAttendanceHistory(userId);
     res.json(records);
   });
 

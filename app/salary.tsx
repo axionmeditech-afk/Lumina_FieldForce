@@ -705,7 +705,7 @@ export default function SalaryScreen() {
     const [salaryData, employees, payouts] = await Promise.all([
       getSalaries(),
       getEmployees(),
-      getIncentivePayouts(),
+      getIncentivePayouts({ refreshRemote: true }),
     ]);
     if (!user) {
       setSalaries([]);
