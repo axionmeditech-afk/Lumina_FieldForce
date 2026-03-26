@@ -322,8 +322,19 @@ export default function SidebarLayout() {
         name="bank-accounts"
         options={{
           title: "Bank Accounts",
+          drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
             <DrawerIcon icon="wallet-outline" activeIcon="wallet" focused={focused} size={size} />
+          ),
+        }}
+      />
+      <Drawer.Screen
+        name="bank-details"
+        options={{
+          title: "Bank Details",
+          drawerItemStyle: canSeeAdminControls ? { display: "none" } : undefined,
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon icon="card-outline" activeIcon="card" focused={focused} size={size} />
           ),
         }}
       />

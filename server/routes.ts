@@ -1,5 +1,5 @@
 import express, { type Express, type Request, type Response } from "express";
-import type { Pool } from "mysql2/promise";
+import type { Pool, PoolConnection } from "mysql2/promise";
 import { createServer, type Server } from "node:http";
 import { createHash, randomUUID } from "crypto";
 import type {
@@ -10,6 +10,7 @@ import type {
   Geofence,
   LocationLog,
   NotificationAudience,
+  SalaryRecord,
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
@@ -2483,6 +2484,274 @@ async function listSalariesFromMySql(): Promise<unknown[]> {
     netPay: Number(row.net_pay),
     status: String(row.status),
   }));
+}
+
+function toDateOnlyString(value: unknown): string | undefined {
+  if (!value) return undefined;
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString().slice(0, 10);
+}
+
+function buildSalaryMonthFromRow(row: Record<string, unknown>): string {
+  return (
+    toDateOnlyString(row.datesp) ||
+    toDateOnlyString(row.dateep) ||
+    toDateOnlyString(row.datep) ||
+    toDateOnlyString(row.datec) ||
+    new Date().toISOString().slice(0, 10)
+  ).slice(0, 7);
+}
+
+function buildDolibarrSalaryName(row: Record<string, unknown>): string {
+  const first = row.firstname ? String(row.firstname).trim() : "";
+  const last = row.lastname ? String(row.lastname).trim() : "";
+  const joined = `${first} ${last}`.trim();
+  if (joined) return joined;
+  if (first) return first;
+  if (last) return last;
+  if (row.login) return String(row.login).trim();
+  return `User ${String(row.fk_user || "")}`.trim();
+}
+
+function parseSalaryNumber(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mapDolibarrSalaryRow(row: Record<string, unknown>): SalaryRecord {
+  const amount = parseSalaryNumber(row.amount);
+  const salaryAmount = parseSalaryNumber(row.salary);
+  const grossPay = salaryAmount > 0 ? salaryAmount : amount;
+  const totalDeductions = Math.max(grossPay - amount, 0);
+  const paymentMode =
+    row.payment_libelle ? String(row.payment_libelle) : row.payment_code ? String(row.payment_code) : undefined;
+  const bankAccount =
+    row.bank_label ? String(row.bank_label) : row.bank_ref ? String(row.bank_ref) : undefined;
+  const employeeName = buildDolibarrSalaryName(row);
+  const employeeId = row.fk_user ? `dolibarr_${String(row.fk_user)}` : `dolibarr_salary_${String(row.rowid || "")}`;
+  const status = parseSalaryNumber(row.paye) > 0 ? "paid" : "pending";
+  const periodStart = toDateOnlyString(row.datesp);
+  const periodEnd = toDateOnlyString(row.dateep);
+  return {
+    id: row.ref_ext ? String(row.ref_ext) : `dolibarr_salary_${String(row.rowid || "")}`,
+    companyId: undefined,
+    employeeId,
+    employeeName,
+    employeeEmail: row.email ? String(row.email).trim() || undefined : undefined,
+    label: row.label ? String(row.label) : "Salary",
+    periodStart,
+    periodEnd,
+    paymentDate: toDateOnlyString(row.datep) || toDateOnlyString(row.datev),
+    paymentMode,
+    bankAccount,
+    note: row.note ? String(row.note) : row.note_public ? String(row.note_public) : undefined,
+    month: buildSalaryMonthFromRow(row),
+    basic: grossPay,
+    hra: 0,
+    transport: 0,
+    medical: 0,
+    bonus: 0,
+    overtime: 0,
+    tax: 0,
+    pf: 0,
+    insurance: 0,
+    grossPay,
+    totalDeductions,
+    netPay: amount,
+    status,
+  };
+}
+
+async function listDolibarrSalaryRows(conn: Pool | PoolConnection): Promise<SalaryRecord[]> {
+  const [rows] = await conn.query<any[]>(`
+    SELECT s.*, u.firstname, u.lastname, u.login, u.email,
+           p.code AS payment_code, p.libelle AS payment_libelle,
+           b.ref AS bank_ref, b.label AS bank_label
+    FROM \`nmy5_salary\` s
+    LEFT JOIN \`nmy5_user\` u ON u.rowid = s.fk_user
+    LEFT JOIN \`nmy5_c_paiement\` p ON p.id = s.fk_typepayment
+    LEFT JOIN \`nmy5_bank_account\` b ON b.rowid = s.fk_account
+    ORDER BY s.datec DESC, s.rowid DESC
+  `);
+  return (rows || []).map((row) => mapDolibarrSalaryRow(row));
+}
+
+function mergeSalarySources(localRows: SalaryRecord[], dolibarrRows: SalaryRecord[]): SalaryRecord[] {
+  const merged = new Map<string, SalaryRecord>();
+
+  for (const salary of localRows) {
+    merged.set(String(salary.id), salary);
+  }
+
+  for (const salary of dolibarrRows) {
+    const key = String(salary.id);
+    if (!merged.has(key)) {
+      merged.set(key, salary);
+    }
+  }
+
+  return Array.from(merged.values()).sort((left, right) => {
+    const leftDate = `${left.month || ""} ${left.employeeName || ""}`;
+    const rightDate = `${right.month || ""} ${right.employeeName || ""}`;
+    return rightDate.localeCompare(leftDate);
+  });
+}
+
+async function resolveDolibarrSalaryUserId(
+  conn: Pool | PoolConnection,
+  payload: { employeeEmail?: string; employeeName?: string; employeeId?: string }
+): Promise<number | null> {
+  const email = payload.employeeEmail ? String(payload.employeeEmail).trim().toLowerCase() : "";
+  if (email) {
+    const [rows] = await conn.query<any[]>(
+      "SELECT rowid FROM `nmy5_user` WHERE LOWER(TRIM(email)) = ? LIMIT 1",
+      [email]
+    );
+    if (rows?.[0]?.rowid) return Number(rows[0].rowid);
+  }
+
+  const rawId = payload.employeeId ? String(payload.employeeId).trim().toLowerCase() : "";
+  const dolibarrId =
+    rawId && rawId.startsWith("dolibarr_") ? Number(rawId.replace("dolibarr_", "")) : Number.NaN;
+  if (Number.isFinite(dolibarrId) && dolibarrId > 0) {
+    const [rows] = await conn.query<any[]>("SELECT rowid FROM `nmy5_user` WHERE rowid = ? LIMIT 1", [dolibarrId]);
+    if (rows?.[0]?.rowid) return Number(rows[0].rowid);
+  }
+
+  const name = payload.employeeName ? String(payload.employeeName).trim().toLowerCase() : "";
+  if (!name) return null;
+  const compactName = name.replace(/\s+/g, "");
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid
+       FROM \`nmy5_user\`
+      WHERE LOWER(TRIM(CONCAT_WS(' ', firstname, lastname))) = ?
+         OR LOWER(TRIM(CONCAT_WS(' ', lastname, firstname))) = ?
+         OR LOWER(REPLACE(CONCAT_WS('', firstname, lastname), ' ', '')) = ?
+         OR LOWER(REPLACE(CONCAT_WS('', lastname, firstname), ' ', '')) = ?
+         OR LOWER(TRIM(login)) = ?
+      LIMIT 1`,
+    [name, name, compactName, compactName, compactName]
+  );
+  return rows?.[0]?.rowid ? Number(rows[0].rowid) : null;
+}
+
+async function resolveDolibarrSalaryPaymentTypeId(conn: Pool | PoolConnection, paymentMode?: string): Promise<number> {
+  const mode = (paymentMode || "").trim().toLowerCase();
+  let preferredCode = "VIR";
+  if (/cash|liquid|esp[eè]ce/.test(mode)) preferredCode = "LIQ";
+  else if (/cheque|check|chq/.test(mode)) preferredCode = "CHQ";
+  else if (/card|cb/.test(mode)) preferredCode = "CB";
+
+  const [rows] = await conn.query<any[]>(
+    "SELECT id FROM `nmy5_c_paiement` WHERE active = 1 AND code = ? LIMIT 1",
+    [preferredCode]
+  );
+  if (rows?.[0]?.id) return Number(rows[0].id);
+
+  return 2;
+}
+
+async function resolveDolibarrSalaryBankAccountId(conn: Pool | PoolConnection, bankAccount?: string): Promise<number | null> {
+  const input = (bankAccount || "").trim().toLowerCase();
+  if (!input) return null;
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid
+       FROM \`nmy5_bank_account\`
+      WHERE LOWER(TRIM(label)) = ?
+         OR LOWER(TRIM(ref)) = ?
+         OR LOWER(TRIM(bank)) = ?
+         OR LOWER(TRIM(number)) = ?
+      LIMIT 1`,
+    [input, input, input, input]
+  );
+  return rows?.[0]?.rowid ? Number(rows[0].rowid) : null;
+}
+
+async function upsertDolibarrSalaryRecord(
+  conn: Pool | PoolConnection,
+  payload: SalaryRecord,
+  requestUser?: AppUser | null
+): Promise<void> {
+  const fkUser = await resolveDolibarrSalaryUserId(conn, payload);
+  if (!fkUser) {
+    throw new Error(`Dolibarr salary user not found for ${payload.employeeName}.`);
+  }
+  const fkTypePayment = await resolveDolibarrSalaryPaymentTypeId(conn, payload.paymentMode);
+  const fkAccount = await resolveDolibarrSalaryBankAccountId(conn, payload.bankAccount);
+  const amount = Number.isFinite(payload.netPay) ? payload.netPay : payload.grossPay;
+  const grossPay = Number.isFinite(payload.grossPay) ? payload.grossPay : amount;
+  const periodStart = payload.periodStart ? toSqlDateOnly(payload.periodStart) : null;
+  const periodEnd = payload.periodEnd ? toSqlDateOnly(payload.periodEnd) : null;
+  const paymentDate = payload.paymentDate ? toSqlDateOnly(payload.paymentDate) : null;
+  const authorId = await resolveDolibarrSalaryUserId(conn, {
+    employeeEmail: requestUser?.email,
+    employeeName: requestUser?.name,
+  });
+  const ref = `APP-SAL-${payload.month.replace(/[^0-9]/g, "").slice(0, 6)}-${payload.id.slice(-6).toUpperCase()}`.slice(0, 30);
+  const label = (payload.label || "").trim() || "Salary";
+  const noteParts = [
+    payload.note?.trim(),
+    `gross=${grossPay}`,
+    `net=${amount}`,
+    payload.bankAccount ? `bank=${payload.bankAccount}` : "",
+  ].filter(Boolean);
+  const note = noteParts.join(" | ") || null;
+  const baseParams = [
+    ref,
+    label,
+    fkUser,
+    paymentDate,
+    null,
+    grossPay || null,
+    amount || 0,
+    0,
+    periodStart,
+    periodEnd,
+    note,
+    payload.status === "paid" ? 1 : 0,
+    fkTypePayment,
+    fkAccount,
+    authorId,
+    authorId,
+    payload.id,
+    note,
+  ];
+  const [existingRows] = await conn.query<any[]>(
+    "SELECT rowid FROM `nmy5_salary` WHERE ref_ext = ? LIMIT 1",
+    [payload.id]
+  );
+  const existingRowId = existingRows?.[0]?.rowid ? Number(existingRows[0].rowid) : null;
+
+  if (existingRowId) {
+    await conn.execute(
+      `UPDATE \`nmy5_salary\`
+          SET \`ref\` = ?, \`label\` = ?, \`fk_user\` = ?, \`datep\` = ?, \`datev\` = ?, \`salary\` = ?, \`amount\` = ?,
+              \`fk_projet\` = ?, \`datesp\` = ?, \`dateep\` = ?, \`note\` = ?, \`paye\` = ?, \`fk_typepayment\` = ?,
+              \`fk_account\` = ?, \`fk_user_author\` = ?, \`fk_user_modif\` = ?, \`ref_ext\` = ?, \`note_public\` = ?
+        WHERE \`rowid\` = ?`,
+      [...baseParams, existingRowId]
+    );
+    return;
+  }
+
+  await conn.execute(
+    `INSERT INTO \`nmy5_salary\`
+      (\`ref\`, \`label\`, \`datec\`, \`fk_user\`, \`datep\`, \`datev\`, \`salary\`, \`amount\`, \`fk_projet\`, \`datesp\`, \`dateep\`, \`entity\`, \`note\`, \`fk_bank\`, \`paye\`, \`fk_typepayment\`, \`fk_account\`, \`fk_user_author\`, \`fk_user_modif\`, \`ref_ext\`, \`note_public\`)
+     VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+    baseParams
+  );
+}
+
+async function deleteDolibarrSalaryRecord(conn: Pool | PoolConnection, salaryId: string): Promise<void> {
+  await conn.execute("DELETE FROM `nmy5_salary` WHERE `ref_ext` = ?", [salaryId]);
+}
+
+async function updateDolibarrSalaryStatus(conn: Pool | PoolConnection, salaryId: string, status: string): Promise<void> {
+  await conn.execute(
+    "UPDATE `nmy5_salary` SET `paye` = ?, `datep` = CASE WHEN ? = 'paid' AND `datep` IS NULL THEN CURDATE() ELSE `datep` END WHERE `ref_ext` = ?",
+    [status === "paid" ? 1 : 0, status, salaryId]
+  );
 }
 
 async function replaceSalariesInMySql(entries: unknown[]): Promise<void> {
@@ -5714,13 +5983,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ─── Salary REST endpoints ────────────────────────────────────────────────
 
-  app.get("/api/salaries", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+  app.get("/api/salaries", requireAuth, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
     }
     try {
-      const items = await listSalariesFromMySql();
+      const requestUser = (req as any).user as AppUser;
+      const conn = await getMySqlPool();
+      const [localItems, dolibarrItems] = await Promise.all([
+        listSalariesFromMySql(),
+        listDolibarrSalaryRows(conn).catch(() => []),
+      ]);
+      let items = mergeSalarySources(
+        localItems as SalaryRecord[],
+        dolibarrItems
+      );
+
+      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        const userEmail = (requestUser?.email || "").trim().toLowerCase();
+        const userId = (requestUser?.id || "").trim().toLowerCase();
+        const userName = (requestUser?.name || "").trim().toLowerCase();
+        items = items.filter((salary) => {
+          const salaryEmail = (salary.employeeEmail || "").trim().toLowerCase();
+          const salaryId = (salary.employeeId || "").trim().toLowerCase();
+          const salaryName = (salary.employeeName || "").trim().toLowerCase();
+          return Boolean(
+            (userEmail && salaryEmail === userEmail) ||
+              (userId && (salaryId === userId || salaryId === `dolibarr_${userId}`)) ||
+              (userName && salaryName === userName)
+          );
+        });
+      }
+
       res.json({ items });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to fetch salaries.";
@@ -5741,7 +6036,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
       await ensureSalariesTable();
-      const conn = await getMySqlPool();
+      const pool = await getMySqlPool();
+      const conn = await pool.getConnection();
       const companyId = e.companyId ? String(e.companyId).trim() : null;
       const employeeId = e.employeeId ? String(e.employeeId).trim() : "";
       const employeeName = e.employeeName ? String(e.employeeName).trim() : "Employee";
@@ -5755,38 +6051,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const note = e.note ? String(e.note).trim() : null;
       const month = e.month ? String(e.month).trim() : "unknown";
       const status = e.status === "paid" ? "paid" : e.status === "approved" ? "approved" : "pending";
-      await conn.execute(
-        `INSERT INTO \`lff_salaries\`
-          (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`label\`, \`period_start\`, \`period_end\`, \`payment_date\`, \`payment_mode\`, \`bank_account\`, \`note\`, \`month\`, \`basic\`, \`hra\`, \`transport\`, \`medical\`, \`bonus\`, \`overtime\`, \`tax\`, \`pf\`, \`insurance\`, \`gross_pay\`, \`total_deductions\`, \`net_pay\`, \`status\`)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           \`company_id\` = VALUES(\`company_id\`),
-           \`employee_name\` = VALUES(\`employee_name\`),
-           \`employee_email\` = VALUES(\`employee_email\`),
-           \`label\` = VALUES(\`label\`),
-           \`period_start\` = VALUES(\`period_start\`),
-           \`period_end\` = VALUES(\`period_end\`),
-           \`payment_date\` = VALUES(\`payment_date\`),
-           \`payment_mode\` = VALUES(\`payment_mode\`),
-           \`bank_account\` = VALUES(\`bank_account\`),
-           \`note\` = VALUES(\`note\`),
-           \`month\` = VALUES(\`month\`),
-           \`basic\` = VALUES(\`basic\`), \`hra\` = VALUES(\`hra\`), \`transport\` = VALUES(\`transport\`),
-           \`medical\` = VALUES(\`medical\`), \`bonus\` = VALUES(\`bonus\`), \`overtime\` = VALUES(\`overtime\`),
-           \`tax\` = VALUES(\`tax\`), \`pf\` = VALUES(\`pf\`), \`insurance\` = VALUES(\`insurance\`),
-           \`gross_pay\` = VALUES(\`gross_pay\`), \`total_deductions\` = VALUES(\`total_deductions\`),
-           \`net_pay\` = VALUES(\`net_pay\`), \`status\` = VALUES(\`status\`)`,
-        [
-          id, companyId, employeeId, employeeName, employeeEmail, label,
-          periodStart, periodEnd, paymentDate, paymentMode, bankAccount, note, month,
-          toSqlNumber(e.basic), toSqlNumber(e.hra), toSqlNumber(e.transport),
-          toSqlNumber(e.medical), toSqlNumber(e.bonus), toSqlNumber(e.overtime),
-          toSqlNumber(e.tax), toSqlNumber(e.pf), toSqlNumber(e.insurance),
-          toSqlNumber(e.grossPay), toSqlNumber(e.totalDeductions), toSqlNumber(e.netPay),
-          status
-        ]
-      );
-      res.status(201).json({ id, ok: true });
+      try {
+        await conn.beginTransaction();
+        await conn.execute(
+          `INSERT INTO \`lff_salaries\`
+            (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`label\`, \`period_start\`, \`period_end\`, \`payment_date\`, \`payment_mode\`, \`bank_account\`, \`note\`, \`month\`, \`basic\`, \`hra\`, \`transport\`, \`medical\`, \`bonus\`, \`overtime\`, \`tax\`, \`pf\`, \`insurance\`, \`gross_pay\`, \`total_deductions\`, \`net_pay\`, \`status\`)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             \`company_id\` = VALUES(\`company_id\`),
+             \`employee_name\` = VALUES(\`employee_name\`),
+             \`employee_email\` = VALUES(\`employee_email\`),
+             \`label\` = VALUES(\`label\`),
+             \`period_start\` = VALUES(\`period_start\`),
+             \`period_end\` = VALUES(\`period_end\`),
+             \`payment_date\` = VALUES(\`payment_date\`),
+             \`payment_mode\` = VALUES(\`payment_mode\`),
+             \`bank_account\` = VALUES(\`bank_account\`),
+             \`note\` = VALUES(\`note\`),
+             \`month\` = VALUES(\`month\`),
+             \`basic\` = VALUES(\`basic\`), \`hra\` = VALUES(\`hra\`), \`transport\` = VALUES(\`transport\`),
+             \`medical\` = VALUES(\`medical\`), \`bonus\` = VALUES(\`bonus\`), \`overtime\` = VALUES(\`overtime\`),
+             \`tax\` = VALUES(\`tax\`), \`pf\` = VALUES(\`pf\`), \`insurance\` = VALUES(\`insurance\`),
+             \`gross_pay\` = VALUES(\`gross_pay\`), \`total_deductions\` = VALUES(\`total_deductions\`),
+             \`net_pay\` = VALUES(\`net_pay\`), \`status\` = VALUES(\`status\`)`,
+          [
+            id, companyId, employeeId, employeeName, employeeEmail, label,
+            periodStart, periodEnd, paymentDate, paymentMode, bankAccount, note, month,
+            toSqlNumber(e.basic), toSqlNumber(e.hra), toSqlNumber(e.transport),
+            toSqlNumber(e.medical), toSqlNumber(e.bonus), toSqlNumber(e.overtime),
+            toSqlNumber(e.tax), toSqlNumber(e.pf), toSqlNumber(e.insurance),
+            toSqlNumber(e.grossPay), toSqlNumber(e.totalDeductions), toSqlNumber(e.netPay),
+            status
+          ]
+        );
+        await upsertDolibarrSalaryRecord(
+          conn,
+          {
+            id,
+            companyId: companyId || undefined,
+            employeeId,
+            employeeName,
+            employeeEmail: employeeEmail || undefined,
+            label: label || undefined,
+            periodStart: periodStart ? String(periodStart) : undefined,
+            periodEnd: periodEnd ? String(periodEnd) : undefined,
+            paymentDate: paymentDate ? String(paymentDate) : undefined,
+            paymentMode: paymentMode || undefined,
+            bankAccount: bankAccount || undefined,
+            note: note || undefined,
+            month,
+            basic: toSqlNumber(e.basic),
+            hra: toSqlNumber(e.hra),
+            transport: toSqlNumber(e.transport),
+            medical: toSqlNumber(e.medical),
+            bonus: toSqlNumber(e.bonus),
+            overtime: toSqlNumber(e.overtime),
+            tax: toSqlNumber(e.tax),
+            pf: toSqlNumber(e.pf),
+            insurance: toSqlNumber(e.insurance),
+            grossPay: toSqlNumber(e.grossPay),
+            totalDeductions: toSqlNumber(e.totalDeductions),
+            netPay: toSqlNumber(e.netPay),
+            status,
+          },
+          (req as any).user as AppUser
+        );
+        await conn.commit();
+        res.status(201).json({ id, ok: true });
+      } catch (error) {
+        await conn.rollback();
+        throw error;
+      } finally {
+        conn.release();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to save salary.";
       res.status(500).json({ message });
@@ -5807,6 +6144,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await ensureSalariesTable();
       const conn = await getMySqlPool();
       await conn.execute("DELETE FROM `lff_salaries` WHERE `id` = ?", [salaryId]);
+      await deleteDolibarrSalaryRecord(conn, salaryId);
       res.json({ id: salaryId, ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to delete salary.";
@@ -5836,6 +6174,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await ensureSalariesTable();
       const conn = await getMySqlPool();
       await conn.execute("UPDATE `lff_salaries` SET `status` = ? WHERE `id` = ?", [status, salaryId]);
+      await updateDolibarrSalaryStatus(conn, salaryId, status);
       res.json({ id: salaryId, status, ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to update salary status.";
@@ -5872,8 +6211,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const filterClauses: string[] = [];
       // Non-admin/hr/manager users can only see their own accounts
       if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        accessClauses.push("LOWER(TRIM(employee_email)) = ?");
-        params.push((requestUser?.email || "").trim().toLowerCase());
+        const ownAccessClauses: string[] = [];
+        const ownAccessParams: unknown[] = [];
+        const requestEmail = (requestUser?.email || "").trim().toLowerCase();
+        const requestId = (requestUser?.id || "").trim().toLowerCase();
+        const requestName = (requestUser?.name || "").trim().toLowerCase();
+        if (requestEmail) {
+          ownAccessClauses.push("LOWER(TRIM(employee_email)) = ?");
+          ownAccessParams.push(requestEmail);
+        }
+        if (requestId) {
+          ownAccessClauses.push("LOWER(TRIM(employee_id)) = ?");
+          ownAccessParams.push(requestId);
+        }
+        if (requestName) {
+          ownAccessClauses.push("LOWER(TRIM(employee_name)) = ?");
+          ownAccessParams.push(requestName);
+        }
+        if (ownAccessClauses.length > 0) {
+          accessClauses.push(`(${ownAccessClauses.join(" OR ")})`);
+          params.push(...ownAccessParams);
+        }
       }
       if (employeeEmail) {
         filterClauses.push("LOWER(TRIM(employee_email)) = ?");

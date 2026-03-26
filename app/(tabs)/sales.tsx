@@ -1353,6 +1353,7 @@ export default function SalesScreen() {
           sortfield: "label",
           sortorder: "asc",
           manufacturedOnly: true,
+          sellableOnly: true,
         }),
         getDolibarrThirdParties({ limit: 200, sortfield: "nom", sortorder: "asc" }),
       ]);
@@ -3233,6 +3234,7 @@ export default function SalesScreen() {
         sortfield: "label",
         sortorder: "asc",
         manufacturedOnly: true,
+        sellableOnly: true,
       });
       const list = Array.isArray(nextProducts) ? nextProducts : [];
       setPosProducts((current) => mergeUniqueProducts(current, list));

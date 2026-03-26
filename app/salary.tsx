@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   View,
   Text,
@@ -27,6 +27,7 @@ import {
   saveSalaryRecord,
   updateSalaryRecordStatus,
 } from "@/lib/employee-data";
+import { getDolibarrBankAccounts, type DolibarrBankAccount } from "@/lib/attendance-api";
 import type { BankAccount, Employee, IncentivePayout, SalaryRecord } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
@@ -56,6 +57,138 @@ function formatCurrency(value: number): string {
 
 function formatBankAccountOption(account: BankAccount): string {
   return `${account.bankName || "UPI"} - ${account.accountNumber || account.upiId || ""}`;
+}
+
+function normalizeBankKey(input: {
+  bankName?: string;
+  accountNumber?: string;
+  upiId?: string;
+  holderName?: string;
+}): string {
+  return [
+    (input.bankName || "").trim().toLowerCase(),
+    (input.accountNumber || "").trim().toLowerCase(),
+    (input.upiId || "").trim().toLowerCase(),
+    (input.holderName || "").trim().toLowerCase(),
+  ].join("|");
+}
+
+function pickFirstText(...values: Array<unknown>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return undefined;
+}
+
+function pickPositiveInteger(...values: Array<unknown>): number | undefined {
+  for (const value of values) {
+    const parsed =
+      typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.trunc(parsed);
+    }
+  }
+  return undefined;
+}
+
+function mapDolibarrType(value: unknown): NonNullable<BankAccount["dolibarrType"]> {
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (parsed === 0) return "savings";
+  if (parsed === 2) return "cash";
+  return "current";
+}
+
+function mapDolibarrBankAccount(entry: DolibarrBankAccount): BankAccount {
+  const id = pickFirstText(entry.id, entry.rowid) || `dolibarr_bank_${Crypto.randomUUID()}`;
+  const bankName = pickFirstText(entry.bank, entry.banque, entry.label) || "Dolibarr Bank Account";
+  const accountNumber = pickFirstText(entry.number, entry.account_number, entry.numcompte, entry.iban);
+  const holderName = pickFirstText(entry.proprio, entry.owner_name, entry.owner, entry.account_holder);
+  const createdAt = pickFirstText(entry.date_creation, entry.datec, entry.tms) || new Date().toISOString();
+  const updatedAt = pickFirstText(entry.tms, entry.date_creation, entry.datec) || createdAt;
+  return {
+    id: `dolibarr_${id}`,
+    employeeName: holderName || "Dolibarr Account",
+    employeeEmail: "",
+    accountType: accountNumber && accountNumber.includes("@") ? "upi" : "bank",
+    dolibarrRef: pickFirstText(entry.ref),
+    dolibarrLabel: pickFirstText(entry.label) || bankName,
+    dolibarrType: mapDolibarrType(entry.type),
+    currencyCode: pickFirstText(entry.currency_code) || "INR",
+    countryId: pickPositiveInteger(entry.country_id),
+    countryCode: pickPositiveInteger(entry.country_id) === 117 ? "IN" : undefined,
+    status: pickFirstText(entry.clos, entry.close, entry.status) === "1" ? "closed" : "open",
+    bankName,
+    bankAddress: pickFirstText(entry.address),
+    accountNumber: accountNumber && !accountNumber.includes("@") ? accountNumber : undefined,
+    upiId: accountNumber && accountNumber.includes("@") ? accountNumber : undefined,
+    ifscCode: pickFirstText(entry.bic),
+    holderName,
+    website: pickFirstText(entry.url),
+    comment: pickFirstText(entry.comment),
+    isDefault: false,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function mergeAccountSources(appAccounts: BankAccount[], dolibarrAccounts: DolibarrBankAccount[]): BankAccount[] {
+  const merged = new Map<string, BankAccount>();
+  for (const account of appAccounts) {
+    const key = normalizeBankKey(account);
+    merged.set(key || `app:${account.id}`, account);
+  }
+  for (const dolibarrEntry of dolibarrAccounts) {
+    const mapped = mapDolibarrBankAccount(dolibarrEntry);
+    const key = normalizeBankKey(mapped);
+    if (!merged.has(key)) {
+      merged.set(key || `dolibarr:${mapped.id}`, mapped);
+    }
+  }
+  return Array.from(merged.values()).sort((left, right) => {
+    const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
+    const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return rightTime - leftTime;
+    }
+    return (left.bankName || "").localeCompare(right.bankName || "");
+  });
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out.`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function loadDolibarrAccountsForSalaryPicker(): Promise<DolibarrBankAccount[]> {
+  try {
+    return await withTimeout(
+      getDolibarrBankAccounts({ limit: 100, sortfield: "tms", sortorder: "desc" }),
+      18_000,
+      "Dolibarr bank accounts"
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    if (!/timed out|timeout|aborted/.test(message)) {
+      throw error;
+    }
+  }
+
+  return withTimeout(
+    getDolibarrBankAccounts({ limit: 50 }),
+    28_000,
+    "Dolibarr bank accounts"
+  );
 }
 
 function normalizeKey(value: string): string {
@@ -843,49 +976,86 @@ export default function SalaryScreen() {
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [showEmployeeDropdown, setShowEmployeeDropdown] = useState(false);
   const [showBankAccountPicker, setShowBankAccountPicker] = useState(false);
+  const [loadingEmployees, setLoadingEmployees] = useState(false);
   const [loadingEmployeeBankAccounts, setLoadingEmployeeBankAccounts] = useState(false);
+  const [hasLoadedBankAccountsForPicker, setHasLoadedBankAccountsForPicker] = useState(false);
   const isAdmin = user?.role === "admin";
+  const hasLoadedDolibarrEmployeesRef = useRef(false);
+
+  const loadDolibarrEmployeeOptions = useCallback(async () => {
+    if (!user || !isAdmin || loadingEmployees || hasLoadedDolibarrEmployeesRef.current) return;
+    setLoadingEmployees(true);
+    try {
+      const result = await getDolibarrEmployees();
+      const nextEmployees = Array.isArray(result) ? result : [];
+      setDolibarrEmployees(nextEmployees);
+      hasLoadedDolibarrEmployeesRef.current = true;
+    } finally {
+      setLoadingEmployees(false);
+    }
+  }, [isAdmin, loadingEmployees, user]);
 
   const loadData = useCallback(async () => {
-    const [salaryData, employees, dolibarrEmployees, payouts, accounts] = await Promise.all([
-      getSalaries(),
-      getEmployees(),
-      getDolibarrEmployees(),
-      getIncentivePayouts({ refreshRemote: true }),
-      getBankAccounts(),
-    ]);
     if (!user) {
       setSalaries([]);
       setEmployees([]);
       setDolibarrEmployees([]);
       setIncentivePayouts([]);
       setBankAccounts([]);
+      hasLoadedDolibarrEmployeesRef.current = false;
       return;
     }
-    setEmployees(employees);
-    setDolibarrEmployees(dolibarrEmployees);
-    setIncentivePayouts(Array.isArray(payouts) ? payouts : []);
-    setBankAccounts(accounts || []);
-    if (isAdmin) {
-      setSalaries(salaryData);
-      return;
-    }
+    try {
+      const [salaryDataResult, employeesResult, payoutsResult] =
+        await Promise.allSettled([
+          getSalaries(),
+          getEmployees(),
+          getIncentivePayouts({ refreshRemote: true }),
+        ]);
+      const salaryData = salaryDataResult.status === "fulfilled" ? salaryDataResult.value : [];
+      const employees = employeesResult.status === "fulfilled" ? employeesResult.value : [];
+      const payouts = payoutsResult.status === "fulfilled" ? payoutsResult.value : [];
+      setEmployees(employees);
+      setIncentivePayouts(Array.isArray(payouts) ? payouts : []);
+      if (isAdmin) {
+        setSalaries(salaryData);
+      } else {
+        if (salaryData.length > 0) {
+          setSalaries(salaryData);
+          return;
+        }
+        const mappedEmployeeIds = new Set(
+          employees
+            .filter((employee) => employee.email === user.email || employee.name === user.name)
+            .map((employee) => employee.id)
+        );
+        const filtered = salaryData.filter(
+          (salary) =>
+            salary.employeeId === user.id ||
+            salary.employeeName === user.name ||
+            mappedEmployeeIds.has(salary.employeeId)
+        );
+        setSalaries(filtered);
+      }
 
-    const mappedEmployeeIds = new Set(
-      employees
-        .filter((employee) => employee.email === user.email || employee.name === user.name)
-        .map((employee) => employee.id)
-    );
-    const filtered = salaryData.filter(
-      (salary) =>
-        salary.employeeId === user.id ||
-        salary.employeeName === user.name ||
-        mappedEmployeeIds.has(salary.employeeId)
-    );
-    setSalaries(filtered);
+    } finally {
+      if (!user || !isAdmin) {
+        hasLoadedDolibarrEmployeesRef.current = false;
+      }
+    }
   }, [isAdmin, user]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    if (!user || !isAdmin) {
+      hasLoadedDolibarrEmployeesRef.current = false;
+      setDolibarrEmployees([]);
+      return;
+    }
+    if (hasLoadedDolibarrEmployeesRef.current || loadingEmployees) return;
+    void loadDolibarrEmployeeOptions();
+  }, [isAdmin, loadDolibarrEmployeeOptions, loadingEmployees, user]);
 
   const handleMarkPaid = useCallback(
     async (salaryId: string) => {
@@ -951,6 +1121,8 @@ export default function SalaryScreen() {
     setShowEmployeeDropdown(false);
     setShowBankAccountPicker(false);
     setLoadingEmployeeBankAccounts(false);
+    setHasLoadedBankAccountsForPicker(false);
+    setBankAccounts([]);
   }, []);
 
   const handleOpenCreate = useCallback(() => {
@@ -970,8 +1142,10 @@ export default function SalaryScreen() {
     setCreateEmployeeEmail("");
     setCreateSearch("");
     setCreateBankAccount("");
+    setBankAccounts([]);
     setShowBankAccountPicker(false);
     setLoadingEmployeeBankAccounts(false);
+    setHasLoadedBankAccountsForPicker(false);
   }, []);
 
   const dolibarrSelectableEmployees = useMemo(
@@ -1028,50 +1202,36 @@ export default function SalaryScreen() {
     return [...matched, ...unmatched];
   }, [bankAccounts, employeeBankAccounts]);
 
-  const refreshEmployeeBankAccounts = useCallback(
-    async (input: { employeeId?: string; employeeName?: string; employeeEmail?: string }) => {
-      const matchKeys = buildEmployeeBankMatchKeys(input);
-      if (!matchKeys.size) {
-        setCreateBankAccount("");
-        return [] as BankAccount[];
+  const refreshEmployeeBankAccounts = useCallback(async (force = false) => {
+      if (!force && hasLoadedBankAccountsForPicker && bankAccounts.length > 0) {
+        return bankAccounts;
       }
       setLoadingEmployeeBankAccounts(true);
       try {
-        const latestAccounts = await getBankAccounts();
-        const normalizedAccounts = Array.isArray(latestAccounts) ? latestAccounts : [];
-        setBankAccounts(normalizedAccounts);
-        const matchingAccounts = normalizedAccounts.filter(
-          (account) => matchesBankAccountToEmployee(account, input)
+        const [latestAccounts, latestDolibarrAccounts] = await Promise.all([
+          getBankAccounts(),
+          loadDolibarrAccountsForSalaryPicker().catch(() => []),
+        ]);
+        const normalizedAccounts = mergeAccountSources(
+          Array.isArray(latestAccounts) ? latestAccounts : [],
+          Array.isArray(latestDolibarrAccounts) ? latestDolibarrAccounts : []
         );
-        setCreateBankAccount((current) => {
-          if (current && matchingAccounts.some((account) => formatBankAccountOption(account) === current)) {
-            return current;
-          }
-          const defaultAccount =
-            matchingAccounts.find((account) => account.isDefault) || matchingAccounts[0];
-          return defaultAccount ? formatBankAccountOption(defaultAccount) : "";
-        });
-        return matchingAccounts;
+        setBankAccounts(normalizedAccounts);
+        setHasLoadedBankAccountsForPicker(true);
+        return normalizedAccounts;
       } catch {
-        setCreateBankAccount("");
+        setBankAccounts([]);
+        setHasLoadedBankAccountsForPicker(true);
         return [] as BankAccount[];
       } finally {
         setLoadingEmployeeBankAccounts(false);
       }
-    },
-    []
-  );
+    }, [bankAccounts, hasLoadedBankAccountsForPicker]);
 
   useEffect(() => {
-    if (!showCreateModal) return;
-    const input = {
-      employeeId: createEmployeeId,
-      employeeName: createEmployeeName,
-      employeeEmail: createEmployeeEmail,
-    };
-    if (!buildEmployeeBankMatchKeys(input).size) return;
-    void refreshEmployeeBankAccounts(input);
-  }, [createEmployeeEmail, createEmployeeId, createEmployeeName, refreshEmployeeBankAccounts, showCreateModal]);
+    if (!showBankAccountPicker) return;
+    void refreshEmployeeBankAccounts();
+  }, [refreshEmployeeBankAccounts, showBankAccountPicker]);
 
   const salaryDraft = useMemo(() => {
     const basic = parseAmountInput(createBasic);
@@ -1445,8 +1605,13 @@ export default function SalaryScreen() {
 
               <View style={styles.sectionBlock}>
                 <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Employee</Text>
-                <Pressable
-                  onPress={() => setShowEmployeeDropdown(true)}
+                  <Pressable
+                    onPress={() => {
+                      setShowEmployeeDropdown(true);
+                      if (!dolibarrSelectableEmployees.length && !loadingEmployees) {
+                        void loadDolibarrEmployeeOptions();
+                      }
+                    }}
                   style={[styles.employeeDropdownField, { borderColor: colors.border, backgroundColor: colors.surface }]}
                 >
                   <Ionicons name="people-outline" size={16} color={colors.textSecondary} />
@@ -1482,9 +1647,9 @@ export default function SalaryScreen() {
                   </View>
                 </Pressable>
 
-                <Text style={[styles.dropdownHint, { color: colors.textTertiary }]}>
-                  Dropdown loads direct Dolibarr employees. Salary save will require a valid employee email for Dolibarr sync.
-                </Text>
+                  <Text style={[styles.dropdownHint, { color: colors.textTertiary }]}>
+                    Dropdown loads direct Dolibarr employees. Salary save will require a valid employee email for Dolibarr sync.
+                  </Text>
 
                 {selectedEmployee ? (
                   <View style={[styles.selectedEmployeeCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -1583,11 +1748,6 @@ export default function SalaryScreen() {
                           Alert.alert("Select Employee", "Pehle employee select karo, phir uske saved bank accounts choose kar paoge.");
                           return;
                         }
-                        await refreshEmployeeBankAccounts({
-                          employeeId: createEmployeeId,
-                          employeeName: createEmployeeName,
-                          employeeEmail: createEmployeeEmail,
-                        });
                         setShowBankAccountPicker(true);
                       }}
                       style={[styles.bankSelector, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
@@ -1606,20 +1766,16 @@ export default function SalaryScreen() {
                           <Text style={[styles.bankPickerHint, { color: colors.textTertiary }]}>
                             {!selectedEmployee
                               ? "Select employee first"
-                              : loadingEmployeeBankAccounts
-                              ? "Loading saved bank accounts..."
                               : employeeBankAccounts.length > 0
                               ? `${employeeBankAccounts.length} matching account${employeeBankAccounts.length > 1 ? "s" : ""} found`
                               : bankAccounts.length > 0
                               ? `${bankAccounts.length} total account${bankAccounts.length > 1 ? "s" : ""} available`
-                              : "No bank account found, add one"}
+                              : hasLoadedBankAccountsForPicker
+                              ? "No bank account found, add one"
+                              : "Tap to load bank accounts"}
                           </Text>
                         </View>
-                        {loadingEmployeeBankAccounts ? (
-                          <ActivityIndicator size="small" color={colors.primary} />
-                        ) : (
-                          <Ionicons name="chevron-down" size={18} color={colors.textSecondary} />
-                        )}
+                        <Ionicons name="chevron-down" size={18} color={colors.textSecondary} />
                       </View>
                     </Pressable>
                   </View>
@@ -1776,7 +1932,7 @@ export default function SalaryScreen() {
               <TextInput
                 value={createSearch}
                 onChangeText={setCreateSearch}
-                placeholder="Search Dolibarr employee..."
+                placeholder="Search employee..."
                 placeholderTextColor={colors.textTertiary}
                 style={[styles.pickerSearchInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.surface }]}
               />
@@ -1786,7 +1942,14 @@ export default function SalaryScreen() {
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={styles.pickerListContent}
               >
-                {dolibarrSelectableEmployees.length === 0 ? (
+                {loadingEmployees ? (
+                  <View style={styles.bankPickerEmptyState}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                      Loading Dolibarr employees...
+                    </Text>
+                  </View>
+                ) : dolibarrSelectableEmployees.length === 0 ? (
                   <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
                     No Dolibarr employees found.
                   </Text>
@@ -1807,12 +1970,9 @@ export default function SalaryScreen() {
                         setCreateEmployeeEmail(selected.email);
                         setCreateSearch(selected.name);
                         setShowEmployeeDropdown(false);
+                        setBankAccounts([]);
                         setCreateBankAccount("");
-                        void refreshEmployeeBankAccounts({
-                          employeeId: selected.id,
-                          employeeName: selected.name,
-                          employeeEmail: selected.email,
-                        });
+                        setHasLoadedBankAccountsForPicker(false);
                       }}
                     />
                   ))
@@ -1840,7 +2000,7 @@ export default function SalaryScreen() {
                   {selectedEmployee
                     ? employeeBankAccounts.length > 0
                       ? `${selectedEmployee.name} ke matching accounts first dikh rahe hain`
-                      : "All bank accounts loaded, choose manually"
+                      : "App + Dolibarr bank accounts loaded, choose manually"
                     : "Choose a bank account"}
                 </Text>
               </View>

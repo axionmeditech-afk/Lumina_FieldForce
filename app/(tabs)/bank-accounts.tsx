@@ -57,6 +57,10 @@ function normalizeText(value: string | null | undefined): string {
   return (value || "").trim();
 }
 
+function normalizeEmail(value: string | null | undefined): string {
+  return normalizeText(value).toLowerCase();
+}
+
 function normalizeBankKey(input: {
   bankName?: string;
   accountNumber?: string;
@@ -310,6 +314,9 @@ export default function BankAccountsScreen() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dolibarrFetchNote, setDolibarrFetchNote] = useState<string | null>(null);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [editingAccountCreatedAt, setEditingAccountCreatedAt] = useState<string | null>(null);
+  const [editingAccountSource, setEditingAccountSource] = useState<BankAccountListItem["source"] | null>(null);
 
   // Form State
   const [accountType, setAccountType] = useState<"bank" | "upi">("bank");
@@ -329,7 +336,8 @@ export default function BankAccountsScreen() {
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [activePicker, setActivePicker] = useState<"employee" | "dolibarrType" | null>(null);
 
-  const isAdmin = user?.role === "admin";
+  const canManageAllAccounts = ["admin", "hr", "manager"].includes(user?.role || "");
+  const isEditing = Boolean(editingAccountId);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -337,8 +345,12 @@ export default function BankAccountsScreen() {
       const [accountsResult, employeesResult, dolibarrEmployeesResult, dolibarrAccountsResult] = await Promise.allSettled([
         withTimeout(getBankAccounts(), 12000, "Bank accounts"),
         withTimeout(getEmployees(), 12000, "Employees"),
-        withTimeout(getDolibarrEmployees(), 12000, "Dolibarr employees"),
-        loadDolibarrAccountsForBankPage(),
+        canManageAllAccounts
+          ? withTimeout(getDolibarrEmployees(), 12000, "Dolibarr employees")
+          : Promise.resolve([]),
+        canManageAllAccounts
+          ? loadDolibarrAccountsForBankPage()
+          : Promise.resolve([]),
       ]);
 
       const accounts =
@@ -358,9 +370,21 @@ export default function BankAccountsScreen() {
           ? dolibarrAccountsResult.value
           : [];
 
-      const appAccounts = isAdmin
+      const appAccounts = canManageAllAccounts
         ? accounts
-        : accounts.filter((acc) => acc.employeeEmail === user?.email);
+        : accounts.filter((acc) => {
+            const userEmail = normalizeEmail(user?.email);
+            const accountEmail = normalizeEmail(acc.employeeEmail);
+            const userId = normalizeText(user?.id).toLowerCase();
+            const accountId = normalizeText(acc.employeeId).toLowerCase();
+            const userName = normalizeText(user?.name).toLowerCase();
+            const accountName = normalizeText(acc.employeeName).toLowerCase();
+            return Boolean(
+              (userEmail && accountEmail === userEmail) ||
+              (userId && accountId === userId) ||
+              (userName && accountName === userName)
+            );
+          });
       setBankAccounts(mergeAccountSources(appAccounts, finalDolibarrAccounts));
       setEmployees(emps);
       setDolibarrEmployees(dolibarrEmployeesList);
@@ -380,14 +404,14 @@ export default function BankAccountsScreen() {
             : "Could not fetch employees."
         );
       }
-      if (dolibarrEmployeesResult.status === "rejected") {
+      if (canManageAllAccounts && dolibarrEmployeesResult.status === "rejected") {
         warnings.push(
           dolibarrEmployeesResult.reason instanceof Error
             ? dolibarrEmployeesResult.reason.message
             : "Could not fetch Dolibarr employees."
         );
       }
-      if (dolibarrAccountsResult.status === "rejected") {
+      if (canManageAllAccounts && dolibarrAccountsResult.status === "rejected") {
         warnings.push(
           dolibarrAccountsResult.reason instanceof Error
             ? dolibarrAccountsResult.reason.message
@@ -405,11 +429,16 @@ export default function BankAccountsScreen() {
     } finally {
       setLoading(false);
     }
-  }, [isAdmin, user]);
+  }, [canManageAllAccounts, user]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const closeModal = () => {
+    setShowAddModal(false);
+    resetForm();
+  };
 
   const handleAddAccount = async () => {
     if (accountType === "bank" && (!bankName || !accountNumber || !ifscCode)) {
@@ -420,7 +449,7 @@ export default function BankAccountsScreen() {
       Alert.alert("Error", "Please enter UPI ID");
       return;
     }
-    if (isAdmin && !selectedEmployeeId) {
+    if (canManageAllAccounts && !selectedEmployeeId) {
       Alert.alert("Error", "Please select an employee");
       return;
     }
@@ -441,21 +470,36 @@ export default function BankAccountsScreen() {
 
     setSaving(true);
     try {
-      const selectedEmployee = isAdmin
+      const selectedEmployee = canManageAllAccounts
         ? dolibarrEmployees.find((e) => e.id === selectedEmployeeId) ||
           employees.find((e) => e.id === selectedEmployeeId) ||
           null
         : null;
-      const employeeEmail = isAdmin ? (selectedEmployee?.email || "") : (user?.email || "");
-      if (!employeeEmail.trim()) {
-        Alert.alert("Error", "Selected employee must have an email for Dolibarr sync.");
-        return;
-      }
+      const linkedAppEmployee = canManageAllAccounts
+        ? employees.find((employee) => {
+            const selectedEmail = normalizeEmail(selectedEmployee?.email);
+            const employeeEmail = normalizeEmail(employee.email);
+            if (selectedEmail && employeeEmail && selectedEmail === employeeEmail) {
+              return true;
+            }
+            return normalizeText(employee.name).toLowerCase() === normalizeText(selectedEmployee?.name).toLowerCase();
+          }) || null
+        : null;
+      const employeeEmail = canManageAllAccounts
+        ? (selectedEmployee?.email || linkedAppEmployee?.email || "")
+        : (user?.email || "");
+      const employeeIdToSave = canManageAllAccounts
+        ? (linkedAppEmployee?.id || selectedEmployeeId)
+        : user?.id;
+      const employeeNameToSave = canManageAllAccounts
+        ? (linkedAppEmployee?.name || selectedEmployee?.name || "Unknown")
+        : (user?.name || "Me");
+      const shouldSyncToDolibarr = !isEditing && Boolean(employeeEmail.trim());
 
       const newAccount: BankAccount = {
-        id: Crypto.randomUUID(),
-        employeeId: isAdmin ? selectedEmployeeId : user?.id,
-        employeeName: isAdmin ? (selectedEmployee?.name || "Unknown") : (user?.name || "Me"),
+        id: editingAccountId || Crypto.randomUUID(),
+        employeeId: employeeIdToSave,
+        employeeName: employeeNameToSave,
         employeeEmail,
         accountType,
         dolibarrRef: dolibarrRef.trim() || undefined,
@@ -470,22 +514,48 @@ export default function BankAccountsScreen() {
         accountNumber: accountType === "bank" ? accountNumber : undefined,
         ifscCode: accountType === "bank" ? ifscCode : undefined,
         upiId: accountType === "upi" ? upiId : undefined,
-        holderName: holderName || (isAdmin ? selectedEmployee?.name : user?.name) || "",
-        isDefault: !bankAccounts.some((entry) => entry.source === "app" || entry.source === "both"),
-        createdAt: new Date().toISOString(),
+        holderName: holderName || employeeNameToSave || "",
+        isDefault: isEditing
+          ? bankAccounts.find((entry) => entry.id === editingAccountId)?.isDefault ?? false
+          : !bankAccounts.some((entry) => entry.source === "app" || entry.source === "both"),
+        createdAt: editingAccountCreatedAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
 
-      const result = await saveBankAccount(newAccount);
+      let result;
+      try {
+        result = await saveBankAccount(newAccount, { syncToDolibarr: shouldSyncToDolibarr });
+      } catch (syncError) {
+        if (isEditing) {
+          throw syncError;
+        }
+        result = await saveBankAccount(newAccount, { syncToDolibarr: false });
+        const syncMessage =
+          syncError instanceof Error ? syncError.message : "Dolibarr sync failed.";
+        Alert.alert(
+          "Saved With Warning",
+          `Bank detail app me save ho gaya hai, lekin Dolibarr sync nahi hua. ${syncMessage}`
+        );
+      }
+
       await loadData();
-      setShowAddModal(false);
-      resetForm();
+      closeModal();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      if (result.dolibarr && !result.dolibarr.ok) {
+      if (!shouldSyncToDolibarr) {
+        Alert.alert(
+          "Saved",
+          "Bank detail save ho gaya hai. Selected employee ka valid email na hone ki wajah se Dolibarr sync skip kiya gaya."
+        );
+      } else if (result?.dolibarr && !result.dolibarr.ok) {
         Alert.alert(
           "Dolibarr Sync Warning",
           result.dolibarr.message || "Account saved locally, but failed to sync to Dolibarr."
+        );
+      } else if (isEditing && editingAccountSource && editingAccountSource !== "app") {
+        Alert.alert(
+          "Updated",
+          "Bank details updated in the app. Dolibarr bank page entry was left unchanged to avoid duplicate bank records."
         );
       }
     } catch (err) {
@@ -520,6 +590,9 @@ export default function BankAccountsScreen() {
   };
 
   const resetForm = () => {
+    setEditingAccountId(null);
+    setEditingAccountCreatedAt(null);
+    setEditingAccountSource(null);
     setAccountType("bank");
     setDolibarrRef("");
     setDolibarrLabel("");
@@ -538,14 +611,49 @@ export default function BankAccountsScreen() {
     setActivePicker(null);
   };
 
-  const employeePickerSource = isAdmin && dolibarrEmployees.length > 0 ? dolibarrEmployees : employees;
+  const openAddModal = () => {
+    resetForm();
+    setShowAddModal(true);
+  };
+
+  const openEditModal = (account: BankAccountListItem) => {
+    const employeeSource = canManageAllAccounts && dolibarrEmployees.length > 0 ? dolibarrEmployees : employees;
+    const matchedEmployee =
+      employeeSource.find((employee) => employee.id === account.employeeId) ||
+      employeeSource.find((employee) => employee.email === account.employeeEmail) ||
+      employeeSource.find((employee) => employee.name === account.employeeName) ||
+      null;
+
+    setEditingAccountId(account.id);
+    setEditingAccountCreatedAt(account.createdAt);
+    setEditingAccountSource(account.source);
+    setAccountType(account.accountType);
+    setDolibarrRef(account.dolibarrRef || "");
+    setDolibarrLabel(account.dolibarrLabel || "");
+    setDolibarrType(account.dolibarrType || "current");
+    setCurrencyCode(account.currencyCode || "INR");
+    setCountryCode(account.countryCode || "IN");
+    setBankStatus(account.status || "open");
+    setBankName(account.bankName || "");
+    setBankAddress(account.bankAddress || "");
+    setAccountNumber(account.accountNumber || "");
+    setIfscCode(account.ifscCode || "");
+    setUpiId(account.upiId || "");
+    setHolderName(account.holderName || account.employeeName || "");
+    setSelectedEmployeeId(canManageAllAccounts ? (matchedEmployee?.id || account.employeeId || "") : "");
+    setEmployeeSearch(canManageAllAccounts ? (matchedEmployee?.name || account.employeeName || "") : "");
+    setActivePicker(null);
+    setShowAddModal(true);
+  };
+
+  const employeePickerSource = canManageAllAccounts && dolibarrEmployees.length > 0 ? dolibarrEmployees : employees;
 
   const filteredEmployees = employeePickerSource.filter(e => 
     e.name.toLowerCase().includes(employeeSearch.toLowerCase()) ||
     e.email.toLowerCase().includes(employeeSearch.toLowerCase())
   ).slice(0, 8);
   const selectedEmployee =
-    isAdmin && selectedEmployeeId
+    canManageAllAccounts && selectedEmployeeId
       ? employeePickerSource.find((employee) => employee.id === selectedEmployeeId) ||
         employees.find((employee) => employee.id === selectedEmployeeId) ||
         null
@@ -633,7 +741,7 @@ export default function BankAccountsScreen() {
           <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Holder Name</Text>
           <Text style={[styles.detailValue, { color: colors.text }]}>{item.holderName || item.employeeName || "N/A"}</Text>
         </View>
-        {isAdmin ? (
+        {canManageAllAccounts ? (
           <View style={{ alignItems: "flex-end" }}>
             <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>
               {item.source === "dolibarr" ? "Source" : "Employee"}
@@ -647,15 +755,26 @@ export default function BankAccountsScreen() {
 
       <View style={styles.accountActionRow} pointerEvents="box-none">
         {item.removable ? (
-          <TouchableOpacity
-            onPress={() => handleDeleteAccount(item.id)}
-            activeOpacity={0.8}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={[styles.deleteAccountButton, { borderColor: colors.danger, backgroundColor: colors.danger + "10" }]}
-          >
-            <Ionicons name="trash-outline" size={16} color={colors.danger} />
-            <Text style={[styles.deleteAccountButtonText, { color: colors.danger }]}>Delete Account</Text>
-          </TouchableOpacity>
+          <>
+            <TouchableOpacity
+              onPress={() => openEditModal(item)}
+              activeOpacity={0.8}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={[styles.editAccountButton, { borderColor: colors.primary, backgroundColor: colors.primary + "10" }]}
+            >
+              <Ionicons name="create-outline" size={16} color={colors.primary} />
+              <Text style={[styles.editAccountButtonText, { color: colors.primary }]}>Edit Account</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => handleDeleteAccount(item.id)}
+              activeOpacity={0.8}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={[styles.deleteAccountButton, { borderColor: colors.danger, backgroundColor: colors.danger + "10" }]}
+            >
+              <Ionicons name="trash-outline" size={16} color={colors.danger} />
+              <Text style={[styles.deleteAccountButtonText, { color: colors.danger }]}>Delete Account</Text>
+            </TouchableOpacity>
+          </>
         ) : (
           <View style={[styles.readOnlyAccountNote, { borderColor: colors.border, backgroundColor: colors.surface }]}>
             <Ionicons name="information-circle-outline" size={15} color={colors.textTertiary} />
@@ -676,14 +795,18 @@ export default function BankAccountsScreen() {
         </View>
         <View style={styles.headerTop}>
           <View>
-            <Text style={[styles.title, { color: colors.text }]}>Bank Accounts</Text>
-            <Text style={[styles.subtitle, { color: colors.textSecondary }]}>Manage your payment methods</Text>
+            <Text style={[styles.title, { color: colors.text }]}>
+              {canManageAllAccounts ? "Bank Accounts" : "Bank Details"}
+            </Text>
+            <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
+              {canManageAllAccounts ? "Manage employee payment methods" : "View and update your payment details"}
+            </Text>
             <Text style={[styles.syncSubtitle, { color: colors.textTertiary }]}>
-              App accounts plus Dolibarr bank page accounts
+              {canManageAllAccounts ? "App accounts plus Dolibarr bank page accounts" : "Only your own saved bank details are shown here"}
             </Text>
           </View>
           <Pressable 
-            onPress={() => setShowAddModal(true)}
+            onPress={openAddModal}
             style={({ pressed }) => [
               styles.addButton, 
               { backgroundColor: colors.primary, opacity: pressed ? 0.85 : 1 }
@@ -711,7 +834,7 @@ export default function BankAccountsScreen() {
         }
       />
 
-      {dolibarrFetchNote ? (
+      {canManageAllAccounts && dolibarrFetchNote ? (
         <View style={[styles.fetchNoteCard, { backgroundColor: colors.warning + "10", borderColor: colors.warning + "30" }]}>
           <Ionicons name="information-circle-outline" size={16} color={colors.warning} />
           <Text style={[styles.fetchNoteText, { color: colors.warning }]}>
@@ -721,18 +844,20 @@ export default function BankAccountsScreen() {
       ) : null}
 
       {/* Add Modal */}
-      <Modal visible={showAddModal} animationType="slide" transparent onRequestClose={() => setShowAddModal(false)}>
+      <Modal visible={showAddModal} animationType="slide" transparent onRequestClose={closeModal}>
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundElevated }]}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: colors.text }]}>Add Bank Account</Text>
-              <Pressable onPress={() => setShowAddModal(false)}>
+              <Text style={[styles.modalTitle, { color: colors.text }]}>
+                {isEditing ? "Edit Bank Details" : canManageAllAccounts ? "Add Bank Account" : "Add Bank Details"}
+              </Text>
+              <Pressable onPress={closeModal}>
                 <Ionicons name="close" size={24} color={colors.textSecondary} />
               </Pressable>
             </View>
 
             <ScrollView contentContainerStyle={styles.modalScroll}>
-              {isAdmin && (
+              {canManageAllAccounts && (
                 <View style={styles.formGroup}>
                   <Text style={[styles.label, { color: colors.textSecondary }]}>Select Employee</Text>
                   <Pressable
@@ -980,12 +1105,14 @@ export default function BankAccountsScreen() {
               <Pressable 
                 onPress={handleAddAccount}
                 disabled={saving}
-                style={[styles.saveButton, { backgroundColor: colors.primary }]}
+                style={[styles.saveButton, { backgroundColor: colors.primary, opacity: saving ? 0.7 : 1 }]}
               >
                 {saving ? (
                   <ActivityIndicator color="#FFF" />
                 ) : (
-                  <Text style={styles.saveButtonText}>Add Bank Account</Text>
+                  <Text style={styles.saveButtonText}>
+                    {isEditing ? "Save Changes" : canManageAllAccounts ? "Add Bank Account" : "Save Bank Details"}
+                  </Text>
                 )}
               </Pressable>
             </View>
@@ -1020,7 +1147,7 @@ export default function BankAccountsScreen() {
                 onChangeText={setEmployeeSearch}
               />
               <ScrollView style={styles.pickerListScroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.pickerListContent}>
-                {employees.length === 0 ? (
+                {employeePickerSource.length === 0 ? (
                   <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>No employees found.</Text>
                 ) : filteredEmployees.length === 0 ? (
                   <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>No employee matched your search.</Text>
@@ -1240,10 +1367,28 @@ const styles = StyleSheet.create({
   },
   accountActionRow: {
     marginTop: 12,
+    flexDirection: "row",
+    gap: 10,
+  },
+  editAccountButton: {
+    minHeight: 42,
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  editAccountButtonText: {
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
   },
   deleteAccountButton: {
     minHeight: 42,
-    width: "100%",
+    flex: 1,
     borderWidth: 1,
     borderRadius: 14,
     flexDirection: "row",

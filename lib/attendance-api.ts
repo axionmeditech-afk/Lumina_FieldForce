@@ -57,6 +57,11 @@ export interface DolibarrProduct {
   is_manufactured?: number | string | boolean;
   finished?: number | string | boolean;
   finished_product?: number | string | boolean;
+  tosell?: number | string | boolean;
+  sell?: number | string | boolean;
+  status_sell?: number | string | boolean;
+  statut_sell?: number | string | boolean;
+  for_sale?: number | string | boolean;
 }
 
 export interface DolibarrWarehouse {
@@ -1646,7 +1651,18 @@ export async function getDolibarrProducts(options?: {
   page?: number;
   includestockdata?: number | boolean;
   manufacturedOnly?: boolean;
+  sellableOnly?: boolean;
 }): Promise<DolibarrProduct[]> {
+  const isTruthyProductFlag = (value: unknown): boolean => {
+    if (value === true) return true;
+    if (typeof value === "number") return value === 1;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "for sale";
+    }
+    return false;
+  };
+
   const matchesManufacturedProduct = (product: DolibarrProduct): boolean => {
     const textCandidates = [
       product.nature_label,
@@ -1659,17 +1675,7 @@ export async function getDolibarrProducts(options?: {
     }
 
     const truthyFlags = [product.manufactured, product.is_manufactured, product.finished, product.finished_product];
-    if (
-      truthyFlags.some((value) => {
-        if (value === true) return true;
-        if (typeof value === "number") return value === 1;
-        if (typeof value === "string") {
-          const normalized = value.trim().toLowerCase();
-          return normalized === "1" || normalized === "true" || normalized === "yes";
-        }
-        return false;
-      })
-    ) {
+    if (truthyFlags.some((value) => isTruthyProductFlag(value))) {
       return true;
     }
 
@@ -1687,6 +1693,22 @@ export async function getDolibarrProducts(options?: {
         typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : Number.NaN;
       return Number.isFinite(parsed) && parsed === 1;
     });
+  };
+
+  const matchesSellableProduct = (product: DolibarrProduct): boolean => {
+    const sellCandidates = [product.tosell, product.sell, product.status_sell, product.statut_sell, product.for_sale];
+    if (sellCandidates.some((value) => isTruthyProductFlag(value))) {
+      return true;
+    }
+
+    const statusValue = typeof product.status === "number" || typeof product.status === "string" ? product.status : undefined;
+    const parsedStatus =
+      typeof statusValue === "number"
+        ? statusValue
+        : typeof statusValue === "string"
+          ? Number(statusValue.trim())
+          : Number.NaN;
+    return Number.isFinite(parsedStatus) && parsedStatus === 1;
   };
 
   const fetchProductPage = async (page: number, limit: number): Promise<DolibarrProduct[]> => {
@@ -1729,7 +1751,8 @@ export async function getDolibarrProducts(options?: {
       const batch = await fetchProductPage(rawPage, rawPageSize);
       const list = Array.isArray(batch) ? batch : [];
       for (const product of list) {
-        if (!matchesManufacturedProduct(product)) continue;
+        if (options?.manufacturedOnly && !matchesManufacturedProduct(product)) continue;
+        if (options?.sellableOnly && !matchesSellableProduct(product)) continue;
         const key =
           typeof product.id === "number" || typeof product.id === "string"
             ? String(product.id)

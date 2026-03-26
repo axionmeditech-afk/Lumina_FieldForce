@@ -17,7 +17,6 @@ import {
   saveBankAccountRemote,
   setRemoteState,
   syncBankAccountToDolibarr,
-  syncSalaryToDolibarr,
   saveSalaryRecordRemote,
   updateSalaryStatusRemote,
 } from "@/lib/attendance-api";
@@ -216,13 +215,9 @@ export async function getSalaries(): Promise<SalaryRecord[]> {
   const currentUser = await getCurrentUser();
   const companyId = currentUser?.companyId || "";
   let remoteSalaries: SalaryRecord[] | null = null;
-  if (currentUser && ["admin", "hr", "manager"].includes(currentUser.role)) {
-    try {
-      remoteSalaries = await listSalaryRecordsRemote();
-    } catch {
-      remoteSalaries = await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY);
-    }
-  } else {
+  try {
+    remoteSalaries = await listSalaryRecordsRemote();
+  } catch {
     remoteSalaries = await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY);
   }
   const localSalaries = await getSalariesLocal();
@@ -243,48 +238,13 @@ export async function saveSalaryRecord(
 
   await saveSalaryRecordRemote(nextRecord);
 
-  let dolibarrResult: { ok: boolean; message: string } | undefined;
-  if (nextRecord.employeeEmail) {
-    try {
-      dolibarrResult = await syncSalaryToDolibarr({
-        salaryId: nextRecord.id,
-        employeeName: nextRecord.employeeName,
-        employeeEmail: nextRecord.employeeEmail,
-        label: nextRecord.label,
-        periodStart: nextRecord.periodStart,
-        periodEnd: nextRecord.periodEnd,
-        paymentDate: nextRecord.paymentDate,
-        paymentMode: nextRecord.paymentMode,
-        note: nextRecord.note,
-        month: nextRecord.month,
-        grossPay: nextRecord.grossPay,
-        netPay: nextRecord.netPay,
-        status: nextRecord.status,
-        bankAccount: nextRecord.bankAccount,
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to sync salary to Dolibarr.";
-      dolibarrResult = { ok: false, message };
-    }
-  }
-
-  if (!dolibarrResult?.ok) {
-    try {
-      await deleteSalaryRecordRemote(nextRecord.id);
-    } catch (rollbackError) {
-      const rollbackMessage =
-        rollbackError instanceof Error ? rollbackError.message : "Unknown rollback failure.";
-      throw new Error(
-        `${dolibarrResult?.message || "Dolibarr salary sync failed."} Database rollback may be required: ${rollbackMessage}`
-      );
-    }
-    throw new Error(dolibarrResult?.message || "Dolibarr salary sync failed.");
-  }
-
   await addSalaryRecord(nextRecord);
 
-  return { record: nextRecord, synced: true, dolibarr: dolibarrResult };
+  return {
+    record: nextRecord,
+    synced: true,
+    dolibarr: { ok: true, message: "Salary saved to app DB and mirrored to Dolibarr salary table." },
+  };
 }
 
 export async function deleteSalaryRecord(id: string): Promise<boolean> {
@@ -335,9 +295,15 @@ export async function getBankAccounts(filters?: {
 }
 
 export async function saveBankAccount(
-  account: BankAccount
+  account: BankAccount,
+  options?: { syncToDolibarr?: boolean }
 ): Promise<{ record: BankAccount; synced: boolean; dolibarr?: { ok: boolean; message: string } }> {
   await saveBankAccountRemote(account);
+
+  if (options?.syncToDolibarr === false) {
+    await saveBankAccountLocal(account);
+    return { record: account, synced: false };
+  }
 
   let dolibarrResult: { ok: boolean; message: string } | undefined;
   try {
