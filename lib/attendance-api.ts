@@ -47,6 +47,16 @@ export interface DolibarrProduct {
   stock_qty?: number | string;
   qty?: number | string;
   stock_warehouse?: Record<string, unknown> | unknown[];
+  nature?: number | string;
+  product_nature?: number | string;
+  nature_label?: string;
+  nature_of_product?: string;
+  fk_product_nature?: number | string;
+  fk_nature?: number | string;
+  manufactured?: number | string | boolean;
+  is_manufactured?: number | string | boolean;
+  finished?: number | string | boolean;
+  finished_product?: number | string | boolean;
 }
 
 export interface DolibarrWarehouse {
@@ -1635,7 +1645,105 @@ export async function getDolibarrProducts(options?: {
   sortorder?: "asc" | "desc";
   page?: number;
   includestockdata?: number | boolean;
+  manufacturedOnly?: boolean;
 }): Promise<DolibarrProduct[]> {
+  const matchesManufacturedProduct = (product: DolibarrProduct): boolean => {
+    const textCandidates = [
+      product.nature_label,
+      product.nature_of_product,
+      typeof product.nature === "string" ? product.nature : undefined,
+      typeof product.product_nature === "string" ? product.product_nature : undefined,
+    ];
+    if (textCandidates.some((value) => (value || "").toLowerCase().includes("manufactured"))) {
+      return true;
+    }
+
+    const truthyFlags = [product.manufactured, product.is_manufactured, product.finished, product.finished_product];
+    if (
+      truthyFlags.some((value) => {
+        if (value === true) return true;
+        if (typeof value === "number") return value === 1;
+        if (typeof value === "string") {
+          const normalized = value.trim().toLowerCase();
+          return normalized === "1" || normalized === "true" || normalized === "yes";
+        }
+        return false;
+      })
+    ) {
+      return true;
+    }
+
+    const numericNatureCandidates = [
+      product.fk_product_nature,
+      product.fk_nature,
+      typeof product.nature === "number" || typeof product.nature === "string" ? product.nature : undefined,
+      typeof product.product_nature === "number" || typeof product.product_nature === "string"
+        ? product.product_nature
+        : undefined,
+    ];
+
+    return numericNatureCandidates.some((value) => {
+      const parsed =
+        typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : Number.NaN;
+      return Number.isFinite(parsed) && parsed === 1;
+    });
+  };
+
+  const fetchProductPage = async (page: number, limit: number): Promise<DolibarrProduct[]> => {
+    const params = new URLSearchParams();
+    params.set("limit", String(Math.max(1, Math.floor(limit))));
+    params.set("page", String(Math.max(0, Math.floor(page))));
+    if (typeof options?.includestockdata === "number") {
+      params.set("includestockdata", String(options.includestockdata));
+    } else if (options?.includestockdata === true) {
+      params.set("includestockdata", "1");
+    }
+    if (options?.sortfield) {
+      params.set("sortfield", options.sortfield);
+    }
+    if (options?.sortorder) {
+      params.set("sortorder", options.sortorder);
+    }
+    const query = params.toString();
+    return fetchJson<DolibarrProduct[]>(`/dolibarr/proxy/products${query ? `?${query}` : ""}`, {
+      method: "GET",
+    });
+  };
+
+  if (options?.manufacturedOnly) {
+    const requestedLimit =
+      typeof options?.limit === "number" && Number.isFinite(options.limit)
+        ? Math.max(1, Math.floor(options.limit))
+        : 100;
+    const requestedPage =
+      typeof options?.page === "number" && Number.isFinite(options.page)
+        ? Math.max(0, Math.floor(options.page))
+        : 0;
+    const skip = requestedPage * requestedLimit;
+    const needed = skip + requestedLimit;
+    const rawPageSize = Math.max(requestedLimit, 100);
+    const seenIds = new Set<string>();
+    const manufacturedProducts: DolibarrProduct[] = [];
+
+    for (let rawPage = 0; rawPage < 20 && manufacturedProducts.length < needed; rawPage += 1) {
+      const batch = await fetchProductPage(rawPage, rawPageSize);
+      const list = Array.isArray(batch) ? batch : [];
+      for (const product of list) {
+        if (!matchesManufacturedProduct(product)) continue;
+        const key =
+          typeof product.id === "number" || typeof product.id === "string"
+            ? String(product.id)
+            : `${product.ref || ""}|${product.label || ""}`;
+        if (!key || seenIds.has(key)) continue;
+        seenIds.add(key);
+        manufacturedProducts.push(product);
+      }
+      if (list.length < rawPageSize) break;
+    }
+
+    return manufacturedProducts.slice(skip, needed);
+  }
+
   const params = new URLSearchParams();
   if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
     params.set("limit", String(Math.max(1, Math.floor(options.limit))));
@@ -1928,10 +2036,28 @@ export async function getDolibarrBankAccounts(options?: {
   );
 }
 
-export async function listBankAccountsRemote(): Promise<BankAccount[]> {
-  const response = await fetchJson<{ items?: BankAccount[] } | BankAccount[]>("/bank-accounts", {
+export async function listBankAccountsRemote(filters?: {
+  employeeId?: string;
+  employeeEmail?: string;
+  employeeName?: string;
+}): Promise<BankAccount[]> {
+  const params = new URLSearchParams();
+  if (filters?.employeeId?.trim()) {
+    params.set("employeeId", filters.employeeId.trim());
+  }
+  if (filters?.employeeEmail?.trim()) {
+    params.set("employeeEmail", filters.employeeEmail.trim());
+  }
+  if (filters?.employeeName?.trim()) {
+    params.set("employeeName", filters.employeeName.trim());
+  }
+  const query = params.toString();
+  const response = await fetchJson<{ items?: BankAccount[] } | BankAccount[]>(
+    `/bank-accounts${query ? `?${query}` : ""}`,
+    {
     method: "GET",
-  });
+    }
+  );
   if (Array.isArray(response)) return response;
   return Array.isArray(response.items) ? response.items : [];
 }
@@ -2274,16 +2400,55 @@ export async function syncBankAccountToDolibarr(
     clos: account.status === "closed" ? 1 : 0,
   };
 
-  try {
+  const createBankAccountInDolibarr = async (body: typeof payload) => {
     const response = await fetchJson<Record<string, unknown>>("/dolibarr/proxy/bankaccounts", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
     const id = parseDolibarrEntityId(response);
+    return { ok: true as const, id };
+  };
+
+  const normalizeDolibarrBankError = (message: string): string => {
+    const normalized = message.toLowerCase();
+    if (normalized.includes("errorbanklabelalreadyexists")) {
+      return "A bank account with the same Dolibarr label already exists.";
+    }
+    if (normalized.includes("errorbankrefalreadyexists")) {
+      return "A bank account with the same Dolibarr reference already exists.";
+    }
+    return message;
+  };
+
+  try {
+    const { id } = await createBankAccountInDolibarr(payload);
     return { ok: true, message: `Bank account synced to Dolibarr (ID: ${id}).` };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to sync bank account to Dolibarr.";
-    return { ok: false, message };
+    const normalizedMessage = normalizeDolibarrBankError(message);
+    if (!/errorbanklabelalreadyexists|errorbankrefalreadyexists/i.test(message)) {
+      return { ok: false, message: normalizedMessage };
+    }
+
+    const uniqueSuffix = Date.now().toString(36).slice(-4).toUpperCase();
+    const retryPayload = {
+      ...payload,
+      ref: `${String(payload.ref || "BANK").slice(0, 7)}${uniqueSuffix}`.slice(0, 12),
+      label: `${String(payload.label || "Bank Account").trim()} ${uniqueSuffix}`.trim(),
+      bank: `${String(payload.bank || payload.label || "Bank Account").trim()} ${uniqueSuffix}`.trim(),
+    };
+
+    try {
+      const { id } = await createBankAccountInDolibarr(retryPayload);
+      return {
+        ok: true,
+        message: `Bank account synced to Dolibarr (ID: ${id}) after resolving duplicate label/ref.`,
+      };
+    } catch (retryError) {
+      const retryMessage =
+        retryError instanceof Error ? retryError.message : "Unable to sync bank account to Dolibarr.";
+      return { ok: false, message: normalizeDolibarrBankError(retryMessage) };
+    }
   }
 }
 

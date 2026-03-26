@@ -20,6 +20,7 @@ import Colors from "@/constants/colors";
 import { addAuditLog, getIncentivePayouts } from "@/lib/storage";
 import {
   deleteSalaryRecord,
+  getBankAccounts,
   getDolibarrEmployees,
   getEmployees,
   getSalaries,
@@ -53,8 +54,58 @@ function formatCurrency(value: number): string {
   return `INR ${value.toLocaleString()}`;
 }
 
+function formatBankAccountOption(account: BankAccount): string {
+  return `${account.bankName || "UPI"} - ${account.accountNumber || account.upiId || ""}`;
+}
+
 function normalizeKey(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function buildEmployeeBankMatchKeys(input: {
+  employeeId?: string;
+  employeeName?: string;
+  employeeEmail?: string;
+}): Set<string> {
+  const keys = new Set<string>();
+  const add = (value?: string) => {
+    const normalized = normalizeKey(value || "");
+    if (!normalized) return;
+    keys.add(normalized);
+    if (normalized.startsWith("dolibarr_")) {
+      keys.add(normalized.replace("dolibarr_", ""));
+    } else {
+      keys.add(`dolibarr_${normalized}`);
+    }
+  };
+
+  add(input.employeeId);
+  add(input.employeeName);
+  add(input.employeeEmail);
+  return keys;
+}
+
+function matchesBankAccountToEmployee(
+  account: BankAccount,
+  input: {
+    employeeId?: string;
+    employeeName?: string;
+    employeeEmail?: string;
+  }
+): boolean {
+  const employeeKeys = buildEmployeeBankMatchKeys(input);
+  if (!employeeKeys.size) return false;
+
+  const accountKeys = buildEmployeeBankMatchKeys({
+    employeeId: account.employeeId,
+    employeeName: account.employeeName,
+    employeeEmail: account.employeeEmail,
+  });
+
+  for (const key of accountKeys) {
+    if (employeeKeys.has(key)) return true;
+  }
+  return false;
 }
 
 function isDolibarrEmployee(employee: Employee): boolean {
@@ -791,6 +842,8 @@ export default function SalaryScreen() {
   const [dateTarget, setDateTarget] = useState<"start" | "end" | "pay" | null>(null);
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [showEmployeeDropdown, setShowEmployeeDropdown] = useState(false);
+  const [showBankAccountPicker, setShowBankAccountPicker] = useState(false);
+  const [loadingEmployeeBankAccounts, setLoadingEmployeeBankAccounts] = useState(false);
   const isAdmin = user?.role === "admin";
 
   const loadData = useCallback(async () => {
@@ -799,7 +852,7 @@ export default function SalaryScreen() {
       getEmployees(),
       getDolibarrEmployees(),
       getIncentivePayouts({ refreshRemote: true }),
-      import("@/lib/employee-data").then(m => m.getBankAccounts())
+      getBankAccounts(),
     ]);
     if (!user) {
       setSalaries([]);
@@ -896,6 +949,8 @@ export default function SalaryScreen() {
     setCreateInsurance("");
     setCreateNote("");
     setShowEmployeeDropdown(false);
+    setShowBankAccountPicker(false);
+    setLoadingEmployeeBankAccounts(false);
   }, []);
 
   const handleOpenCreate = useCallback(() => {
@@ -908,6 +963,16 @@ export default function SalaryScreen() {
     if (savingSalary) return;
     setShowCreateModal(false);
   }, [savingSalary]);
+
+  const clearSelectedEmployee = useCallback(() => {
+    setCreateEmployeeId("");
+    setCreateEmployeeName("");
+    setCreateEmployeeEmail("");
+    setCreateSearch("");
+    setCreateBankAccount("");
+    setShowBankAccountPicker(false);
+    setLoadingEmployeeBankAccounts(false);
+  }, []);
 
   const dolibarrSelectableEmployees = useMemo(
     () =>
@@ -940,12 +1005,73 @@ export default function SalaryScreen() {
   );
 
   const employeeBankAccounts = useMemo(
-    () =>
-      createEmployeeEmail
-        ? bankAccounts.filter((account) => account.employeeEmail === createEmployeeEmail)
-        : [],
-    [bankAccounts, createEmployeeEmail]
+    () => {
+      if (!createEmployeeId && !createEmployeeName && !createEmployeeEmail) return [];
+      return bankAccounts.filter((account) =>
+        matchesBankAccountToEmployee(account, {
+          employeeId: createEmployeeId,
+          employeeName: createEmployeeName,
+          employeeEmail: createEmployeeEmail,
+        })
+      );
+    },
+    [bankAccounts, createEmployeeEmail, createEmployeeId, createEmployeeName]
   );
+
+  const bankAccountsForPicker = useMemo(() => {
+    if (bankAccounts.length === 0) return [];
+    const matchedIds = new Set(employeeBankAccounts.map((account) => account.id));
+    const matched = employeeBankAccounts.map((account) => ({ account, matched: true }));
+    const unmatched = bankAccounts
+      .filter((account) => !matchedIds.has(account.id))
+      .map((account) => ({ account, matched: false }));
+    return [...matched, ...unmatched];
+  }, [bankAccounts, employeeBankAccounts]);
+
+  const refreshEmployeeBankAccounts = useCallback(
+    async (input: { employeeId?: string; employeeName?: string; employeeEmail?: string }) => {
+      const matchKeys = buildEmployeeBankMatchKeys(input);
+      if (!matchKeys.size) {
+        setCreateBankAccount("");
+        return [] as BankAccount[];
+      }
+      setLoadingEmployeeBankAccounts(true);
+      try {
+        const latestAccounts = await getBankAccounts();
+        const normalizedAccounts = Array.isArray(latestAccounts) ? latestAccounts : [];
+        setBankAccounts(normalizedAccounts);
+        const matchingAccounts = normalizedAccounts.filter(
+          (account) => matchesBankAccountToEmployee(account, input)
+        );
+        setCreateBankAccount((current) => {
+          if (current && matchingAccounts.some((account) => formatBankAccountOption(account) === current)) {
+            return current;
+          }
+          const defaultAccount =
+            matchingAccounts.find((account) => account.isDefault) || matchingAccounts[0];
+          return defaultAccount ? formatBankAccountOption(defaultAccount) : "";
+        });
+        return matchingAccounts;
+      } catch {
+        setCreateBankAccount("");
+        return [] as BankAccount[];
+      } finally {
+        setLoadingEmployeeBankAccounts(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!showCreateModal) return;
+    const input = {
+      employeeId: createEmployeeId,
+      employeeName: createEmployeeName,
+      employeeEmail: createEmployeeEmail,
+    };
+    if (!buildEmployeeBankMatchKeys(input).size) return;
+    void refreshEmployeeBankAccounts(input);
+  }, [createEmployeeEmail, createEmployeeId, createEmployeeName, refreshEmployeeBankAccounts, showCreateModal]);
 
   const salaryDraft = useMemo(() => {
     const basic = parseAmountInput(createBasic);
@@ -1319,77 +1445,46 @@ export default function SalaryScreen() {
 
               <View style={styles.sectionBlock}>
                 <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Employee</Text>
-                <View style={[styles.employeeDropdownField, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+                <Pressable
+                  onPress={() => setShowEmployeeDropdown(true)}
+                  style={[styles.employeeDropdownField, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                >
                   <Ionicons name="people-outline" size={16} color={colors.textSecondary} />
-                  <TextInput
-                    value={createSearch}
-                    onChangeText={(value) => {
-                      setCreateSearch(value);
-                      setShowEmployeeDropdown(true);
-                    }}
-                    onFocus={() => setShowEmployeeDropdown(true)}
-                    placeholder="Search Dolibarr employee..."
-                    placeholderTextColor={colors.textTertiary}
-                    style={[styles.employeeDropdownInput, { color: colors.text }]}
-                  />
-                  <Pressable onPress={() => setShowEmployeeDropdown((current) => !current)} hitSlop={8}>
+                  <View style={styles.employeePickerValueWrap}>
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.employeePickerValue,
+                        { color: createSearch ? colors.text : colors.textSecondary },
+                      ]}
+                    >
+                      {createSearch || "Search Dolibarr employee..."}
+                    </Text>
+                    <Text style={[styles.employeePickerHint, { color: colors.textTertiary }]}>
+                      Tap to open employee picker
+                    </Text>
+                  </View>
+                  <View style={styles.employeeFieldActions}>
+                    {createSearch ? (
+                      <Pressable
+                        hitSlop={8}
+                        onPress={clearSelectedEmployee}
+                        style={[styles.clearEmployeeButton, { backgroundColor: colors.danger + "14" }]}
+                      >
+                        <Ionicons name="close" size={14} color={colors.danger} />
+                      </Pressable>
+                    ) : null}
                     <Ionicons
-                      name={showEmployeeDropdown ? "chevron-up" : "chevron-down"}
+                      name="chevron-down"
                       size={18}
                       color={colors.textSecondary}
                     />
-                  </Pressable>
-                </View>
+                  </View>
+                </Pressable>
 
                 <Text style={[styles.dropdownHint, { color: colors.textTertiary }]}>
                   Dropdown loads direct Dolibarr employees. Salary save will require a valid employee email for Dolibarr sync.
                 </Text>
-
-                {showEmployeeDropdown ? (
-                  <View style={[styles.employeeDropdown, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
-                    <ScrollView
-                      nestedScrollEnabled
-                      showsVerticalScrollIndicator={false}
-                      style={styles.employeeDropdownScroll}
-                    >
-                      {dolibarrSelectableEmployees.length === 0 ? (
-                        <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
-                          No Dolibarr employees found.
-                        </Text>
-                      ) : filteredEmployees.length === 0 ? (
-                        <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
-                          No Dolibarr employee matched your search.
-                        </Text>
-                      ) : (
-                        filteredEmployees.map((employee) => (
-                          <EmployeePickerRow
-                            key={employee.id}
-                            employee={employee}
-                            selected={employee.id === createEmployeeId}
-                            colors={colors}
-                            onSelect={(selected) => {
-                              setCreateEmployeeId(selected.id);
-                              setCreateEmployeeName(selected.name);
-                              setCreateEmployeeEmail(selected.email);
-                              setCreateSearch(selected.name);
-                              setShowEmployeeDropdown(false);
-                              const defaultAccount = bankAccounts.find(
-                                (account) =>
-                                  account.employeeEmail === selected.email &&
-                                  account.isDefault
-                              ) || bankAccounts.find((account) => account.employeeEmail === selected.email);
-                              setCreateBankAccount(
-                                defaultAccount
-                                  ? `${defaultAccount.bankName || "UPI"} - ${defaultAccount.accountNumber || defaultAccount.upiId || ""}`
-                                  : ""
-                              );
-                            }}
-                          />
-                        ))
-                      )}
-                    </ScrollView>
-                  </View>
-                ) : null}
 
                 {selectedEmployee ? (
                   <View style={[styles.selectedEmployeeCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -1404,7 +1499,16 @@ export default function SalaryScreen() {
                         {createEmployeeEmail || "No email on profile"}
                       </Text>
                     </View>
-                    <Ionicons name="checkmark-circle" size={22} color={colors.success} />
+                    <View style={styles.selectedEmployeeActions}>
+                      <Ionicons name="checkmark-circle" size={22} color={colors.success} />
+                      <Pressable
+                        hitSlop={8}
+                        onPress={clearSelectedEmployee}
+                        style={[styles.clearEmployeeButton, { backgroundColor: colors.danger + "14" }]}
+                      >
+                        <Ionicons name="close" size={14} color={colors.danger} />
+                      </Pressable>
+                    </View>
                   </View>
                 ) : null}
               </View>
@@ -1473,55 +1577,51 @@ export default function SalaryScreen() {
                   </View>
                   <View style={styles.gridField}>
                     <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Bank Account</Text>
-                    <View style={[styles.bankSelector, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
-                      {!createEmployeeEmail ? (
-                        <View style={styles.addBankButton}>
-                          <Ionicons name="person-outline" size={15} color={colors.textTertiary} />
-                          <Text style={[styles.addBankButtonText, { color: colors.textSecondary }]}>
-                            Select an employee to load bank accounts
+                    <Pressable
+                      onPress={async () => {
+                        if (!createEmployeeId && !createEmployeeName && !createEmployeeEmail) {
+                          Alert.alert("Select Employee", "Pehle employee select karo, phir uske saved bank accounts choose kar paoge.");
+                          return;
+                        }
+                        await refreshEmployeeBankAccounts({
+                          employeeId: createEmployeeId,
+                          employeeName: createEmployeeName,
+                          employeeEmail: createEmployeeEmail,
+                        });
+                        setShowBankAccountPicker(true);
+                      }}
+                      style={[styles.bankSelector, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
+                    >
+                      <View style={styles.bankPickerTrigger}>
+                        <View style={styles.bankPickerTriggerTextWrap}>
+                          <Text
+                            numberOfLines={1}
+                            style={[
+                              styles.bankPickerValue,
+                              { color: createBankAccount ? colors.text : colors.textSecondary },
+                            ]}
+                          >
+                            {createBankAccount || "Select bank account"}
+                          </Text>
+                          <Text style={[styles.bankPickerHint, { color: colors.textTertiary }]}>
+                            {!selectedEmployee
+                              ? "Select employee first"
+                              : loadingEmployeeBankAccounts
+                              ? "Loading saved bank accounts..."
+                              : employeeBankAccounts.length > 0
+                              ? `${employeeBankAccounts.length} matching account${employeeBankAccounts.length > 1 ? "s" : ""} found`
+                              : bankAccounts.length > 0
+                              ? `${bankAccounts.length} total account${bankAccounts.length > 1 ? "s" : ""} available`
+                              : "No bank account found, add one"}
                           </Text>
                         </View>
-                      ) : employeeBankAccounts.length === 0 ? (
-                        <Pressable onPress={() => router.push("/bank-accounts" as any)} style={styles.addBankButton}>
-                          <Ionicons name="add-circle-outline" size={15} color={colors.primary} />
-                          <Text style={[styles.addBankButtonText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
-                            Add Bank Account
-                          </Text>
-                        </Pressable>
-                      ) : (
-                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bankChipRow}>
-                          {employeeBankAccounts.map((account) => {
-                            const bankLabel = `${account.bankName || "UPI"} - ${account.accountNumber || account.upiId || ""}`;
-                            const selected = createBankAccount === bankLabel;
-                            return (
-                              <Pressable
-                                key={account.id}
-                                onPress={() => setCreateBankAccount(bankLabel)}
-                                style={[
-                                  styles.bankChip,
-                                  {
-                                    backgroundColor: selected ? colors.primary : colors.surface,
-                                    borderColor: selected ? colors.primary : colors.border,
-                                  },
-                                ]}
-                              >
-                                <Text
-                                  style={[
-                                    styles.bankChipText,
-                                    {
-                                      color: selected ? "#FFFFFF" : colors.text,
-                                      fontFamily: "Inter_500Medium",
-                                    },
-                                  ]}
-                                >
-                                  {account.bankName || "UPI"} ({account.accountNumber?.slice(-4) || account.upiId || "saved"})
-                                </Text>
-                              </Pressable>
-                            );
-                          })}
-                        </ScrollView>
-                      )}
-                    </View>
+                        {loadingEmployeeBankAccounts ? (
+                          <ActivityIndicator size="small" color={colors.primary} />
+                        ) : (
+                          <Ionicons name="chevron-down" size={18} color={colors.textSecondary} />
+                        )}
+                      </View>
+                    </Pressable>
                   </View>
                 </View>
               </View>
@@ -1649,6 +1749,182 @@ export default function SalaryScreen() {
           else if (dateTarget === "pay") setCreatePaymentDate(dateStr);
         }}
       />
+
+      <Modal
+        visible={showEmployeeDropdown}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowEmployeeDropdown(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.pickerSheetCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={[styles.pickerSheetHeader, { borderBottomColor: colors.border }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.pickerSheetTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                  Select Employee
+                </Text>
+                <Text style={[styles.pickerSheetSubtitle, { color: colors.textSecondary }]}>
+                  Direct Dolibarr employee picker
+                </Text>
+              </View>
+              <Pressable onPress={() => setShowEmployeeDropdown(false)} hitSlop={8}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+
+            <View style={styles.pickerSheetBody}>
+              <TextInput
+                value={createSearch}
+                onChangeText={setCreateSearch}
+                placeholder="Search Dolibarr employee..."
+                placeholderTextColor={colors.textTertiary}
+                style={[styles.pickerSearchInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.surface }]}
+              />
+
+              <ScrollView
+                style={styles.pickerListScroll}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.pickerListContent}
+              >
+                {dolibarrSelectableEmployees.length === 0 ? (
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                    No Dolibarr employees found.
+                  </Text>
+                ) : filteredEmployees.length === 0 ? (
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                    No Dolibarr employee matched your search.
+                  </Text>
+                ) : (
+                  filteredEmployees.map((employee) => (
+                    <EmployeePickerRow
+                      key={employee.id}
+                      employee={employee}
+                      selected={employee.id === createEmployeeId}
+                      colors={colors}
+                      onSelect={(selected) => {
+                        setCreateEmployeeId(selected.id);
+                        setCreateEmployeeName(selected.name);
+                        setCreateEmployeeEmail(selected.email);
+                        setCreateSearch(selected.name);
+                        setShowEmployeeDropdown(false);
+                        setCreateBankAccount("");
+                        void refreshEmployeeBankAccounts({
+                          employeeId: selected.id,
+                          employeeName: selected.name,
+                          employeeEmail: selected.email,
+                        });
+                      }}
+                    />
+                  ))
+                )}
+              </ScrollView>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showBankAccountPicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowBankAccountPicker(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.pickerSheetCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={[styles.pickerSheetHeader, { borderBottomColor: colors.border }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.pickerSheetTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                  Select Bank Account
+                </Text>
+                <Text style={[styles.pickerSheetSubtitle, { color: colors.textSecondary }]}>
+                  {selectedEmployee
+                    ? employeeBankAccounts.length > 0
+                      ? `${selectedEmployee.name} ke matching accounts first dikh rahe hain`
+                      : "All bank accounts loaded, choose manually"
+                    : "Choose a bank account"}
+                </Text>
+              </View>
+              <Pressable onPress={() => setShowBankAccountPicker(false)} hitSlop={8}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.pickerSheetContent}
+            >
+              {loadingEmployeeBankAccounts ? (
+                <View style={styles.bankPickerEmptyState}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                    Loading bank accounts...
+                  </Text>
+                </View>
+              ) : bankAccountsForPicker.length === 0 ? (
+                <View style={styles.bankPickerEmptyState}>
+                  <Ionicons name="card-outline" size={22} color={colors.textTertiary} />
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                    No bank account found.
+                  </Text>
+                </View>
+              ) : (
+                bankAccountsForPicker.map(({ account, matched }) => {
+                  const bankLabel = formatBankAccountOption(account);
+                  const selected = createBankAccount === bankLabel;
+                  return (
+                    <Pressable
+                      key={account.id}
+                      onPress={() => {
+                        setCreateBankAccount(bankLabel);
+                        setShowBankAccountPicker(false);
+                      }}
+                      style={[
+                        styles.bankOptionRow,
+                        {
+                          borderColor: selected ? colors.primary : colors.border,
+                          backgroundColor: selected ? colors.primary + "14" : colors.surface,
+                        },
+                      ]}
+                      >
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.bankOptionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          {account.bankName || "UPI"}
+                        </Text>
+                        <Text style={[styles.bankOptionMeta, { color: colors.textSecondary }]}>
+                          {account.accountNumber || account.upiId || "Saved account"}
+                        </Text>
+                        <Text style={[styles.bankOptionMeta, { color: colors.textTertiary }]}>
+                          {account.holderName || account.employeeName || "Account holder"}
+                          {account.employeeName ? ` • ${account.employeeName}` : ""}
+                          {matched ? " • Suggested" : ""}
+                        </Text>
+                      </View>
+                      <Ionicons
+                        name={selected ? "checkmark-circle" : "ellipse-outline"}
+                        size={20}
+                        color={selected ? colors.primary : colors.textTertiary}
+                      />
+                    </Pressable>
+                  );
+                })
+              )}
+
+              <Pressable
+                onPress={() => {
+                  setShowBankAccountPicker(false);
+                  router.push("/bank-accounts" as any);
+                }}
+                style={[styles.pickerAddAction, { borderColor: colors.primary, backgroundColor: colors.primary + "10" }]}
+              >
+                <Ionicons name="add-circle-outline" size={16} color={colors.primary} />
+                <Text style={[styles.pickerAddActionText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                  Add New Bank Account
+                </Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </AppCanvas>
   );
 }
@@ -1833,6 +2109,22 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
+  employeePickerValueWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  employeePickerValue: {
+    fontSize: 13.5,
+    fontFamily: "Inter_500Medium",
+  },
+  employeePickerHint: {
+    fontSize: 11.5,
+  },
+  employeeFieldActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   employeeDropdownInput: {
     flex: 1,
     fontSize: 13.5,
@@ -1865,6 +2157,17 @@ const styles = StyleSheet.create({
   selectedEmployeeMeta: {
     fontSize: 12,
     marginTop: 2,
+  },
+  selectedEmployeeActions: {
+    alignItems: "center",
+    gap: 10,
+  },
+  clearEmployeeButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
   },
   employeeList: {
     gap: 8,
@@ -1923,19 +2226,26 @@ const styles = StyleSheet.create({
     minHeight: 46,
     justifyContent: "center",
     paddingVertical: 4,
+    overflow: "hidden",
   },
-  bankChipRow: {
-    paddingHorizontal: 8,
-    gap: 8,
+  bankPickerTrigger: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
   },
-  bankChip: {
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 999,
-    borderWidth: 1,
+  bankPickerTriggerTextWrap: {
+    flex: 1,
+    gap: 2,
   },
-  bankChipText: {
-    fontSize: 12,
+  bankPickerValue: {
+    fontSize: 13,
+    fontFamily: "Inter_500Medium",
+  },
+  bankPickerHint: {
+    fontSize: 11.5,
   },
   addBankButton: {
     minHeight: 38,
@@ -1946,6 +2256,90 @@ const styles = StyleSheet.create({
   },
   addBankButtonText: {
     fontSize: 12.5,
+  },
+  pickerSheetCard: {
+    maxHeight: "72%",
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  pickerSheetHeader: {
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  pickerSheetTitle: {
+    fontSize: 17,
+  },
+  pickerSheetSubtitle: {
+    fontSize: 12.5,
+    marginTop: 2,
+  },
+  pickerSheetContent: {
+    padding: 16,
+    gap: 10,
+    paddingBottom: 4,
+  },
+  pickerSheetBody: {
+    padding: 16,
+    gap: 10,
+    paddingBottom: 4,
+    maxHeight: 380,
+  },
+  pickerSearchInput: {
+    borderWidth: 1,
+    borderRadius: 14,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    fontSize: 13.5,
+  },
+  pickerListScroll: {
+    maxHeight: 280,
+  },
+  pickerListContent: {
+    gap: 10,
+    paddingBottom: 4,
+  },
+  bankOptionRow: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  bankOptionTitle: {
+    fontSize: 14,
+    marginBottom: 2,
+  },
+  bankOptionMeta: {
+    fontSize: 12,
+    marginTop: 1,
+  },
+  bankPickerEmptyState: {
+    minHeight: 108,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingHorizontal: 16,
+  },
+  pickerAddAction: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginTop: 4,
+  },
+  pickerAddActionText: {
+    fontSize: 13,
   },
   summaryStatsRow: {
     flexDirection: "row",

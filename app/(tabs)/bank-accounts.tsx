@@ -5,6 +5,7 @@ import {
   StyleSheet,
   FlatList,
   Pressable,
+  TouchableOpacity,
   Modal,
   ScrollView,
   ActivityIndicator,
@@ -20,7 +21,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { getDolibarrBankAccounts, type DolibarrBankAccount } from "@/lib/attendance-api";
-import { getBankAccounts, saveBankAccount, deleteBankAccount, getEmployees } from "@/lib/employee-data";
+import { getBankAccounts, saveBankAccount, deleteBankAccount, getDolibarrEmployees, getEmployees } from "@/lib/employee-data";
 import type { BankAccount, Employee } from "@/lib/types";
 import * as Crypto from "expo-crypto";
 
@@ -35,6 +36,16 @@ const DOLIBARR_TYPE_OPTIONS: Array<{
   { value: "current", label: "Current" },
   { value: "savings", label: "Savings" },
   { value: "cash", label: "Cash" },
+];
+
+const ACCOUNT_TYPE_OPTIONS = [
+  { value: "bank" as const, label: "Bank Transfer" },
+  { value: "upi" as const, label: "UPI / VPA" },
+];
+
+const BANK_STATUS_OPTIONS = [
+  { value: "open" as const, label: "Open" },
+  { value: "closed" as const, label: "Closed" },
 ];
 
 type BankAccountListItem = BankAccount & {
@@ -170,6 +181,123 @@ function getSourceLabel(source: BankAccountListItem["source"]): string {
   return "App";
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out.`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function loadDolibarrAccountsForBankPage(): Promise<DolibarrBankAccount[]> {
+  try {
+    return await withTimeout(
+      getDolibarrBankAccounts({ limit: 100, sortfield: "tms", sortorder: "desc" }),
+      18_000,
+      "Dolibarr bank accounts"
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    if (!/timed out|timeout|aborted/.test(message)) {
+      throw error;
+    }
+  }
+
+  return withTimeout(
+    getDolibarrBankAccounts({ limit: 50 }),
+    28_000,
+    "Dolibarr bank accounts"
+  );
+}
+
+function EmployeePickerRow({
+  employee,
+  selected,
+  colors,
+  onSelect,
+}: {
+  employee: Employee;
+  selected: boolean;
+  colors: ReturnType<typeof useAppTheme>["colors"];
+  onSelect: (employee: Employee) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => onSelect(employee)}
+      style={({ pressed }) => [
+        styles.employeeRow,
+        {
+          borderColor: selected ? colors.primary : colors.border,
+          backgroundColor: selected ? colors.primary + "18" : colors.surface,
+          opacity: pressed ? 0.86 : 1,
+        },
+      ]}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.employeeRowName, { color: colors.text }]}>{employee.name}</Text>
+        <Text style={[styles.employeeRowMeta, { color: colors.textSecondary }]}>
+          {employee.email || "Email missing"} • {employee.branch}
+        </Text>
+      </View>
+      <Ionicons
+        name={selected ? "checkmark-circle" : "ellipse-outline"}
+        size={20}
+        color={selected ? colors.primary : colors.textTertiary}
+      />
+    </Pressable>
+  );
+}
+
+function PickerOptionRow({
+  label,
+  subtitle,
+  selected,
+  colors,
+  onPress,
+}: {
+  label: string;
+  subtitle?: string;
+  selected: boolean;
+  colors: ReturnType<typeof useAppTheme>["colors"];
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.pickerOptionRow,
+        {
+          borderColor: selected ? colors.primary : colors.border,
+          backgroundColor: selected ? colors.primary + "16" : colors.surface,
+          opacity: pressed ? 0.88 : 1,
+        },
+      ]}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.pickerOptionLabel, { color: colors.text }]}>{label}</Text>
+        {subtitle ? (
+          <Text style={[styles.pickerOptionSubtitle, { color: colors.textSecondary }]}>{subtitle}</Text>
+        ) : null}
+      </View>
+      <Ionicons
+        name={selected ? "checkmark-circle" : "ellipse-outline"}
+        size={20}
+        color={selected ? colors.primary : colors.textTertiary}
+      />
+    </Pressable>
+  );
+}
+
 export default function BankAccountsScreen() {
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
@@ -177,6 +305,7 @@ export default function BankAccountsScreen() {
   
   const [bankAccounts, setBankAccounts] = useState<BankAccountListItem[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [dolibarrEmployees, setDolibarrEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -198,33 +327,80 @@ export default function BankAccountsScreen() {
   const [holderName, setHolderName] = useState("");
   const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
   const [employeeSearch, setEmployeeSearch] = useState("");
+  const [activePicker, setActivePicker] = useState<"employee" | "dolibarrType" | null>(null);
 
   const isAdmin = user?.role === "admin";
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [accounts, emps, dolibarrAccounts] = await Promise.all([
-        getBankAccounts(),
-        getEmployees(),
-        getDolibarrBankAccounts({ limit: 200, sortfield: "tms", sortorder: "desc" }).catch((error) => {
-          setDolibarrFetchNote(error instanceof Error ? error.message : "Could not fetch Dolibarr bank accounts.");
-          return [];
-        }),
+      const [accountsResult, employeesResult, dolibarrEmployeesResult, dolibarrAccountsResult] = await Promise.allSettled([
+        withTimeout(getBankAccounts(), 12000, "Bank accounts"),
+        withTimeout(getEmployees(), 12000, "Employees"),
+        withTimeout(getDolibarrEmployees(), 12000, "Dolibarr employees"),
+        loadDolibarrAccountsForBankPage(),
       ]);
+
+      const accounts =
+        accountsResult.status === "fulfilled" && Array.isArray(accountsResult.value)
+          ? accountsResult.value
+          : [];
+      const emps =
+        employeesResult.status === "fulfilled" && Array.isArray(employeesResult.value)
+          ? employeesResult.value
+          : [];
+      const dolibarrEmployeesList =
+        dolibarrEmployeesResult.status === "fulfilled" && Array.isArray(dolibarrEmployeesResult.value)
+          ? dolibarrEmployeesResult.value
+          : [];
+      const finalDolibarrAccounts =
+        dolibarrAccountsResult.status === "fulfilled" && Array.isArray(dolibarrAccountsResult.value)
+          ? dolibarrAccountsResult.value
+          : [];
 
       const appAccounts = isAdmin
         ? accounts
         : accounts.filter((acc) => acc.employeeEmail === user?.email);
-      const mergedAccounts = mergeAccountSources(appAccounts, Array.isArray(dolibarrAccounts) ? dolibarrAccounts : []);
-
-      setBankAccounts(mergedAccounts);
+      setBankAccounts(mergeAccountSources(appAccounts, finalDolibarrAccounts));
       setEmployees(emps);
-      if (Array.isArray(dolibarrAccounts)) {
-        setDolibarrFetchNote(null);
+      setDolibarrEmployees(dolibarrEmployeesList);
+
+      const warnings: string[] = [];
+      if (accountsResult.status === "rejected") {
+        warnings.push(
+          accountsResult.reason instanceof Error
+            ? accountsResult.reason.message
+            : "Could not fetch saved bank accounts."
+        );
       }
+      if (employeesResult.status === "rejected") {
+        warnings.push(
+          employeesResult.reason instanceof Error
+            ? employeesResult.reason.message
+            : "Could not fetch employees."
+        );
+      }
+      if (dolibarrEmployeesResult.status === "rejected") {
+        warnings.push(
+          dolibarrEmployeesResult.reason instanceof Error
+            ? dolibarrEmployeesResult.reason.message
+            : "Could not fetch Dolibarr employees."
+        );
+      }
+      if (dolibarrAccountsResult.status === "rejected") {
+        warnings.push(
+          dolibarrAccountsResult.reason instanceof Error
+            ? dolibarrAccountsResult.reason.message
+            : "Could not fetch Dolibarr bank accounts."
+        );
+      }
+      setDolibarrFetchNote(warnings.length > 0 ? warnings.join(" ") : null);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Could not load bank accounts";
+      setBankAccounts([]);
+      setEmployees([]);
+      setDolibarrEmployees([]);
+      setDolibarrFetchNote(message);
       Alert.alert("Error", message);
     } finally {
       setLoading(false);
@@ -265,8 +441,10 @@ export default function BankAccountsScreen() {
 
     setSaving(true);
     try {
-      const selectedEmployee = isAdmin 
-        ? employees.find(e => e.id === selectedEmployeeId)
+      const selectedEmployee = isAdmin
+        ? dolibarrEmployees.find((e) => e.id === selectedEmployeeId) ||
+          employees.find((e) => e.id === selectedEmployeeId) ||
+          null
         : null;
       const employeeEmail = isAdmin ? (selectedEmployee?.email || "") : (user?.email || "");
       if (!employeeEmail.trim()) {
@@ -357,12 +535,25 @@ export default function BankAccountsScreen() {
     setHolderName("");
     setSelectedEmployeeId("");
     setEmployeeSearch("");
+    setActivePicker(null);
   };
 
-  const filteredEmployees = employees.filter(e => 
+  const employeePickerSource = isAdmin && dolibarrEmployees.length > 0 ? dolibarrEmployees : employees;
+
+  const filteredEmployees = employeePickerSource.filter(e => 
     e.name.toLowerCase().includes(employeeSearch.toLowerCase()) ||
     e.email.toLowerCase().includes(employeeSearch.toLowerCase())
-  ).slice(0, 5);
+  ).slice(0, 8);
+  const selectedEmployee =
+    isAdmin && selectedEmployeeId
+      ? employeePickerSource.find((employee) => employee.id === selectedEmployeeId) ||
+        employees.find((employee) => employee.id === selectedEmployeeId) ||
+        null
+      : null;
+  const clearSelectedEmployee = () => {
+    setSelectedEmployeeId("");
+    setEmployeeSearch("");
+  };
 
   const renderAccount = ({ item }: { item: BankAccountListItem }) => (
     <Animated.View 
@@ -388,13 +579,16 @@ export default function BankAccountsScreen() {
             </Text>
           </View>
         </View>
-        {item.removable ? (
-          <Pressable onPress={() => handleDeleteAccount(item.id)} hitSlop={10}>
-            <Ionicons name="trash-outline" size={18} color={colors.danger} />
-          </Pressable>
-        ) : (
-          <Ionicons name="lock-closed-outline" size={16} color={colors.textTertiary} />
-        )}
+        <View style={[styles.accountStatusPill, { backgroundColor: item.removable ? colors.danger + "12" : colors.surface }]}>
+          <Ionicons
+            name={item.removable ? "trash-outline" : "lock-closed-outline"}
+            size={14}
+            color={item.removable ? colors.danger : colors.textTertiary}
+          />
+          <Text style={[styles.accountStatusPillText, { color: item.removable ? colors.danger : colors.textTertiary }]}>
+            {item.removable ? "Can Delete" : "Dolibarr Only"}
+          </Text>
+        </View>
       </View>
 
       <Text style={[styles.accountTitle, { color: colors.text }]}>{item.bankName}</Text>
@@ -439,13 +633,34 @@ export default function BankAccountsScreen() {
           <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Holder Name</Text>
           <Text style={[styles.detailValue, { color: colors.text }]}>{item.holderName || item.employeeName || "N/A"}</Text>
         </View>
-        {isAdmin && (
+        {isAdmin ? (
           <View style={{ alignItems: "flex-end" }}>
             <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>
               {item.source === "dolibarr" ? "Source" : "Employee"}
             </Text>
             <Text style={[styles.detailValue, { color: colors.primary, fontSize: 12 }]}>
               {item.source === "dolibarr" ? "Dolibarr Bank Page" : item.employeeName}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.accountActionRow} pointerEvents="box-none">
+        {item.removable ? (
+          <TouchableOpacity
+            onPress={() => handleDeleteAccount(item.id)}
+            activeOpacity={0.8}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={[styles.deleteAccountButton, { borderColor: colors.danger, backgroundColor: colors.danger + "10" }]}
+          >
+            <Ionicons name="trash-outline" size={16} color={colors.danger} />
+            <Text style={[styles.deleteAccountButtonText, { color: colors.danger }]}>Delete Account</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={[styles.readOnlyAccountNote, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+            <Ionicons name="information-circle-outline" size={15} color={colors.textTertiary} />
+            <Text style={[styles.readOnlyAccountNoteText, { color: colors.textSecondary }]}>
+              Delete app-created accounts only
             </Text>
           </View>
         )}
@@ -520,38 +735,59 @@ export default function BankAccountsScreen() {
               {isAdmin && (
                 <View style={styles.formGroup}>
                   <Text style={[styles.label, { color: colors.textSecondary }]}>Select Employee</Text>
-                  <TextInput
-                    style={[styles.input, { borderColor: colors.border, color: colors.text }]}
-                    placeholder="Search employee..."
-                    placeholderTextColor={colors.textTertiary}
-                    value={employeeSearch}
-                    onChangeText={setEmployeeSearch}
-                  />
-                  <View style={styles.employeeChips}>
-                    {filteredEmployees.map(emp => (
-                      <Pressable 
-                        key={emp.id}
-                        onPress={() => {
-                          setSelectedEmployeeId(emp.id);
-                          if (!holderName.trim()) {
-                            setHolderName(emp.name);
-                          }
-                          if (!dolibarrLabel.trim()) {
-                            setDolibarrLabel(`${emp.name} Account`);
-                          }
-                        }}
-                        style={[
-                          styles.employeeChip, 
-                          { 
-                            backgroundColor: selectedEmployeeId === emp.id ? colors.primary : colors.surface,
-                            borderColor: selectedEmployeeId === emp.id ? colors.primary : colors.border
-                          }
-                        ]}
+                  <Pressable
+                    onPress={() => setActivePicker("employee")}
+                    style={[styles.pickerTriggerField, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                  >
+                    <Ionicons name="people-outline" size={16} color={colors.textSecondary} />
+                    <View style={styles.pickerTriggerTextWrap}>
+                      <Text
+                        numberOfLines={1}
+                        style={[styles.pickerTriggerValue, { color: employeeSearch ? colors.text : colors.textSecondary }]}
                       >
-                        <Text style={{ color: selectedEmployeeId === emp.id ? "#FFF" : colors.text, fontSize: 12 }}>{emp.name}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
+                        {employeeSearch || "Select employee"}
+                      </Text>
+                      <Text style={[styles.pickerTriggerHint, { color: colors.textTertiary }]}>Tap to choose employee</Text>
+                    </View>
+                    <View style={styles.pickerTriggerActions}>
+                      {employeeSearch ? (
+                        <Pressable
+                          hitSlop={8}
+                          onPress={clearSelectedEmployee}
+                          style={[styles.clearIconButton, { backgroundColor: colors.danger + "14" }]}
+                        >
+                          <Ionicons name="close" size={14} color={colors.danger} />
+                        </Pressable>
+                      ) : null}
+                      <Ionicons name="chevron-down" size={18} color={colors.textSecondary} />
+                    </View>
+                  </Pressable>
+
+                  {selectedEmployee ? (
+                    <View style={[styles.selectedEmployeeCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.selectedEmployeeName, { color: colors.text }]}>
+                          {selectedEmployee.name}
+                        </Text>
+                        <Text style={[styles.selectedEmployeeMeta, { color: colors.textSecondary }]}>
+                          {selectedEmployee.branch}
+                        </Text>
+                        <Text style={[styles.selectedEmployeeMeta, { color: colors.textTertiary }]}>
+                          {selectedEmployee.email || "No email on profile"}
+                        </Text>
+                      </View>
+                      <View style={styles.selectedEmployeeActions}>
+                        <Ionicons name="checkmark-circle" size={22} color={colors.success} />
+                        <Pressable
+                          hitSlop={8}
+                          onPress={clearSelectedEmployee}
+                          style={[styles.clearIconButton, { backgroundColor: colors.danger + "14" }]}
+                        >
+                          <Ionicons name="close" size={14} color={colors.danger} />
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : null}
                 </View>
               )}
 
@@ -586,22 +822,19 @@ export default function BankAccountsScreen() {
 
                 <View style={styles.formGroup}>
                   <Text style={[styles.label, { color: colors.textSecondary }]}>Dolibarr Account Type</Text>
-                  <View style={styles.tabRow}>
-                    {DOLIBARR_TYPE_OPTIONS.map((option) => (
-                      <Pressable
-                        key={option.value}
-                        onPress={() => setDolibarrType(option.value)}
-                        style={[
-                          styles.tab,
-                          dolibarrType === option.value && { backgroundColor: colors.primary },
-                        ]}
-                      >
-                        <Text style={[styles.tabText, dolibarrType === option.value && { color: "#FFF" }]}>
-                          {option.label}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
+                  <Pressable
+                    onPress={() => setActivePicker("dolibarrType")}
+                    style={[styles.pickerTriggerField, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
+                  >
+                    <Ionicons name="swap-vertical-outline" size={16} color={colors.textSecondary} />
+                    <View style={styles.pickerTriggerTextWrap}>
+                      <Text style={[styles.pickerTriggerValue, { color: colors.text }]}>
+                        {DOLIBARR_TYPE_OPTIONS.find((option) => option.value === dolibarrType)?.label || "Current"}
+                      </Text>
+                      <Text style={[styles.pickerTriggerHint, { color: colors.textTertiary }]}>Tap to choose account type</Text>
+                    </View>
+                    <Ionicons name="chevron-down" size={18} color={colors.textSecondary} />
+                  </Pressable>
                 </View>
 
                 <View style={styles.twoColumnRow}>
@@ -634,14 +867,14 @@ export default function BankAccountsScreen() {
                 <View style={styles.formGroup}>
                   <Text style={[styles.label, { color: colors.textSecondary }]}>Status</Text>
                   <View style={styles.tabRow}>
-                    {(["open", "closed"] as const).map((value) => (
+                    {BANK_STATUS_OPTIONS.map((option) => (
                       <Pressable
-                        key={value}
-                        onPress={() => setBankStatus(value)}
-                        style={[styles.tab, bankStatus === value && { backgroundColor: colors.primary }]}
+                        key={option.value}
+                        onPress={() => setBankStatus(option.value)}
+                        style={[styles.tab, bankStatus === option.value && { backgroundColor: colors.primary }]}
                       >
-                        <Text style={[styles.tabText, bankStatus === value && { color: "#FFF" }]}>
-                          {value === "open" ? "Open" : "Closed"}
+                        <Text style={[styles.tabText, bankStatus === option.value && { color: "#FFF" }]}>
+                          {option.label}
                         </Text>
                       </Pressable>
                     ))}
@@ -655,18 +888,17 @@ export default function BankAccountsScreen() {
               <View style={styles.formGroup}>
                 <Text style={[styles.label, { color: colors.textSecondary }]}>Account Type</Text>
                 <View style={styles.tabRow}>
-                  <Pressable 
-                    onPress={() => setAccountType("bank")}
-                    style={[styles.tab, accountType === "bank" && { backgroundColor: colors.primary }]}
-                  >
-                    <Text style={[styles.tabText, accountType === "bank" && { color: "#FFF" }]}>Bank Transfer</Text>
-                  </Pressable>
-                  <Pressable 
-                    onPress={() => setAccountType("upi")}
-                    style={[styles.tab, accountType === "upi" && { backgroundColor: colors.primary }]}
-                  >
-                    <Text style={[styles.tabText, accountType === "upi" && { color: "#FFF" }]}>UPI / VPA</Text>
-                  </Pressable>
+                  {ACCOUNT_TYPE_OPTIONS.map((option) => (
+                    <Pressable
+                      key={option.value}
+                      onPress={() => setAccountType(option.value)}
+                      style={[styles.tab, accountType === option.value && { backgroundColor: colors.primary }]}
+                    >
+                      <Text style={[styles.tabText, accountType === option.value && { color: "#FFF" }]}>
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  ))}
                 </View>
               </View>
 
@@ -744,7 +976,7 @@ export default function BankAccountsScreen() {
               </View>
             </ScrollView>
 
-            <View style={[styles.modalFooter, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+            <View style={[styles.modalFooter, { paddingBottom: Math.max(insets.bottom - 6, 0) }]}>
               <Pressable 
                 onPress={handleAddAccount}
                 disabled={saving}
@@ -757,6 +989,113 @@ export default function BankAccountsScreen() {
                 )}
               </Pressable>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={activePicker === "employee"}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setActivePicker(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.pickerSheetCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={[styles.pickerSheetHandle, { backgroundColor: colors.border }]} />
+            <View style={[styles.pickerSheetHeader, { borderBottomColor: colors.border }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.pickerSheetTitle, { color: colors.text }]}>Select Employee</Text>
+                <Text style={[styles.pickerSheetSubtitle, { color: colors.textSecondary }]}>Choose an employee from your list</Text>
+              </View>
+              <Pressable onPress={() => setActivePicker(null)} hitSlop={8}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+            <View style={styles.pickerSheetBody}>
+              <TextInput
+                style={[styles.pickerSearchInput, { borderColor: colors.border, color: colors.text, backgroundColor: colors.surface }]}
+                placeholder="Search employee..."
+                placeholderTextColor={colors.textTertiary}
+                value={employeeSearch}
+                onChangeText={setEmployeeSearch}
+              />
+              <ScrollView style={styles.pickerListScroll} showsVerticalScrollIndicator={false} contentContainerStyle={styles.pickerListContent}>
+                {employees.length === 0 ? (
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>No employees found.</Text>
+                ) : filteredEmployees.length === 0 ? (
+                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>No employee matched your search.</Text>
+                ) : (
+                  filteredEmployees.map((emp) => (
+                    <EmployeePickerRow
+                      key={emp.id}
+                      employee={emp}
+                      selected={selectedEmployeeId === emp.id}
+                      colors={colors}
+                      onSelect={(selected) => {
+                        setSelectedEmployeeId(selected.id);
+                        setEmployeeSearch(selected.name);
+                        setActivePicker(null);
+                        if (!holderName.trim()) {
+                          setHolderName(selected.name);
+                        }
+                        if (!dolibarrLabel.trim()) {
+                          setDolibarrLabel(`${selected.name} Account`);
+                        }
+                      }}
+                    />
+                  ))
+                )}
+              </ScrollView>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={activePicker === "dolibarrType"}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setActivePicker(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View
+            style={[
+              styles.optionSheetCard,
+              {
+                backgroundColor: colors.backgroundElevated,
+                borderColor: colors.border,
+                paddingBottom: Math.max(insets.bottom - 6, 0),
+              },
+            ]}
+          >
+            <View style={[styles.pickerSheetHandle, { backgroundColor: colors.border }]} />
+            <View style={[styles.pickerSheetHeader, { borderBottomColor: colors.border }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.pickerSheetTitle, { color: colors.text }]}>Select Dolibarr Type</Text>
+                <Text style={[styles.pickerSheetSubtitle, { color: colors.textSecondary }]}>Choose how this account should be created</Text>
+              </View>
+              <Pressable onPress={() => setActivePicker(null)} hitSlop={8}>
+                <Ionicons name="close" size={22} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+            <ScrollView
+              style={styles.optionSheetScroll}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.pickerSheetContent}
+            >
+              {DOLIBARR_TYPE_OPTIONS.map((option) => (
+                <PickerOptionRow
+                  key={option.value}
+                  label={option.label}
+                  selected={dolibarrType === option.value}
+                  colors={colors}
+                  onPress={() => {
+                    setDolibarrType(option.value);
+                    setActivePicker(null);
+                  }}
+                />
+              ))}
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -852,6 +1191,18 @@ const styles = StyleSheet.create({
     fontSize: 10.5,
     fontFamily: "Inter_700Bold",
   },
+  accountStatusPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  accountStatusPillText: {
+    fontSize: 10.5,
+    fontFamily: "Inter_700Bold",
+  },
   accountTitle: {
     fontSize: 18,
     fontFamily: "Inter_600SemiBold",
@@ -886,6 +1237,39 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: "rgba(0,0,0,0.05)",
+  },
+  accountActionRow: {
+    marginTop: 12,
+  },
+  deleteAccountButton: {
+    minHeight: 42,
+    width: "100%",
+    borderWidth: 1,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  deleteAccountButtonText: {
+    fontSize: 13,
+    fontFamily: "Inter_700Bold",
+  },
+  readOnlyAccountNote: {
+    minHeight: 42,
+    borderWidth: 1,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+  },
+  readOnlyAccountNoteText: {
+    fontSize: 12.5,
+    fontFamily: "Inter_500Medium",
   },
   emptyState: {
     alignItems: "center",
@@ -924,7 +1308,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 30,
     borderTopRightRadius: 30,
     height: "85%",
-    paddingTop: 20,
+    paddingTop: 12,
   },
   modalHeader: {
     flexDirection: "row",
@@ -939,7 +1323,7 @@ const styles = StyleSheet.create({
   },
   modalScroll: {
     paddingHorizontal: 20,
-    paddingBottom: 20,
+    paddingBottom: 0,
   },
   formSection: {
     borderWidth: 1,
@@ -1004,7 +1388,7 @@ const styles = StyleSheet.create({
   },
   modalFooter: {
     paddingHorizontal: 20,
-    paddingTop: 10,
+    paddingTop: 4,
   },
   saveButton: {
     borderRadius: 16,
@@ -1017,16 +1401,171 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: "Inter_700Bold",
   },
-  employeeChips: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginTop: 10,
-  },
-  employeeChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
+  pickerTriggerField: {
     borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    minHeight: 56,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  pickerTriggerTextWrap: {
+    flex: 1,
+  },
+  pickerTriggerValue: {
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+  },
+  pickerTriggerHint: {
+    fontSize: 11.5,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
+  },
+  pickerTriggerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  clearIconButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyPickerText: {
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+    fontSize: 13,
+    fontFamily: "Inter_400Regular",
+  },
+  employeeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(0,0,0,0.06)",
+  },
+  employeeRowName: {
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+    marginBottom: 2,
+  },
+  employeeRowMeta: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+  },
+  selectedEmployeeCard: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  selectedEmployeeName: {
+    fontSize: 15,
+    fontFamily: "Inter_700Bold",
+    marginBottom: 4,
+  },
+  selectedEmployeeMeta: {
+    fontSize: 12.5,
+    fontFamily: "Inter_400Regular",
+    lineHeight: 18,
+  },
+  selectedEmployeeActions: {
+    alignItems: "center",
+    gap: 10,
+  },
+  pickerSheetCard: {
+    maxHeight: "72%",
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  optionSheetCard: {
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderWidth: 1,
+    overflow: "hidden",
+    maxHeight: "38%",
+  },
+  pickerSheetHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 999,
+    alignSelf: "center",
+    marginTop: 10,
+    marginBottom: 4,
+    opacity: 0.7,
+  },
+  pickerSheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  pickerSheetTitle: {
+    fontSize: 19,
+    fontFamily: "Inter_700Bold",
+  },
+  pickerSheetSubtitle: {
+    fontSize: 12.5,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
+  },
+  pickerSheetBody: {
+    padding: 16,
+    gap: 12,
+    maxHeight: 380,
+  },
+  pickerSearchInput: {
+    borderWidth: 1,
+    borderRadius: 16,
+    minHeight: 50,
+    paddingHorizontal: 14,
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+  },
+  pickerListScroll: {
+    maxHeight: 280,
+  },
+  pickerListContent: {
+    gap: 10,
+    paddingBottom: 4,
+  },
+  optionSheetScroll: {
+    maxHeight: 320,
+  },
+  pickerSheetContent: {
+    padding: 16,
+    gap: 10,
+    paddingBottom: 4,
+  },
+  pickerOptionRow: {
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  pickerOptionLabel: {
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+  },
+  pickerOptionSubtitle: {
+    fontSize: 12,
+    fontFamily: "Inter_400Regular",
+    marginTop: 2,
   },
 });

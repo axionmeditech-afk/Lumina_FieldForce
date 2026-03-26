@@ -385,7 +385,8 @@ async function forwardDolibarrRequest(
   const targetUrl = `${base}${path}${query}`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
+  const requestTimeoutMs = path.startsWith("/bankaccounts") ? 30_000 : 15_000;
+  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
     const dispatcher =
       DOLIBARR_INSECURE_TLS && endpoint.startsWith("https:")
@@ -5853,13 +5854,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await ensureBankAccountsTable();
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
-      let query = "SELECT * FROM `lff_bank_accounts` ORDER BY updated_at DESC";
+      const employeeId = typeof req.query.employeeId === "string" ? req.query.employeeId.trim().toLowerCase() : "";
+      const employeeEmail =
+        typeof req.query.employeeEmail === "string" ? req.query.employeeEmail.trim().toLowerCase() : "";
+      const employeeName =
+        typeof req.query.employeeName === "string" ? req.query.employeeName.trim().toLowerCase() : "";
+      const employeeIdAlt =
+        employeeId && employeeId.startsWith("dolibarr_")
+          ? employeeId.replace("dolibarr_", "")
+          : employeeId
+            ? `dolibarr_${employeeId}`
+            : "";
+
+      let query = "SELECT * FROM `lff_bank_accounts`";
       const params: unknown[] = [];
+      const accessClauses: string[] = [];
+      const filterClauses: string[] = [];
       // Non-admin/hr/manager users can only see their own accounts
       if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        query = "SELECT * FROM `lff_bank_accounts` WHERE employee_email = ? ORDER BY updated_at DESC";
-        params.push(requestUser?.email || "");
+        accessClauses.push("LOWER(TRIM(employee_email)) = ?");
+        params.push((requestUser?.email || "").trim().toLowerCase());
       }
+      if (employeeEmail) {
+        filterClauses.push("LOWER(TRIM(employee_email)) = ?");
+        params.push(employeeEmail);
+      }
+      if (employeeName) {
+        filterClauses.push("LOWER(TRIM(employee_name)) = ?");
+        params.push(employeeName);
+      }
+      if (employeeId) {
+        const idClauses = ["LOWER(TRIM(employee_id)) = ?"];
+        const idParams: unknown[] = [employeeId];
+        if (employeeIdAlt && employeeIdAlt !== employeeId) {
+          idClauses.push("LOWER(TRIM(employee_id)) = ?");
+          idParams.push(employeeIdAlt);
+        }
+        filterClauses.push(`(${idClauses.join(" OR ")})`);
+        params.push(...idParams);
+      }
+      const whereClauses: string[] = [];
+      if (accessClauses.length > 0) {
+        whereClauses.push(...accessClauses);
+      }
+      if (filterClauses.length > 0) {
+        whereClauses.push(`(${filterClauses.join(" OR ")})`);
+      }
+      if (whereClauses.length > 0) {
+        query += ` WHERE ${whereClauses.join(" AND ")}`;
+      }
+      query += " ORDER BY updated_at DESC";
       const [rows] = await conn.query<any[]>(query, params);
       res.json({ items: (rows || []).map(mapBankAccountRow) });
     } catch (error) {

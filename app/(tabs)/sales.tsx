@@ -1348,7 +1348,12 @@ export default function SalesScreen() {
     setPosSuccess(null);
     try {
       const [products, customers] = await Promise.all([
-        getDolibarrProducts({ limit: POS_PAGE_SIZE, sortfield: "label", sortorder: "asc" }),
+        getDolibarrProducts({
+          limit: POS_PAGE_SIZE,
+          sortfield: "label",
+          sortorder: "asc",
+          manufacturedOnly: true,
+        }),
         getDolibarrThirdParties({ limit: 200, sortfield: "nom", sortorder: "asc" }),
       ]);
       const productList = Array.isArray(products) ? products : [];
@@ -3227,6 +3232,7 @@ export default function SalesScreen() {
         page: nextPage,
         sortfield: "label",
         sortorder: "asc",
+        manufacturedOnly: true,
       });
       const list = Array.isArray(nextProducts) ? nextProducts : [];
       setPosProducts((current) => mergeUniqueProducts(current, list));

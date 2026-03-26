@@ -304,12 +304,33 @@ export async function updateSalaryRecordStatus(
 
 const BANK_ACCOUNTS_STATE_KEY = "@trackforce_bank_accounts";
 
-export async function getBankAccounts(): Promise<BankAccount[]> {
+export async function getBankAccounts(filters?: {
+  employeeId?: string;
+  employeeEmail?: string;
+  employeeName?: string;
+}): Promise<BankAccount[]> {
   try {
-    return await listBankAccountsRemote();
+    return await listBankAccountsRemote(filters);
   } catch {
     const remote = await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY);
-    return Array.isArray(remote) ? remote : [];
+    if (!Array.isArray(remote)) return [];
+    if (!filters?.employeeId && !filters?.employeeEmail && !filters?.employeeName) {
+      return remote;
+    }
+    const email = normalizeEmail(filters.employeeEmail);
+    const name = normalizeIdentity(filters.employeeName);
+    const rawId = normalizeIdentity(filters.employeeId);
+    const altId = rawId.startsWith("dolibarr_") ? rawId.replace("dolibarr_", "") : `dolibarr_${rawId}`;
+    return remote.filter((account) => {
+      const accountEmail = normalizeEmail(account.employeeEmail);
+      const accountName = normalizeIdentity(account.employeeName);
+      const accountId = normalizeIdentity(account.employeeId);
+      return Boolean(
+        (email && accountEmail === email) ||
+          (name && accountName === name) ||
+          (rawId && (accountId === rawId || accountId === altId))
+      );
+    });
   }
 }
 
