@@ -212,18 +212,7 @@ export async function getDolibarrEmployees(): Promise<Employee[]> {
 }
 
 export async function getSalaries(): Promise<SalaryRecord[]> {
-  const currentUser = await getCurrentUser();
-  const companyId = currentUser?.companyId || "";
-  let remoteSalaries: SalaryRecord[] | null = null;
-  try {
-    remoteSalaries = await listSalaryRecordsRemote();
-  } catch {
-    remoteSalaries = await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY);
-  }
-  const localSalaries = await getSalariesLocal();
-  const base = remoteSalaries ?? localSalaries;
-  if (!companyId) return base;
-  return base.filter((salary) => !salary.companyId || salary.companyId === companyId);
+  return await listSalaryRecordsRemote();
 }
 
 export async function saveSalaryRecord(

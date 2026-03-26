@@ -5991,14 +5991,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const requestUser = (req as any).user as AppUser;
       const conn = await getMySqlPool();
-      const [localItems, dolibarrItems] = await Promise.all([
-        listSalariesFromMySql(),
-        listDolibarrSalaryRows(conn).catch(() => []),
-      ]);
-      let items = mergeSalarySources(
-        localItems as SalaryRecord[],
-        dolibarrItems
-      );
+      let items = await listDolibarrSalaryRows(conn);
 
       if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
         const userEmail = (requestUser?.email || "").trim().toLowerCase();

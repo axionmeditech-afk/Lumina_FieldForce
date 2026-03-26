@@ -1017,26 +1017,7 @@ export default function SalaryScreen() {
       const payouts = payoutsResult.status === "fulfilled" ? payoutsResult.value : [];
       setEmployees(employees);
       setIncentivePayouts(Array.isArray(payouts) ? payouts : []);
-      if (isAdmin) {
-        setSalaries(salaryData);
-      } else {
-        if (salaryData.length > 0) {
-          setSalaries(salaryData);
-          return;
-        }
-        const mappedEmployeeIds = new Set(
-          employees
-            .filter((employee) => employee.email === user.email || employee.name === user.name)
-            .map((employee) => employee.id)
-        );
-        const filtered = salaryData.filter(
-          (salary) =>
-            salary.employeeId === user.id ||
-            salary.employeeName === user.name ||
-            mappedEmployeeIds.has(salary.employeeId)
-        );
-        setSalaries(filtered);
-      }
+      setSalaries(salaryData);
 
     } finally {
       if (!user || !isAdmin) {
