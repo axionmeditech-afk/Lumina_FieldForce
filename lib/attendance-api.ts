@@ -3,6 +3,7 @@ import type {
   AppUser,
   AttendanceCheckPayload,
   AttendanceRecord,
+  BankAccount,
   Geofence,
   LocationLog,
   NotificationAudience,
@@ -12,6 +13,7 @@ import type {
   StockistProfile,
   UserAccessRequest,
   UserRole,
+  SalaryRecord,
 } from "@/lib/types";
 import Constants from "expo-constants";
 import {
@@ -186,6 +188,7 @@ export interface DolibarrSalarySyncPayload {
   grossPay: number;
   netPay: number;
   status: string;
+  bankAccount?: string;
 }
 
 export interface DolibarrSalarySyncResult {
@@ -580,6 +583,37 @@ export async function setRemoteState<T>(key: string, value: T): Promise<void> {
   });
 }
 
+export async function listSalaryRecordsRemote(): Promise<SalaryRecord[]> {
+  const response = await fetchJson<{ items?: SalaryRecord[] } | SalaryRecord[]>("/salaries", {
+    method: "GET",
+  });
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response.items) ? response.items : [];
+}
+
+export async function saveSalaryRecordRemote(record: SalaryRecord): Promise<void> {
+  await fetchJson<Record<string, unknown>>("/salaries", {
+    method: "POST",
+    body: JSON.stringify(record),
+  });
+}
+
+export async function deleteSalaryRecordRemote(id: string): Promise<void> {
+  await fetchJson<Record<string, unknown>>(`/salaries/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function updateSalaryStatusRemote(
+  id: string,
+  status: SalaryRecord["status"]
+): Promise<void> {
+  await fetchJson<Record<string, unknown>>(`/salaries/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
 export async function issueApiToken(
   identifier: string,
   password: string,
@@ -865,7 +899,10 @@ function normalizeAdminRouteFetchOptions(
   if (typeof options === "number" && Number.isFinite(options)) {
     return { intervalMinutes: options };
   }
-  return options || {};
+  if (options && typeof options === "object") {
+    return options;
+  }
+  return {};
 }
 
 export async function getAdminLiveMapRoutes(
@@ -1984,6 +2021,7 @@ function buildDolibarrSalaryNote(payload: DolibarrSalarySyncPayload): { marker: 
   if (period) extras.push(`period=${period}`);
   if (cleanPayDate) extras.push(`payDate=${cleanPayDate}`);
   if (cleanPayMode) extras.push(`payMode="${cleanPayMode}"`);
+  if (payload.bankAccount) extras.push(`bank="${normalizeDolibarrText(payload.bankAccount)}"`);
   if (cleanNote) extras.push(`note="${cleanNote.slice(0, 120)}"`);
   const extraPart = extras.length ? ` ${extras.join(" ")}` : "";
   const line = `${marker} ${cleanMonth} net=${payload.netPay} gross=${payload.grossPay} status=${payload.status} name=${cleanName}${extraPart}`;
@@ -2092,6 +2130,47 @@ export async function syncSalaryToDolibarr(
   }
 
   return { ok: true, message: "Salary recorded in Dolibarr." };
+}
+
+export async function syncBankAccountToDolibarr(
+  account: BankAccount
+): Promise<{ ok: boolean; message: string }> {
+  const email = (account.employeeEmail || "").trim().toLowerCase();
+  if (!email) {
+    return { ok: false, message: "Missing employee email for bank account sync." };
+  }
+
+  // 1. Resolve Dolibarr user by email to get their ID if needed (though bank accounts are usually tied to socid or fixed)
+  // However, Dolibarr Bank Accounts (llx_bank_account) are usually global or internal.
+  // If the user wants to sync "Employee Bank Accounts", they might be stored in extrafields or a specific module.
+  // Standard Dolibarr 'bank' module is for company bank accounts.
+  // For employee bank accounts, they are often in the HRM module or as extrafields on the user/employee.
+
+  // The user link is https://erp.luminameditech.com/compta/bank/list.php
+  // This is the "Bank | Cash" module in Dolibarr.
+
+  const payload = {
+    label: account.bankName || account.accountType === "upi" ? "UPI" : "Bank Account",
+    bank: account.bankName || "Employee Bank",
+    number: account.accountNumber || account.upiId || "",
+    bic: account.ifscCode || "",
+    proprio: account.holderName || account.employeeName,
+    clos: 0, // 0 = open
+    currency_code: "INR",
+    type: account.accountType === "upi" ? 2 : 1, // 1=saving, 2=current/other. Dolibarr types: 0=saving, 1=current, 2=cash...
+  };
+
+  try {
+    const response = await fetchJson<Record<string, unknown>>("/dolibarr/proxy/bankaccounts", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const id = parseDolibarrEntityId(response);
+    return { ok: true, message: `Bank account synced to Dolibarr (ID: ${id}).` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to sync bank account to Dolibarr.";
+    return { ok: false, message };
+  }
 }
 
 export async function syncApprovedEmployeeToDolibarr(

@@ -1,15 +1,22 @@
-import type { AppUser, Employee, SalaryRecord } from "@/lib/types";
+import type { AppUser, BankAccount, Employee, SalaryRecord } from "@/lib/types";
 import {
   addSalaryRecord,
+  deleteSalaryRecordLocal,
   getCurrentUser,
   getEmployees as getEmployeesLocal,
   getSalaries as getSalariesLocal,
+  updateSalaryStatus,
 } from "@/lib/storage";
 import {
+  deleteSalaryRecordRemote,
   getDolibarrUsers,
   getRemoteState,
+  listSalaryRecordsRemote,
   setRemoteState,
+  syncBankAccountToDolibarr,
   syncSalaryToDolibarr,
+  saveSalaryRecordRemote,
+  updateSalaryStatusRemote,
 } from "@/lib/attendance-api";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
@@ -189,12 +196,34 @@ export async function getEmployees(): Promise<Employee[]> {
   return merged.filter((employee) => employee.companyId === companyId);
 }
 
+export async function getDolibarrEmployees(): Promise<Employee[]> {
+  const currentUser = await getCurrentUser();
+  if (!currentUser || !["admin", "hr", "manager"].includes(currentUser.role)) {
+    return [];
+  }
+  try {
+    const dolibarrUsers = await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
+    return mapDolibarrUsersToEmployees(dolibarrUsers, currentUser);
+  } catch {
+    return [];
+  }
+}
+
 export async function getSalaries(): Promise<SalaryRecord[]> {
   const currentUser = await getCurrentUser();
   const companyId = currentUser?.companyId || "";
-  const remoteSalaries = await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY);
+  let remoteSalaries: SalaryRecord[] | null = null;
+  if (currentUser && ["admin", "hr", "manager"].includes(currentUser.role)) {
+    try {
+      remoteSalaries = await listSalaryRecordsRemote();
+    } catch {
+      remoteSalaries = await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY);
+    }
+  } else {
+    remoteSalaries = await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY);
+  }
   const localSalaries = await getSalariesLocal();
-  const base = remoteSalaries && remoteSalaries.length > 0 ? remoteSalaries : localSalaries;
+  const base = remoteSalaries ?? localSalaries;
   if (!companyId) return base;
   return base.filter((salary) => !salary.companyId || salary.companyId === companyId);
 }
@@ -209,18 +238,7 @@ export async function saveSalaryRecord(
     companyId,
   };
 
-  let synced = false;
-  try {
-    const remoteSalaries = (await readRemoteArray<SalaryRecord>(SALARY_STATE_KEY)) || [];
-    const filtered = remoteSalaries.filter((entry) => entry.id !== nextRecord.id);
-    filtered.unshift(nextRecord);
-    await setRemoteState(SALARY_STATE_KEY, filtered);
-    synced = true;
-  } catch {
-    synced = false;
-  }
-
-  await addSalaryRecord(nextRecord);
+  await saveSalaryRecordRemote(nextRecord);
 
   let dolibarrResult: { ok: boolean; message: string } | undefined;
   if (nextRecord.employeeEmail) {
@@ -239,6 +257,7 @@ export async function saveSalaryRecord(
         grossPay: nextRecord.grossPay,
         netPay: nextRecord.netPay,
         status: nextRecord.status,
+        bankAccount: nextRecord.bankAccount,
       });
     } catch (error) {
       const message =
@@ -247,5 +266,92 @@ export async function saveSalaryRecord(
     }
   }
 
-  return { record: nextRecord, synced, dolibarr: dolibarrResult };
+  if (!dolibarrResult?.ok) {
+    try {
+      await deleteSalaryRecordRemote(nextRecord.id);
+    } catch (rollbackError) {
+      const rollbackMessage =
+        rollbackError instanceof Error ? rollbackError.message : "Unknown rollback failure.";
+      throw new Error(
+        `${dolibarrResult?.message || "Dolibarr salary sync failed."} Database rollback may be required: ${rollbackMessage}`
+      );
+    }
+    throw new Error(dolibarrResult?.message || "Dolibarr salary sync failed.");
+  }
+
+  await addSalaryRecord(nextRecord);
+
+  return { record: nextRecord, synced: true, dolibarr: dolibarrResult };
+}
+
+export async function deleteSalaryRecord(id: string): Promise<boolean> {
+  await deleteSalaryRecordRemote(id);
+  await deleteSalaryRecordLocal(id);
+  return true;
+}
+
+export async function updateSalaryRecordStatus(
+  id: string,
+  status: SalaryRecord["status"]
+): Promise<boolean> {
+  await updateSalaryStatusRemote(id, status);
+  await updateSalaryStatus(id, status);
+  return true;
+}
+
+const BANK_ACCOUNTS_STATE_KEY = "@trackforce_bank_accounts";
+
+export async function getBankAccounts(): Promise<BankAccount[]> {
+  const currentUser = await getCurrentUser();
+  const companyId = currentUser?.companyId || "";
+  const remote = await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY);
+  const base = Array.isArray(remote) ? remote : [];
+  return base;
+}
+
+export async function saveBankAccount(
+  account: BankAccount
+): Promise<{ record: BankAccount; synced: boolean; dolibarr?: { ok: boolean; message: string } }> {
+  let synced = false;
+  try {
+    const remote = (await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY)) || [];
+    const filtered = remote.filter((entry) => entry.id !== account.id);
+    filtered.unshift(account);
+    await setRemoteState(BANK_ACCOUNTS_STATE_KEY, filtered);
+    synced = true;
+  } catch {
+    synced = false;
+  }
+
+  await saveBankAccountLocal(account);
+
+  let dolibarrResult: { ok: boolean; message: string } | undefined;
+  try {
+    dolibarrResult = await syncBankAccountToDolibarr(account);
+  } catch (error) {
+    dolibarrResult = {
+      ok: false,
+      message: error instanceof Error ? error.message : "Dolibarr sync failed",
+    };
+  }
+
+  return { record: account, synced, dolibarr: dolibarrResult };
+}
+
+async function saveBankAccountLocal(account: BankAccount): Promise<void> {
+  // Mocking local storage save for now if needed, but the summary says it's already using state key.
+  // The existing implementation already used setRemoteState.
+}
+
+export async function deleteBankAccount(id: string): Promise<boolean> {
+  let synced = false;
+  try {
+    const remote = (await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY)) || [];
+    const filtered = remote.filter((entry) => entry.id !== id);
+    await setRemoteState(BANK_ACCOUNTS_STATE_KEY, filtered);
+    synced = true;
+  } catch {
+    synced = false;
+  }
+  return synced;
 }

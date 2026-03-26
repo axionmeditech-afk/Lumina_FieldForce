@@ -2311,6 +2311,15 @@ export async function addSalaryRecord(record: SalaryRecord): Promise<void> {
   await setItem(KEYS.SALARIES, filtered);
 }
 
+export async function deleteSalaryRecordLocal(salaryId: string): Promise<void> {
+  const companyId = await getActiveCompanyId();
+  const salaries = await getRawList<SalaryRecord>(KEYS.SALARIES);
+  const filtered = salaries.filter(
+    (salary) => !(salary.id === salaryId && matchesCompany(salary, companyId))
+  );
+  await setItem(KEYS.SALARIES, filtered);
+}
+
 export async function getTasks(): Promise<Task[]> {
   const companyId = await getActiveCompanyId();
   const tasks = await getRawList<Task>(KEYS.TASKS);

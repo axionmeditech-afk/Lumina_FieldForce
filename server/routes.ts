@@ -78,6 +78,7 @@ const DOLIBARR_PROXY_RULES: Array<{
   { prefix: "/warehouses", roles: ["admin", "hr", "manager"] },
   { prefix: "/stockmovements", roles: ["admin", "hr", "manager"] },
   { prefix: "/invoices", roles: ["admin", "hr", "manager"] },
+  { prefix: "/bankaccounts", roles: ["admin", "hr", "manager", "salesperson"] },
 ];
 const PRODUCT_STOCK_TABLE = "nmy5_product_stock";
 type ProductStockSchema = {
@@ -119,6 +120,7 @@ const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_incentive_goal_plans",
   "@trackforce_incentive_product_plans",
   "@trackforce_incentive_payouts",
+  "@trackforce_salaries",
 ]);
 
 function firstString(value: unknown): string {
@@ -2372,6 +2374,235 @@ async function hydrateLocationLogsFromLegacyStateIfNeeded(): Promise<void> {
   }
 }
 
+let salariesTableEnsured = false;
+async function ensureSalariesTable(): Promise<void> {
+  if (salariesTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_salaries\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`employee_id\` VARCHAR(64) NOT NULL,
+      \`employee_name\` VARCHAR(191) NOT NULL,
+      \`employee_email\` VARCHAR(191) NULL,
+      \`label\` VARCHAR(191) NULL,
+      \`period_start\` DATE NULL,
+      \`period_end\` DATE NULL,
+      \`payment_date\` DATE NULL,
+      \`payment_mode\` VARCHAR(64) NULL,
+      \`bank_account\` VARCHAR(191) NULL,
+      \`note\` LONGTEXT NULL,
+      \`month\` VARCHAR(16) NOT NULL,
+      \`basic\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`hra\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`transport\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`medical\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`bonus\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`overtime\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`tax\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`pf\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`insurance\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`gross_pay\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`total_deductions\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`net_pay\` DECIMAL(12,2) NOT NULL DEFAULT 0,
+      \`status\` ENUM('pending','approved','paid') NOT NULL DEFAULT 'pending',
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_salaries_employee\` (\`employee_id\`),
+      KEY \`idx_lff_salaries_month\` (\`month\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  const [salaryColumns] = await conn.query<any[]>("SHOW COLUMNS FROM `lff_salaries`");
+  const existingColumns = new Set((salaryColumns || []).map((column) => String(column.Field || "")));
+  const alterClauses: string[] = [];
+
+  if (!existingColumns.has("employee_email")) {
+    alterClauses.push("ADD COLUMN `employee_email` VARCHAR(191) NULL AFTER `employee_name`");
+  }
+  if (!existingColumns.has("label")) {
+    alterClauses.push("ADD COLUMN `label` VARCHAR(191) NULL AFTER `employee_email`");
+  }
+  if (!existingColumns.has("period_start")) {
+    alterClauses.push("ADD COLUMN `period_start` DATE NULL AFTER `label`");
+  }
+  if (!existingColumns.has("period_end")) {
+    alterClauses.push("ADD COLUMN `period_end` DATE NULL AFTER `period_start`");
+  }
+  if (!existingColumns.has("payment_date")) {
+    alterClauses.push("ADD COLUMN `payment_date` DATE NULL AFTER `period_end`");
+  }
+  if (!existingColumns.has("payment_mode")) {
+    alterClauses.push("ADD COLUMN `payment_mode` VARCHAR(64) NULL AFTER `payment_date`");
+  }
+  if (!existingColumns.has("bank_account")) {
+    alterClauses.push("ADD COLUMN `bank_account` VARCHAR(191) NULL AFTER `payment_mode`");
+  }
+  if (!existingColumns.has("note")) {
+    alterClauses.push("ADD COLUMN `note` LONGTEXT NULL AFTER `bank_account`");
+  }
+
+  if (alterClauses.length > 0) {
+    await conn.execute(`ALTER TABLE \`lff_salaries\` ${alterClauses.join(", ")}`);
+  }
+  salariesTableEnsured = true;
+}
+
+async function listSalariesFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureSalariesTable();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT * FROM lff_salaries ORDER BY month DESC, employee_name ASC
+  `);
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    employeeId: String(row.employee_id),
+    employeeName: String(row.employee_name),
+    employeeEmail: row.employee_email ? String(row.employee_email) : undefined,
+    label: row.label ? String(row.label) : undefined,
+    periodStart: row.period_start ? new Date(row.period_start).toISOString().slice(0, 10) : undefined,
+    periodEnd: row.period_end ? new Date(row.period_end).toISOString().slice(0, 10) : undefined,
+    paymentDate: row.payment_date ? new Date(row.payment_date).toISOString().slice(0, 10) : undefined,
+    paymentMode: row.payment_mode ? String(row.payment_mode) : undefined,
+    bankAccount: row.bank_account ? String(row.bank_account) : undefined,
+    note: row.note ? String(row.note) : undefined,
+    month: String(row.month),
+    basic: Number(row.basic),
+    hra: Number(row.hra),
+    transport: Number(row.transport),
+    medical: Number(row.medical),
+    bonus: Number(row.bonus),
+    overtime: Number(row.overtime),
+    tax: Number(row.tax),
+    pf: Number(row.pf),
+    insurance: Number(row.insurance),
+    grossPay: Number(row.gross_pay),
+    totalDeductions: Number(row.total_deductions),
+    netPay: Number(row.net_pay),
+    status: String(row.status),
+  }));
+}
+
+async function replaceSalariesInMySql(entries: unknown[]): Promise<void> {
+  await ensureSalariesTable();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_salaries");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const id = e.id ? String(e.id).trim() : "";
+      if (!id) continue;
+      const companyId = e.companyId ? String(e.companyId).trim() : null;
+      const employeeId = e.employeeId ? String(e.employeeId).trim() : "";
+      const employeeName = e.employeeName ? String(e.employeeName).trim() : "Employee";
+      const employeeEmail = e.employeeEmail ? String(e.employeeEmail).trim() : null;
+      const label = e.label ? String(e.label).trim() : null;
+      const periodStart = e.periodStart ? toSqlDateOnly(e.periodStart) : null;
+      const periodEnd = e.periodEnd ? toSqlDateOnly(e.periodEnd) : null;
+      const paymentDate = e.paymentDate ? toSqlDateOnly(e.paymentDate) : null;
+      const paymentMode = e.paymentMode ? String(e.paymentMode).trim() : null;
+      const bankAccount = e.bankAccount ? String(e.bankAccount).trim() : null;
+      const note = e.note ? String(e.note).trim() : null;
+      const month = e.month ? String(e.month).trim() : "unknown";
+      const status = e.status === "paid" ? "paid" : e.status === "approved" ? "approved" : "pending";
+      await conn.execute(
+        `INSERT INTO \`lff_salaries\`
+          (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`label\`, \`period_start\`, \`period_end\`, \`payment_date\`, \`payment_mode\`, \`bank_account\`, \`note\`, \`month\`, \`basic\`, \`hra\`, \`transport\`, \`medical\`, \`bonus\`, \`overtime\`, \`tax\`, \`pf\`, \`insurance\`, \`gross_pay\`, \`total_deductions\`, \`net_pay\`, \`status\`)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           \`company_id\` = VALUES(\`company_id\`),
+           \`employee_name\` = VALUES(\`employee_name\`),
+           \`employee_email\` = VALUES(\`employee_email\`),
+           \`label\` = VALUES(\`label\`),
+           \`period_start\` = VALUES(\`period_start\`),
+           \`period_end\` = VALUES(\`period_end\`),
+           \`payment_date\` = VALUES(\`payment_date\`),
+           \`payment_mode\` = VALUES(\`payment_mode\`),
+           \`bank_account\` = VALUES(\`bank_account\`),
+           \`note\` = VALUES(\`note\`),
+           \`month\` = VALUES(\`month\`),
+           \`basic\` = VALUES(\`basic\`),
+           \`hra\` = VALUES(\`hra\`),
+           \`transport\` = VALUES(\`transport\`),
+           \`medical\` = VALUES(\`medical\`),
+           \`bonus\` = VALUES(\`bonus\`),
+           \`overtime\` = VALUES(\`overtime\`),
+           \`tax\` = VALUES(\`tax\`),
+           \`pf\` = VALUES(\`pf\`),
+           \`insurance\` = VALUES(\`insurance\`),
+           \`gross_pay\` = VALUES(\`gross_pay\`),
+           \`total_deductions\` = VALUES(\`total_deductions\`),
+           \`net_pay\` = VALUES(\`net_pay\`),
+           \`status\` = VALUES(\`status\`)`,
+        [
+          id, companyId, employeeId, employeeName, employeeEmail, label,
+          periodStart, periodEnd, paymentDate, paymentMode, bankAccount, note, month,
+          toSqlNumber(e.basic), toSqlNumber(e.hra), toSqlNumber(e.transport),
+          toSqlNumber(e.medical), toSqlNumber(e.bonus), toSqlNumber(e.overtime),
+          toSqlNumber(e.tax), toSqlNumber(e.pf), toSqlNumber(e.insurance),
+          toSqlNumber(e.grossPay), toSqlNumber(e.totalDeductions), toSqlNumber(e.netPay),
+          status
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+let bankAccountsTableEnsured = false;
+async function ensureBankAccountsTable(): Promise<void> {
+  if (bankAccountsTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_bank_accounts\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`employee_id\` VARCHAR(64) NULL,
+      \`employee_name\` VARCHAR(191) NOT NULL,
+      \`employee_email\` VARCHAR(191) NOT NULL,
+      \`account_type\` ENUM('bank','upi') NOT NULL DEFAULT 'bank',
+      \`bank_name\` VARCHAR(191) NULL,
+      \`account_number\` VARCHAR(64) NULL,
+      \`ifsc_code\` VARCHAR(16) NULL,
+      \`upi_id\` VARCHAR(191) NULL,
+      \`holder_name\` VARCHAR(191) NULL,
+      \`is_default\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`created_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_bank_accounts_email\` (\`employee_email\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  bankAccountsTableEnsured = true;
+}
+
+function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown> {
+  const nowIso = new Date().toISOString();
+  return {
+    id: String(row.id),
+    employeeId: row.employee_id ? String(row.employee_id) : undefined,
+    employeeName: row.employee_name ? String(row.employee_name) : "",
+    employeeEmail: row.employee_email ? String(row.employee_email) : "",
+    accountType: row.account_type === "upi" ? "upi" : "bank",
+    bankName: row.bank_name ? String(row.bank_name) : undefined,
+    accountNumber: row.account_number ? String(row.account_number) : undefined,
+    ifscCode: row.ifsc_code ? String(row.ifsc_code) : undefined,
+    upiId: row.upi_id ? String(row.upi_id) : undefined,
+    holderName: row.holder_name ? String(row.holder_name) : undefined,
+    isDefault: Boolean(row.is_default),
+    createdAt: row.created_at ? new Date(row.created_at as string).toISOString() : nowIso,
+    updatedAt: row.updated_at ? new Date(row.updated_at as string).toISOString() : nowIso,
+  };
+}
+
 async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
   if (!isNormalizedStateKey(key)) return undefined;
   if (key === "@trackforce_attendance") return listAttendanceFromMySql();
@@ -2381,6 +2612,7 @@ async function readNormalizedState(key: string): Promise<unknown[] | undefined> 
   if (key === "@trackforce_incentive_goal_plans") return listIncentiveGoalPlansFromMySql();
   if (key === "@trackforce_incentive_product_plans") return listIncentiveProductPlansFromMySql();
   if (key === "@trackforce_incentive_payouts") return listIncentivePayoutsFromMySql();
+  if (key === "@trackforce_salaries") return listSalariesFromMySql();
   return undefined;
 }
 
@@ -2419,6 +2651,10 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
   }
   if (key === "@trackforce_incentive_payouts") {
     await replaceIncentivePayoutsInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_salaries") {
+    await replaceSalariesInMySql(entries);
     return true;
   }
   return false;
@@ -5438,6 +5674,237 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ? await listAttendanceHistoryFromMySql(userId).catch(() => storage.getAttendanceHistory(userId))
       : await storage.getAttendanceHistory(userId);
     res.json(records);
+  });
+
+  // ─── Salary REST endpoints ────────────────────────────────────────────────
+
+  app.get("/api/salaries", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    try {
+      const items = await listSalariesFromMySql();
+      res.json({ items });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to fetch salaries.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.post("/api/salaries", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    try {
+      const e = (req.body || {}) as Record<string, unknown>;
+      const id = e.id ? String(e.id).trim() : "";
+      if (!id) {
+        res.status(400).json({ message: "id is required" });
+        return;
+      }
+      await ensureSalariesTable();
+      const conn = await getMySqlPool();
+      const companyId = e.companyId ? String(e.companyId).trim() : null;
+      const employeeId = e.employeeId ? String(e.employeeId).trim() : "";
+      const employeeName = e.employeeName ? String(e.employeeName).trim() : "Employee";
+      const employeeEmail = e.employeeEmail ? String(e.employeeEmail).trim() : null;
+      const label = e.label ? String(e.label).trim() : null;
+      const periodStart = e.periodStart ? toSqlDateOnly(e.periodStart) : null;
+      const periodEnd = e.periodEnd ? toSqlDateOnly(e.periodEnd) : null;
+      const paymentDate = e.paymentDate ? toSqlDateOnly(e.paymentDate) : null;
+      const paymentMode = e.paymentMode ? String(e.paymentMode).trim() : null;
+      const bankAccount = e.bankAccount ? String(e.bankAccount).trim() : null;
+      const note = e.note ? String(e.note).trim() : null;
+      const month = e.month ? String(e.month).trim() : "unknown";
+      const status = e.status === "paid" ? "paid" : e.status === "approved" ? "approved" : "pending";
+      await conn.execute(
+        `INSERT INTO \`lff_salaries\`
+          (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`label\`, \`period_start\`, \`period_end\`, \`payment_date\`, \`payment_mode\`, \`bank_account\`, \`note\`, \`month\`, \`basic\`, \`hra\`, \`transport\`, \`medical\`, \`bonus\`, \`overtime\`, \`tax\`, \`pf\`, \`insurance\`, \`gross_pay\`, \`total_deductions\`, \`net_pay\`, \`status\`)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           \`company_id\` = VALUES(\`company_id\`),
+           \`employee_name\` = VALUES(\`employee_name\`),
+           \`employee_email\` = VALUES(\`employee_email\`),
+           \`label\` = VALUES(\`label\`),
+           \`period_start\` = VALUES(\`period_start\`),
+           \`period_end\` = VALUES(\`period_end\`),
+           \`payment_date\` = VALUES(\`payment_date\`),
+           \`payment_mode\` = VALUES(\`payment_mode\`),
+           \`bank_account\` = VALUES(\`bank_account\`),
+           \`note\` = VALUES(\`note\`),
+           \`month\` = VALUES(\`month\`),
+           \`basic\` = VALUES(\`basic\`), \`hra\` = VALUES(\`hra\`), \`transport\` = VALUES(\`transport\`),
+           \`medical\` = VALUES(\`medical\`), \`bonus\` = VALUES(\`bonus\`), \`overtime\` = VALUES(\`overtime\`),
+           \`tax\` = VALUES(\`tax\`), \`pf\` = VALUES(\`pf\`), \`insurance\` = VALUES(\`insurance\`),
+           \`gross_pay\` = VALUES(\`gross_pay\`), \`total_deductions\` = VALUES(\`total_deductions\`),
+           \`net_pay\` = VALUES(\`net_pay\`), \`status\` = VALUES(\`status\`)`,
+        [
+          id, companyId, employeeId, employeeName, employeeEmail, label,
+          periodStart, periodEnd, paymentDate, paymentMode, bankAccount, note, month,
+          toSqlNumber(e.basic), toSqlNumber(e.hra), toSqlNumber(e.transport),
+          toSqlNumber(e.medical), toSqlNumber(e.bonus), toSqlNumber(e.overtime),
+          toSqlNumber(e.tax), toSqlNumber(e.pf), toSqlNumber(e.insurance),
+          toSqlNumber(e.grossPay), toSqlNumber(e.totalDeductions), toSqlNumber(e.netPay),
+          status
+        ]
+      );
+      res.status(201).json({ id, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to save salary.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.delete("/api/salaries/:id", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    const salaryId = firstString(req.params.id);
+    if (!salaryId) {
+      res.status(400).json({ message: "Salary id is required." });
+      return;
+    }
+    try {
+      await ensureSalariesTable();
+      const conn = await getMySqlPool();
+      await conn.execute("DELETE FROM `lff_salaries` WHERE `id` = ?", [salaryId]);
+      res.json({ id: salaryId, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to delete salary.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.patch("/api/salaries/:id/status", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    const salaryId = firstString(req.params.id);
+    if (!salaryId) {
+      res.status(400).json({ message: "Salary id is required." });
+      return;
+    }
+
+    const rawStatus = firstString((req.body as Record<string, unknown> | undefined)?.status);
+    const status = rawStatus === "paid" ? "paid" : rawStatus === "approved" ? "approved" : rawStatus === "pending" ? "pending" : null;
+    if (!status) {
+      res.status(400).json({ message: "A valid salary status is required." });
+      return;
+    }
+
+    try {
+      await ensureSalariesTable();
+      const conn = await getMySqlPool();
+      await conn.execute("UPDATE `lff_salaries` SET `status` = ? WHERE `id` = ?", [status, salaryId]);
+      res.json({ id: salaryId, status, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to update salary status.";
+      res.status(500).json({ message });
+    }
+  });
+
+  // ─── Employee Bank Accounts REST endpoints ────────────────────────────────
+
+  app.get("/api/bank-accounts", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    try {
+      await ensureBankAccountsTable();
+      const conn = await getMySqlPool();
+      const requestUser = (req as any).user as AppUser;
+      let query = "SELECT * FROM `lff_bank_accounts` ORDER BY updated_at DESC";
+      const params: unknown[] = [];
+      // Non-admin/hr/manager users can only see their own accounts
+      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        query = "SELECT * FROM `lff_bank_accounts` WHERE employee_email = ? ORDER BY updated_at DESC";
+        params.push(requestUser?.email || "");
+      }
+      const [rows] = await conn.query<any[]>(query, params);
+      res.json({ items: (rows || []).map(mapBankAccountRow) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to fetch bank accounts.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.post("/api/bank-accounts", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    try {
+      await ensureBankAccountsTable();
+      const conn = await getMySqlPool();
+      const requestUser = (req as any).user as AppUser;
+      const body = (req.body || {}) as Record<string, unknown>;
+      const id = body.id ? String(body.id).trim() : randomUUID();
+      const employeeId = body.employeeId ? String(body.employeeId).trim() : "";
+      const employeeName = body.employeeName ? String(body.employeeName).trim() : "";
+      const employeeEmail = body.employeeEmail ? String(body.employeeEmail).trim() : requestUser?.email || "";
+      const accountType = body.accountType ? String(body.accountType).trim() : "bank";
+      const bankName = body.bankName ? String(body.bankName).trim() : null;
+      const accountNumber = body.accountNumber ? String(body.accountNumber).trim() : null;
+      const ifscCode = body.ifscCode ? String(body.ifscCode).trim() : null;
+      const upiId = body.upiId ? String(body.upiId).trim() : null;
+      const holderName = body.holderName ? String(body.holderName).trim() : null;
+      const isDefault = body.isDefault ? 1 : 0;
+      const now = toSqlTimestamp(new Date());
+      await conn.execute(
+        `INSERT INTO \`lff_bank_accounts\`
+          (\`id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`account_type\`, \`bank_name\`, \`account_number\`, \`ifsc_code\`, \`upi_id\`, \`holder_name\`, \`is_default\`, \`created_at\`, \`updated_at\`)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           \`bank_name\` = VALUES(\`bank_name\`),
+           \`account_number\` = VALUES(\`account_number\`),
+           \`ifsc_code\` = VALUES(\`ifsc_code\`),
+           \`upi_id\` = VALUES(\`upi_id\`),
+           \`holder_name\` = VALUES(\`holder_name\`),
+           \`account_type\` = VALUES(\`account_type\`),
+           \`is_default\` = VALUES(\`is_default\`),
+           \`updated_at\` = VALUES(\`updated_at\`)`,
+        [id, employeeId, employeeName, employeeEmail, accountType, bankName, accountNumber, ifscCode, upiId, holderName, isDefault, now, now]
+      );
+      res.status(201).json({ id, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to save bank account.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.delete("/api/bank-accounts/:id", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL is not configured." });
+      return;
+    }
+    const accountId = firstString(req.params.id);
+    if (!accountId) {
+      res.status(400).json({ message: "Account id is required." });
+      return;
+    }
+    try {
+      await ensureBankAccountsTable();
+      const conn = await getMySqlPool();
+      const requestUser = (req as any).user as AppUser;
+      // Non-admins can only delete their own accounts
+      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        await conn.execute(
+          "DELETE FROM `lff_bank_accounts` WHERE `id` = ? AND `employee_email` = ?",
+          [accountId, requestUser?.email || ""]
+        );
+      } else {
+        await conn.execute("DELETE FROM `lff_bank_accounts` WHERE `id` = ?", [accountId]);
+      }
+      res.json({ id: accountId, ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to delete bank account.";
+      res.status(500).json({ message });
+    }
   });
 
   const httpServer = createServer(app);

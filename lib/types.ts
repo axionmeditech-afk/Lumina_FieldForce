@@ -113,6 +113,7 @@ export interface SalaryRecord {
   periodEnd?: string;
   paymentDate?: string;
   paymentMode?: string;
+  bankAccount?: string;
   note?: string;
   month: string;
   basic: number;
@@ -554,4 +555,20 @@ export interface DashboardStats {
   pendingExpenses: number;
   totalConversations: number;
   avgInterestScore: number;
+}
+
+export interface BankAccount {
+  id: string;
+  employeeId?: string;
+  employeeName: string;
+  employeeEmail: string;
+  accountType: "bank" | "upi";
+  bankName?: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  upiId?: string;
+  holderName?: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
 }

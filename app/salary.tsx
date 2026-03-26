@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -17,11 +17,19 @@ import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import Colors from "@/constants/colors";
-import { addAuditLog, getIncentivePayouts, updateSalaryStatus } from "@/lib/storage";
-import { getEmployees, getSalaries, saveSalaryRecord } from "@/lib/employee-data";
-import type { Employee, IncentivePayout, SalaryRecord } from "@/lib/types";
+import { addAuditLog, getIncentivePayouts } from "@/lib/storage";
+import {
+  deleteSalaryRecord,
+  getDolibarrEmployees,
+  getEmployees,
+  getSalaries,
+  saveSalaryRecord,
+  updateSalaryRecordStatus,
+} from "@/lib/employee-data";
+import type { BankAccount, Employee, IncentivePayout, SalaryRecord } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
+import { CalendarModal } from "@/components/CalendarModal";
 import { useAuth } from "@/contexts/AuthContext";
 import * as Crypto from "expo-crypto";
 import * as Print from "expo-print";
@@ -47,6 +55,15 @@ function formatCurrency(value: number): string {
 
 function normalizeKey(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function isDolibarrEmployee(employee: Employee): boolean {
+  return employee.id.trim().toLowerCase().startsWith("dolibarr_");
+}
+
+function hasSyncableEmployeeEmail(value?: string): boolean {
+  const email = (value || "").trim().toLowerCase();
+  return Boolean(email) && email.includes("@") && !email.endsWith("@dolibarr.local");
 }
 
 function parseDateOnly(value?: string): Date | null {
@@ -228,6 +245,7 @@ function SalaryBreakdown({
   onMarkPaid,
   onViewSlip,
   onPrintSlip,
+  onDeleteSalary,
   printingSlipId,
 }: {
   salary: SalaryRecord;
@@ -237,6 +255,7 @@ function SalaryBreakdown({
   onMarkPaid: (salaryId: string) => void;
   onViewSlip: (salary: SalaryRecord) => void;
   onPrintSlip: (salary: SalaryRecord) => void;
+  onDeleteSalary: (salary: SalaryRecord) => void;
   printingSlipId: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -373,6 +392,26 @@ function SalaryBreakdown({
                 {isPrinting ? "Printing..." : "Print Slip"}
               </Text>
             </Pressable>
+
+            {isAdmin ? (
+              <Pressable
+                onPress={() => onDeleteSalary(salary)}
+                style={({ pressed }) => [
+                  styles.secondaryActionButton,
+                  styles.destructiveActionButton,
+                  {
+                    borderColor: colors.danger,
+                    backgroundColor: colors.danger + "10",
+                    opacity: pressed ? 0.82 : 1,
+                  },
+                ]}
+              >
+                <Ionicons name="trash-outline" size={15} color={colors.danger} />
+                <Text style={[styles.secondaryActionButtonText, { color: colors.danger }]}>
+                  Delete
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
 
           {isAdmin && salary.status !== "paid" ? (
@@ -637,6 +676,46 @@ function AmountField({
   );
 }
 
+function CompactAmountField({
+  label,
+  value,
+  onChangeText,
+  colors,
+}: {
+  label: string;
+  value: string;
+  onChangeText: (next: string) => void;
+  colors: typeof Colors.light;
+}) {
+  return (
+    <View style={styles.gridField}>
+      <AmountField label={label} value={value} onChangeText={onChangeText} colors={colors} />
+    </View>
+  );
+}
+
+function SummaryStat({
+  label,
+  value,
+  accent,
+  colors,
+}: {
+  label: string;
+  value: number;
+  accent: string;
+  colors: typeof Colors.light;
+}) {
+  return (
+    <View style={[styles.summaryStatCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+      <View style={[styles.summaryStatDot, { backgroundColor: accent }]} />
+      <Text style={[styles.summaryStatLabel, { color: colors.textSecondary }]}>{label}</Text>
+      <Text style={[styles.summaryStatValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+        {formatCurrency(value)}
+      </Text>
+    </View>
+  );
+}
+
 function EmployeePickerRow({
   employee,
   selected,
@@ -665,7 +744,7 @@ function EmployeePickerRow({
           {employee.name}
         </Text>
         <Text style={[styles.employeeMeta, { color: colors.textSecondary }]}>
-          {employee.department} • {employee.branch}
+          {employee.email || "Email missing"} • {employee.branch}
         </Text>
       </View>
       <Ionicons
@@ -683,6 +762,7 @@ export default function SalaryScreen() {
   const { colors } = useAppTheme();
   const [salaries, setSalaries] = useState<SalaryRecord[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [dolibarrEmployees, setDolibarrEmployees] = useState<Employee[]>([]);
   const [incentivePayouts, setIncentivePayouts] = useState<IncentivePayout[]>([]);
   const [selectedSlip, setSelectedSlip] = useState<SalaryRecord | null>(null);
   const [printingSlipId, setPrintingSlipId] = useState<string | null>(null);
@@ -696,25 +776,43 @@ export default function SalaryScreen() {
   const [createPeriodEnd, setCreatePeriodEnd] = useState("");
   const [createPaymentDate, setCreatePaymentDate] = useState("");
   const [createPaymentMode, setCreatePaymentMode] = useState("");
-  const [createAmount, setCreateAmount] = useState("");
+  const [createBankAccount, setCreateBankAccount] = useState("");
+  const [createBasic, setCreateBasic] = useState("");
+  const [createHra, setCreateHra] = useState("");
+  const [createTransport, setCreateTransport] = useState("");
+  const [createMedical, setCreateMedical] = useState("");
+  const [createBonus, setCreateBonus] = useState("");
+  const [createOvertime, setCreateOvertime] = useState("");
+  const [createTax, setCreateTax] = useState("");
+  const [createPf, setCreatePf] = useState("");
+  const [createInsurance, setCreateInsurance] = useState("");
   const [createNote, setCreateNote] = useState("");
   const [savingSalary, setSavingSalary] = useState(false);
+  const [dateTarget, setDateTarget] = useState<"start" | "end" | "pay" | null>(null);
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  const [showEmployeeDropdown, setShowEmployeeDropdown] = useState(false);
   const isAdmin = user?.role === "admin";
 
   const loadData = useCallback(async () => {
-    const [salaryData, employees, payouts] = await Promise.all([
+    const [salaryData, employees, dolibarrEmployees, payouts, accounts] = await Promise.all([
       getSalaries(),
       getEmployees(),
+      getDolibarrEmployees(),
       getIncentivePayouts({ refreshRemote: true }),
+      import("@/lib/employee-data").then(m => m.getBankAccounts())
     ]);
     if (!user) {
       setSalaries([]);
       setEmployees([]);
+      setDolibarrEmployees([]);
       setIncentivePayouts([]);
+      setBankAccounts([]);
       return;
     }
     setEmployees(employees);
+    setDolibarrEmployees(dolibarrEmployees);
     setIncentivePayouts(Array.isArray(payouts) ? payouts : []);
+    setBankAccounts(accounts || []);
     if (isAdmin) {
       setSalaries(salaryData);
       return;
@@ -739,7 +837,7 @@ export default function SalaryScreen() {
   const handleMarkPaid = useCallback(
     async (salaryId: string) => {
       if (!isAdmin || !user) return;
-      await updateSalaryStatus(salaryId, "paid");
+      const synced = await updateSalaryRecordStatus(salaryId, "paid");
       const target = salaries.find((entry) => entry.id === salaryId);
       await addAuditLog({
         id: Crypto.randomUUID(),
@@ -761,7 +859,7 @@ export default function SalaryScreen() {
     const pending = salaries.filter((salary) => salary.status !== "paid");
     if (!pending.length) return;
     for (const salary of pending) {
-      await updateSalaryStatus(salary.id, "paid");
+      await updateSalaryRecordStatus(salary.id, "paid");
     }
     await addAuditLog({
       id: Crypto.randomUUID(),
@@ -786,8 +884,18 @@ export default function SalaryScreen() {
     setCreatePeriodEnd("");
     setCreatePaymentDate("");
     setCreatePaymentMode("");
-    setCreateAmount("");
+    setCreateBankAccount("");
+    setCreateBasic("");
+    setCreateHra("");
+    setCreateTransport("");
+    setCreateMedical("");
+    setCreateBonus("");
+    setCreateOvertime("");
+    setCreateTax("");
+    setCreatePf("");
+    setCreateInsurance("");
     setCreateNote("");
+    setShowEmployeeDropdown(false);
   }, []);
 
   const handleOpenCreate = useCallback(() => {
@@ -801,23 +909,82 @@ export default function SalaryScreen() {
     setShowCreateModal(false);
   }, [savingSalary]);
 
-  const selectableEmployees = useMemo(
-    () => employees.filter((employee) => employee.role !== "admin"),
-    [employees]
+  const dolibarrSelectableEmployees = useMemo(
+    () =>
+      dolibarrEmployees
+        .filter((employee) => employee.role !== "admin")
+        .filter((employee) => isDolibarrEmployee(employee))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    [dolibarrEmployees]
   );
 
   const filteredEmployees = useMemo(() => {
     const q = createSearch.trim().toLowerCase();
-    if (!q) return selectableEmployees;
-    return selectableEmployees.filter((employee) => {
+    if (!q) return dolibarrSelectableEmployees.slice(0, 20);
+    return dolibarrSelectableEmployees.filter((employee) => {
       return (
         employee.name.toLowerCase().includes(q) ||
         employee.email.toLowerCase().includes(q) ||
         employee.department.toLowerCase().includes(q) ||
         employee.branch.toLowerCase().includes(q)
       );
-    });
-  }, [createSearch, selectableEmployees]);
+    }).slice(0, 20);
+  }, [createSearch, dolibarrSelectableEmployees]);
+
+  const selectedEmployee = useMemo(
+    () =>
+      dolibarrEmployees.find((employee) => employee.id === createEmployeeId) ||
+      employees.find((employee) => employee.id === createEmployeeId) ||
+      null,
+    [createEmployeeId, dolibarrEmployees, employees]
+  );
+
+  const employeeBankAccounts = useMemo(
+    () =>
+      createEmployeeEmail
+        ? bankAccounts.filter((account) => account.employeeEmail === createEmployeeEmail)
+        : [],
+    [bankAccounts, createEmployeeEmail]
+  );
+
+  const salaryDraft = useMemo(() => {
+    const basic = parseAmountInput(createBasic);
+    const hra = parseAmountInput(createHra);
+    const transport = parseAmountInput(createTransport);
+    const medical = parseAmountInput(createMedical);
+    const bonus = parseAmountInput(createBonus);
+    const overtime = parseAmountInput(createOvertime);
+    const tax = parseAmountInput(createTax);
+    const pf = parseAmountInput(createPf);
+    const insurance = parseAmountInput(createInsurance);
+    const grossPay = basic + hra + transport + medical + bonus + overtime;
+    const totalDeductions = tax + pf + insurance;
+    const netPay = Math.max(grossPay - totalDeductions, 0);
+    return {
+      basic,
+      hra,
+      transport,
+      medical,
+      bonus,
+      overtime,
+      tax,
+      pf,
+      insurance,
+      grossPay,
+      totalDeductions,
+      netPay,
+    };
+  }, [
+    createBasic,
+    createBonus,
+    createHra,
+    createInsurance,
+    createMedical,
+    createOvertime,
+    createPf,
+    createTax,
+    createTransport,
+  ]);
 
   const incentivesBySalaryId = useMemo(() => {
     const map = new Map<string, IncentiveSummary>();
@@ -871,6 +1038,13 @@ export default function SalaryScreen() {
       Alert.alert("Employee Required", "Select an employee before saving the salary.");
       return;
     }
+    if (!createEmployeeId.startsWith("dolibarr_") || !hasSyncableEmployeeEmail(createEmployeeEmail)) {
+      Alert.alert(
+        "Dolibarr Employee Required",
+        "Select an employee from the Dolibarr dropdown with a valid email so salary can save to DB and sync to Dolibarr."
+      );
+      return;
+    }
     const label = createLabel.trim() || "Salary";
     const periodStart = createPeriodStart.trim();
     const periodEnd = createPeriodEnd.trim();
@@ -891,16 +1065,12 @@ export default function SalaryScreen() {
       return;
     }
 
-    const amount = parseAmountInput(createAmount);
-    if (!amount || amount <= 0) {
-      Alert.alert("Invalid Amount", "Enter a valid salary amount.");
+    if (!salaryDraft.grossPay || salaryDraft.grossPay <= 0) {
+      Alert.alert("Invalid Salary", "Enter at least the basic salary or earnings amount.");
       return;
     }
     const monthSource = periodStart || paymentDate || "";
     const monthKey = /^\d{4}-\d{2}/.test(monthSource) ? monthSource.slice(0, 7) : getDefaultMonthKey();
-    const grossPay = amount;
-    const totalDeductions = 0;
-    const netPay = amount;
 
     setSavingSalary(true);
     try {
@@ -914,24 +1084,25 @@ export default function SalaryScreen() {
         periodEnd: periodEnd || undefined,
         paymentDate: paymentDate || undefined,
         paymentMode: paymentMode || undefined,
+        bankAccount: createBankAccount.trim() || undefined,
         note: note || undefined,
         month: monthKey,
-        basic: amount,
-        hra: 0,
-        transport: 0,
-        medical: 0,
-        bonus: 0,
-        overtime: 0,
-        tax: 0,
-        pf: 0,
-        insurance: 0,
-        grossPay,
-        totalDeductions,
-        netPay,
+        basic: salaryDraft.basic,
+        hra: salaryDraft.hra,
+        transport: salaryDraft.transport,
+        medical: salaryDraft.medical,
+        bonus: salaryDraft.bonus,
+        overtime: salaryDraft.overtime,
+        tax: salaryDraft.tax,
+        pf: salaryDraft.pf,
+        insurance: salaryDraft.insurance,
+        grossPay: salaryDraft.grossPay,
+        totalDeductions: salaryDraft.totalDeductions,
+        netPay: salaryDraft.netPay,
         status: "approved",
       };
 
-      const result = await saveSalaryRecord(salaryRecord);
+      await saveSalaryRecord(salaryRecord);
 
       await addAuditLog({
         id: Crypto.randomUUID(),
@@ -942,20 +1113,6 @@ export default function SalaryScreen() {
         timestamp: new Date().toISOString(),
         module: "Salary",
       });
-
-      if (result.dolibarr && !result.dolibarr.ok) {
-        Alert.alert(
-          "Dolibarr Sync Warning",
-          result.dolibarr.message || "Salary saved, but Dolibarr sync failed."
-        );
-      }
-
-      if (!result.synced) {
-        Alert.alert(
-          "Offline Salary Saved",
-          "Salary saved locally. Connect to the backend to sync company-wide."
-        );
-      }
 
       setShowCreateModal(false);
       await loadData();
@@ -976,12 +1133,49 @@ export default function SalaryScreen() {
     createPeriodEnd,
     createPaymentDate,
     createPaymentMode,
-    createAmount,
+    createBankAccount,
+    createBasic,
+    createBonus,
+    createHra,
+    createInsurance,
+    createMedical,
     createNote,
+    createOvertime,
     isAdmin,
     loadData,
+    salaryDraft,
+    createPf,
+    createTax,
+    createTransport,
     user,
   ]);
+
+  const handleDeleteSalary = useCallback(
+    (record: SalaryRecord) => {
+      Alert.alert(
+        "Delete Salary Record",
+        `Are you sure you want to delete the salary record for ${record.employeeName} (${record.month})?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                await deleteSalaryRecord(record.id);
+                await loadData();
+                Alert.alert("Deleted", "Salary record deleted successfully.");
+              } catch (err) {
+                const message = err instanceof Error ? err.message : "Could not delete salary record.";
+                Alert.alert("Delete Failed", message);
+              }
+            },
+          },
+        ]
+      );
+    },
+    [loadData]
+  );
 
   const handleViewSlip = useCallback((salary: SalaryRecord) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -1053,6 +1247,7 @@ export default function SalaryScreen() {
             onMarkPaid={handleMarkPaid}
             onViewSlip={handleViewSlip}
             onPrintSlip={(salary) => void handlePrintSlip(salary)}
+            onDeleteSalary={handleDeleteSalary}
             printingSlipId={printingSlipId}
           />
         )}
@@ -1093,100 +1288,305 @@ export default function SalaryScreen() {
             </View>
 
             <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Employee</Text>
-              <TextInput
-                value={createSearch}
-                onChangeText={setCreateSearch}
-                placeholder="Search employee..."
-                placeholderTextColor={colors.textTertiary}
-                style={[styles.searchInput, { color: colors.text, borderColor: colors.border }]}
-              />
-              <View style={styles.employeeList}>
-                {filteredEmployees.length === 0 ? (
-                  <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
-                    No employees found.
-                  </Text>
-                ) : (
-                  filteredEmployees.map((employee) => (
-                    <EmployeePickerRow
-                      key={employee.id}
-                      employee={employee}
-                      selected={employee.id === createEmployeeId}
-                      colors={colors}
-                      onSelect={(selected) => {
-                        setCreateEmployeeId(selected.id);
-                        setCreateEmployeeName(selected.name);
-                        setCreateEmployeeEmail(selected.email);
-                      }}
+              <View style={[styles.createHeroCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <View style={styles.createHeroHeader}>
+                  <View style={styles.createHeroTitleWrap}>
+                    <Text style={[styles.createHeroTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                      Salary Workspace
+                    </Text>
+                    <Text style={[styles.createHeroSubtitle, { color: colors.textSecondary }]}>
+                      Fill earnings, deductions, payment info, and save directly to payroll records.
+                    </Text>
+                  </View>
+                  <View style={[styles.createHeroBadge, { backgroundColor: colors.primary + "14" }]}>
+                    <Text style={[styles.createHeroBadgeText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                      {selectedEmployee ? "Employee linked" : "Pick employee"}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.summaryStatsRow}>
+                  <SummaryStat label="Gross" value={salaryDraft.grossPay} accent={colors.primary} colors={colors} />
+                  <SummaryStat
+                    label="Deductions"
+                    value={salaryDraft.totalDeductions}
+                    accent={colors.warning}
+                    colors={colors}
+                  />
+                  <SummaryStat label="Net" value={salaryDraft.netPay} accent={colors.success} colors={colors} />
+                </View>
+              </View>
+
+              <View style={styles.sectionBlock}>
+                <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Employee</Text>
+                <View style={[styles.employeeDropdownField, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+                  <Ionicons name="people-outline" size={16} color={colors.textSecondary} />
+                  <TextInput
+                    value={createSearch}
+                    onChangeText={(value) => {
+                      setCreateSearch(value);
+                      setShowEmployeeDropdown(true);
+                    }}
+                    onFocus={() => setShowEmployeeDropdown(true)}
+                    placeholder="Search Dolibarr employee..."
+                    placeholderTextColor={colors.textTertiary}
+                    style={[styles.employeeDropdownInput, { color: colors.text }]}
+                  />
+                  <Pressable onPress={() => setShowEmployeeDropdown((current) => !current)} hitSlop={8}>
+                    <Ionicons
+                      name={showEmployeeDropdown ? "chevron-up" : "chevron-down"}
+                      size={18}
+                      color={colors.textSecondary}
                     />
-                  ))
-                )}
+                  </Pressable>
+                </View>
+
+                <Text style={[styles.dropdownHint, { color: colors.textTertiary }]}>
+                  Dropdown loads direct Dolibarr employees. Salary save will require a valid employee email for Dolibarr sync.
+                </Text>
+
+                {showEmployeeDropdown ? (
+                  <View style={[styles.employeeDropdown, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
+                    <ScrollView
+                      nestedScrollEnabled
+                      showsVerticalScrollIndicator={false}
+                      style={styles.employeeDropdownScroll}
+                    >
+                      {dolibarrSelectableEmployees.length === 0 ? (
+                        <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                          No Dolibarr employees found.
+                        </Text>
+                      ) : filteredEmployees.length === 0 ? (
+                        <Text style={[styles.emptyPickerText, { color: colors.textSecondary }]}>
+                          No Dolibarr employee matched your search.
+                        </Text>
+                      ) : (
+                        filteredEmployees.map((employee) => (
+                          <EmployeePickerRow
+                            key={employee.id}
+                            employee={employee}
+                            selected={employee.id === createEmployeeId}
+                            colors={colors}
+                            onSelect={(selected) => {
+                              setCreateEmployeeId(selected.id);
+                              setCreateEmployeeName(selected.name);
+                              setCreateEmployeeEmail(selected.email);
+                              setCreateSearch(selected.name);
+                              setShowEmployeeDropdown(false);
+                              const defaultAccount = bankAccounts.find(
+                                (account) =>
+                                  account.employeeEmail === selected.email &&
+                                  account.isDefault
+                              ) || bankAccounts.find((account) => account.employeeEmail === selected.email);
+                              setCreateBankAccount(
+                                defaultAccount
+                                  ? `${defaultAccount.bankName || "UPI"} - ${defaultAccount.accountNumber || defaultAccount.upiId || ""}`
+                                  : ""
+                              );
+                            }}
+                          />
+                        ))
+                      )}
+                    </ScrollView>
+                  </View>
+                ) : null}
+
+                {selectedEmployee ? (
+                  <View style={[styles.selectedEmployeeCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.selectedEmployeeName, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                        {selectedEmployee.name}
+                      </Text>
+                      <Text style={[styles.selectedEmployeeMeta, { color: colors.textSecondary }]}>
+                        Dolibarr Employee • {selectedEmployee.branch}
+                      </Text>
+                      <Text style={[styles.selectedEmployeeMeta, { color: colors.textTertiary }]}>
+                        {createEmployeeEmail || "No email on profile"}
+                      </Text>
+                    </View>
+                    <Ionicons name="checkmark-circle" size={22} color={colors.success} />
+                  </View>
+                ) : null}
               </View>
 
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Salary Details</Text>
-              <View style={styles.formRow}>
-                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Label</Text>
-                <TextInput
-                  value={createLabel}
-                  onChangeText={setCreateLabel}
-                  placeholder="Salary Payment"
-                  placeholderTextColor={colors.textTertiary}
-                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
-                />
-              </View>
-              <View style={styles.formRow}>
-                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Period Start (YYYY-MM-DD)</Text>
-                <TextInput
-                  value={createPeriodStart}
-                  onChangeText={setCreatePeriodStart}
-                  placeholder="2026-03-01"
-                  placeholderTextColor={colors.textTertiary}
-                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
-                />
-              </View>
-              <View style={styles.formRow}>
-                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Period End (YYYY-MM-DD)</Text>
-                <TextInput
-                  value={createPeriodEnd}
-                  onChangeText={setCreatePeriodEnd}
-                  placeholder="2026-03-31"
-                  placeholderTextColor={colors.textTertiary}
-                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
-                />
-              </View>
-              <AmountField label="Amount" value={createAmount} onChangeText={setCreateAmount} colors={colors} />
+              <View style={styles.sectionBlock}>
+                <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Salary Details</Text>
+                <View style={styles.formGrid}>
+                  <View style={styles.gridField}>
+                    <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Label</Text>
+                    <TextInput
+                      value={createLabel}
+                      onChangeText={setCreateLabel}
+                      placeholder="Salary Payment"
+                      placeholderTextColor={colors.textTertiary}
+                      style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                    />
+                  </View>
+                  <View style={styles.gridField}>
+                    <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Payment Mode</Text>
+                    <TextInput
+                      value={createPaymentMode}
+                      onChangeText={setCreatePaymentMode}
+                      placeholder="Bank Transfer / Cash / Cheque"
+                      placeholderTextColor={colors.textTertiary}
+                      style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
+                    />
+                  </View>
+                </View>
 
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Payment</Text>
-              <View style={styles.formRow}>
-                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Payment Date (YYYY-MM-DD)</Text>
-                <TextInput
-                  value={createPaymentDate}
-                  onChangeText={setCreatePaymentDate}
-                  placeholder="2026-03-31"
-                  placeholderTextColor={colors.textTertiary}
-                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
-                />
-              </View>
-              <View style={styles.formRow}>
-                <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Payment Mode</Text>
-                <TextInput
-                  value={createPaymentMode}
-                  onChangeText={setCreatePaymentMode}
-                  placeholder="Bank Transfer / Cash / Cheque"
-                  placeholderTextColor={colors.textTertiary}
-                  style={[styles.formInput, { color: colors.text, borderColor: colors.border }]}
-                />
+                <View style={styles.formGrid}>
+                  <View style={styles.gridField}>
+                    <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Period Start</Text>
+                    <Pressable
+                      onPress={() => setDateTarget("start")}
+                      style={[styles.formInput, styles.dateInput, { borderColor: colors.border }]}
+                    >
+                      <Text style={{ color: createPeriodStart ? colors.text : colors.textTertiary }}>
+                        {createPeriodStart || "Select Start Date"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <View style={styles.gridField}>
+                    <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Period End</Text>
+                    <Pressable
+                      onPress={() => setDateTarget("end")}
+                      style={[styles.formInput, styles.dateInput, { borderColor: colors.border }]}
+                    >
+                      <Text style={{ color: createPeriodEnd ? colors.text : colors.textTertiary }}>
+                        {createPeriodEnd || "Select End Date"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+
+                <View style={styles.formGrid}>
+                  <View style={styles.gridField}>
+                    <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Payment Date</Text>
+                    <Pressable
+                      onPress={() => setDateTarget("pay")}
+                      style={[styles.formInput, styles.dateInput, { borderColor: colors.border }]}
+                    >
+                      <Text style={{ color: createPaymentDate ? colors.text : colors.textTertiary }}>
+                        {createPaymentDate || "Select Payment Date"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <View style={styles.gridField}>
+                    <Text style={[styles.formLabel, { color: colors.textSecondary }]}>Bank Account</Text>
+                    <View style={[styles.bankSelector, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
+                      {!createEmployeeEmail ? (
+                        <View style={styles.addBankButton}>
+                          <Ionicons name="person-outline" size={15} color={colors.textTertiary} />
+                          <Text style={[styles.addBankButtonText, { color: colors.textSecondary }]}>
+                            Select an employee to load bank accounts
+                          </Text>
+                        </View>
+                      ) : employeeBankAccounts.length === 0 ? (
+                        <Pressable onPress={() => router.push("/bank-accounts" as any)} style={styles.addBankButton}>
+                          <Ionicons name="add-circle-outline" size={15} color={colors.primary} />
+                          <Text style={[styles.addBankButtonText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                            Add Bank Account
+                          </Text>
+                        </Pressable>
+                      ) : (
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bankChipRow}>
+                          {employeeBankAccounts.map((account) => {
+                            const bankLabel = `${account.bankName || "UPI"} - ${account.accountNumber || account.upiId || ""}`;
+                            const selected = createBankAccount === bankLabel;
+                            return (
+                              <Pressable
+                                key={account.id}
+                                onPress={() => setCreateBankAccount(bankLabel)}
+                                style={[
+                                  styles.bankChip,
+                                  {
+                                    backgroundColor: selected ? colors.primary : colors.surface,
+                                    borderColor: selected ? colors.primary : colors.border,
+                                  },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.bankChipText,
+                                    {
+                                      color: selected ? "#FFFFFF" : colors.text,
+                                      fontFamily: "Inter_500Medium",
+                                    },
+                                  ]}
+                                >
+                                  {account.bankName || "UPI"} ({account.accountNumber?.slice(-4) || account.upiId || "saved"})
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </ScrollView>
+                      )}
+                    </View>
+                  </View>
+                </View>
               </View>
 
-              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Notes</Text>
-              <TextInput
-                value={createNote}
-                onChangeText={setCreateNote}
-                placeholder="Optional notes for this salary entry"
-                placeholderTextColor={colors.textTertiary}
-                style={[styles.formInput, { color: colors.text, borderColor: colors.border, minHeight: 70 }]}
-                multiline
-              />
+              <View style={styles.sectionBlock}>
+                <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Earnings</Text>
+                <View style={styles.formGrid}>
+                  <CompactAmountField label="Basic" value={createBasic} onChangeText={setCreateBasic} colors={colors} />
+                  <CompactAmountField label="HRA" value={createHra} onChangeText={setCreateHra} colors={colors} />
+                  <CompactAmountField label="Transport" value={createTransport} onChangeText={setCreateTransport} colors={colors} />
+                  <CompactAmountField label="Medical" value={createMedical} onChangeText={setCreateMedical} colors={colors} />
+                  <CompactAmountField label="Bonus" value={createBonus} onChangeText={setCreateBonus} colors={colors} />
+                  <CompactAmountField label="Overtime" value={createOvertime} onChangeText={setCreateOvertime} colors={colors} />
+                </View>
+              </View>
+
+              <View style={styles.sectionBlock}>
+                <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Deductions</Text>
+                <View style={styles.formGrid}>
+                  <CompactAmountField label="Income Tax" value={createTax} onChangeText={setCreateTax} colors={colors} />
+                  <CompactAmountField label="Provident Fund" value={createPf} onChangeText={setCreatePf} colors={colors} />
+                  <CompactAmountField label="Insurance" value={createInsurance} onChangeText={setCreateInsurance} colors={colors} />
+                </View>
+              </View>
+
+              <View style={[styles.summaryCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <View style={styles.summaryCardHeader}>
+                  <Text style={[styles.summaryCardTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    Payroll Summary
+                  </Text>
+                  <Text style={[styles.summaryCardSubtitle, { color: colors.textSecondary }]}>
+                    Live totals before saving
+                  </Text>
+                </View>
+                <View style={styles.summaryValueRow}>
+                  <Text style={[styles.summaryValueLabel, { color: colors.textSecondary }]}>Gross Pay</Text>
+                  <Text style={[styles.summaryValueText, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    {formatCurrency(salaryDraft.grossPay)}
+                  </Text>
+                </View>
+                <View style={styles.summaryValueRow}>
+                  <Text style={[styles.summaryValueLabel, { color: colors.textSecondary }]}>Total Deductions</Text>
+                  <Text style={[styles.summaryValueText, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    {formatCurrency(salaryDraft.totalDeductions)}
+                  </Text>
+                </View>
+                <View style={[styles.summaryValueRow, styles.summaryNetRow, { borderTopColor: colors.border }]}>
+                  <Text style={[styles.summaryNetLabel, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Net Pay</Text>
+                  <Text style={[styles.summaryNetValue, { color: colors.success, fontFamily: "Inter_700Bold" }]}>
+                    {formatCurrency(salaryDraft.netPay)}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.sectionBlock}>
+                <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>Notes</Text>
+                <TextInput
+                  value={createNote}
+                  onChangeText={setCreateNote}
+                  placeholder="Optional payout note, bank transfer reference, or payroll remarks"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[styles.formInput, styles.notesInput, { color: colors.text, borderColor: colors.border }]}
+                  multiline
+                />
+              </View>
             </ScrollView>
 
             <View style={[styles.modalFooter, { paddingBottom: Math.max(insets.bottom, 12) }]}>
@@ -1231,6 +1631,24 @@ export default function SalaryScreen() {
           </View>
         </View>
       </Modal>
+
+      <CalendarModal
+        visible={Boolean(dateTarget)}
+        value={
+          dateTarget === "start"
+            ? createPeriodStart
+            : dateTarget === "end"
+            ? createPeriodEnd
+            : createPaymentDate
+        }
+        onClose={() => setDateTarget(null)}
+        colors={colors}
+        onSelect={(dateStr) => {
+          if (dateTarget === "start") setCreatePeriodStart(dateStr);
+          else if (dateTarget === "end") setCreatePeriodEnd(dateStr);
+          else if (dateTarget === "pay") setCreatePaymentDate(dateStr);
+        }}
+      />
     </AppCanvas>
   );
 }
@@ -1290,9 +1708,11 @@ const styles = StyleSheet.create({
     marginTop: 12,
     flexDirection: "row",
     gap: 8,
+    flexWrap: "wrap",
   },
   secondaryActionButton: {
-    flex: 1,
+    flexGrow: 1,
+    minWidth: 102,
     minHeight: 36,
     borderRadius: 10,
     borderWidth: 1,
@@ -1305,6 +1725,9 @@ const styles = StyleSheet.create({
   secondaryActionButtonText: {
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
+  },
+  destructiveActionButton: {
+    flexGrow: 0,
   },
   payButton: {
     marginTop: 12,
@@ -1354,17 +1777,94 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     overflow: "hidden",
   },
+  createHeroCard: {
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+    gap: 14,
+  },
+  createHeroHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  createHeroTitleWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  createHeroTitle: {
+    fontSize: 17,
+    letterSpacing: -0.3,
+  },
+  createHeroSubtitle: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  createHeroBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  createHeroBadgeText: {
+    fontSize: 11.5,
+  },
   sectionLabel: {
     fontSize: 12,
     textTransform: "uppercase",
     letterSpacing: 0.4,
   },
+  sectionBlock: {
+    gap: 10,
+  },
   searchInput: {
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 13,
+  },
+  employeeDropdownField: {
+    borderWidth: 1,
+    borderRadius: 14,
+    minHeight: 48,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  employeeDropdownInput: {
+    flex: 1,
+    fontSize: 13.5,
+    paddingVertical: 0,
+  },
+  dropdownHint: {
+    fontSize: 11.5,
+    lineHeight: 17,
+  },
+  employeeDropdown: {
+    borderWidth: 1,
+    borderRadius: 14,
+    overflow: "hidden",
+  },
+  employeeDropdownScroll: {
+    maxHeight: 220,
+  },
+  selectedEmployeeCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  selectedEmployeeName: {
+    fontSize: 14.5,
+  },
+  selectedEmployeeMeta: {
+    fontSize: 12,
+    marginTop: 2,
   },
   employeeList: {
     gap: 8,
@@ -1394,15 +1894,125 @@ const styles = StyleSheet.create({
   formRow: {
     gap: 6,
   },
+  formGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  gridField: {
+    flexGrow: 1,
+    flexBasis: 150,
+  },
   formLabel: {
     fontSize: 12.5,
   },
   formInput: {
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 13,
+  },
+  dateInput: {
+    justifyContent: "center",
+    minHeight: 46,
+  },
+  bankSelector: {
+    borderWidth: 1,
+    borderRadius: 12,
+    minHeight: 46,
+    justifyContent: "center",
+    paddingVertical: 4,
+  },
+  bankChipRow: {
+    paddingHorizontal: 8,
+    gap: 8,
+  },
+  bankChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  bankChipText: {
+    fontSize: 12,
+  },
+  addBankButton: {
+    minHeight: 38,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 12,
+  },
+  addBankButtonText: {
+    fontSize: 12.5,
+  },
+  summaryStatsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  summaryStatCard: {
+    flexGrow: 1,
+    minWidth: 96,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    gap: 6,
+  },
+  summaryStatDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+  },
+  summaryStatLabel: {
+    fontSize: 11.5,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  summaryStatValue: {
+    fontSize: 14,
+  },
+  summaryCard: {
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+    gap: 12,
+  },
+  summaryCardHeader: {
+    gap: 3,
+  },
+  summaryCardTitle: {
+    fontSize: 15.5,
+  },
+  summaryCardSubtitle: {
+    fontSize: 12,
+  },
+  summaryValueRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  summaryValueLabel: {
+    fontSize: 13,
+  },
+  summaryValueText: {
+    fontSize: 14,
+  },
+  summaryNetRow: {
+    borderTopWidth: 1,
+    paddingTop: 12,
+  },
+  summaryNetLabel: {
+    fontSize: 15,
+  },
+  summaryNetValue: {
+    fontSize: 16.5,
+  },
+  notesInput: {
+    minHeight: 78,
+    textAlignVertical: "top",
   },
   modalCard: {
     maxHeight: "92%",

@@ -319,6 +319,15 @@ export default function SidebarLayout() {
         }}
       />
       <Drawer.Screen
+        name="bank-accounts"
+        options={{
+          title: "Bank Accounts",
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon icon="wallet-outline" activeIcon="wallet" focused={focused} size={size} />
+          ),
+        }}
+      />
+      <Drawer.Screen
         name="notifications"
         options={{
           title: "Notifications",
