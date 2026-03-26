@@ -85,6 +85,36 @@ export interface DolibarrUser {
   status?: number | string;
 }
 
+export interface DolibarrBankAccount {
+  id?: number | string;
+  rowid?: number | string;
+  ref?: string;
+  label?: string;
+  type?: number | string;
+  status?: number | string;
+  bank?: string;
+  banque?: string;
+  number?: string;
+  account_number?: string;
+  numcompte?: string;
+  bic?: string;
+  iban?: string;
+  proprio?: string;
+  owner_name?: string;
+  owner?: string;
+  account_holder?: string;
+  address?: string;
+  url?: string;
+  comment?: string;
+  country_id?: number | string;
+  currency_code?: string;
+  clos?: number | string;
+  close?: number | string;
+  date_creation?: string | number;
+  datec?: string | number;
+  tms?: string | number;
+}
+
 export interface DolibarrOrder {
   id?: number | string;
   ref?: string;
@@ -195,6 +225,13 @@ export interface DolibarrSalarySyncResult {
   ok: boolean;
   message: string;
 }
+
+const DEFAULT_DOLIBARR_BANK_COUNTRY_CODE = "IN";
+const DEFAULT_DOLIBARR_BANK_COUNTRY_ID = 117;
+const DEFAULT_DOLIBARR_BANK_CURRENCY = "INR";
+const DOLIBARR_BANK_COUNTRY_CODE_TO_ID: Record<string, number> = {
+  IN: 117,
+};
 
 const PUBLIC_API_PATH_PATTERNS = [
   /^\/health\b/i,
@@ -1867,6 +1904,51 @@ export async function getDolibarrUsers(options?: {
   );
 }
 
+export async function getDolibarrBankAccounts(options?: {
+  limit?: number;
+  sortfield?: string;
+  sortorder?: "asc" | "desc";
+}): Promise<DolibarrBankAccount[]> {
+  const params = new URLSearchParams();
+  if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(options.limit))));
+  }
+  if (options?.sortfield) {
+    params.set("sortfield", options.sortfield);
+  }
+  if (options?.sortorder) {
+    params.set("sortorder", options.sortorder);
+  }
+  const query = params.toString();
+  return fetchJson<DolibarrBankAccount[]>(
+    `/dolibarr/proxy/bankaccounts${query ? `?${query}` : ""}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+export async function listBankAccountsRemote(): Promise<BankAccount[]> {
+  const response = await fetchJson<{ items?: BankAccount[] } | BankAccount[]>("/bank-accounts", {
+    method: "GET",
+  });
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response.items) ? response.items : [];
+}
+
+export async function saveBankAccountRemote(account: BankAccount): Promise<void> {
+  await fetchJson<Record<string, unknown>>("/bank-accounts", {
+    method: "POST",
+    body: JSON.stringify(account),
+  });
+}
+
+export async function deleteBankAccountRemote(id: string): Promise<void> {
+  await fetchJson<Record<string, unknown>>(`/bank-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getRemoteNotifications(): Promise<AppNotification[]> {
   return fetchJson<AppNotification[]>("/notifications", { method: "GET" });
 }
@@ -2149,15 +2231,47 @@ export async function syncBankAccountToDolibarr(
   // The user link is https://erp.luminameditech.com/compta/bank/list.php
   // This is the "Bank | Cash" module in Dolibarr.
 
+  const currencyCode = (account.currencyCode || DEFAULT_DOLIBARR_BANK_CURRENCY).trim().toUpperCase();
+  const countryCode = (account.countryCode || DEFAULT_DOLIBARR_BANK_COUNTRY_CODE).trim().toUpperCase();
+  const countryId =
+    typeof account.countryId === "number" && Number.isFinite(account.countryId) && account.countryId > 0
+      ? Math.trunc(account.countryId)
+      : DOLIBARR_BANK_COUNTRY_CODE_TO_ID[countryCode] || DEFAULT_DOLIBARR_BANK_COUNTRY_ID;
+  const refSeed = (account.dolibarrRef || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const refFallbackSource = [
+    account.bankName,
+    account.dolibarrLabel,
+    account.holderName,
+    account.accountNumber,
+    account.upiId,
+  ]
+    .map((value) => (value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .find(Boolean);
+  const dolibarrRef = (refSeed || refFallbackSource || `BANK${Date.now().toString(36)}`)
+    .slice(0, 12)
+    .padEnd(4, "0");
+  const dolibarrLabel =
+    (account.dolibarrLabel || "").trim() ||
+    (account.accountType === "upi"
+      ? `${account.holderName || account.employeeName || "Employee"} UPI`
+      : account.bankName || "Employee Bank Account");
+  const dolibarrType =
+    account.dolibarrType === "savings" ? 0 : account.dolibarrType === "cash" ? 2 : 1;
   const payload = {
-    label: account.bankName || account.accountType === "upi" ? "UPI" : "Bank Account",
-    bank: account.bankName || "Employee Bank",
+    ref: dolibarrRef,
+    label: dolibarrLabel,
+    type: dolibarrType,
+    currency_code: currencyCode || DEFAULT_DOLIBARR_BANK_CURRENCY,
+    country_id: countryId,
+    bank: account.bankName || dolibarrLabel,
     number: account.accountNumber || account.upiId || "",
-    bic: account.ifscCode || "",
+    bic: (account.ifscCode || "").trim().toUpperCase(),
     proprio: account.holderName || account.employeeName,
-    clos: 0, // 0 = open
-    currency_code: "INR",
-    type: account.accountType === "upi" ? 2 : 1, // 1=saving, 2=current/other. Dolibarr types: 0=saving, 1=current, 2=cash...
+    owner_name: account.holderName || account.employeeName,
+    address: (account.bankAddress || "").trim() || undefined,
+    url: (account.website || "").trim() || undefined,
+    comment: (account.comment || "").trim() || undefined,
+    clos: account.status === "closed" ? 1 : 0,
   };
 
   try {

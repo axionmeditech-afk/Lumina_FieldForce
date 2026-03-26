@@ -2569,17 +2569,40 @@ async function ensureBankAccountsTable(): Promise<void> {
       \`employee_name\` VARCHAR(191) NOT NULL,
       \`employee_email\` VARCHAR(191) NOT NULL,
       \`account_type\` ENUM('bank','upi') NOT NULL DEFAULT 'bank',
+      \`dolibarr_ref\` VARCHAR(32) NULL,
+      \`dolibarr_label\` VARCHAR(191) NULL,
+      \`dolibarr_type\` ENUM('savings','current','cash') NOT NULL DEFAULT 'current',
+      \`currency_code\` VARCHAR(3) NOT NULL DEFAULT 'INR',
+      \`country_code\` VARCHAR(8) NOT NULL DEFAULT 'IN',
+      \`country_id\` INT NOT NULL DEFAULT 117,
+      \`status\` ENUM('open','closed') NOT NULL DEFAULT 'open',
       \`bank_name\` VARCHAR(191) NULL,
+      \`bank_address\` LONGTEXT NULL,
       \`account_number\` VARCHAR(64) NULL,
       \`ifsc_code\` VARCHAR(16) NULL,
       \`upi_id\` VARCHAR(191) NULL,
       \`holder_name\` VARCHAR(191) NULL,
+      \`website\` VARCHAR(255) NULL,
+      \`comment\` LONGTEXT NULL,
       \`is_default\` TINYINT(1) NOT NULL DEFAULT 0,
       \`created_at\` DATETIME NOT NULL,
       \`updated_at\` DATETIME NOT NULL,
       PRIMARY KEY (\`id\`),
       KEY \`idx_lff_bank_accounts_email\` (\`employee_email\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
+    ALTER TABLE \`lff_bank_accounts\`
+      ADD COLUMN IF NOT EXISTS \`dolibarr_ref\` VARCHAR(32) NULL AFTER \`account_type\`,
+      ADD COLUMN IF NOT EXISTS \`dolibarr_label\` VARCHAR(191) NULL AFTER \`dolibarr_ref\`,
+      ADD COLUMN IF NOT EXISTS \`dolibarr_type\` ENUM('savings','current','cash') NOT NULL DEFAULT 'current' AFTER \`dolibarr_label\`,
+      ADD COLUMN IF NOT EXISTS \`currency_code\` VARCHAR(3) NOT NULL DEFAULT 'INR' AFTER \`dolibarr_type\`,
+      ADD COLUMN IF NOT EXISTS \`country_code\` VARCHAR(8) NOT NULL DEFAULT 'IN' AFTER \`currency_code\`,
+      ADD COLUMN IF NOT EXISTS \`country_id\` INT NOT NULL DEFAULT 117 AFTER \`country_code\`,
+      ADD COLUMN IF NOT EXISTS \`status\` ENUM('open','closed') NOT NULL DEFAULT 'open' AFTER \`country_id\`,
+      ADD COLUMN IF NOT EXISTS \`bank_address\` LONGTEXT NULL AFTER \`bank_name\`,
+      ADD COLUMN IF NOT EXISTS \`website\` VARCHAR(255) NULL AFTER \`holder_name\`,
+      ADD COLUMN IF NOT EXISTS \`comment\` LONGTEXT NULL AFTER \`website\`
   `);
   bankAccountsTableEnsured = true;
 }
@@ -2592,11 +2615,23 @@ function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown
     employeeName: row.employee_name ? String(row.employee_name) : "",
     employeeEmail: row.employee_email ? String(row.employee_email) : "",
     accountType: row.account_type === "upi" ? "upi" : "bank",
+    dolibarrRef: row.dolibarr_ref ? String(row.dolibarr_ref) : undefined,
+    dolibarrLabel: row.dolibarr_label ? String(row.dolibarr_label) : undefined,
+    dolibarrType:
+      row.dolibarr_type === "savings" || row.dolibarr_type === "cash" ? String(row.dolibarr_type) : "current",
+    currencyCode: row.currency_code ? String(row.currency_code) : "INR",
+    countryCode: row.country_code ? String(row.country_code) : "IN",
+    countryId:
+      typeof row.country_id === "number" ? row.country_id : row.country_id ? Number(row.country_id) : 117,
+    status: row.status === "closed" ? "closed" : "open",
     bankName: row.bank_name ? String(row.bank_name) : undefined,
+    bankAddress: row.bank_address ? String(row.bank_address) : undefined,
     accountNumber: row.account_number ? String(row.account_number) : undefined,
     ifscCode: row.ifsc_code ? String(row.ifsc_code) : undefined,
     upiId: row.upi_id ? String(row.upi_id) : undefined,
     holderName: row.holder_name ? String(row.holder_name) : undefined,
+    website: row.website ? String(row.website) : undefined,
+    comment: row.comment ? String(row.comment) : undefined,
     isDefault: Boolean(row.is_default),
     createdAt: row.created_at ? new Date(row.created_at as string).toISOString() : nowIso,
     updatedAt: row.updated_at ? new Date(row.updated_at as string).toISOString() : nowIso,
@@ -5848,27 +5883,74 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const employeeName = body.employeeName ? String(body.employeeName).trim() : "";
       const employeeEmail = body.employeeEmail ? String(body.employeeEmail).trim() : requestUser?.email || "";
       const accountType = body.accountType ? String(body.accountType).trim() : "bank";
+      const dolibarrRef = body.dolibarrRef ? String(body.dolibarrRef).trim() : null;
+      const dolibarrLabel = body.dolibarrLabel ? String(body.dolibarrLabel).trim() : null;
+      const dolibarrType =
+        body.dolibarrType === "savings" || body.dolibarrType === "cash" ? String(body.dolibarrType) : "current";
+      const currencyCode = body.currencyCode ? String(body.currencyCode).trim().toUpperCase() : "INR";
+      const countryCode = body.countryCode ? String(body.countryCode).trim().toUpperCase() : "IN";
+      const parsedCountryId =
+        typeof body.countryId === "number" ? body.countryId : Number(String(body.countryId || ""));
+      const countryId = Number.isFinite(parsedCountryId) && parsedCountryId > 0 ? Math.trunc(parsedCountryId) : 117;
+      const status = body.status === "closed" ? "closed" : "open";
       const bankName = body.bankName ? String(body.bankName).trim() : null;
+      const bankAddress = body.bankAddress ? String(body.bankAddress).trim() : null;
       const accountNumber = body.accountNumber ? String(body.accountNumber).trim() : null;
       const ifscCode = body.ifscCode ? String(body.ifscCode).trim() : null;
       const upiId = body.upiId ? String(body.upiId).trim() : null;
       const holderName = body.holderName ? String(body.holderName).trim() : null;
+      const website = body.website ? String(body.website).trim() : null;
+      const comment = body.comment ? String(body.comment).trim() : null;
       const isDefault = body.isDefault ? 1 : 0;
       const now = toSqlTimestamp(new Date());
       await conn.execute(
         `INSERT INTO \`lff_bank_accounts\`
-          (\`id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`account_type\`, \`bank_name\`, \`account_number\`, \`ifsc_code\`, \`upi_id\`, \`holder_name\`, \`is_default\`, \`created_at\`, \`updated_at\`)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (\`id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`account_type\`, \`dolibarr_ref\`, \`dolibarr_label\`, \`dolibarr_type\`, \`currency_code\`, \`country_code\`, \`country_id\`, \`status\`, \`bank_name\`, \`bank_address\`, \`account_number\`, \`ifsc_code\`, \`upi_id\`, \`holder_name\`, \`website\`, \`comment\`, \`is_default\`, \`created_at\`, \`updated_at\`)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
+           \`dolibarr_ref\` = VALUES(\`dolibarr_ref\`),
+           \`dolibarr_label\` = VALUES(\`dolibarr_label\`),
+           \`dolibarr_type\` = VALUES(\`dolibarr_type\`),
+           \`currency_code\` = VALUES(\`currency_code\`),
+           \`country_code\` = VALUES(\`country_code\`),
+           \`country_id\` = VALUES(\`country_id\`),
+           \`status\` = VALUES(\`status\`),
            \`bank_name\` = VALUES(\`bank_name\`),
+           \`bank_address\` = VALUES(\`bank_address\`),
            \`account_number\` = VALUES(\`account_number\`),
            \`ifsc_code\` = VALUES(\`ifsc_code\`),
            \`upi_id\` = VALUES(\`upi_id\`),
            \`holder_name\` = VALUES(\`holder_name\`),
+           \`website\` = VALUES(\`website\`),
+           \`comment\` = VALUES(\`comment\`),
            \`account_type\` = VALUES(\`account_type\`),
            \`is_default\` = VALUES(\`is_default\`),
            \`updated_at\` = VALUES(\`updated_at\`)`,
-        [id, employeeId, employeeName, employeeEmail, accountType, bankName, accountNumber, ifscCode, upiId, holderName, isDefault, now, now]
+        [
+          id,
+          employeeId,
+          employeeName,
+          employeeEmail,
+          accountType,
+          dolibarrRef,
+          dolibarrLabel,
+          dolibarrType,
+          currencyCode,
+          countryCode,
+          countryId,
+          status,
+          bankName,
+          bankAddress,
+          accountNumber,
+          ifscCode,
+          upiId,
+          holderName,
+          website,
+          comment,
+          isDefault,
+          now,
+          now,
+        ]
       );
       res.status(201).json({ id, ok: true });
     } catch (error) {

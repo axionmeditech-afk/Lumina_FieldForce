@@ -8,10 +8,13 @@ import {
   updateSalaryStatus,
 } from "@/lib/storage";
 import {
+  deleteBankAccountRemote,
   deleteSalaryRecordRemote,
   getDolibarrUsers,
+  listBankAccountsRemote,
   getRemoteState,
   listSalaryRecordsRemote,
+  saveBankAccountRemote,
   setRemoteState,
   syncBankAccountToDolibarr,
   syncSalaryToDolibarr,
@@ -302,28 +305,18 @@ export async function updateSalaryRecordStatus(
 const BANK_ACCOUNTS_STATE_KEY = "@trackforce_bank_accounts";
 
 export async function getBankAccounts(): Promise<BankAccount[]> {
-  const currentUser = await getCurrentUser();
-  const companyId = currentUser?.companyId || "";
-  const remote = await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY);
-  const base = Array.isArray(remote) ? remote : [];
-  return base;
+  try {
+    return await listBankAccountsRemote();
+  } catch {
+    const remote = await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY);
+    return Array.isArray(remote) ? remote : [];
+  }
 }
 
 export async function saveBankAccount(
   account: BankAccount
 ): Promise<{ record: BankAccount; synced: boolean; dolibarr?: { ok: boolean; message: string } }> {
-  let synced = false;
-  try {
-    const remote = (await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY)) || [];
-    const filtered = remote.filter((entry) => entry.id !== account.id);
-    filtered.unshift(account);
-    await setRemoteState(BANK_ACCOUNTS_STATE_KEY, filtered);
-    synced = true;
-  } catch {
-    synced = false;
-  }
-
-  await saveBankAccountLocal(account);
+  await saveBankAccountRemote(account);
 
   let dolibarrResult: { ok: boolean; message: string } | undefined;
   try {
@@ -335,7 +328,22 @@ export async function saveBankAccount(
     };
   }
 
-  return { record: account, synced, dolibarr: dolibarrResult };
+  if (!dolibarrResult?.ok) {
+    try {
+      await deleteBankAccountRemote(account.id);
+    } catch (rollbackError) {
+      const rollbackMessage =
+        rollbackError instanceof Error ? rollbackError.message : "Unknown rollback failure.";
+      throw new Error(
+        `${dolibarrResult?.message || "Dolibarr bank account sync failed."} Database rollback may be required: ${rollbackMessage}`
+      );
+    }
+    throw new Error(dolibarrResult?.message || "Dolibarr bank account sync failed.");
+  }
+
+  await saveBankAccountLocal(account);
+
+  return { record: account, synced: true, dolibarr: dolibarrResult };
 }
 
 async function saveBankAccountLocal(account: BankAccount): Promise<void> {
@@ -344,14 +352,6 @@ async function saveBankAccountLocal(account: BankAccount): Promise<void> {
 }
 
 export async function deleteBankAccount(id: string): Promise<boolean> {
-  let synced = false;
-  try {
-    const remote = (await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY)) || [];
-    const filtered = remote.filter((entry) => entry.id !== id);
-    await setRemoteState(BANK_ACCOUNTS_STATE_KEY, filtered);
-    synced = true;
-  } catch {
-    synced = false;
-  }
-  return synced;
+  await deleteBankAccountRemote(id);
+  return true;
 }

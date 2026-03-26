@@ -225,6 +225,34 @@ CREATE TABLE IF NOT EXISTS `lff_salaries` (
   KEY `idx_lff_salaries_company` (`company_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `lff_bank_accounts` (
+  `id` VARCHAR(64) NOT NULL,
+  `employee_id` VARCHAR(64) NULL,
+  `employee_name` VARCHAR(191) NOT NULL,
+  `employee_email` VARCHAR(191) NOT NULL,
+  `account_type` ENUM('bank','upi') NOT NULL DEFAULT 'bank',
+  `dolibarr_ref` VARCHAR(32) NULL,
+  `dolibarr_label` VARCHAR(191) NULL,
+  `dolibarr_type` ENUM('savings','current','cash') NOT NULL DEFAULT 'current',
+  `currency_code` VARCHAR(3) NOT NULL DEFAULT 'INR',
+  `country_code` VARCHAR(8) NOT NULL DEFAULT 'IN',
+  `country_id` INT NOT NULL DEFAULT 117,
+  `status` ENUM('open','closed') NOT NULL DEFAULT 'open',
+  `bank_name` VARCHAR(191) NULL,
+  `bank_address` LONGTEXT NULL,
+  `account_number` VARCHAR(64) NULL,
+  `ifsc_code` VARCHAR(16) NULL,
+  `upi_id` VARCHAR(191) NULL,
+  `holder_name` VARCHAR(191) NULL,
+  `website` VARCHAR(255) NULL,
+  `comment` LONGTEXT NULL,
+  `is_default` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL,
+  `updated_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_bank_accounts_email` (`employee_email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `lff_tasks` (
   `id` VARCHAR(64) NOT NULL,
   `company_id` VARCHAR(64) NULL,
