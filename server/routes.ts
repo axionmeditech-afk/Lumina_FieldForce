@@ -2514,6 +2514,64 @@ function buildDolibarrSalaryName(row: Record<string, unknown>): string {
   return `User ${String(row.fk_user || "")}`.trim();
 }
 
+function normalizeSalaryIdentity(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+async function resolveDolibarrSalaryViewerIds(
+  conn: Pool | PoolConnection,
+  requestUser: AppUser | null | undefined
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  const email = normalizeSalaryIdentity(requestUser?.email);
+  const name = normalizeSalaryIdentity(requestUser?.name);
+  const login = normalizeSalaryIdentity(requestUser?.login);
+  const compactName = name.replace(/\s+/g, "");
+  if (!email && !name && !login) return ids;
+
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (email) {
+    clauses.push("LOWER(TRIM(email)) = ?");
+    params.push(email);
+  }
+  if (name) {
+    clauses.push("LOWER(TRIM(CONCAT_WS(' ', firstname, lastname))) = ?");
+    params.push(name);
+    clauses.push("LOWER(TRIM(CONCAT_WS(' ', lastname, firstname))) = ?");
+    params.push(name);
+    clauses.push("LOWER(REPLACE(CONCAT_WS('', firstname, lastname), ' ', '')) = ?");
+    params.push(compactName);
+    clauses.push("LOWER(REPLACE(CONCAT_WS('', lastname, firstname), ' ', '')) = ?");
+    params.push(compactName);
+    clauses.push("LOWER(TRIM(firstname)) = ?");
+    params.push(name);
+    clauses.push("LOWER(TRIM(lastname)) = ?");
+    params.push(name);
+    clauses.push("LOWER(TRIM(login)) = ?");
+    params.push(compactName);
+  }
+  if (login) {
+    clauses.push("LOWER(TRIM(login)) = ?");
+    params.push(login);
+  }
+  if (!clauses.length) return ids;
+
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid FROM \`nmy5_user\` WHERE ${clauses.join(" OR ")}`,
+    params
+  );
+  for (const row of rows || []) {
+    if (row?.rowid) {
+      ids.add(`dolibarr_${String(row.rowid).trim().toLowerCase()}`);
+    }
+  }
+  return ids;
+}
+
 function parseSalaryNumber(value: unknown): number {
   const parsed = typeof value === "number" ? value : Number(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -2744,13 +2802,26 @@ async function upsertDolibarrSalaryRecord(
 }
 
 async function deleteDolibarrSalaryRecord(conn: Pool | PoolConnection, salaryId: string): Promise<void> {
-  await conn.execute("DELETE FROM `nmy5_salary` WHERE `ref_ext` = ?", [salaryId]);
+  const legacyRowId =
+    salaryId.startsWith("dolibarr_salary_") ? Number(salaryId.replace("dolibarr_salary_", "")) : Number.NaN;
+  const hasLegacyRowId = Number.isFinite(legacyRowId) && legacyRowId > 0;
+  await conn.execute(
+    `DELETE FROM \`nmy5_salary\` WHERE \`ref_ext\` = ?${hasLegacyRowId ? " OR `rowid` = ?" : ""}`,
+    hasLegacyRowId ? [salaryId, legacyRowId] : [salaryId]
+  );
 }
 
 async function updateDolibarrSalaryStatus(conn: Pool | PoolConnection, salaryId: string, status: string): Promise<void> {
+  const legacyRowId =
+    salaryId.startsWith("dolibarr_salary_") ? Number(salaryId.replace("dolibarr_salary_", "")) : Number.NaN;
+  const hasLegacyRowId = Number.isFinite(legacyRowId) && legacyRowId > 0;
   await conn.execute(
-    "UPDATE `nmy5_salary` SET `paye` = ?, `datep` = CASE WHEN ? = 'paid' AND `datep` IS NULL THEN CURDATE() ELSE `datep` END WHERE `ref_ext` = ?",
-    [status === "paid" ? 1 : 0, status, salaryId]
+    `UPDATE \`nmy5_salary\`
+        SET \`paye\` = ?, \`datep\` = CASE WHEN ? = 'paid' AND \`datep\` IS NULL THEN CURDATE() ELSE \`datep\` END
+      WHERE \`ref_ext\` = ?${hasLegacyRowId ? " OR `rowid` = ?" : ""}`,
+    hasLegacyRowId
+      ? [status === "paid" ? 1 : 0, status, salaryId, legacyRowId]
+      : [status === "paid" ? 1 : 0, status, salaryId]
   );
 }
 
@@ -5996,15 +6067,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
         const userEmail = (requestUser?.email || "").trim().toLowerCase();
         const userId = (requestUser?.id || "").trim().toLowerCase();
-        const userName = (requestUser?.name || "").trim().toLowerCase();
+        const userName = normalizeSalaryIdentity(requestUser?.name);
+        const userLogin = normalizeSalaryIdentity(requestUser?.login);
+        const dolibarrViewerIds = await resolveDolibarrSalaryViewerIds(conn, requestUser);
         items = items.filter((salary) => {
           const salaryEmail = (salary.employeeEmail || "").trim().toLowerCase();
           const salaryId = (salary.employeeId || "").trim().toLowerCase();
-          const salaryName = (salary.employeeName || "").trim().toLowerCase();
+          const salaryName = normalizeSalaryIdentity(salary.employeeName);
           return Boolean(
             (userEmail && salaryEmail === userEmail) ||
               (userId && (salaryId === userId || salaryId === `dolibarr_${userId}`)) ||
-              (userName && salaryName === userName)
+              (userLogin && (salaryEmail === userLogin || salaryName === userLogin || salaryId === `dolibarr_${userLogin}`)) ||
+              (userName && salaryName === userName) ||
+              dolibarrViewerIds.has(salaryId)
           );
         });
       }
@@ -6028,10 +6103,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(400).json({ message: "id is required" });
         return;
       }
-      await ensureSalariesTable();
       const pool = await getMySqlPool();
       const conn = await pool.getConnection();
-      const companyId = e.companyId ? String(e.companyId).trim() : null;
       const employeeId = e.employeeId ? String(e.employeeId).trim() : "";
       const employeeName = e.employeeName ? String(e.employeeName).trim() : "Employee";
       const employeeEmail = e.employeeEmail ? String(e.employeeEmail).trim() : null;
@@ -6046,42 +6119,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const status = e.status === "paid" ? "paid" : e.status === "approved" ? "approved" : "pending";
       try {
         await conn.beginTransaction();
-        await conn.execute(
-          `INSERT INTO \`lff_salaries\`
-            (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`label\`, \`period_start\`, \`period_end\`, \`payment_date\`, \`payment_mode\`, \`bank_account\`, \`note\`, \`month\`, \`basic\`, \`hra\`, \`transport\`, \`medical\`, \`bonus\`, \`overtime\`, \`tax\`, \`pf\`, \`insurance\`, \`gross_pay\`, \`total_deductions\`, \`net_pay\`, \`status\`)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             \`company_id\` = VALUES(\`company_id\`),
-             \`employee_name\` = VALUES(\`employee_name\`),
-             \`employee_email\` = VALUES(\`employee_email\`),
-             \`label\` = VALUES(\`label\`),
-             \`period_start\` = VALUES(\`period_start\`),
-             \`period_end\` = VALUES(\`period_end\`),
-             \`payment_date\` = VALUES(\`payment_date\`),
-             \`payment_mode\` = VALUES(\`payment_mode\`),
-             \`bank_account\` = VALUES(\`bank_account\`),
-             \`note\` = VALUES(\`note\`),
-             \`month\` = VALUES(\`month\`),
-             \`basic\` = VALUES(\`basic\`), \`hra\` = VALUES(\`hra\`), \`transport\` = VALUES(\`transport\`),
-             \`medical\` = VALUES(\`medical\`), \`bonus\` = VALUES(\`bonus\`), \`overtime\` = VALUES(\`overtime\`),
-             \`tax\` = VALUES(\`tax\`), \`pf\` = VALUES(\`pf\`), \`insurance\` = VALUES(\`insurance\`),
-             \`gross_pay\` = VALUES(\`gross_pay\`), \`total_deductions\` = VALUES(\`total_deductions\`),
-             \`net_pay\` = VALUES(\`net_pay\`), \`status\` = VALUES(\`status\`)`,
-          [
-            id, companyId, employeeId, employeeName, employeeEmail, label,
-            periodStart, periodEnd, paymentDate, paymentMode, bankAccount, note, month,
-            toSqlNumber(e.basic), toSqlNumber(e.hra), toSqlNumber(e.transport),
-            toSqlNumber(e.medical), toSqlNumber(e.bonus), toSqlNumber(e.overtime),
-            toSqlNumber(e.tax), toSqlNumber(e.pf), toSqlNumber(e.insurance),
-            toSqlNumber(e.grossPay), toSqlNumber(e.totalDeductions), toSqlNumber(e.netPay),
-            status
-          ]
-        );
         await upsertDolibarrSalaryRecord(
           conn,
           {
             id,
-            companyId: companyId || undefined,
             employeeId,
             employeeName,
             employeeEmail: employeeEmail || undefined,
@@ -6134,9 +6175,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
     try {
-      await ensureSalariesTable();
       const conn = await getMySqlPool();
-      await conn.execute("DELETE FROM `lff_salaries` WHERE `id` = ?", [salaryId]);
       await deleteDolibarrSalaryRecord(conn, salaryId);
       res.json({ id: salaryId, ok: true });
     } catch (error) {
@@ -6164,9 +6203,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     try {
-      await ensureSalariesTable();
       const conn = await getMySqlPool();
-      await conn.execute("UPDATE `lff_salaries` SET `status` = ? WHERE `id` = ?", [status, salaryId]);
       await updateDolibarrSalaryStatus(conn, salaryId, status);
       res.json({ id: salaryId, status, ok: true });
     } catch (error) {

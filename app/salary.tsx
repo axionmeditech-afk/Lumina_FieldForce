@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import Colors from "@/constants/colors";
@@ -945,6 +945,7 @@ export default function SalaryScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
   const [salaries, setSalaries] = useState<SalaryRecord[]>([]);
+  const [salaryLoadError, setSalaryLoadError] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [dolibarrEmployees, setDolibarrEmployees] = useState<Employee[]>([]);
   const [incentivePayouts, setIncentivePayouts] = useState<IncentivePayout[]>([]);
@@ -976,6 +977,7 @@ export default function SalaryScreen() {
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [showEmployeeDropdown, setShowEmployeeDropdown] = useState(false);
   const [showBankAccountPicker, setShowBankAccountPicker] = useState(false);
+  const [loadingSalaries, setLoadingSalaries] = useState(true);
   const [loadingEmployees, setLoadingEmployees] = useState(false);
   const [loadingEmployeeBankAccounts, setLoadingEmployeeBankAccounts] = useState(false);
   const [hasLoadedBankAccountsForPicker, setHasLoadedBankAccountsForPicker] = useState(false);
@@ -996,13 +998,16 @@ export default function SalaryScreen() {
   }, [isAdmin, loadingEmployees, user]);
 
   const loadData = useCallback(async () => {
+    setLoadingSalaries(true);
     if (!user) {
       setSalaries([]);
+      setSalaryLoadError(null);
       setEmployees([]);
       setDolibarrEmployees([]);
       setIncentivePayouts([]);
       setBankAccounts([]);
       hasLoadedDolibarrEmployeesRef.current = false;
+      setLoadingSalaries(false);
       return;
     }
     try {
@@ -1013,20 +1018,34 @@ export default function SalaryScreen() {
           getIncentivePayouts({ refreshRemote: true }),
         ]);
       const salaryData = salaryDataResult.status === "fulfilled" ? salaryDataResult.value : [];
+      const salaryError =
+        salaryDataResult.status === "rejected"
+          ? salaryDataResult.reason instanceof Error
+            ? salaryDataResult.reason.message
+            : "Unable to fetch salaries from backend."
+          : null;
       const employees = employeesResult.status === "fulfilled" ? employeesResult.value : [];
       const payouts = payoutsResult.status === "fulfilled" ? payoutsResult.value : [];
       setEmployees(employees);
       setIncentivePayouts(Array.isArray(payouts) ? payouts : []);
       setSalaries(salaryData);
+      setSalaryLoadError(salaryError);
 
     } finally {
       if (!user || !isAdmin) {
         hasLoadedDolibarrEmployeesRef.current = false;
       }
+      setLoadingSalaries(false);
     }
   }, [isAdmin, user]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadData();
+    }, [loadData])
+  );
 
   useEffect(() => {
     if (!user || !isAdmin) {
@@ -1519,12 +1538,21 @@ export default function SalaryScreen() {
           />
         )}
         ListEmptyComponent={
-          <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-            <Ionicons name="wallet-outline" size={40} color={colors.textTertiary} />
-            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
-              {isAdmin ? "No salary records" : "No salary record for your profile"}
-            </Text>
-          </View>
+          loadingSalaries ? (
+            <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                Loading salaries...
+              </Text>
+            </View>
+          ) : (
+            <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+              <Ionicons name="wallet-outline" size={40} color={colors.textTertiary} />
+              <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                {salaryLoadError || (isAdmin ? "No salary records" : "No salary record for your profile")}
+              </Text>
+            </View>
+          )
         }
       />
 

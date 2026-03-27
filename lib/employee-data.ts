@@ -1,11 +1,7 @@
 import type { AppUser, BankAccount, Employee, SalaryRecord } from "@/lib/types";
 import {
-  addSalaryRecord,
-  deleteSalaryRecordLocal,
   getCurrentUser,
   getEmployees as getEmployeesLocal,
-  getSalaries as getSalariesLocal,
-  updateSalaryStatus,
 } from "@/lib/storage";
 import {
   deleteBankAccountRemote,
@@ -22,8 +18,6 @@ import {
 } from "@/lib/attendance-api";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
-const SALARY_STATE_KEY = "@trackforce_salaries";
-
 function normalizeText(value: string | null | undefined): string {
   return (value || "").trim();
 }
@@ -227,18 +221,15 @@ export async function saveSalaryRecord(
 
   await saveSalaryRecordRemote(nextRecord);
 
-  await addSalaryRecord(nextRecord);
-
   return {
     record: nextRecord,
     synced: true,
-    dolibarr: { ok: true, message: "Salary saved to app DB and mirrored to Dolibarr salary table." },
+    dolibarr: { ok: true, message: "Salary saved to nmy5_salary." },
   };
 }
 
 export async function deleteSalaryRecord(id: string): Promise<boolean> {
   await deleteSalaryRecordRemote(id);
-  await deleteSalaryRecordLocal(id);
   return true;
 }
 
@@ -247,7 +238,6 @@ export async function updateSalaryRecordStatus(
   status: SalaryRecord["status"]
 ): Promise<boolean> {
   await updateSalaryStatusRemote(id, status);
-  await updateSalaryStatus(id, status);
   return true;
 }
 
