@@ -636,8 +636,18 @@ export async function setRemoteState<T>(key: string, value: T): Promise<void> {
   });
 }
 
-export async function listSalaryRecordsRemote(): Promise<SalaryRecord[]> {
-  const response = await fetchJson<{ items?: SalaryRecord[] } | SalaryRecord[]>("/salaries", {
+export async function listSalaryRecordsRemote(filters?: {
+  userId?: string;
+  userEmail?: string;
+  userName?: string;
+  userLogin?: string;
+}): Promise<SalaryRecord[]> {
+  const query = new URLSearchParams();
+  if (filters?.userId) query.set("userId", filters.userId);
+  if (filters?.userEmail) query.set("userEmail", filters.userEmail);
+  if (filters?.userName) query.set("userName", filters.userName);
+  if (filters?.userLogin) query.set("userLogin", filters.userLogin);
+  const response = await fetchJson<{ items?: SalaryRecord[] } | SalaryRecord[]>(`/salaries${query.size ? `?${query}` : ""}`, {
     method: "GET",
   });
   if (Array.isArray(response)) return response;

@@ -21,7 +21,7 @@ import {
   PENDING_COMPANY_NAME,
 } from "@/lib/seedData";
 import { buildRouteTimeline } from "@/lib/route-analytics";
-import { requireAuth, requireRoles, signJwt } from "@/server/auth";
+import { requireAuth, requireRoles, signJwt, verifyJwt } from "@/server/auth";
 import { storage } from "@/server/storage";
 import { recordAnomaly, resolveGeofenceStatus } from "@/server/services/attendance-guard";
 import { storeAttendancePhoto } from "@/server/services/photo-upload";
@@ -6062,6 +6062,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const conn = await getMySqlPool();
       let items = await listDolibarrSalaryRows(conn);
+      const authHeader = req.header("authorization");
+      const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      const authPayload = bearer ? verifyJwt(bearer) : null;
+      const isPrivileged = ["admin", "hr", "manager"].includes(authPayload?.role || "");
+
+      if (!isPrivileged) {
+        const requestUserId = firstString(req.query.userId).trim();
+        const requestUserEmail = firstString(req.query.userEmail).trim();
+        const requestUserName = firstString(req.query.userName).trim();
+        const requestUserLogin = firstString(req.query.userLogin).trim();
+        const userId = (authPayload?.sub || requestUserId).trim().toLowerCase();
+        const userEmail = (authPayload?.email || requestUserEmail).trim().toLowerCase();
+        const userName = normalizeSalaryIdentity(requestUserName);
+        const userLogin = normalizeSalaryIdentity(requestUserLogin);
+
+        if (userId || userEmail || userName || userLogin) {
+          const viewerIds = await resolveDolibarrSalaryViewerIds(conn, {
+            id: userId,
+            name: requestUserName,
+            email: authPayload?.email || requestUserEmail,
+            login: requestUserLogin || undefined,
+            role: "salesperson",
+            companyId: "",
+            companyName: "",
+            department: "",
+            branch: "",
+            phone: "",
+            joinDate: "",
+          } as AppUser);
+
+          items = items.filter((salary) => {
+            const salaryEmail = (salary.employeeEmail || "").trim().toLowerCase();
+            const salaryId = (salary.employeeId || "").trim().toLowerCase();
+            const salaryName = normalizeSalaryIdentity(salary.employeeName);
+            return Boolean(
+              (userEmail && salaryEmail === userEmail) ||
+                (userId && (salaryId === userId || salaryId === `dolibarr_${userId}`)) ||
+                (userLogin && (salaryEmail === userLogin || salaryName === userLogin || salaryId === `dolibarr_${userLogin}`)) ||
+                (userName && salaryName === userName) ||
+                viewerIds.has(salaryId)
+            );
+          });
+        } else {
+          items = [];
+        }
+      }
 
       res.json({ items });
     } catch (error) {

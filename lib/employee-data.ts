@@ -206,7 +206,21 @@ export async function getDolibarrEmployees(): Promise<Employee[]> {
 }
 
 export async function getSalaries(): Promise<SalaryRecord[]> {
-  return await listSalaryRecordsRemote();
+  const currentUser = await getCurrentUser();
+  if (!currentUser) {
+    return await listSalaryRecordsRemote();
+  }
+
+  if (["admin", "hr", "manager"].includes(currentUser.role)) {
+    return await listSalaryRecordsRemote();
+  }
+
+  return await listSalaryRecordsRemote({
+    userId: currentUser.id,
+    userEmail: currentUser.email,
+    userName: currentUser.name,
+    userLogin: currentUser.login,
+  });
 }
 
 export async function saveSalaryRecord(
