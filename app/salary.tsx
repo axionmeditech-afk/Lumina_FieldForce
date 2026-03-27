@@ -1549,7 +1549,7 @@ export default function SalaryScreen() {
             <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
               <Ionicons name="wallet-outline" size={40} color={colors.textTertiary} />
               <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
-                {salaryLoadError || (isAdmin ? "No salary records" : "No salary record for your profile")}
+                {salaryLoadError || "No salary records found in nmy5_salary"}
               </Text>
             </View>
           )

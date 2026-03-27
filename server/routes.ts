@@ -6060,29 +6060,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
     try {
-      const requestUser = (req as any).user as AppUser;
       const conn = await getMySqlPool();
       let items = await listDolibarrSalaryRows(conn);
-
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        const userEmail = (requestUser?.email || "").trim().toLowerCase();
-        const userId = (requestUser?.id || "").trim().toLowerCase();
-        const userName = normalizeSalaryIdentity(requestUser?.name);
-        const userLogin = normalizeSalaryIdentity(requestUser?.login);
-        const dolibarrViewerIds = await resolveDolibarrSalaryViewerIds(conn, requestUser);
-        items = items.filter((salary) => {
-          const salaryEmail = (salary.employeeEmail || "").trim().toLowerCase();
-          const salaryId = (salary.employeeId || "").trim().toLowerCase();
-          const salaryName = normalizeSalaryIdentity(salary.employeeName);
-          return Boolean(
-            (userEmail && salaryEmail === userEmail) ||
-              (userId && (salaryId === userId || salaryId === `dolibarr_${userId}`)) ||
-              (userLogin && (salaryEmail === userLogin || salaryName === userLogin || salaryId === `dolibarr_${userLogin}`)) ||
-              (userName && salaryName === userName) ||
-              dolibarrViewerIds.has(salaryId)
-          );
-        });
-      }
 
       res.json({ items });
     } catch (error) {
