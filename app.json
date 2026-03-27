@@ -2,6 +2,7 @@
   "expo": {
     "name": "Lumina FieldForce",
     "slug": "lumina-fieldforce",
+    "owner": "appallakarthik",
     "entryPoint": "./node_modules/expo-router/entry",
     "version": "1.0.0",
     "updates": {
@@ -20,7 +21,10 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.luminafieldforce"
+      "bundleIdentifier": "com.luminafieldforce",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.luminafieldforce",
@@ -71,6 +75,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "671331d1-e438-4593-9fda-8a71075988f7"
+      }
     }
   }
 }

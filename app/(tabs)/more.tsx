@@ -235,7 +235,7 @@ export default function MoreScreen() {
         </Animated.View>
 
         <Text style={[styles.version, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-          {company?.name || user?.companyName || "Lumina FieldForce"} v1.0.0
+          lumina fieldforce v1.0.0
         </Text>
 
         <View style={{ height: 40 }} />
