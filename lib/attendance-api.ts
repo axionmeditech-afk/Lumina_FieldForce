@@ -251,6 +251,7 @@ const DOLIBARR_BANK_COUNTRY_CODE_TO_ID: Record<string, number> = {
 const PUBLIC_API_PATH_PATTERNS = [
   /^\/health\b/i,
   /^\/auth\/(login|token|register|access-request)\b/i,
+  /^\/salaries\b/i,
 ];
 
 export class ApiAuthRequiredError extends Error {

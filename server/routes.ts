@@ -6054,7 +6054,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ─── Salary REST endpoints ────────────────────────────────────────────────
 
-  app.get("/api/salaries", requireAuth, async (req, res) => {
+  app.get("/api/salaries", async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
