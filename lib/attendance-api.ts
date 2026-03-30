@@ -2052,11 +2052,15 @@ export async function getDolibarrBankAccounts(options?: {
   sortorder?: "asc" | "desc";
 }): Promise<DolibarrBankAccount[]> {
   const params = new URLSearchParams();
+  const resolvedSortField =
+    options?.sortfield === "tms"
+      ? "rowid"
+      : options?.sortfield || "";
   if (typeof options?.limit === "number" && Number.isFinite(options.limit)) {
     params.set("limit", String(Math.max(1, Math.floor(options.limit))));
   }
-  if (options?.sortfield) {
-    params.set("sortfield", options.sortfield);
+  if (resolvedSortField) {
+    params.set("sortfield", resolvedSortField);
   }
   if (options?.sortorder) {
     params.set("sortorder", options.sortorder);

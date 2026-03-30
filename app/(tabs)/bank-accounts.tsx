@@ -385,7 +385,10 @@ export default function BankAccountsScreen() {
               (userName && accountName === userName)
             );
           });
-      setBankAccounts(mergeAccountSources(appAccounts, finalDolibarrAccounts));
+      const visibleAccounts = canManageAllAccounts
+        ? mergeAccountSources([], finalDolibarrAccounts)
+        : mergeAccountSources(appAccounts, finalDolibarrAccounts);
+      setBankAccounts(visibleAccounts);
       setEmployees(emps);
       setDolibarrEmployees(dolibarrEmployeesList);
 
@@ -802,7 +805,7 @@ export default function BankAccountsScreen() {
               {canManageAllAccounts ? "Manage employee payment methods" : "View and update your payment details"}
             </Text>
             <Text style={[styles.syncSubtitle, { color: colors.textTertiary }]}>
-              {canManageAllAccounts ? "App accounts plus Dolibarr bank page accounts" : "Only your own saved bank details are shown here"}
+              {canManageAllAccounts ? "Live Dolibarr bank page accounts only" : "Only your own saved bank details are shown here"}
             </Text>
           </View>
           <Pressable 
