@@ -1,0 +1,55 @@
+workflows:
+  ios-ipa:
+    name: Lumina FieldForce iOS IPA
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    environment:
+      ios_signing:
+        distribution_type: app_store # Change to ad_hoc if you want a directly installable device build.
+        bundle_identifier: com.luminafieldforce
+      vars:
+        BUNDLE_ID: "com.luminafieldforce"
+      node: 22.14.0
+      xcode: latest
+      cocoapods: default
+    cache:
+      cache_paths:
+        - $HOME/.npm
+        - $HOME/Library/Caches/CocoaPods
+        - $CM_BUILD_DIR/node_modules
+    scripts:
+      - name: Install JavaScript dependencies
+        script: |
+          npm ci
+      - name: Generate iOS native project from Expo
+        script: |
+          npx expo prebuild --platform ios --non-interactive
+      - name: Install CocoaPods dependencies
+        script: |
+          cd ios
+          pod install --repo-update
+      - name: Build signed IPA
+        script: |
+          set -euo pipefail
+
+          IOS_WORKSPACE="$(find "$CM_BUILD_DIR/ios" -maxdepth 1 -name "*.xcworkspace" -print -quit)"
+          if [ -z "$IOS_WORKSPACE" ]; then
+            echo "No Xcode workspace found under ios/"
+            exit 1
+          fi
+
+          IOS_SCHEME="$(xcodebuild -list -json -workspace "$IOS_WORKSPACE" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; abort("No Xcode scheme found") if schemes.empty?; puts schemes.first')"
+
+          echo "Using workspace: $IOS_WORKSPACE"
+          echo "Using scheme: $IOS_SCHEME"
+
+          xcode-project use-profiles
+
+          xcode-project build-ipa \
+            --workspace "$IOS_WORKSPACE" \
+            --scheme "$IOS_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
