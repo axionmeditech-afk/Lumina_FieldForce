@@ -3,6 +3,8 @@ workflows:
     name: Lumina FieldForce iOS IPA
     max_build_duration: 120
     instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: Lumina_fieldforce
     environment:
       ios_signing:
         distribution_type: app_store # Change to ad_hoc if you want a directly installable device build.
@@ -61,3 +63,6 @@ workflows:
       - /tmp/xcodebuild_logs/*.log
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        auth: integration
