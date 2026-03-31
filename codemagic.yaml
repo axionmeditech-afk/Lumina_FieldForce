@@ -44,7 +44,7 @@ workflows:
             exit 1
           fi
 
-          IOS_SCHEME="$(xcodebuild -list -json -workspace "$IOS_WORKSPACE" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; preferred = ARGV[0]; abort(\"No Xcode scheme found\") if schemes.empty?; match = schemes.find { |scheme| scheme == preferred } || schemes.find { |scheme| !scheme.start_with?(\"EX\") } || schemes.first; puts match' "$APP_SCHEME")"
+          IOS_SCHEME="$APP_SCHEME"
 
           echo "Using workspace: $IOS_WORKSPACE"
           echo "Using project: $IOS_PROJECT"
