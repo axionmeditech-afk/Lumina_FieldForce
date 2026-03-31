@@ -34,6 +34,7 @@ workflows:
 
           IOS_WORKSPACE="$(find "$CM_BUILD_DIR/ios" -maxdepth 1 -name "*.xcworkspace" -print -quit)"
           IOS_PROJECT="$(find "$CM_BUILD_DIR/ios" -maxdepth 1 -name "*.xcodeproj" -print -quit)"
+          APP_SCHEME="$(basename "$IOS_PROJECT" .xcodeproj)"
           if [ -z "$IOS_WORKSPACE" ]; then
             echo "No Xcode workspace found under ios/"
             exit 1
@@ -43,10 +44,11 @@ workflows:
             exit 1
           fi
 
-          IOS_SCHEME="$(xcodebuild -list -json -workspace "$IOS_WORKSPACE" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; abort("No Xcode scheme found") if schemes.empty?; puts schemes.first')"
+          IOS_SCHEME="$(xcodebuild -list -json -workspace "$IOS_WORKSPACE" | ruby -rjson -e 'data = JSON.parse(STDIN.read); schemes = data.dig("workspace", "schemes") || []; preferred = ARGV[0]; abort(\"No Xcode scheme found\") if schemes.empty?; match = schemes.find { |scheme| scheme == preferred } || schemes.find { |scheme| !scheme.start_with?(\"EX\") } || schemes.first; puts match' "$APP_SCHEME")"
 
           echo "Using workspace: $IOS_WORKSPACE"
           echo "Using project: $IOS_PROJECT"
+          echo "Preferred app scheme: $APP_SCHEME"
           echo "Using scheme: $IOS_SCHEME"
 
           xcode-project use-profiles --project "$IOS_PROJECT"
