@@ -6,7 +6,7 @@ import { router, useNavigation } from "expo-router";
 import { AppCanvas } from "@/components/AppCanvas";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
-import { getTasks } from "@/lib/storage";
+import { getTasks, getVisitNotesRemote } from "@/lib/storage";
 import { formatMumbaiDateTime, formatMumbaiDateKey } from "@/lib/ist-time";
 import type { Task } from "@/lib/types";
 
@@ -27,8 +27,18 @@ export default function VisitNotesScreen() {
   const loadVisitNotes = useCallback(async () => {
     setLoading(true);
     try {
-      const taskData = await getTasks();
-      setTasks(taskData);
+      const [localTasks, remoteTasks] = await Promise.all([getTasks(), getVisitNotesRemote()]);
+      const mergedById = new Map<string, Task>();
+      for (const task of localTasks) {
+        mergedById.set(task.id, task);
+      }
+      for (const task of remoteTasks || []) {
+        mergedById.set(task.id, {
+          ...(mergedById.get(task.id) || {}),
+          ...task,
+        });
+      }
+      setTasks(Array.from(mergedById.values()));
     } finally {
       setLoading(false);
     }

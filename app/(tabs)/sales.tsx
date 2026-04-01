@@ -54,6 +54,7 @@ import {
   getTasks,
   resolveAssignedStockistForUser,
   removeTask,
+  syncVisitNoteTaskRemote,
   updateTask,
   updateConversation,
 } from "@/lib/storage";
@@ -3091,13 +3092,20 @@ export default function SalesScreen() {
       setMeetingNotesSavingTaskId(task.id);
       try {
         const nowIso = new Date().toISOString();
-        await updateTask(task.id, {
+        const updatedTask = await updateTask(task.id, {
           meetingNotes: normalizedNotes || null,
           meetingNotesUpdatedAt: normalizedNotes ? nowIso : null,
         });
         await updateConversation(task.autoCaptureConversationId, {
           notes: normalizedNotes || undefined,
         });
+        const synced = await syncVisitNoteTaskRemote(
+          updatedTask || {
+            ...task,
+            meetingNotes: normalizedNotes || null,
+            meetingNotesUpdatedAt: normalizedNotes ? nowIso : null,
+          }
+        );
         await addAuditLog({
           id: createLocalId("audit"),
           userId: user.id,
@@ -3108,6 +3116,12 @@ export default function SalesScreen() {
           module: "Sales Intelligence",
         });
         await loadData();
+        if (!synced) {
+          Alert.alert(
+            "Saved Locally",
+            "Meeting notes saved on device, but MySQL sync is unavailable right now."
+          );
+        }
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } catch (error) {
         Alert.alert(
@@ -3141,7 +3155,7 @@ export default function SalesScreen() {
     try {
       const nowIso = new Date().toISOString();
       const normalizedNote = departureNotesDraft.trim();
-      await updateTask(departureNotesTask.id, {
+      const updatedTask = await updateTask(departureNotesTask.id, {
         status: "completed",
         departureAt: nowIso,
         arrivalAt: departureNotesTask.arrivalAt ?? nowIso,
@@ -3149,6 +3163,17 @@ export default function SalesScreen() {
         visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
         autoCaptureRecordingActive: false,
       });
+      const synced = await syncVisitNoteTaskRemote(
+        updatedTask || {
+          ...departureNotesTask,
+          status: "completed",
+          departureAt: nowIso,
+          arrivalAt: departureNotesTask.arrivalAt ?? nowIso,
+          visitDepartureNotes: normalizedNote || null,
+          visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
+          autoCaptureRecordingActive: false,
+        }
+      );
       await addAuditLog({
         id: createLocalId("audit"),
         userId: user.id,
@@ -3163,6 +3188,12 @@ export default function SalesScreen() {
       setDepartureNotesTask(null);
       setDepartureNotesDraft("");
       await loadData();
+      if (!synced) {
+        Alert.alert(
+          "Saved Locally",
+          "Departure note saved on device, but MySQL sync is unavailable right now."
+        );
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
       Alert.alert(

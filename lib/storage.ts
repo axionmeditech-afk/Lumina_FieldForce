@@ -470,6 +470,49 @@ async function fetchStockistsRemote(): Promise<StockistProfile[] | null | undefi
   return undefined;
 }
 
+async function fetchVisitNotesRemote(): Promise<Task[] | null | undefined> {
+  const token = await getApiToken();
+  if (!token) return undefined;
+
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/visit-notes`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        if (response.status >= 500) continue;
+        return undefined;
+      }
+      const trimmed = text.trim();
+      if (!trimmed) return [];
+      try {
+        const payload = JSON.parse(text) as { items?: unknown } | unknown[];
+        if (Array.isArray(payload)) return payload as Task[];
+        if (payload && typeof payload === "object" && Array.isArray((payload as any).items)) {
+          return (payload as any).items as Task[];
+        }
+        return [];
+      } catch {
+        continue;
+      }
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return undefined;
+}
+
 async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
   const token = await getApiToken();
   if (!token) return false;
@@ -483,6 +526,42 @@ async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
     try {
       const response = await fetch(`${apiBase}/state/${encodedKey}`, {
         method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body,
+        signal: controller.signal,
+      });
+      if (response.ok) return true;
+      if (response.status < 500) return false;
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return false;
+}
+
+export async function getVisitNotesRemote(): Promise<Task[] | null> {
+  const remote = await fetchVisitNotesRemote();
+  if (typeof remote === "undefined") return null;
+  return Array.isArray(remote) ? remote : [];
+}
+
+export async function syncVisitNoteTaskRemote(task: Task): Promise<boolean> {
+  const token = await getApiToken();
+  if (!token) return false;
+  const body = JSON.stringify({ task });
+  const apiBases = await getRemoteStateApiCandidates();
+
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/visit-notes`, {
+        method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,

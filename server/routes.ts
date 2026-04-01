@@ -11,6 +11,7 @@ import type {
   LocationLog,
   NotificationAudience,
   SalaryRecord,
+  Task,
   UserAccessRequest,
   UserRole,
 } from "@/lib/types";
@@ -675,6 +676,7 @@ const accessRequestsById = new Map<string, AccessRequestRecord>();
 const inMemoryStateStore = new Map<string, string>();
 let accessRequestAssignmentColumnsEnsured = false;
 let stockistAssignmentColumnsEnsured = false;
+let taskVisitNotesColumnsEnsured = false;
 
 function setAuthUserRecord(record: AuthUserRecord): void {
   const emailKey = normalizeEmailKey(record.user.email);
@@ -848,6 +850,151 @@ async function ensureStockistAssignmentColumns(): Promise<void> {
       ADD COLUMN IF NOT EXISTS assigned_salesperson_ids_json LONGTEXT NULL AFTER notes
   `);
   stockistAssignmentColumnsEnsured = true;
+}
+
+async function ensureTaskVisitNotesColumns(): Promise<void> {
+  if (taskVisitNotesColumnsEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    ALTER TABLE lff_tasks
+      ADD COLUMN IF NOT EXISTS task_type VARCHAR(32) NULL AFTER description,
+      ADD COLUMN IF NOT EXISTS visit_plan_date DATETIME NULL AFTER due_date,
+      ADD COLUMN IF NOT EXISTS visit_sequence INT NULL AFTER visit_plan_date,
+      ADD COLUMN IF NOT EXISTS visit_location_label VARCHAR(191) NULL AFTER visit_sequence,
+      ADD COLUMN IF NOT EXISTS visit_location_address LONGTEXT NULL AFTER visit_location_label,
+      ADD COLUMN IF NOT EXISTS arrival_at DATETIME NULL AFTER visit_location_address,
+      ADD COLUMN IF NOT EXISTS departure_at DATETIME NULL AFTER arrival_at,
+      ADD COLUMN IF NOT EXISTS meeting_notes LONGTEXT NULL AFTER departure_at,
+      ADD COLUMN IF NOT EXISTS meeting_notes_updated_at DATETIME NULL AFTER meeting_notes,
+      ADD COLUMN IF NOT EXISTS visit_departure_notes LONGTEXT NULL AFTER meeting_notes_updated_at,
+      ADD COLUMN IF NOT EXISTS visit_departure_notes_updated_at DATETIME NULL AFTER visit_departure_notes,
+      ADD COLUMN IF NOT EXISTS auto_capture_conversation_id VARCHAR(64) NULL AFTER visit_departure_notes_updated_at
+  `);
+  taskVisitNotesColumnsEnsured = true;
+}
+
+function toMySqlDateTime(value: string | null | undefined): string | null {
+  const normalized = normalizeWhitespace(value || "");
+  if (!normalized) return null;
+  const next = new Date(normalized);
+  if (Number.isNaN(next.getTime())) return null;
+  return next.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function fromMySqlDateTime(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  const normalized = normalizeWhitespace(String(value));
+  if (!normalized) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return `${normalized}T00:00:00.000Z`;
+  }
+  if (normalized.includes("T")) {
+    const iso = new Date(normalized);
+    return Number.isNaN(iso.getTime()) ? normalized : iso.toISOString();
+  }
+  const assumedUtc = new Date(normalized.replace(" ", "T") + "Z");
+  return Number.isNaN(assumedUtc.getTime()) ? normalized : assumedUtc.toISOString();
+}
+
+function normalizeVisitNoteTask(task: Partial<Task>, fallbackUser?: AppUser | null): Task {
+  const fallbackName =
+    normalizeWhitespace(fallbackUser?.name || "") ||
+    normalizeWhitespace(task.assignedToName || "") ||
+    "Unknown";
+  const nowIso = new Date().toISOString();
+  return {
+    id: normalizeWhitespace(task.id || "") || randomUUID(),
+    companyId: normalizeWhitespace(task.companyId || "") || fallbackUser?.companyId || undefined,
+    title: normalizeWhitespace(task.title || "") || "Visit",
+    description: normalizeWhitespace(task.description || "") || "Field visit",
+    taskType: task.taskType === "field_visit" ? "field_visit" : "general",
+    assignedTo: normalizeWhitespace(task.assignedTo || "") || fallbackUser?.id || "",
+    assignedToName: normalizeWhitespace(task.assignedToName || "") || fallbackName,
+    assignedBy: normalizeWhitespace(task.assignedBy || "") || fallbackUser?.id || "system",
+    teamId: task.teamId ?? null,
+    teamName: task.teamName ?? null,
+    status: task.status === "completed" || task.status === "in_progress" ? task.status : "pending",
+    priority: task.priority === "low" || task.priority === "high" ? task.priority : "medium",
+    dueDate: normalizeWhitespace(task.dueDate || "") || nowIso,
+    createdAt: normalizeWhitespace(task.createdAt || "") || nowIso,
+    visitPlanDate: task.visitPlanDate ?? null,
+    visitSequence:
+      typeof task.visitSequence === "number" && Number.isFinite(task.visitSequence)
+        ? Math.trunc(task.visitSequence)
+        : null,
+    visitLatitude:
+      typeof task.visitLatitude === "number" && Number.isFinite(task.visitLatitude)
+        ? task.visitLatitude
+        : null,
+    visitLongitude:
+      typeof task.visitLongitude === "number" && Number.isFinite(task.visitLongitude)
+        ? task.visitLongitude
+        : null,
+    visitLocationLabel: task.visitLocationLabel ?? null,
+    visitLocationAddress: task.visitLocationAddress ?? null,
+    arrivalAt: task.arrivalAt ?? null,
+    meetingNotes: task.meetingNotes ?? null,
+    meetingNotesUpdatedAt: task.meetingNotesUpdatedAt ?? null,
+    departureAt: task.departureAt ?? null,
+    visitDepartureNotes: task.visitDepartureNotes ?? null,
+    visitDepartureNotesUpdatedAt: task.visitDepartureNotesUpdatedAt ?? null,
+    autoCaptureRecordingActive: Boolean(task.autoCaptureRecordingActive),
+    autoCaptureRecordingStartedAt: task.autoCaptureRecordingStartedAt ?? null,
+    autoCaptureRecordingStoppedAt: task.autoCaptureRecordingStoppedAt ?? null,
+    autoCaptureConversationId: task.autoCaptureConversationId ?? null,
+  };
+}
+
+function mapVisitNoteRowToTask(row: Record<string, unknown>): Task {
+  return {
+    id: normalizeWhitespace(String(row.id || "")),
+    companyId: normalizeWhitespace(String(row.company_id || "")) || undefined,
+    title: normalizeWhitespace(String(row.title || "Visit")),
+    description: String(row.description || "Field visit"),
+    taskType: row.task_type === "field_visit" ? "field_visit" : "general",
+    assignedTo: normalizeWhitespace(String(row.assigned_to_id || "")),
+    assignedToName: normalizeWhitespace(String(row.assigned_to_name || "")),
+    assignedBy: normalizeWhitespace(String(row.assigned_by_id || "")),
+    teamId: null,
+    teamName: null,
+    status:
+      row.status === "completed" || row.status === "in_progress" || row.status === "pending"
+        ? row.status
+        : "pending",
+    priority:
+      row.priority === "low" || row.priority === "medium" || row.priority === "high"
+        ? row.priority
+        : "medium",
+    dueDate: fromMySqlDateTime(row.due_date) || fromMySqlDateTime(row.created_at) || new Date().toISOString(),
+    createdAt: fromMySqlDateTime(row.created_at) || new Date().toISOString(),
+    visitPlanDate: fromMySqlDateTime(row.visit_plan_date),
+    visitSequence:
+      typeof row.visit_sequence === "number"
+        ? row.visit_sequence
+        : Number.isFinite(Number(row.visit_sequence))
+          ? Number(row.visit_sequence)
+          : null,
+    visitLatitude: null,
+    visitLongitude: null,
+    visitLocationLabel: row.visit_location_label ? String(row.visit_location_label) : null,
+    visitLocationAddress: row.visit_location_address ? String(row.visit_location_address) : null,
+    arrivalAt: fromMySqlDateTime(row.arrival_at),
+    meetingNotes: row.meeting_notes ? String(row.meeting_notes) : null,
+    meetingNotesUpdatedAt: fromMySqlDateTime(row.meeting_notes_updated_at),
+    departureAt: fromMySqlDateTime(row.departure_at),
+    visitDepartureNotes: row.visit_departure_notes ? String(row.visit_departure_notes) : null,
+    visitDepartureNotesUpdatedAt: fromMySqlDateTime(row.visit_departure_notes_updated_at),
+    autoCaptureRecordingActive: false,
+    autoCaptureRecordingStartedAt: null,
+    autoCaptureRecordingStoppedAt: null,
+    autoCaptureConversationId: row.auto_capture_conversation_id
+      ? String(row.auto_capture_conversation_id)
+      : null,
+  };
 }
 
 async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
@@ -5031,6 +5178,190 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to read remote state value.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.get("/api/visit-notes", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL visit notes store is not configured." });
+      return;
+    }
+
+    try {
+      await ensureTaskVisitNotesColumns();
+      const companyId = await resolveRequestCompanyId(req);
+      const conn = await getMySqlPool();
+      const filters: string[] = [
+        "task_type = 'field_visit'",
+        "(TRIM(COALESCE(meeting_notes, '')) <> '' OR TRIM(COALESCE(visit_departure_notes, '')) <> '' OR departure_at IS NOT NULL)",
+      ];
+      const params: unknown[] = [];
+
+      if (companyId) {
+        filters.push("company_id = ?");
+        params.push(companyId);
+      }
+      if (req.auth?.role === "salesperson") {
+        filters.push("assigned_to_id = ?");
+        params.push(req.auth.sub);
+      }
+
+      const [rows] = await conn.query<Record<string, unknown>[]>(
+        `SELECT
+          id,
+          company_id,
+          title,
+          description,
+          task_type,
+          assigned_to_id,
+          assigned_to_name,
+          assigned_by_id,
+          status,
+          priority,
+          due_date,
+          created_at,
+          visit_plan_date,
+          visit_sequence,
+          visit_location_label,
+          visit_location_address,
+          arrival_at,
+          departure_at,
+          meeting_notes,
+          meeting_notes_updated_at,
+          visit_departure_notes,
+          visit_departure_notes_updated_at,
+          auto_capture_conversation_id
+        FROM lff_tasks
+        WHERE ${filters.join(" AND ")}
+        ORDER BY COALESCE(visit_departure_notes_updated_at, meeting_notes_updated_at, departure_at, created_at) DESC`,
+        params
+      );
+
+      res.json({ items: rows.map(mapVisitNoteRowToTask) });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to fetch visit notes from MySQL.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.post("/api/visit-notes", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL visit notes store is not configured." });
+      return;
+    }
+
+    const body = req.body as { task?: Partial<Task> };
+    const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
+    const normalizedTask = normalizeVisitNoteTask(body?.task || {}, authRecord?.user ?? null);
+
+    if (!normalizedTask.id) {
+      res.status(400).json({ message: "Task id is required." });
+      return;
+    }
+    if (normalizedTask.taskType !== "field_visit") {
+      res.status(400).json({ message: "Only field visit tasks can be synced as visit notes." });
+      return;
+    }
+    if (req.auth?.role === "salesperson" && normalizedTask.assignedTo !== req.auth.sub) {
+      res.status(403).json({ message: "You can only sync your own visit notes." });
+      return;
+    }
+
+    try {
+      await ensureTaskVisitNotesColumns();
+      const companyId = normalizedTask.companyId || (await resolveRequestCompanyId(req)) || null;
+      const conn = await getMySqlPool();
+      const assignedByName =
+        normalizeWhitespace(authRecord?.user.name || "") ||
+        normalizeWhitespace(req.auth?.email || "") ||
+        "System";
+
+      await conn.execute(
+        `INSERT INTO lff_tasks (
+          id,
+          company_id,
+          title,
+          description,
+          task_type,
+          assigned_to_id,
+          assigned_to_name,
+          assigned_by_id,
+          assigned_by_name,
+          status,
+          priority,
+          due_date,
+          created_at,
+          updated_at,
+          visit_plan_date,
+          visit_sequence,
+          visit_location_label,
+          visit_location_address,
+          arrival_at,
+          departure_at,
+          meeting_notes,
+          meeting_notes_updated_at,
+          visit_departure_notes,
+          visit_departure_notes_updated_at,
+          auto_capture_conversation_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          company_id = VALUES(company_id),
+          title = VALUES(title),
+          description = VALUES(description),
+          task_type = VALUES(task_type),
+          assigned_to_id = VALUES(assigned_to_id),
+          assigned_to_name = VALUES(assigned_to_name),
+          assigned_by_id = VALUES(assigned_by_id),
+          assigned_by_name = VALUES(assigned_by_name),
+          status = VALUES(status),
+          priority = VALUES(priority),
+          due_date = VALUES(due_date),
+          visit_plan_date = VALUES(visit_plan_date),
+          visit_sequence = VALUES(visit_sequence),
+          visit_location_label = VALUES(visit_location_label),
+          visit_location_address = VALUES(visit_location_address),
+          arrival_at = VALUES(arrival_at),
+          departure_at = VALUES(departure_at),
+          meeting_notes = VALUES(meeting_notes),
+          meeting_notes_updated_at = VALUES(meeting_notes_updated_at),
+          visit_departure_notes = VALUES(visit_departure_notes),
+          visit_departure_notes_updated_at = VALUES(visit_departure_notes_updated_at),
+          auto_capture_conversation_id = VALUES(auto_capture_conversation_id),
+          updated_at = NOW()`,
+        [
+          normalizedTask.id,
+          companyId,
+          normalizedTask.title,
+          normalizedTask.description,
+          normalizedTask.taskType,
+          normalizedTask.assignedTo,
+          normalizedTask.assignedToName,
+          normalizedTask.assignedBy || req.auth?.sub || "system",
+          assignedByName,
+          normalizedTask.status,
+          normalizedTask.priority,
+          toMySqlDateTime(normalizedTask.dueDate) || toMySqlDateTime(normalizedTask.createdAt),
+          toMySqlDateTime(normalizedTask.createdAt) || new Date().toISOString().slice(0, 19).replace("T", " "),
+          toMySqlDateTime(normalizedTask.visitPlanDate),
+          normalizedTask.visitSequence,
+          normalizedTask.visitLocationLabel,
+          normalizedTask.visitLocationAddress,
+          toMySqlDateTime(normalizedTask.arrivalAt),
+          toMySqlDateTime(normalizedTask.departureAt),
+          normalizedTask.meetingNotes,
+          toMySqlDateTime(normalizedTask.meetingNotesUpdatedAt),
+          normalizedTask.visitDepartureNotes,
+          toMySqlDateTime(normalizedTask.visitDepartureNotesUpdatedAt),
+          normalizedTask.autoCaptureConversationId,
+        ]
+      );
+
+      res.json({ ok: true });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to store visit notes in MySQL.";
       res.status(500).json({ message });
     }
   });
