@@ -22,6 +22,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.luminafieldforce",
+      "buildNumber": "2",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
