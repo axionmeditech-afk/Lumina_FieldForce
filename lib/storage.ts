@@ -856,28 +856,35 @@ async function getItem<T>(key: string): Promise<T | null> {
 async function setItem<T>(key: string, value: T): Promise<void> {
   await AsyncStorage.setItem(key, JSON.stringify(value));
   if (shouldSyncRemoteStateKey(key)) {
-    let remoteValue = value;
-
-    if (key === KEYS.EMPLOYEES && Array.isArray(value)) {
-      const currentUser = await getCurrentUser().catch(() => null);
-      if (!currentUser) {
-        remoteValue = (await fetchStateRemote<T>(key)) ?? value;
-      } else if (currentUser.role === "salesperson") {
-        const remoteEmployees = (await fetchStateRemote<Employee[]>(key)) || [];
-        remoteValue = mergeEmployeeWriteForSalesperson(
-          remoteEmployees,
-          value as Employee[],
-          currentUser
-        ) as T;
-      }
-    }
-
-    const pushed = await pushStateRemote(key, remoteValue);
-    if (!pushed) {
-      await enqueuePendingRemoteStateWrite(key, remoteValue);
-    } else {
+    if (key === KEYS.LOCATION_LOGS) {
+      // Location points already sync through /api/location/log and /api/location/batch.
+      // Re-uploading the entire local log history through remote state creates very large
+      // writes that can stall the app and server for several seconds.
       await removePendingRemoteStateWrite(key);
-      void flushPendingRemoteStateWrites();
+    } else {
+      let remoteValue = value;
+
+      if (key === KEYS.EMPLOYEES && Array.isArray(value)) {
+        const currentUser = await getCurrentUser().catch(() => null);
+        if (!currentUser) {
+          remoteValue = (await fetchStateRemote<T>(key)) ?? value;
+        } else if (currentUser.role === "salesperson") {
+          const remoteEmployees = (await fetchStateRemote<Employee[]>(key)) || [];
+          remoteValue = mergeEmployeeWriteForSalesperson(
+            remoteEmployees,
+            value as Employee[],
+            currentUser
+          ) as T;
+        }
+      }
+
+      const pushed = await pushStateRemote(key, remoteValue);
+      if (!pushed) {
+        await enqueuePendingRemoteStateWrite(key, remoteValue);
+      } else {
+        await removePendingRemoteStateWrite(key);
+        void flushPendingRemoteStateWrites();
+      }
     }
   }
   const event: StorageUpdateEvent = {

@@ -50,6 +50,7 @@ import {
 } from "@/lib/background-location";
 import {
   ensureLocationServicesEnabled,
+  getLastKnownLocationSafe,
   getVerifiedLocationEvidence,
   getLocationPermissionSnapshot,
   isMockLocation,
@@ -206,6 +207,8 @@ export default function AttendanceScreen() {
     sampleWindowMs: number;
     bestAccuracyMeters: number | null;
   } | null>(null);
+  const latestLocationRef = useRef<LocationObject | null>(null);
+  const latestLocationCapturedAtMsRef = useRef<number>(0);
   const successScale = useSharedValue(1);
 
   const pulseStyle = useAnimatedStyle(() => ({
@@ -308,6 +311,8 @@ export default function AttendanceScreen() {
     async (location: LocationObject, options?: { skipRoutePersistence?: boolean }) => {
       if (!user?.id) return;
       const effectiveLocation = applyAhmedabadOfficeLocationLock(location);
+      latestLocationRef.current = effectiveLocation;
+      latestLocationCapturedAtMsRef.current = Date.now();
       const nextEvaluation = evaluateGeofenceStatus(
         geofences,
         effectiveLocation.coords.latitude,
@@ -393,6 +398,8 @@ export default function AttendanceScreen() {
       const enabled = await ensureLocationServicesEnabled();
       if (!enabled) {
         latestEvidenceRef.current = null;
+        latestLocationRef.current = null;
+        latestLocationCapturedAtMsRef.current = 0;
         setGpsEvidence("");
         setLocationReady(false);
         setEvaluation({
@@ -425,6 +432,8 @@ export default function AttendanceScreen() {
           sampleWindowMs: effectiveEvidence.sampleWindowMs,
           bestAccuracyMeters: effectiveEvidence.bestAccuracyMeters,
         };
+        latestLocationRef.current = effectiveEvidence.location;
+        latestLocationCapturedAtMsRef.current = Date.now();
         setGpsEvidence(
           `GPS lock: ${effectiveEvidence.sampleCount} samples / ${Math.max(
             1,
@@ -447,7 +456,7 @@ export default function AttendanceScreen() {
         }
 
         if (!fallbackLocation) {
-          fallbackLocation = await ExpoLocation.getLastKnownPositionAsync({
+          fallbackLocation = await getLastKnownLocationSafe({
             maxAge: 20 * 60 * 1000,
             requiredAccuracy: strict ? 450 : 1200,
           });
@@ -465,6 +474,8 @@ export default function AttendanceScreen() {
             sampleWindowMs: 0,
             bestAccuracyMeters: fallbackAccuracy,
           };
+          latestLocationRef.current = effectiveFallbackLocation;
+          latestLocationCapturedAtMsRef.current = Date.now();
           setGpsEvidence(
             `GPS fallback: ${
               fallbackAccuracy !== null ? `+/-${fallbackAccuracy}m` : "accuracy unknown"
@@ -481,6 +492,8 @@ export default function AttendanceScreen() {
         }
 
         latestEvidenceRef.current = null;
+        latestLocationRef.current = null;
+        latestLocationCapturedAtMsRef.current = 0;
         setGpsEvidence("");
         setLocationReady(false);
         setEvaluation({
@@ -606,6 +619,28 @@ export default function AttendanceScreen() {
     void Promise.allSettled(jobs);
   }, [beginTracking, refreshLocation]);
 
+  const getFastAttendanceEvidence = useCallback(async () => {
+    const cachedLocation = latestLocationRef.current;
+    const cachedAgeMs = Date.now() - latestLocationCapturedAtMsRef.current;
+    const cachedAccuracy =
+      typeof cachedLocation?.coords.accuracy === "number" && Number.isFinite(cachedLocation.coords.accuracy)
+        ? cachedLocation.coords.accuracy
+        : Number.POSITIVE_INFINITY;
+
+    if (cachedLocation && cachedAgeMs <= 20_000 && cachedAccuracy <= 250) {
+      const roundedAccuracy = Number.isFinite(cachedAccuracy) ? Math.round(cachedAccuracy) : null;
+      return {
+        location: cachedLocation,
+        sampleCount: latestEvidenceRef.current?.sampleCount ?? 1,
+        sampleWindowMs: latestEvidenceRef.current?.sampleWindowMs ?? 0,
+        averageAccuracyMeters: latestEvidenceRef.current?.bestAccuracyMeters ?? roundedAccuracy,
+        bestAccuracyMeters: latestEvidenceRef.current?.bestAccuracyMeters ?? roundedAccuracy,
+      };
+    }
+
+    return refreshLocation(false, { skipRoutePersistence: true });
+  }, [refreshLocation]);
+
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout") => {
       if (!user?.id) return;
@@ -616,11 +651,13 @@ export default function AttendanceScreen() {
         let biometricType: string | null = null;
         let biometricFailureReason: string | null = null;
 
-        const preCaptureEvidence = await refreshLocation(false, { skipRoutePersistence: true });
+        const preCaptureEvidence = await getFastAttendanceEvidence();
         if (!preCaptureEvidence) {
           Alert.alert("Location Unavailable", "Unable to fetch live GPS location. Please try again.");
           return;
         }
+
+        const securityPromise = getClientSecurityStatus(isMockLocation(preCaptureEvidence.location));
 
         if (biometricRequired) {
           const biometricResult = await verifyBiometricForAttendance(type, {
@@ -657,7 +694,7 @@ export default function AttendanceScreen() {
         }
 
         if (type === "checkin") {
-          // Start location tracking immediately after successful fingerprint verification.
+          // Start location tracking immediately after successful device authentication.
           void Promise.allSettled([beginTracking(), refreshLocation()]);
         }
 
@@ -672,7 +709,7 @@ export default function AttendanceScreen() {
         );
         const finalZoneName = finalEvaluation.activeZone?.name ?? "Unassigned Zone";
 
-        const security = await getClientSecurityStatus(isMockLocation(postCaptureLocation));
+        const security = await securityPromise;
         const capturedAtClient = new Date().toISOString();
         const accuracyMeters = postCaptureLocation.coords.accuracy;
         const roundedAccuracyMeters =
@@ -822,6 +859,7 @@ export default function AttendanceScreen() {
       animateSuccess,
       beginTracking,
       geofences,
+      getFastAttendanceEvidence,
       isSalespersonFieldCheckIn,
       loadBaseData,
       openAppSettings,
@@ -897,7 +935,7 @@ export default function AttendanceScreen() {
             <Text style={[styles.modalText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
                 ? "Tap Grant Permissions to allow location. Sales check-in will start live GPS route tracking with battery level."
-                : "Tap Grant Permissions to allow location. Secure check-in uses fingerprint verification and starts live location tracking."}
+                : "Tap Grant Permissions to allow location. Secure check-in uses face unlock, fingerprint, or device PIN/password verification and starts live location tracking."}
             </Text>
             <Pressable
               style={[styles.modalButton, { backgroundColor: colors.primary, opacity: permissionLoading ? 0.86 : 1 }]}
@@ -956,7 +994,7 @@ export default function AttendanceScreen() {
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
           {isSalespersonFieldCheckIn
             ? `${company?.name || "Company"} time-based check-in with live GPS + battery tracking`
-            : `${company?.name || "Company"} fingerprint-based secure check-in with live location tracking`}
+            : `${company?.name || "Company"} device-authenticated secure check-in with live location tracking`}
         </Text>
 
         <View style={[styles.banner, { backgroundColor: banner.bg, borderColor: banner.border }]}>
@@ -966,7 +1004,7 @@ export default function AttendanceScreen() {
             <Text style={[styles.bannerSubText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
                 ? "Route and battery tracking will start automatically after check-in."
-                : "Live route and battery tracking starts immediately after fingerprint verification."}
+                : "Live route and battery tracking starts immediately after device authentication."}
             </Text>
           </View>
           {gpsLoading ? <ActivityIndicator size="small" color={colors.primary} /> : null}
@@ -1022,7 +1060,7 @@ export default function AttendanceScreen() {
 
         {!checkedInState && !canCheckIn ? (
           <Text style={[styles.helperWarning, { color: colors.danger }]}>
-            Wait for location to be ready, then verify your fingerprint to complete secure check-in.
+            Wait for location to be ready, then verify with face unlock, fingerprint, or device PIN/password to complete secure check-in.
           </Text>
         ) : null}
 

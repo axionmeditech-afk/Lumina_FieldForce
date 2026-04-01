@@ -153,7 +153,11 @@ export interface Task {
   visitLocationLabel?: string | null;
   visitLocationAddress?: string | null;
   arrivalAt?: string | null;
+  meetingNotes?: string | null;
+  meetingNotesUpdatedAt?: string | null;
   departureAt?: string | null;
+  visitDepartureNotes?: string | null;
+  visitDepartureNotesUpdatedAt?: string | null;
   autoCaptureRecordingActive?: boolean;
   autoCaptureRecordingStartedAt?: string | null;
   autoCaptureRecordingStoppedAt?: string | null;
@@ -284,6 +288,7 @@ export interface Conversation {
   objections: string[];
   improvements: string[];
   summary: string;
+  notes?: string;
   keyPhrases: string[];
 }
 

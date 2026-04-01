@@ -46,6 +46,12 @@
       "expo-web-browser",
       "expo-notifications",
       [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Lumina FieldForce uses Face ID to securely verify your identity for attendance."
+        }
+      ],
+      [
         "expo-location",
         {
           "locationWhenInUsePermission": "Lumina FieldForce uses your location to verify geo-fenced attendance at your assigned branch.",

@@ -1,13 +1,13 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Drawer } from "expo-router/drawer";
 import { Ionicons } from "@expo/vector-icons";
-import { LinearGradient } from "expo-linear-gradient";
 import {
   DrawerContentScrollView,
   DrawerItemList,
   type DrawerContentComponentProps,
+  useDrawerStatus,
 } from "@react-navigation/drawer";
-import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
@@ -23,6 +23,62 @@ type DrawerIconProps = {
   badgeCount?: number;
 };
 
+const DRAWER_WIDTH = 396;
+
+function getDrawerPalette(isDark: boolean) {
+  if (isDark) {
+    return {
+      panelBackground: "#10264B",
+      panelBorder: "rgba(196, 214, 255, 0.18)",
+      pillBackground: "#EEF4FF",
+      pillText: "#143764",
+      mutedText: "rgba(224, 235, 255, 0.76)",
+      footerLine: "rgba(196, 214, 255, 0.16)",
+      activeIconColor: "#F7FAFF",
+      inactiveIconColor: "#AFC3EB",
+      activeTintColor: "#F7FAFF",
+      inactiveTintColor: "#AFC3EB",
+      activeBackgroundColor: "rgba(255, 255, 255, 0.08)",
+      brandName: "#F7FAFF",
+      brandMeta: "rgba(214, 228, 255, 0.76)",
+      closePillBackground: "#F4F8FF",
+      closePillStaticBackground: "rgba(244, 248, 255, 0.12)",
+      closePillText: "#173966",
+      closePillTextStatic: "#F2F7FF",
+      segmentTrackBorder: "rgba(196, 214, 255, 0.2)",
+      segmentTrackBackground: "rgba(255, 255, 255, 0.06)",
+      segmentGhostText: "rgba(214, 228, 255, 0.88)",
+      footerText: "#F2F7FF",
+      footerMeta: "rgba(208, 224, 255, 0.68)",
+    };
+  }
+
+  return {
+    panelBackground: "#FBF7F0",
+    panelBorder: "rgba(25, 52, 92, 0.08)",
+    pillBackground: "#E8EDF5",
+    pillText: "#173A69",
+    mutedText: "rgba(49, 67, 97, 0.72)",
+    footerLine: "rgba(20, 38, 67, 0.1)",
+    activeIconColor: "#173A69",
+    inactiveIconColor: "#45638F",
+    activeTintColor: "#173A69",
+    inactiveTintColor: "#274C82",
+    activeBackgroundColor: "#E9EDF2",
+    brandName: "#173A69",
+    brandMeta: "rgba(45, 69, 104, 0.68)",
+    closePillBackground: "#FFFFFF",
+    closePillStaticBackground: "#EEF2F7",
+    closePillText: "#173A69",
+    closePillTextStatic: "#385887",
+    segmentTrackBorder: "rgba(25, 52, 92, 0.1)",
+    segmentTrackBackground: "rgba(223, 230, 240, 0.52)",
+    segmentGhostText: "rgba(44, 64, 97, 0.78)",
+    footerText: "#2F4C77",
+    footerMeta: "rgba(78, 98, 128, 0.74)",
+  };
+}
+
 function DrawerIcon({
   icon,
   activeIcon,
@@ -31,9 +87,10 @@ function DrawerIcon({
   offsetX = 0,
   badgeCount = 0,
 }: DrawerIconProps) {
-  const { colors } = useAppTheme();
-  const iconColor = focused ? colors.primary : colors.textSecondary;
-  const iconSize = size;
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
   const badgeLabel = useMemo(() => {
     if (!badgeCount || badgeCount <= 0) return "";
     return badgeCount > 99 ? "99+" : String(badgeCount);
@@ -43,8 +100,6 @@ function DrawerIcon({
       style={[
         styles.iconShell,
         {
-          backgroundColor: focused ? `${colors.primary}1C` : "transparent",
-          borderColor: focused ? `${colors.primary}40` : "transparent",
           marginLeft: offsetX,
         },
       ]}
@@ -71,70 +126,100 @@ function CustomDrawerContent(
   const { colors, isDark } = useAppTheme();
   const { user, company } = useAuth();
   const insets = useSafeAreaInsets();
-  const initials = user?.name
-    ? user.name
-        .split(" ")
-        .map((part) => part[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()
-    : "TF";
+  const drawerStatus = useDrawerStatus();
+  const scrollRef = useRef<ScrollView | null>(null);
+  const palette = getDrawerPalette(isDark);
+  const brandLabel = company?.name?.trim() || "Lumina";
+  const roleLabel = (user?.role ?? "staff").toUpperCase();
+  const branchLabel = company?.primaryBranch ?? user?.branch ?? "Workspace";
+
+  useEffect(() => {
+    if (drawerStatus !== "open") return;
+    const frame = requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ x: 0, y: 0, animated: false });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+  }, [drawerStatus]);
 
   return (
     <DrawerContentScrollView
       {...props}
-      contentContainerStyle={{ paddingTop: 0, paddingBottom: insets.bottom + 14 }}
-      style={{ backgroundColor: colors.backgroundElevated }}
+      ref={scrollRef}
+      contentContainerStyle={{
+        paddingTop: insets.top + 6,
+        paddingBottom: insets.bottom + 18,
+        paddingHorizontal: 14,
+      }}
+      style={{ backgroundColor: "transparent" }}
       showsVerticalScrollIndicator={false}
     >
-      <LinearGradient
-        colors={isDark ? [colors.heroEnd, colors.heroStart] : [colors.heroStart, colors.heroEnd]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.profileCard}
+      <View
+        style={[
+          styles.sidebarPanel,
+          {
+            backgroundColor: palette.panelBackground,
+            borderColor: palette.panelBorder,
+            shadowColor: colors.cardShadow,
+          },
+        ]}
       >
-        {!props.isLargeScreen ? (
-          <Pressable
-            onPress={() => props.navigation.closeDrawer()}
-            style={({ pressed }) => [
-              styles.closeButton,
-              { opacity: pressed ? 0.86 : 1 },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Close navigation menu"
-            hitSlop={6}
-          >
-            <Ionicons name="close" size={18} color="#FFFFFF" />
-          </Pressable>
-        ) : null}
-        <View style={styles.avatarShell}>
-          {user?.avatar ? (
-            <Image source={{ uri: user.avatar }} style={styles.avatarImage} />
+        <View style={styles.sidebarTopRow}>
+          <View style={styles.brandBlock}>
+            <Text style={[styles.brandName, { color: palette.brandName }]} numberOfLines={1}>
+              {brandLabel}
+            </Text>
+            <Text style={[styles.brandMeta, { color: palette.brandMeta }]} numberOfLines={1}>
+              {roleLabel} • {branchLabel}
+            </Text>
+          </View>
+          {!props.isLargeScreen ? (
+            <Pressable
+              onPress={() => props.navigation.closeDrawer()}
+              style={({ pressed }) => [
+                styles.closePill,
+                { backgroundColor: palette.closePillBackground },
+                { opacity: pressed ? 0.86 : 1 },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Close navigation menu"
+              hitSlop={6}
+            >
+              <Text style={[styles.closePillText, { color: palette.closePillText }]}>Close</Text>
+            </Pressable>
           ) : (
-            <Text style={styles.avatarText}>{initials}</Text>
+            <View style={[styles.closePillStatic, { backgroundColor: palette.closePillStaticBackground }]}>
+              <Text style={[styles.closePillText, styles.closePillTextStatic, { color: palette.closePillTextStatic }]}>Menu</Text>
+            </View>
           )}
         </View>
-        <View style={styles.profileInfo}>
-          <Text style={styles.profileName}>{user?.name ?? "Lumina FieldForce User"}</Text>
-          <Text style={styles.profileMeta}>
-            {(user?.role ?? "staff").toUpperCase()} | {company?.primaryBranch ?? user?.branch ?? "Enterprise Suite"}
+
+        <View style={styles.drawerBody}>
+          <Text style={[styles.drawerHeading, { color: palette.mutedText }]}>Navigation</Text>
+          <DrawerItemList {...props} />
+        </View>
+
+        <View style={[styles.footerDivider, { backgroundColor: palette.footerLine }]} />
+        <View style={styles.footerBlock}>
+          <Text style={[styles.footerText, { color: palette.footerText }]}>
+            {company?.name ?? "Enterprise Suite Pro"}
+          </Text>
+          <Text style={[styles.footerMeta, { color: palette.footerMeta }]}>
+            Crafted for focused field operations
           </Text>
         </View>
-      </LinearGradient>
-
-      <View style={styles.drawerBody}>
-        <Text style={[styles.drawerHeading, { color: colors.textTertiary }]}>Navigation</Text>
-        <DrawerItemList {...props} />
       </View>
     </DrawerContentScrollView>
   );
 }
 
 export default function SidebarLayout() {
-  const { colors, isDark } = useAppTheme();
+  const { isDark } = useAppTheme();
   const { user } = useAuth();
   const { width } = useWindowDimensions();
   const isLargeScreen = width >= 1024;
+  const palette = getDrawerPalette(isDark);
   const isAdmin = user?.role === "admin";
   const canSeeSalesAi = canAccessSalesModule(user?.role);
   const canSeeAdminControls = canAccessAdminControls(user?.role);
@@ -162,6 +247,7 @@ export default function SidebarLayout() {
 
   return (
     <Drawer
+      backBehavior="history"
       defaultStatus={isLargeScreen ? "open" : "closed"}
       drawerContent={(props) => (
         <CustomDrawerContent {...props} isLargeScreen={isLargeScreen} />
@@ -176,25 +262,27 @@ export default function SidebarLayout() {
             ? "rgba(2, 10, 20, 0.68)"
             : "rgba(9, 20, 38, 0.30)",
         drawerStyle: {
-          width: 300,
-          backgroundColor: colors.backgroundElevated,
-          borderRightWidth: 1,
-          borderRightColor: colors.border,
+          width: DRAWER_WIDTH,
+          backgroundColor: "transparent",
+          borderRightWidth: 0,
+          elevation: 0,
+          shadowOpacity: 0,
         },
-        drawerActiveTintColor: colors.primary,
-        drawerInactiveTintColor: colors.textSecondary,
-        drawerActiveBackgroundColor: `${colors.primary}14`,
+        drawerActiveTintColor: palette.activeTintColor,
+        drawerInactiveTintColor: palette.inactiveTintColor,
+        drawerActiveBackgroundColor: palette.activeBackgroundColor,
         drawerLabelStyle: {
-          fontFamily: "Inter_600SemiBold",
-          fontSize: 14,
-          marginLeft: -6,
+          fontFamily: "Inter_700Bold",
+          fontSize: 20,
+          lineHeight: 28,
+          marginLeft: 2,
         },
         drawerItemStyle: {
-          marginHorizontal: 10,
-          marginVertical: 3,
-          borderRadius: 14,
-          paddingHorizontal: 6,
-          minHeight: 50,
+          marginHorizontal: 0,
+          marginVertical: 2,
+          borderRadius: 18,
+          paddingHorizontal: 0,
+          minHeight: 56,
         },
       }}
     >
@@ -203,7 +291,7 @@ export default function SidebarLayout() {
         options={{
           title: "Dashboard",
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="grid-outline" activeIcon="grid" focused={focused} size={size} />
+            <DrawerIcon icon="speedometer-outline" activeIcon="speedometer" focused={focused} size={size} />
           ),
         }}
       />
@@ -230,7 +318,7 @@ export default function SidebarLayout() {
         options={{
           title: "Tasks",
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="clipboard-outline" activeIcon="clipboard" focused={focused} size={size} />
+            <DrawerIcon icon="checkbox-outline" activeIcon="checkbox" focused={focused} size={size} />
           ),
         }}
       />
@@ -245,7 +333,23 @@ export default function SidebarLayout() {
               activeIcon="sparkles"
               focused={focused}
               size={size}
-              offsetX={18}
+              offsetX={0}
+            />
+          ),
+        }}
+      />
+      <Drawer.Screen
+        name="visit-notes"
+        options={{
+          title: "View Notes",
+          drawerItemStyle: canSeeSalesAi ? undefined : { display: "none" },
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon
+              icon="document-text-outline"
+              activeIcon="document-text"
+              focused={focused}
+              size={size}
+              offsetX={0}
             />
           ),
         }}
@@ -257,11 +361,11 @@ export default function SidebarLayout() {
           drawerItemStyle: isAdmin ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
             <DrawerIcon
-              icon="receipt-outline"
-              activeIcon="receipt"
+              icon="cart-outline"
+              activeIcon="cart"
               focused={focused}
               size={size}
-              offsetX={18}
+              offsetX={0}
             />
           ),
         }}
@@ -273,11 +377,11 @@ export default function SidebarLayout() {
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
             <DrawerIcon
-              icon="stats-chart-outline"
-              activeIcon="stats-chart"
+              icon="bar-chart-outline"
+              activeIcon="bar-chart"
               focused={focused}
               size={size}
-              offsetX={18}
+              offsetX={0}
             />
           ),
         }}
@@ -293,7 +397,7 @@ export default function SidebarLayout() {
               activeIcon="ribbon"
               focused={focused}
               size={size}
-              offsetX={18}
+              offsetX={0}
             />
           ),
         }}
@@ -304,7 +408,7 @@ export default function SidebarLayout() {
           title: "Admin Stock",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="cube-outline" activeIcon="cube" focused={focused} size={size} offsetX={18} />
+            <DrawerIcon icon="cube-outline" activeIcon="cube" focused={focused} size={size} offsetX={0} />
           ),
         }}
       />
@@ -314,7 +418,7 @@ export default function SidebarLayout() {
           title: "Route Tracking",
           drawerItemStyle: isAdmin ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="map-outline" activeIcon="map" focused={focused} size={size} offsetX={18} />
+            <DrawerIcon icon="navigate-outline" activeIcon="navigate" focused={focused} size={size} offsetX={0} />
           ),
         }}
       />
@@ -324,7 +428,7 @@ export default function SidebarLayout() {
           title: "Bank Accounts",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="wallet-outline" activeIcon="wallet" focused={focused} size={size} />
+            <DrawerIcon icon="wallet-outline" activeIcon="wallet" focused={focused} size={size} offsetX={0} />
           ),
         }}
       />
@@ -334,7 +438,7 @@ export default function SidebarLayout() {
           title: "Bank Details",
           drawerItemStyle: canSeeAdminControls ? { display: "none" } : undefined,
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="card-outline" activeIcon="card" focused={focused} size={size} />
+            <DrawerIcon icon="wallet-outline" activeIcon="wallet" focused={focused} size={size} offsetX={0} />
           ),
         }}
       />
@@ -368,7 +472,7 @@ export default function SidebarLayout() {
           title: "Admin Controls",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="construct-outline" activeIcon="construct" focused={focused} size={size} offsetX={18} />
+            <DrawerIcon icon="shield-checkmark-outline" activeIcon="shield-checkmark" focused={focused} size={size} offsetX={0} />
           ),
         }}
       />
@@ -392,15 +496,14 @@ export default function SidebarLayout() {
 
 const styles = StyleSheet.create({
   iconShell: {
-    width: 34,
-    height: 32,
-    borderRadius: 10,
-    borderWidth: 1,
+    width: 20,
+    height: 22,
+    borderRadius: 0,
     alignItems: "center",
     justifyContent: "center",
   },
   iconInner: {
-    width: 22,
+    width: 20,
     height: 22,
     alignItems: "center",
     justifyContent: "center",
@@ -422,78 +525,97 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: "Inter_700Bold",
   },
-  profileCard: {
-    marginHorizontal: 12,
-    marginTop: 10,
-    borderRadius: 20,
-    minHeight: 120,
+  sidebarPanel: {
+    borderRadius: 34,
+    borderWidth: 1,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingTop: 20,
+    paddingBottom: 18,
+    minHeight: 720,
+    shadowOpacity: 0.18,
+    shadowRadius: 26,
+    shadowOffset: { width: 0, height: 14 },
+    elevation: 10,
+  },
+  sidebarTopRow: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     gap: 12,
-    shadowColor: "#0A2E67",
-    shadowOpacity: 0.22,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
   },
-  closeButton: {
-    position: "absolute",
-    right: 10,
-    top: 10,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.22)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.32)",
-  },
-  avatarShell: {
-    width: 52,
-    height: 52,
-    borderRadius: 16,
-    backgroundColor: "rgba(255,255,255,0.22)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avatarText: {
-    color: "#FFFFFF",
-    fontFamily: "Inter_700Bold",
-    fontSize: 18,
-    letterSpacing: 0.4,
-  },
-  avatarImage: {
-    width: "100%",
-    height: "100%",
-    borderRadius: 16,
-  },
-  profileInfo: {
+  brandBlock: {
     flex: 1,
-    gap: 3,
+    gap: 4,
   },
-  profileName: {
-    color: "#FFFFFF",
+  brandName: {
+    color: "#F7FAFF",
+    fontSize: 27,
+    letterSpacing: -0.7,
     fontFamily: "Inter_700Bold",
-    fontSize: 16,
   },
-  profileMeta: {
-    color: "rgba(255,255,255,0.80)",
-    fontFamily: "Inter_500Medium",
+  brandMeta: {
+    color: "rgba(214, 228, 255, 0.76)",
     fontSize: 11.5,
+    letterSpacing: 0.5,
+    fontFamily: "Inter_500Medium",
+  },
+  closePill: {
+    minWidth: 94,
+    height: 48,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#F4F8FF",
+    paddingHorizontal: 18,
+  },
+  closePillStatic: {
+    minWidth: 94,
+    height: 48,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(244, 248, 255, 0.12)",
+    paddingHorizontal: 18,
+  },
+  closePillText: {
+    color: "#173966",
+    fontSize: 16,
+    fontFamily: "Inter_600SemiBold",
+  },
+  closePillTextStatic: {
+    color: "#F2F7FF",
   },
   drawerBody: {
-    marginTop: 14,
+    marginTop: 2,
   },
   drawerHeading: {
-    fontFamily: "Inter_600SemiBold",
+    fontFamily: "Inter_700Bold",
     fontSize: 11,
-    letterSpacing: 0.8,
+    letterSpacing: 1.6,
     textTransform: "uppercase",
-    marginLeft: 18,
-    marginBottom: 4,
+    marginLeft: 8,
+    marginBottom: 10,
+  },
+  footerDivider: {
+    height: 1,
+    borderRadius: 999,
+    marginTop: 18,
+    marginBottom: 16,
+  },
+  footerBlock: {
+    gap: 4,
+    paddingHorizontal: 2,
+  },
+  footerText: {
+    color: "#F2F7FF",
+    fontSize: 14.5,
+    fontFamily: "Inter_600SemiBold",
+  },
+  footerMeta: {
+    color: "rgba(208, 224, 255, 0.68)",
+    fontSize: 12.5,
+    lineHeight: 18,
+    fontFamily: "Inter_500Medium",
   },
 });
 

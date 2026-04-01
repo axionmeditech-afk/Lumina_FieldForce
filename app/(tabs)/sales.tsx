@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Linking,
   ScrollView,
+  Modal,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -54,6 +55,7 @@ import {
   resolveAssignedStockistForUser,
   removeTask,
   updateTask,
+  updateConversation,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
@@ -1114,6 +1116,7 @@ function ConversationCard({
   conversation: Conversation;
   colors: typeof Colors.light;
 }) {
+  const meetingNote = conversation.notes?.trim() || "";
   const sentimentColor =
     conversation.sentiment === "positive" ? colors.success :
     conversation.sentiment === "neutral" ? colors.warning : colors.danger;
@@ -1157,6 +1160,29 @@ function ConversationCard({
         {conversation.summary}
       </Text>
 
+      {meetingNote ? (
+        <View
+          style={[
+            styles.notePreviewCard,
+            {
+              backgroundColor: colors.surface,
+              borderColor: colors.borderLight,
+            },
+          ]}
+        >
+          <Ionicons name="document-text-outline" size={14} color={colors.textSecondary} />
+          <Text
+            numberOfLines={2}
+            style={[
+              styles.notePreviewText,
+              { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+            ]}
+          >
+            {meetingNote}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.convoFooter}>
         <View style={[styles.sentimentChip, { backgroundColor: sentimentColor + "15" }]}>
           <View style={[styles.sentimentDot, { backgroundColor: sentimentColor }]} />
@@ -1196,6 +1222,11 @@ export default function SalesScreen() {
   const [isTranscribingFile, setIsTranscribingFile] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [audioUri, setAudioUri] = useState<string | null>(null);
+  const [meetingNotesDraftByTaskId, setMeetingNotesDraftByTaskId] = useState<Record<string, string>>({});
+  const [meetingNotesSavingTaskId, setMeetingNotesSavingTaskId] = useState<string | null>(null);
+  const [departureNotesTask, setDepartureNotesTask] = useState<Task | null>(null);
+  const [departureNotesDraft, setDepartureNotesDraft] = useState("");
+  const [departureNotesModalVisible, setDepartureNotesModalVisible] = useState(false);
   const [recordError, setRecordError] = useState<string | null>(null);
   const [recognitionAvailable, setRecognitionAvailable] = useState(true);
   const [requestBusy, setRequestBusy] = useState(false);
@@ -1386,6 +1417,28 @@ export default function SalesScreen() {
   useEffect(() => {
     void loadPosData();
   }, [loadPosData]);
+
+  useEffect(() => {
+    setMeetingNotesDraftByTaskId((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const task of tasks) {
+        if (task.taskType !== "field_visit") continue;
+        const linkedConversation = task.autoCaptureConversationId
+          ? conversationsById.get(task.autoCaptureConversationId)
+          : null;
+        const seedValue =
+          task.meetingNotes?.trim() ||
+          linkedConversation?.notes?.trim() ||
+          "";
+        if (next[task.id] === undefined) {
+          next[task.id] = seedValue;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [conversationsById, tasks]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -3018,6 +3071,116 @@ export default function SalesScreen() {
     [isAdminViewer, loadData, saveConversation, stopRecordingAndWait, user, visitActionTaskId]
   );
 
+  const saveVisitMeetingNotes = useCallback(
+    async (task: Task) => {
+      if (!user || isAdminViewer) return;
+      if (!task.autoCaptureConversationId) {
+        Alert.alert("Meeting Missing", "End the meeting first to save notes.");
+        return;
+      }
+
+      const normalizedNotes = (meetingNotesDraftByTaskId[task.id] || "").trim();
+      const currentTaskNotes = task.meetingNotes?.trim() || "";
+      const currentConversationNotes =
+        conversationsById.get(task.autoCaptureConversationId)?.notes?.trim() || "";
+
+      if (normalizedNotes === currentTaskNotes && normalizedNotes === currentConversationNotes) {
+        return;
+      }
+
+      setMeetingNotesSavingTaskId(task.id);
+      try {
+        const nowIso = new Date().toISOString();
+        await updateTask(task.id, {
+          meetingNotes: normalizedNotes || null,
+          meetingNotesUpdatedAt: normalizedNotes ? nowIso : null,
+        });
+        await updateConversation(task.autoCaptureConversationId, {
+          notes: normalizedNotes || undefined,
+        });
+        await addAuditLog({
+          id: createLocalId("audit"),
+          userId: user.id,
+          userName: user.name,
+          action: "Meeting Notes Updated",
+          details: `${user.name} updated meeting notes for ${getVisitLabel(task)}.`,
+          timestamp: nowIso,
+          module: "Sales Intelligence",
+        });
+        await loadData();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } catch (error) {
+        Alert.alert(
+          "Unable to Save Notes",
+          error instanceof Error ? error.message : "Meeting notes could not be saved."
+        );
+      } finally {
+        setMeetingNotesSavingTaskId(null);
+      }
+    },
+    [conversationsById, isAdminViewer, loadData, meetingNotesDraftByTaskId, user]
+  );
+
+  const closeDepartureNotesModal = useCallback(() => {
+    if (visitActionTaskId) return;
+    setDepartureNotesModalVisible(false);
+    setDepartureNotesTask(null);
+    setDepartureNotesDraft("");
+  }, [visitActionTaskId]);
+
+  const openDepartureNotesModal = useCallback((task: Task) => {
+    setDepartureNotesTask(task);
+    setDepartureNotesDraft(task.visitDepartureNotes?.trim() ?? "");
+    setDepartureNotesModalVisible(true);
+  }, []);
+
+  const confirmVisitDepartureWithNotes = useCallback(async () => {
+    if (!user || isAdminViewer || !departureNotesTask) return;
+    if (visitActionTaskId) return;
+    setVisitActionTaskId(departureNotesTask.id);
+    try {
+      const nowIso = new Date().toISOString();
+      const normalizedNote = departureNotesDraft.trim();
+      await updateTask(departureNotesTask.id, {
+        status: "completed",
+        departureAt: nowIso,
+        arrivalAt: departureNotesTask.arrivalAt ?? nowIso,
+        visitDepartureNotes: normalizedNote || null,
+        visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
+        autoCaptureRecordingActive: false,
+      });
+      await addAuditLog({
+        id: createLocalId("audit"),
+        userId: user.id,
+        userName: user.name,
+        action: "Visit Completed",
+        details: `${user.name} departed from ${getVisitLabel(departureNotesTask)}${normalizedNote ? " with departure notes." : "."}`,
+        timestamp: nowIso,
+        module: "Sales Intelligence",
+      });
+      setActiveVisitTaskId(null);
+      setDepartureNotesModalVisible(false);
+      setDepartureNotesTask(null);
+      setDepartureNotesDraft("");
+      await loadData();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      Alert.alert(
+        "Unable to Complete Visit",
+        error instanceof Error ? error.message : "Failed to mark departure."
+      );
+    } finally {
+      setVisitActionTaskId(null);
+    }
+  }, [
+    departureNotesDraft,
+    departureNotesTask,
+    isAdminViewer,
+    loadData,
+    user,
+    visitActionTaskId,
+  ]);
+
   const handleVisitDeparture = useCallback(
     async (task: Task) => {
       if (!user || isAdminViewer) return;
@@ -3030,37 +3193,9 @@ export default function SalesScreen() {
         Alert.alert("Meeting Not Ended", "Please tap Meeting End before departure.");
         return;
       }
-      setVisitActionTaskId(task.id);
-      try {
-        const nowIso = new Date().toISOString();
-        await updateTask(task.id, {
-          status: "completed",
-          departureAt: nowIso,
-          arrivalAt: task.arrivalAt ?? nowIso,
-          autoCaptureRecordingActive: false,
-        });
-        await addAuditLog({
-          id: createLocalId("audit"),
-          userId: user.id,
-          userName: user.name,
-          action: "Visit Completed",
-          details: `${user.name} departed from ${getVisitLabel(task)}.`,
-          timestamp: nowIso,
-          module: "Sales Intelligence",
-        });
-        setActiveVisitTaskId(null);
-        await loadData();
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      } catch (error) {
-        Alert.alert(
-          "Unable to Complete Visit",
-          error instanceof Error ? error.message : "Failed to mark departure."
-        );
-      } finally {
-        setVisitActionTaskId(null);
-      }
+      openDepartureNotesModal(task);
     },
-    [isAdminViewer, loadData, user, visitActionTaskId]
+    [isAdminViewer, openDepartureNotesModal, user, visitActionTaskId]
   );
 
   const voicePulseColor =
@@ -3100,6 +3235,10 @@ export default function SalesScreen() {
   const activeVisitTask = useMemo(
     () => todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress") ?? null,
     [todaysVisitTasks]
+  );
+  const conversationsById = useMemo(
+    () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
+    [conversations]
   );
   const remainingVisits = Math.max(visitSummary.total - visitSummary.completed, 0);
   const salesHeroMeta = activeVisitTask
@@ -4052,9 +4191,34 @@ export default function SalesScreen() {
 
 
             <Animated.View entering={FadeInDown.duration(350).delay(70)}>
-              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                {isAdminViewer ? "Assigned Field Visits" : "Today's Visits"}
-              </Text>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                  {isAdminViewer ? "Assigned Field Visits" : "Today's Visits"}
+                </Text>
+                {!isAdminViewer ? (
+                  <Pressable
+                    onPress={() => router.push("/visit-notes")}
+                    style={({ pressed }) => [
+                      styles.reviewNotesButton,
+                      {
+                        backgroundColor: colors.surface,
+                        borderColor: colors.border,
+                        opacity: pressed ? 0.8 : 1,
+                      },
+                    ]}
+                  >
+                    <Ionicons name="document-text-outline" size={14} color={colors.primary} />
+                    <Text
+                      style={[
+                        styles.reviewNotesButtonText,
+                        { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                      ]}
+                    >
+                      Review Notes
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
               <View style={[styles.timelineCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
                 {todaysVisitTasks.length ? (
                   todaysVisitTasks.map((task, idx) => {
@@ -4068,6 +4232,18 @@ export default function SalesScreen() {
                     const canMeetingEnd = !isAdminViewer && status === "in_progress" && recordingActive;
                     const canDepart =
                       !isAdminViewer && status === "in_progress" && !recordingActive && Boolean(task.autoCaptureConversationId);
+                    const canEditMeetingNotes =
+                      !isAdminViewer && !recordingActive && Boolean(task.autoCaptureConversationId);
+                    const meetingNotesValue = meetingNotesDraftByTaskId[task.id] ?? "";
+                    const normalizedMeetingNotes = meetingNotesValue.trim();
+                    const storedMeetingNotes = (
+                      task.meetingNotes?.trim() ||
+                      (task.autoCaptureConversationId
+                        ? conversationsById.get(task.autoCaptureConversationId)?.notes?.trim()
+                        : "") ||
+                      ""
+                    ).trim();
+                    const hasMeetingNotesChanges = normalizedMeetingNotes !== storedMeetingNotes;
                     const recordingStartAt = task.autoCaptureRecordingStartedAt || task.arrivalAt || null;
                     const recordingStopAt = task.autoCaptureRecordingStoppedAt || task.departureAt || null;
                     const recordingHint =
@@ -4125,6 +4301,114 @@ export default function SalesScreen() {
                                   }`
                                 : "Pending"}
                           </Text>
+                          {task.visitDepartureNotes?.trim() ? (
+                            <View
+                              style={[
+                                styles.visitNotesPreview,
+                                { backgroundColor: colors.surface, borderColor: colors.borderLight },
+                              ]}
+                            >
+                              <Ionicons name="create-outline" size={14} color={colors.primary} />
+                              <Text
+                                numberOfLines={2}
+                                style={[
+                                  styles.visitNotesPreviewText,
+                                  { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                              ]}
+                            >
+                              {task.visitDepartureNotes.trim()}
+                              </Text>
+                            </View>
+                          ) : null}
+                          {canEditMeetingNotes ? (
+                            <View
+                              style={[
+                                styles.inlineMeetingNotesCard,
+                                { backgroundColor: colors.surface, borderColor: colors.border },
+                              ]}
+                            >
+                              <View style={styles.inlineMeetingNotesHeader}>
+                                <Text
+                                  style={[
+                                    styles.inlineMeetingNotesTitle,
+                                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                  ]}
+                                >
+                                  Meeting Notes
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.inlineMeetingNotesMeta,
+                                    { color: colors.textTertiary, fontFamily: "Inter_500Medium" },
+                                  ]}
+                                >
+                                  Add notes before departure
+                                </Text>
+                              </View>
+                              <TextInput
+                                multiline
+                                maxLength={320}
+                                value={meetingNotesValue}
+                                onChangeText={(text) =>
+                                  setMeetingNotesDraftByTaskId((current) => ({
+                                    ...current,
+                                    [task.id]: text,
+                                  }))
+                                }
+                                placeholder="Write remarks, dates, next step, pricing discussion, or follow-up note."
+                                placeholderTextColor={colors.textTertiary}
+                                textAlignVertical="top"
+                                style={[
+                                  styles.inlineMeetingNotesInput,
+                                  {
+                                    color: colors.text,
+                                    backgroundColor: colors.backgroundElevated,
+                                    borderColor: colors.borderLight,
+                                    fontFamily: "Inter_500Medium",
+                                  },
+                                ]}
+                              />
+                              <View style={styles.inlineMeetingNotesFooter}>
+                                <Text
+                                  style={[
+                                    styles.inlineMeetingNotesCount,
+                                    { color: colors.textTertiary, fontFamily: "Inter_500Medium" },
+                                  ]}
+                                >
+                                  {normalizedMeetingNotes
+                                    ? `${normalizedMeetingNotes.length}/320`
+                                    : "Optional"}
+                                </Text>
+                                <Pressable
+                                  onPress={() => void saveVisitMeetingNotes(task)}
+                                  disabled={meetingNotesSavingTaskId === task.id || !hasMeetingNotesChanges}
+                                  style={({ pressed }) => [
+                                    styles.inlineMeetingNotesSaveButton,
+                                    {
+                                      backgroundColor: colors.primary,
+                                      opacity:
+                                        pressed ||
+                                        meetingNotesSavingTaskId === task.id ||
+                                        !hasMeetingNotesChanges
+                                          ? 0.6
+                                          : 1,
+                                    },
+                                  ]}
+                                >
+                                  {meetingNotesSavingTaskId === task.id ? (
+                                    <ActivityIndicator size="small" color="#FFFFFF" />
+                                  ) : (
+                                    <>
+                                      <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+                                      <Text style={styles.inlineMeetingNotesSaveButtonText}>
+                                        Save Note
+                                      </Text>
+                                    </>
+                                  )}
+                                </Pressable>
+                              </View>
+                            </View>
+                          ) : null}
                           {isAdminViewer && recordingHint ? (
                             <Text
                               style={[
@@ -4938,6 +5222,119 @@ export default function SalesScreen() {
           ) : null
         }
       />
+      <Modal
+        visible={departureNotesModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeDepartureNotesModal}
+      >
+        <View style={styles.departureNotesOverlay}>
+          <View
+            style={[
+              styles.departureNotesCard,
+              { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+            ]}
+          >
+            <Text
+              style={[
+                styles.departureNotesTitle,
+                { color: colors.text, fontFamily: "Inter_700Bold" },
+              ]}
+            >
+              Departure Notes
+            </Text>
+            <Text
+              style={[
+                styles.departureNotesMeta,
+                { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" },
+              ]}
+            >
+              {departureNotesTask ? getVisitLabel(departureNotesTask) : "Visit"}
+            </Text>
+            <Text
+              style={[
+                styles.departureNotesHint,
+                { color: colors.textTertiary, fontFamily: "Inter_400Regular" },
+              ]}
+            >
+              Add any dates, remarks, commitments, or follow-up details. This note stays attached to the visit for later review.
+            </Text>
+            <TextInput
+              multiline
+              maxLength={600}
+              value={departureNotesDraft}
+              onChangeText={setDepartureNotesDraft}
+              placeholder="Example: Follow up on 15 Apr. Client asked for revised pricing and product brochure."
+              placeholderTextColor={colors.textTertiary}
+              textAlignVertical="top"
+              style={[
+                styles.departureNotesInput,
+                {
+                  color: colors.text,
+                  backgroundColor: colors.surface,
+                  borderColor: colors.border,
+                  fontFamily: "Inter_500Medium",
+                },
+              ]}
+            />
+            <View style={styles.departureNotesFooter}>
+              <Text
+                style={[
+                  styles.departureNotesCount,
+                  { color: colors.textTertiary, fontFamily: "Inter_500Medium" },
+                ]}
+              >
+                {departureNotesDraft.trim()
+                  ? `${departureNotesDraft.trim().length}/600`
+                  : "Optional note"}
+              </Text>
+              <View style={styles.departureNotesActions}>
+                <Pressable
+                  onPress={closeDepartureNotesModal}
+                  disabled={Boolean(visitActionTaskId)}
+                  style={({ pressed }) => [
+                    styles.departureNotesSecondaryButton,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      opacity: pressed || visitActionTaskId ? 0.68 : 1,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.departureNotesSecondaryButtonText,
+                      { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" },
+                    ]}
+                  >
+                    Cancel
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void confirmVisitDepartureWithNotes()}
+                  disabled={Boolean(visitActionTaskId)}
+                  style={({ pressed }) => [
+                    styles.departureNotesPrimaryButton,
+                    {
+                      backgroundColor: colors.danger,
+                      opacity: pressed || visitActionTaskId ? 0.72 : 1,
+                    },
+                  ]}
+                >
+                  {visitActionTaskId === departureNotesTask?.id ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <>
+                      <Ionicons name="checkmark-circle-outline" size={16} color="#FFFFFF" />
+                      <Text style={styles.departureNotesPrimaryButtonText}>Save & Depart</Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </AppCanvas>
   );
 }
@@ -5261,6 +5658,25 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: "Inter_500Medium",
   },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 12,
+  },
+  reviewNotesButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  reviewNotesButtonText: {
+    fontSize: 12.5,
+  },
   salesMapCard: {
     borderRadius: 16,
     borderWidth: 1,
@@ -5386,6 +5802,73 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
   },
+  visitNotesPreview: {
+    marginTop: 4,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  visitNotesPreviewText: {
+    flex: 1,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  inlineMeetingNotesCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 10,
+    gap: 8,
+  },
+  inlineMeetingNotesHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  inlineMeetingNotesTitle: {
+    fontSize: 13.5,
+  },
+  inlineMeetingNotesMeta: {
+    fontSize: 11.5,
+  },
+  inlineMeetingNotesInput: {
+    minHeight: 88,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 12.5,
+    lineHeight: 18,
+    textAlignVertical: "top",
+  },
+  inlineMeetingNotesFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  inlineMeetingNotesCount: {
+    fontSize: 11.5,
+  },
+  inlineMeetingNotesSaveButton: {
+    minHeight: 34,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 6,
+  },
+  inlineMeetingNotesSaveButtonText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+  },
   emptyTimeline: {
     minHeight: 86,
     alignItems: "center",
@@ -5408,6 +5891,76 @@ const styles = StyleSheet.create({
   visitActionButtonText: {
     color: "#FFFFFF",
     fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+  },
+  departureNotesOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(7, 16, 30, 0.48)",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+  },
+  departureNotesCard: {
+    borderWidth: 1,
+    borderRadius: 22,
+    padding: 18,
+    gap: 10,
+  },
+  departureNotesTitle: {
+    fontSize: 20,
+    letterSpacing: -0.4,
+  },
+  departureNotesMeta: {
+    fontSize: 13,
+  },
+  departureNotesHint: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  departureNotesInput: {
+    minHeight: 140,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 13,
+    textAlignVertical: "top",
+  },
+  departureNotesFooter: {
+    gap: 12,
+  },
+  departureNotesCount: {
+    fontSize: 11.5,
+  },
+  departureNotesActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  departureNotesSecondaryButton: {
+    minHeight: 42,
+    minWidth: 90,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  departureNotesSecondaryButtonText: {
+    fontSize: 13,
+  },
+  departureNotesPrimaryButton: {
+    minHeight: 42,
+    minWidth: 132,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  departureNotesPrimaryButtonText: {
+    color: "#FFFFFF",
+    fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
   routeHintCard: {
@@ -5699,6 +6252,21 @@ const styles = StyleSheet.create({
   customerName: { fontSize: 15 },
   salesperson: { fontSize: 12 },
   summary: { fontSize: 13, lineHeight: 18 },
+  notePreviewCard: {
+    minHeight: 36,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  notePreviewText: {
+    flex: 1,
+    fontSize: 11.5,
+    lineHeight: 16,
+  },
   convoFooter: {
     flexDirection: "row",
     alignItems: "center",

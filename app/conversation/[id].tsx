@@ -33,6 +33,16 @@ import {
 } from "@/lib/ai-sales-analysis";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
 
+function normalizeConversationNotes(value: string | undefined | null): string {
+  if (!value) return "";
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 function ScoreGauge({
   label,
   score,
@@ -404,6 +414,8 @@ export default function ConversationDetailScreen() {
   }
 
   const canViewAnalysis = user?.role === "admin";
+  const normalizedStoredNotes = normalizeConversationNotes(convo.notes);
+  const showConversationNotes = canViewAnalysis && Boolean(normalizedStoredNotes);
 
   const onPlaybackStatusUpdate = (status: AVPlaybackStatus) => {
     if (!status.isLoaded) {
@@ -568,9 +580,39 @@ export default function ConversationDetailScreen() {
           </>
         ) : null}
 
+        {showConversationNotes ? (
         <Animated.View entering={FadeInDown.duration(400).delay(400)}>
           <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            {canViewAnalysis ? "Summary" : "Conversation Notes"}
+            Meeting Notes
+          </Text>
+          <View style={[styles.textCard, styles.notesCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={styles.notesHeaderRow}>
+              <View style={[styles.notesBadge, { backgroundColor: colors.primary + "14", borderColor: colors.primary + "26" }]}>
+                <Ionicons name="sparkles-outline" size={14} color={colors.primary} />
+                <Text style={[styles.notesBadgeText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                  Attached to conversation
+                </Text>
+              </View>
+              <Text style={[styles.notesHelperText, { color: colors.textTertiary, fontFamily: "Inter_500Medium" }]}>
+                Interest, objection, next step
+              </Text>
+            </View>
+
+            {normalizedStoredNotes ? (
+              <View style={[styles.notesReadOnlyCard, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}>
+                <Ionicons name="document-text-outline" size={16} color={colors.textSecondary} />
+                <Text style={[styles.summaryText, styles.notesReadOnlyText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                  {normalizedStoredNotes}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        </Animated.View>
+        ) : null}
+
+        <Animated.View entering={FadeInDown.duration(400).delay(430)}>
+          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+            {canViewAnalysis ? "AI Summary" : "Conversation Summary"}
           </Text>
           <View style={[styles.textCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <Text style={[styles.summaryText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
@@ -706,7 +748,7 @@ export default function ConversationDetailScreen() {
         </Animated.View>
 
         {canViewAnalysis && convo.transcript ? (
-          <Animated.View entering={FadeInDown.duration(400).delay(430)}>
+          <Animated.View entering={FadeInDown.duration(400).delay(460)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               Transcript
             </Text>
@@ -831,6 +873,106 @@ const styles = StyleSheet.create({
   gaugeFill: { height: "100%", borderRadius: 4 },
   sectionTitle: { fontSize: 16, marginBottom: 10 },
   textCard: { borderRadius: 16, padding: 16, marginBottom: 20, borderWidth: 1 },
+  notesCard: {
+    gap: 12,
+  },
+  notesHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  notesBadge: {
+    minHeight: 30,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  notesBadgeText: {
+    fontSize: 11,
+  },
+  notesHelperText: {
+    fontSize: 11,
+  },
+  quickNoteRow: {
+    gap: 8,
+    paddingRight: 6,
+  },
+  quickNoteChip: {
+    minHeight: 32,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  quickNoteChipText: {
+    fontSize: 11.5,
+  },
+  notesComposer: {
+    minHeight: 86,
+    borderRadius: 16,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  notesInput: {
+    flex: 1,
+    minHeight: 58,
+    fontSize: 13,
+    lineHeight: 18,
+    paddingTop: 0,
+    paddingBottom: 0,
+  },
+  notesFooterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  notesMetaText: {
+    flex: 1,
+    fontSize: 11.5,
+  },
+  notesSaveButton: {
+    minHeight: 36,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  notesSaveButtonText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+  },
+  notesReadOnlyCard: {
+    minHeight: 54,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  notesReadOnlyText: {
+    flex: 1,
+  },
+  notesEmptyText: {
+    flex: 1,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
   summaryText: { fontSize: 14, lineHeight: 20 },
   audioButton: {
     marginTop: 14,

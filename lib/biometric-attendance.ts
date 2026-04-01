@@ -5,7 +5,11 @@ export interface BiometricSupportStatus {
   available: boolean;
   enrolled: boolean;
   method: string | null;
+  supportedTypes?: LocalAuthentication.AuthenticationType[];
+  hasDeviceCredential?: boolean;
+  enrolledLevel?: LocalAuthentication.SecurityLevel;
   reason?: string;
+  errorCode?: string;
 }
 
 export interface BiometricVerificationResult {
@@ -16,9 +20,30 @@ export interface BiometricVerificationResult {
   cachedForToday?: boolean;
 }
 
-function pickPrimaryMethod(types: LocalAuthentication.AuthenticationType[]): string | null {
+function pickPrimaryMethod(
+  types: LocalAuthentication.AuthenticationType[],
+  enrolledLevel: LocalAuthentication.SecurityLevel
+): string | null {
+  const supportedBiometricMethods: string[] = [];
+
   if (types.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
-    return "fingerprint";
+    supportedBiometricMethods.push("fingerprint");
+  }
+  if (types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+    supportedBiometricMethods.push("face");
+  }
+  if (types.includes(LocalAuthentication.AuthenticationType.IRIS)) {
+    supportedBiometricMethods.push("iris");
+  }
+
+  if (supportedBiometricMethods.length === 1) {
+    return supportedBiometricMethods[0];
+  }
+  if (supportedBiometricMethods.length > 1) {
+    return "biometric";
+  }
+  if (enrolledLevel === LocalAuthentication.SecurityLevel.SECRET) {
+    return "device_credential";
   }
   return null;
 }
@@ -57,13 +82,13 @@ async function setDailyVerificationStore(store: DailyVerificationStore): Promise
 
 function mapAuthErrorMessage(code: string): string {
   if (code === "passcode_not_set") {
-    return "Phone screen lock is not set. Please set phone PIN/pattern or fingerprint in device settings.";
+    return "Phone screen lock is not set. Please set device PIN, pattern, password, face unlock, or fingerprint in device settings.";
   }
   if (code === "not_enrolled") {
-    return "No fingerprint is enrolled. Please enroll fingerprint in phone settings.";
+    return "No device authentication is set up. Please enable face unlock, fingerprint, iris, or device PIN/password in phone settings.";
   }
   if (code === "not_available") {
-    return "Biometric authentication is not available on this device.";
+    return "Device authentication is not available on this device.";
   }
   if (code === "user_cancel" || code === "system_cancel" || code === "app_cancel") {
     return "Verification was cancelled.";
@@ -76,44 +101,62 @@ function mapAuthErrorMessage(code: string): string {
 
 export async function getBiometricSupportStatus(): Promise<BiometricSupportStatus> {
   try {
-    const [hasHardware, enrolled, supportedTypes] = await Promise.all([
+    const [hasHardware, enrolled, supportedTypes, enrolledLevel] = await Promise.all([
       LocalAuthentication.hasHardwareAsync(),
       LocalAuthentication.isEnrolledAsync(),
       LocalAuthentication.supportedAuthenticationTypesAsync(),
+      LocalAuthentication.getEnrolledLevelAsync(),
     ]);
-    const method = pickPrimaryMethod(supportedTypes);
+    const method = pickPrimaryMethod(supportedTypes, enrolledLevel);
+    const hasDeviceCredential = enrolledLevel === LocalAuthentication.SecurityLevel.SECRET;
+    const hasKnownBiometricType = supportedTypes.length > 0;
 
-    if (!hasHardware) {
+    if (enrolled && method) {
       return {
-        available: false,
-        enrolled: false,
-        method: null,
-        reason: "Biometric hardware is not available on this device.",
+        available: true,
+        enrolled: true,
+        method,
+        supportedTypes,
+        hasDeviceCredential,
+        enrolledLevel,
       };
     }
 
-    if (!enrolled) {
+    if (hasDeviceCredential) {
       return {
         available: true,
-        enrolled: false,
-        method: null,
-        reason: "No fingerprint is enrolled. Please enroll fingerprint in phone settings.",
+        enrolled: true,
+        method: "device_credential",
+        supportedTypes,
+        hasDeviceCredential,
+        enrolledLevel,
       };
     }
 
-    if (!method) {
+    if (hasHardware || hasKnownBiometricType) {
       return {
         available: true,
         enrolled: false,
-        method: null,
-        reason: "Fingerprint is not available on this device.",
+        method,
+        supportedTypes,
+        hasDeviceCredential,
+        enrolledLevel,
+        reason:
+          "No usable device authentication is set up. Please enable face unlock, fingerprint, iris, or device PIN/password in phone settings.",
+        errorCode: "not_enrolled",
       };
     }
 
     return {
-      available: true,
-      enrolled: true,
-      method,
+      available: false,
+      enrolled: false,
+      method: null,
+      supportedTypes,
+      hasDeviceCredential,
+      enrolledLevel,
+      reason:
+        "This device does not have a supported biometric sensor or screen lock configured for secure verification.",
+      errorCode: "not_available",
     };
   } catch (error) {
     return {
@@ -121,8 +164,57 @@ export async function getBiometricSupportStatus(): Promise<BiometricSupportStatu
       enrolled: false,
       method: null,
       reason: error instanceof Error ? error.message : "Unable to verify biometric capability.",
+      errorCode: "auth_exception",
     };
   }
+}
+
+async function authenticateWithPreferredMethod(
+  action: "checkin" | "checkout",
+  method: "fingerprint" | "face" | "device_credential",
+  options?: { allowDeviceFallback?: boolean; strongOnly?: boolean }
+): Promise<BiometricVerificationResult> {
+  const isCheckIn = action === "checkin";
+  const promptMessage = isCheckIn ? "Verify identity for Check-In" : "Verify identity for Check-Out";
+  const basePromptDescription =
+    "Secure attendance uses your device authentication to confirm identity.";
+
+  const response = await LocalAuthentication.authenticateAsync({
+    promptMessage,
+    promptSubtitle:
+      method === "fingerprint"
+        ? "Use fingerprint to verify attendance"
+        : method === "face"
+          ? "Use face unlock to verify attendance"
+          : "Use your device PIN, pattern, or password",
+    promptDescription:
+      method === "fingerprint"
+        ? `${basePromptDescription} You can use fingerprint or choose your phone PIN, pattern, or password.`
+        : method === "face"
+          ? `${basePromptDescription} You can use face unlock or choose your phone PIN, pattern, or password.`
+          : `${basePromptDescription} Biometric unlock is unavailable, so device credential will be used.`,
+    cancelLabel: "Cancel",
+    fallbackLabel: "Use PIN / Password",
+    disableDeviceFallback: options?.allowDeviceFallback === true ? false : true,
+    requireConfirmation: true,
+    biometricsSecurityLevel: options?.strongOnly ? "strong" : "weak",
+  });
+
+  if (response.success) {
+    return {
+      success: true,
+      method,
+      cachedForToday: false,
+    };
+  }
+
+  const code = typeof response.error === "string" ? response.error : "authentication_failed";
+  return {
+    success: false,
+    method,
+    errorCode: code,
+    errorMessage: mapAuthErrorMessage(code),
+  };
 }
 
 export async function verifyBiometricForAttendance(
@@ -149,8 +241,8 @@ export async function verifyBiometricForAttendance(
     return {
       success: false,
       method: support.method,
-      errorCode: "biometric_unavailable",
-      errorMessage: support.reason ?? "Biometric auth is not available on this device.",
+      errorCode: support.errorCode ?? "biometric_unavailable",
+      errorMessage: support.reason ?? "Device authentication is not available on this device.",
     };
   }
 
@@ -158,21 +250,18 @@ export async function verifyBiometricForAttendance(
     return {
       success: false,
       method: support.method,
-      errorCode: "not_enrolled",
-      errorMessage: mapAuthErrorMessage("not_enrolled"),
+      errorCode: support.errorCode ?? "not_enrolled",
+      errorMessage: support.reason ?? mapAuthErrorMessage("not_enrolled"),
     };
   }
 
   try {
-    const response = await LocalAuthentication.authenticateAsync({
-      promptMessage:
-        action === "checkin" ? "Verify fingerprint for Check-In" : "Verify fingerprint for Check-Out",
-      cancelLabel: "Cancel",
-      disableDeviceFallback: true,
-    });
+    const supportedTypes = support.supportedTypes ?? [];
+    const hasFingerprint = supportedTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT);
+    const hasFace = supportedTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION);
+    const hasDeviceCredential = support.hasDeviceCredential ?? support.method === "device_credential";
 
-    if (response.success) {
-      const verifiedMethod = support.method ?? (support.enrolled ? "fingerprint" : "device_credential");
+    const persistSuccess = async (verifiedMethod: string) => {
       if (enforceDaily && userId) {
         const store = await getDailyVerificationStore();
         store[userId] = {
@@ -183,16 +272,51 @@ export async function verifyBiometricForAttendance(
         await setDailyVerificationStore(store);
       }
       return {
-        success: true,
+        success: true as const,
         method: verifiedMethod,
         cachedForToday: false,
       };
+    };
+
+    let result: BiometricVerificationResult | null = null;
+
+    if (hasFingerprint) {
+      result = await authenticateWithPreferredMethod(action, "fingerprint", {
+        allowDeviceFallback: true,
+        strongOnly: true,
+      });
+      if (result.success) {
+        return persistSuccess(result.method ?? "fingerprint");
+      }
+      return result;
     }
 
-    const code = typeof response.error === "string" ? response.error : "auth_failed";
+    if (hasFace) {
+      result = await authenticateWithPreferredMethod(action, "face", {
+        allowDeviceFallback: true,
+        strongOnly: false,
+      });
+      if (result.success) {
+        return persistSuccess(result.method ?? "face");
+      }
+      return result;
+    }
+
+    if (hasDeviceCredential) {
+      result = await authenticateWithPreferredMethod(action, "device_credential", {
+        allowDeviceFallback: true,
+        strongOnly: false,
+      });
+    }
+
+    if (result?.success) {
+      return persistSuccess(result.method ?? support.method ?? "device_credential");
+    }
+
+    const code = result?.errorCode ?? "authentication_failed";
     return {
       success: false,
-      method: support.method,
+      method: result?.method ?? support.method,
       errorCode: code,
       errorMessage: mapAuthErrorMessage(code),
     };
@@ -201,7 +325,7 @@ export async function verifyBiometricForAttendance(
       success: false,
       method: support.method,
       errorCode: "auth_exception",
-      errorMessage: error instanceof Error ? error.message : "Biometric authentication failed.",
+      errorMessage: error instanceof Error ? error.message : "Device authentication failed.",
     };
   }
 }

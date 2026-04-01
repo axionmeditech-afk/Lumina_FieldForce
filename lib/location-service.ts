@@ -239,8 +239,16 @@ export async function ensureLocationServicesEnabled(): Promise<boolean> {
 export async function getLastKnownLocationSafe(
   options?: { requiredAccuracy?: number; maxAgeMs?: number }
 ): Promise<Location.LocationObject | null> {
-  return Location.getLastKnownPositionAsync({
-    maxAge: options?.maxAgeMs ?? 5 * 60 * 1000,
-    requiredAccuracy: options?.requiredAccuracy ?? 120,
-  });
+  try {
+    const foregroundPermission = await Location.getForegroundPermissionsAsync();
+    if (!foregroundPermission.granted) {
+      return null;
+    }
+    return await Location.getLastKnownPositionAsync({
+      maxAge: options?.maxAgeMs ?? 5 * 60 * 1000,
+      requiredAccuracy: options?.requiredAccuracy ?? 120,
+    });
+  } catch {
+    return null;
+  }
 }

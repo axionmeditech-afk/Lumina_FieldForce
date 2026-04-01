@@ -113,6 +113,22 @@ type HeroBadge = {
   iconLib?: "ion" | "mci";
 };
 
+type DashboardSection =
+  | {
+      id: string;
+      kind: "metrics" | "quickLinks" | "support";
+      title: string;
+      subtitle: string;
+      delay: number;
+    }
+  | {
+      id: string;
+      kind: "visits" | "pulse" | "activity" | "footer";
+      title?: string;
+      subtitle?: string;
+      delay: number;
+    };
+
 const LATE_THRESHOLD_HOUR = 9;
 const LATE_THRESHOLD_MINUTE = 45;
 const DASHBOARD_POLL_INTERVAL_MS = 15_000;
@@ -193,6 +209,27 @@ function getGreetingLabel(): string {
   if (hour < 12) return "Good morning";
   if (hour < 17) return "Good afternoon";
   return "Good evening";
+}
+
+function getSectionEyebrow(sectionId: DashboardSection["id"], isSalesperson: boolean): string {
+  switch (sectionId) {
+    case "metrics":
+      return isSalesperson ? "TODAY" : "OVERVIEW";
+    case "visits":
+      return "FIELD FLOW";
+    case "pulse":
+      return "OPERATIONS";
+    case "quick_links":
+      return "WORKSPACE";
+    case "support":
+      return "SUPPORT";
+    case "activity":
+      return "LIVE LOG";
+    case "footer":
+      return "SUMMARY";
+    default:
+      return "";
+  }
 }
 
 function useLenisScrollEngine(scrollRef: React.RefObject<any>): void {
@@ -1033,6 +1070,92 @@ export default function DashboardScreen() {
     ]
   );
 
+  const dashboardSections = useMemo<DashboardSection[]>(
+    () =>
+      isSalesperson
+        ? [
+            {
+              id: "metrics",
+              kind: "metrics",
+              title: "My Progress",
+              subtitle: "Today's visits, tasks, and alerts",
+              delay: 40,
+            },
+            {
+              id: "visits",
+              kind: "visits",
+              title: "Today's Visits",
+              subtitle: "Your field stops and route flow",
+              delay: 120,
+            },
+            {
+              id: "quick_links",
+              kind: "quickLinks",
+              title: "My Shortcuts",
+              subtitle: "Tools you use every day",
+              delay: 170,
+            },
+            {
+              id: "support",
+              kind: "support",
+              title: "My Support",
+              subtitle: "Your open requests and updates",
+              delay: 220,
+            },
+          ]
+        : [
+            {
+              id: "metrics",
+              kind: "metrics",
+              title: "Live Metrics",
+              subtitle: "Real-time operational health",
+              delay: 40,
+            },
+            {
+              id: "pulse",
+              kind: "pulse",
+              title: "Operational Pulse",
+              subtitle: "Attendance + execution trend",
+              delay: 120,
+            },
+            {
+              id: "quick_links",
+              kind: "quickLinks",
+              title: "Quick Actions",
+              subtitle: "Jump directly into modules",
+              delay: 170,
+            },
+            {
+              id: "support",
+              kind: "support",
+              title: "Support Priority",
+              subtitle: "Open threads requiring attention",
+              delay: 220,
+            },
+            {
+              id: "activity",
+              kind: "activity",
+              title: "Activity Timeline",
+              subtitle: "Latest actions across operations",
+              delay: 260,
+            },
+            {
+              id: "footer",
+              kind: "footer",
+              delay: 300,
+            },
+          ],
+    [isSalesperson]
+  );
+  const metricsSection = dashboardSections.find((section) => section.kind === "metrics") ?? null;
+  const visitsSection = dashboardSections.find((section) => section.kind === "visits") ?? null;
+  const pulseSection = dashboardSections.find((section) => section.kind === "pulse") ?? null;
+  const quickLinksSection =
+    dashboardSections.find((section) => section.kind === "quickLinks") ?? null;
+  const supportSection = dashboardSections.find((section) => section.kind === "support") ?? null;
+  const activitySection = dashboardSections.find((section) => section.kind === "activity") ?? null;
+  const footerSection = dashboardSections.find((section) => section.kind === "footer") ?? null;
+
   if (!user) {
     return (
       <AppCanvas>
@@ -1203,20 +1326,24 @@ export default function DashboardScreen() {
           ))}
         </View>
 
-        <Animated.View entering={FadeInDown.duration(420).delay(40)} style={styles.sectionWrap}>
+        {metricsSection ? (
+        <Animated.View entering={FadeInDown.duration(420).delay(metricsSection.delay)} style={styles.sectionWrap}>
           <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+              {getSectionEyebrow(metricsSection.id, isSalesperson)}
+            </Text>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {isSalesperson ? "My Progress" : "Live Metrics"}
+              {metricsSection.title}
             </Text>
             <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {isSalesperson ? "Today's visits, tasks, and alerts" : "Real-time operational health"}
+              {metricsSection.subtitle}
             </Text>
           </View>
           <View style={styles.metricGrid}>
             {metricCards.map((card, index) => (
               <Animated.View
                 key={card.id}
-                entering={FadeInDown.duration(340).delay(80 + index * 30)}
+                entering={FadeInDown.duration(340).delay(metricsSection.delay + 40 + index * 30)}
                 style={[
                   styles.metricCard,
                   {
@@ -1247,10 +1374,11 @@ export default function DashboardScreen() {
             ))}
           </View>
         </Animated.View>
+        ) : null}
 
-        {isSalesperson ? (
+        {visitsSection ? (
           <Animated.View
-            entering={FadeInDown.duration(420).delay(120)}
+            entering={FadeInDown.duration(420).delay(visitsSection.delay)}
             style={[
               styles.sectionCard,
               { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
@@ -1258,11 +1386,14 @@ export default function DashboardScreen() {
           >
             <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
             <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+                {getSectionEyebrow(visitsSection.id, isSalesperson)}
+              </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                Today&apos;s Visits
+                {visitsSection.title}
               </Text>
               <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                Your field stops and route flow
+                {visitsSection.subtitle}
               </Text>
             </View>
 
@@ -1343,9 +1474,9 @@ export default function DashboardScreen() {
               <Text style={styles.salesCtaText}>Open Sales Day</Text>
             </Pressable>
           </Animated.View>
-        ) : (
+        ) : pulseSection ? (
           <Animated.View
-            entering={FadeInDown.duration(420).delay(120)}
+            entering={FadeInDown.duration(420).delay(pulseSection.delay)}
             style={[
               styles.pulseCard,
               { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
@@ -1353,11 +1484,14 @@ export default function DashboardScreen() {
           >
             <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
             <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+                {getSectionEyebrow(pulseSection.id, isSalesperson)}
+              </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                Operational Pulse
+                {pulseSection.title}
               </Text>
               <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                Attendance + execution trend
+                {pulseSection.subtitle}
               </Text>
             </View>
 
@@ -1432,15 +1566,19 @@ export default function DashboardScreen() {
               </View>
             ) : null}
           </Animated.View>
-        )}
+        ) : null}
 
-        <Animated.View entering={FadeInDown.duration(420).delay(170)} style={styles.sectionWrap}>
+        {quickLinksSection ? (
+        <Animated.View entering={FadeInDown.duration(420).delay(quickLinksSection.delay)} style={styles.sectionWrap}>
           <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+              {getSectionEyebrow(quickLinksSection.id, isSalesperson)}
+            </Text>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {isSalesperson ? "My Shortcuts" : "Quick Actions"}
+              {quickLinksSection.title}
             </Text>
             <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {isSalesperson ? "Tools you use every day" : "Jump directly into modules"}
+              {quickLinksSection.subtitle}
             </Text>
           </View>
 
@@ -1475,18 +1613,23 @@ export default function DashboardScreen() {
             ))}
           </View>
         </Animated.View>
+        ) : null}
 
+        {supportSection ? (
         <Animated.View
-          entering={FadeInDown.duration(420).delay(220)}
+          entering={FadeInDown.duration(420).delay(supportSection.delay)}
           style={[styles.sectionCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
         >
           <View style={[styles.cardSheen, { backgroundColor: `${colors.warning}24` }]} />
           <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+              {getSectionEyebrow(supportSection.id, isSalesperson)}
+            </Text>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {isSalesperson ? "My Support" : "Support Priority"}
+              {supportSection.title}
             </Text>
             <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {isSalesperson ? "Your open requests and updates" : "Open threads requiring attention"}
+              {supportSection.subtitle}
             </Text>
           </View>
 
@@ -1544,19 +1687,23 @@ export default function DashboardScreen() {
             ))
           )}
         </Animated.View>
+        ) : null}
 
-        {!isSalesperson ? (
+        {activitySection ? (
           <Animated.View
-            entering={FadeInDown.duration(420).delay(260)}
+            entering={FadeInDown.duration(420).delay(activitySection.delay)}
             style={[styles.sectionCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
           >
             <View style={[styles.cardSheen, { backgroundColor: `${colors.secondary}24` }]} />
             <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+                {getSectionEyebrow(activitySection.id, isSalesperson)}
+              </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                Activity Timeline
+                {activitySection.title}
               </Text>
               <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                Latest actions across operations
+                {activitySection.subtitle}
               </Text>
             </View>
 
@@ -1613,8 +1760,8 @@ export default function DashboardScreen() {
           </Animated.View>
         ) : null}
 
-        {!isSalesperson ? (
-          <Animated.View entering={FadeInDown.duration(420).delay(300)} style={styles.footerSummaryRow}>
+        {footerSection ? (
+          <Animated.View entering={FadeInDown.duration(420).delay(footerSection.delay)} style={styles.footerSummaryRow}>
             <View
               style={[
                 styles.footerSummaryCard,
@@ -1653,29 +1800,32 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   scrollContent: {
-    paddingHorizontal: 18,
+    width: "100%",
+    maxWidth: 1180,
+    alignSelf: "center",
+    paddingHorizontal: 20,
   },
   navToggleWrap: {
     alignSelf: "flex-start",
-    marginBottom: 10,
+    marginBottom: 14,
   },
   heroWrap: {
-    marginBottom: 12,
+    marginBottom: 16,
   },
   heroCard: {
-    borderRadius: 22,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 16,
+    borderRadius: 28,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 18,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.16)",
+    borderColor: "rgba(255,255,255,0.14)",
     position: "relative",
     overflow: "hidden",
     shadowColor: "#0A1D35",
-    shadowOpacity: 0.24,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 9 },
-    elevation: 4,
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 6,
   },
   heroOrb: {
     position: "absolute",
@@ -1702,20 +1852,22 @@ const styles = StyleSheet.create({
   heroGridOverlay: {
     ...StyleSheet.absoluteFillObject,
     borderWidth: 1,
-    borderRadius: 22,
+    borderRadius: 28,
   },
   heroHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 14,
     gap: 8,
   },
   heroDateChip: {
-    minHeight: 30,
+    minHeight: 32,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.18)",
-    paddingHorizontal: 11,
+    backgroundColor: "rgba(255,255,255,0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
@@ -1727,10 +1879,12 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   heroRoleChip: {
-    minHeight: 30,
+    minHeight: 32,
     borderRadius: 999,
-    backgroundColor: "rgba(9,20,38,0.22)",
-    paddingHorizontal: 10,
+    backgroundColor: "rgba(9,20,38,0.18)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    paddingHorizontal: 12,
     justifyContent: "center",
   },
   heroRoleText: {
@@ -1742,33 +1896,36 @@ const styles = StyleSheet.create({
   heroGreetingText: {
     color: "#D8EBFF",
     fontFamily: "Inter_500Medium",
-    fontSize: 12,
+    fontSize: 12.5,
+    letterSpacing: 0.2,
   },
   heroTitleText: {
     marginTop: 2,
     color: "#FFFFFF",
     fontFamily: "Inter_700Bold",
-    fontSize: 24,
-    letterSpacing: -0.3,
+    fontSize: 28,
+    letterSpacing: -0.5,
   },
   heroSubtitleText: {
     marginTop: 6,
-    color: "#E6F1FF",
+    color: "#EAF2FF",
     fontFamily: "Inter_400Regular",
-    fontSize: 12.5,
-    lineHeight: 18,
-    maxWidth: "95%",
+    fontSize: 13,
+    lineHeight: 19,
+    maxWidth: "92%",
   },
   heroInsightRow: {
-    marginTop: 14,
-    minHeight: 56,
-    borderRadius: 14,
-    backgroundColor: "rgba(7, 16, 34, 0.24)",
+    marginTop: 16,
+    minHeight: 64,
+    borderRadius: 18,
+    backgroundColor: "rgba(7, 16, 34, 0.18)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 8,
-    paddingVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
   heroInsightItem: {
     flex: 1,
@@ -1778,13 +1935,13 @@ const styles = StyleSheet.create({
   heroInsightValue: {
     color: "#FFFFFF",
     fontFamily: "Inter_700Bold",
-    fontSize: 17,
+    fontSize: 18,
   },
   heroInsightLabel: {
     marginTop: 2,
     color: "#D8E9FF",
     fontFamily: "Inter_400Regular",
-    fontSize: 10.5,
+    fontSize: 10.8,
   },
   heroDivider: {
     width: 1,
@@ -1792,16 +1949,18 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.18)",
   },
   heroBadgeRow: {
-    marginTop: 11,
+    marginTop: 14,
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
   },
   heroBadge: {
-    minHeight: 28,
+    minHeight: 30,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.12)",
-    paddingHorizontal: 10,
+    backgroundColor: "rgba(255,255,255,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    paddingHorizontal: 11,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
@@ -1813,70 +1972,76 @@ const styles = StyleSheet.create({
   },
   commandStripRow: {
     marginTop: 1,
-    marginBottom: 9,
+    marginBottom: 12,
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8,
+    gap: 10,
   },
   commandStripCard: {
-    width: "48.6%",
-    minHeight: 66,
-    borderRadius: 13,
+    width: "48.4%",
+    minHeight: 74,
+    borderRadius: 18,
     borderWidth: 1,
-    paddingHorizontal: 9,
-    paddingVertical: 8,
+    paddingHorizontal: 11,
+    paddingVertical: 10,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
+    overflow: "hidden",
   },
   commandStripIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
+    width: 34,
+    height: 34,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
   commandStripValue: {
-    fontSize: 15,
-    letterSpacing: -0.2,
+    fontSize: 16,
+    letterSpacing: -0.3,
   },
   commandStripLabel: {
     marginTop: 1,
-    fontSize: 10.8,
+    fontSize: 11.2,
   },
   sectionWrap: {
     marginTop: 2,
-    marginBottom: 10,
+    marginBottom: 14,
   },
   sectionHeader: {
-    marginBottom: 8,
+    marginBottom: 10,
+  },
+  sectionEyebrow: {
+    marginBottom: 4,
+    fontSize: 10.5,
+    letterSpacing: 1.2,
   },
   sectionTitle: {
-    fontSize: 16,
-    letterSpacing: -0.2,
+    fontSize: 17,
+    letterSpacing: -0.3,
   },
   sectionCaption: {
-    marginTop: 2,
-    fontSize: 12,
+    marginTop: 3,
+    fontSize: 12.4,
   },
   metricGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 9,
+    gap: 10,
   },
   metricCard: {
-    width: "48.6%",
+    width: "48.4%",
     borderWidth: 1,
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    minHeight: 114,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    minHeight: 126,
     position: "relative",
     overflow: "hidden",
     shadowColor: "#13263F",
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
     elevation: 2,
   },
   metricCardGlow: {
@@ -1884,38 +2049,38 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: 36,
+    height: 42,
   },
   metricHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 7,
+    gap: 8,
   },
   metricIconWrap: {
-    width: 28,
-    height: 28,
-    borderRadius: 999,
+    width: 34,
+    height: 34,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
   metricLabel: {
-    fontSize: 11.5,
+    fontSize: 11.8,
     flex: 1,
   },
   metricValue: {
-    marginTop: 8,
-    fontSize: 21,
-    letterSpacing: -0.3,
+    marginTop: 10,
+    fontSize: 24,
+    letterSpacing: -0.5,
   },
   metricHint: {
-    marginTop: 4,
-    fontSize: 11,
-    lineHeight: 16,
+    marginTop: 5,
+    fontSize: 11.2,
+    lineHeight: 16.5,
   },
   metricAccentTrack: {
-    marginTop: 6,
+    marginTop: 8,
     width: "100%",
-    height: 3,
+    height: 4,
     borderRadius: 999,
     overflow: "hidden",
   },
@@ -1925,12 +2090,12 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   pulseCard: {
-    borderRadius: 16,
+    borderRadius: 20,
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 12,
-    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 14,
+    marginBottom: 12,
     overflow: "hidden",
   },
   cardSheen: {
@@ -1941,7 +2106,7 @@ const styles = StyleSheet.create({
     height: 2,
   },
   progressRow: {
-    marginBottom: 12,
+    marginBottom: 14,
   },
   progressHeader: {
     flexDirection: "row",
@@ -1966,11 +2131,11 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   salesStrip: {
-    marginTop: 2,
+    marginTop: 4,
     borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
     flexDirection: "row",
     alignItems: "center",
   },
@@ -1985,24 +2150,24 @@ const styles = StyleSheet.create({
   },
   salesStripValue: {
     marginTop: 3,
-    fontSize: 17,
+    fontSize: 18,
   },
   quickGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 9,
+    gap: 10,
   },
   quickCard: {
-    width: "48.6%",
-    borderRadius: 14,
+    width: "48.4%",
+    borderRadius: 18,
     borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    minHeight: 104,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    minHeight: 114,
     shadowColor: "#13263F",
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
     elevation: 2,
   },
   quickCardHeader: {
@@ -2011,9 +2176,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   quickIconWrap: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
+    width: 36,
+    height: 36,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2026,21 +2191,21 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   quickTitle: {
-    marginTop: 8,
-    fontSize: 13.5,
+    marginTop: 10,
+    fontSize: 14,
   },
   quickSubtitle: {
-    marginTop: 3,
-    fontSize: 11.3,
-    lineHeight: 16,
+    marginTop: 4,
+    fontSize: 11.5,
+    lineHeight: 16.5,
   },
   sectionCard: {
-    borderRadius: 16,
+    borderRadius: 20,
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 8,
-    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 10,
+    marginBottom: 12,
     overflow: "hidden",
   },
   emptyInlineWrap: {
@@ -2054,9 +2219,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   salesCtaButton: {
-    marginTop: 10,
-    borderRadius: 10,
-    minHeight: 40,
+    marginTop: 12,
+    borderRadius: 14,
+    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -2070,8 +2235,8 @@ const styles = StyleSheet.create({
   threadRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingVertical: 10,
+    gap: 10,
+    paddingVertical: 12,
   },
   threadStatusDot: {
     width: 8,
@@ -2079,11 +2244,11 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   threadTitle: {
-    fontSize: 12.8,
+    fontSize: 13,
   },
   threadMeta: {
     marginTop: 2,
-    fontSize: 11.3,
+    fontSize: 11.5,
   },
   threadChip: {
     borderRadius: 999,
@@ -2100,15 +2265,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   activityRow: {
-    paddingVertical: 10,
+    paddingVertical: 12,
     flexDirection: "row",
     alignItems: "flex-start",
-    gap: 8,
+    gap: 10,
   },
   activityIconWrap: {
-    width: 30,
-    height: 30,
-    borderRadius: 999,
+    width: 34,
+    height: 34,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 2,
@@ -2121,7 +2286,7 @@ const styles = StyleSheet.create({
   },
   activityTitle: {
     flex: 1,
-    fontSize: 12.8,
+    fontSize: 13,
     lineHeight: 18,
   },
   activityBadge: {
@@ -2135,8 +2300,8 @@ const styles = StyleSheet.create({
   },
   activitySubtitle: {
     marginTop: 2,
-    fontSize: 11.5,
-    lineHeight: 17,
+    fontSize: 11.7,
+    lineHeight: 17.5,
   },
   activityTime: {
     marginTop: 3,
@@ -2144,17 +2309,17 @@ const styles = StyleSheet.create({
   },
   footerSummaryRow: {
     flexDirection: "row",
-    gap: 10,
-    marginTop: 2,
+    gap: 12,
+    marginTop: 4,
   },
   footerSummaryCard: {
     flex: 1,
-    borderRadius: 14,
+    borderRadius: 18,
     borderWidth: 1,
-    minHeight: 82,
+    minHeight: 92,
     alignItems: "center",
     justifyContent: "center",
-    gap: 4,
+    gap: 5,
   },
   footerSummaryLabel: {
     fontSize: 11,
@@ -2164,15 +2329,15 @@ const styles = StyleSheet.create({
   },
   emptyStateWrap: {
     flex: 1,
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
   },
   emptyStateCard: {
     marginTop: 16,
     borderWidth: 1,
-    borderRadius: 18,
-    padding: 22,
+    borderRadius: 24,
+    padding: 24,
     alignItems: "center",
-    gap: 8,
+    gap: 10,
   },
   emptyStateTitle: {
     fontSize: 18,

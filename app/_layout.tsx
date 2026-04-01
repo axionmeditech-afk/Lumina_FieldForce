@@ -59,6 +59,7 @@ function RootLayoutNav() {
       <Stack.Screen name="audit" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="settings" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="sales-ai" options={{ presentation: "card", animation: "slide_from_right" }} />
+      <Stack.Screen name="visit-notes" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="route-tracking" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="employee/[id]" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="conversation/[id]" options={{ presentation: "card", animation: "slide_from_right" }} />
