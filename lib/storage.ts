@@ -553,11 +553,14 @@ export async function getVisitNotesRemote(): Promise<Task[] | null> {
   return Array.isArray(remote) ? remote : [];
 }
 
-export async function syncVisitNoteTaskRemote(task: Task): Promise<boolean> {
+export async function syncVisitNoteTaskRemote(task: Task): Promise<void> {
   const token = await getApiToken();
-  if (!token) return false;
+  if (!token) {
+    throw new Error("API session missing. Please sign in again so visit data can sync to the server.");
+  }
   const body = JSON.stringify({ task });
   const apiBases = await getRemoteStateApiCandidates();
+  const failures: string[] = [];
 
   for (const apiBase of apiBases) {
     const controller = new AbortController();
@@ -572,15 +575,25 @@ export async function syncVisitNoteTaskRemote(task: Task): Promise<boolean> {
         body,
         signal: controller.signal,
       });
-      if (response.ok) return true;
-      if (response.status < 500) return false;
-    } catch {
-      // try next backend candidate
+      if (response.ok) return;
+      const text = await response.text();
+      const preview = text.trim().replace(/\s+/g, " ");
+      failures.push(`${apiBase} -> HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
+      if (response.status < 500) {
+        throw new Error(preview || `Visit sync failed with HTTP ${response.status}.`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Visit sync failed.";
+      failures.push(`${apiBase} -> ${message}`);
     } finally {
       clearTimeout(timer);
     }
   }
-  return false;
+  throw new Error(
+    failures.length
+      ? `Visit sync failed. ${failures.join(" | ")}`
+      : "Visit sync failed because the server could not be reached."
+  );
 }
 
 async function refreshRemoteStateList<T>(key: string): Promise<T[] | null> {

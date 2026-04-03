@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Crypto from "expo-crypto";
+import * as Location from "expo-location";
 import Colors from "@/constants/colors";
 import {
   addAuditLog,
@@ -28,11 +29,42 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { toMumbaiDateKey } from "@/lib/ist-time";
+import {
+  getDolibarrThirdParties,
+  type DolibarrThirdParty,
+} from "@/lib/attendance-api";
 
 const LEAD_ROLES: UserRole[] = ["admin", "hr", "manager"];
 
 function isLeadRole(role?: UserRole | null): boolean {
   return Boolean(role && LEAD_ROLES.includes(role));
+}
+
+function getThirdPartyId(customer: DolibarrThirdParty): string {
+  const raw = customer.id;
+  if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return "";
+}
+
+function getThirdPartyLabel(customer: DolibarrThirdParty): string {
+  return (
+    customer.name?.trim() ||
+    customer.nom?.trim() ||
+    customer.email?.trim() ||
+    "Customer"
+  );
+}
+
+function getThirdPartyAddress(customer: DolibarrThirdParty): string {
+  return [customer.address, customer.town, customer.zip]
+    .map((entry) => (entry || "").trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+function normalizeSearchText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function TaskCard({
@@ -148,6 +180,11 @@ export default function TasksScreen() {
   const [selectedAssigneeId, setSelectedAssigneeId] = useState<string | null>(null);
   const [visitDate, setVisitDate] = useState(() => toMumbaiDateKey(new Date()));
   const [visitSequence, setVisitSequence] = useState("1");
+  const [visitInputMode, setVisitInputMode] = useState<"customer" | "manual">("customer");
+  const [customerOptions, setCustomerOptions] = useState<DolibarrThirdParty[]>([]);
+  const [customerOptionsLoading, setCustomerOptionsLoading] = useState(false);
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [visitLocationLabel, setVisitLocationLabel] = useState("");
   const [visitLocationAddress, setVisitLocationAddress] = useState("");
   const [visitLatitude, setVisitLatitude] = useState("");
@@ -217,6 +254,28 @@ export default function TasksScreen() {
       .filter((member): member is Employee => Boolean(member));
   }, [canManage, employeesById, manageableMemberIds, manageableTeams, selectedTeamId]);
 
+  const selectedCustomer = useMemo(
+    () => customerOptions.find((entry) => getThirdPartyId(entry) === selectedCustomerId) ?? null,
+    [customerOptions, selectedCustomerId]
+  );
+
+  const filteredCustomerOptions = useMemo(() => {
+    const query = normalizeSearchText(customerQuery);
+    if (!query) return customerOptions.slice(0, 8);
+    return customerOptions
+      .filter((entry) => {
+        const haystack = normalizeSearchText(
+          [
+            getThirdPartyLabel(entry),
+            entry.email || "",
+            getThirdPartyAddress(entry),
+          ].join(" ")
+        );
+        return haystack.includes(query);
+      })
+      .slice(0, 8);
+  }, [customerOptions, customerQuery]);
+
   useEffect(() => {
     if (!canManage) return;
     if (selectedTeamId) {
@@ -234,6 +293,30 @@ export default function TasksScreen() {
       setSelectedAssigneeId(assigneeOptions[0].id);
     }
   }, [assigneeOptions, canManage, manageableTeams, selectedAssigneeId, selectedTeamId]);
+
+  useEffect(() => {
+    if (!showAdd || !canManage || newTaskType !== "field_visit" || customerOptions.length > 0 || customerOptionsLoading) {
+      return;
+    }
+    let cancelled = false;
+    setCustomerOptionsLoading(true);
+    void getDolibarrThirdParties({ limit: 200, sortfield: "name", sortorder: "asc" })
+      .then((items) => {
+        if (cancelled) return;
+        setCustomerOptions(Array.isArray(items) ? items : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCustomerOptions([]);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setCustomerOptionsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canManage, customerOptions.length, customerOptionsLoading, newTaskType, showAdd]);
 
   const visibleTasks = useMemo(() => {
     const filteredByStatus = tasks.filter((task) => filter === "all" || task.status === filter);
@@ -284,20 +367,56 @@ export default function TasksScreen() {
     const dueInDays = Math.max(1, Number.parseInt(newDueDays, 10) || 7);
     const normalizedVisitDate = visitDate.trim();
     const isFieldVisit = newTaskType === "field_visit";
-    const visitLat = Number.parseFloat(visitLatitude);
-    const visitLng = Number.parseFloat(visitLongitude);
+    let resolvedVisitLabel = visitLocationLabel.trim();
+    let resolvedVisitAddress = visitLocationAddress.trim();
+    let visitLat = Number.parseFloat(visitLatitude);
+    let visitLng = Number.parseFloat(visitLongitude);
     if (isFieldVisit) {
-      if (!visitLocationLabel.trim()) {
-        Alert.alert("Location Missing", "Please enter a location label for this field visit.");
-        return;
-      }
       const isValidVisitDate = /^\d{4}-\d{2}-\d{2}$/.test(normalizedVisitDate);
       if (!isValidVisitDate) {
         Alert.alert("Date Format", "Visit date must be in YYYY-MM-DD format.");
         return;
       }
+
+      if (visitInputMode === "customer") {
+        if (!selectedCustomer) {
+          Alert.alert("Customer Required", "Choose a customer before assigning this visit.");
+          return;
+        }
+        resolvedVisitLabel = getThirdPartyLabel(selectedCustomer);
+        resolvedVisitAddress = getThirdPartyAddress(selectedCustomer);
+        if (!resolvedVisitLabel) {
+          Alert.alert("Customer Missing", "Selected customer is missing a valid name.");
+          return;
+        }
+        if ((!Number.isFinite(visitLat) || !Number.isFinite(visitLng)) && resolvedVisitAddress) {
+          try {
+            const geocoded = await Location.geocodeAsync(resolvedVisitAddress);
+            const first = geocoded[0];
+            if (first) {
+              visitLat = first.latitude;
+              visitLng = first.longitude;
+              setVisitLatitude(String(first.latitude));
+              setVisitLongitude(String(first.longitude));
+            }
+          } catch {
+            // fall through to validation below
+          }
+        }
+      } else {
+        if (!resolvedVisitLabel) {
+          Alert.alert("Location Missing", "Please enter a location label for this field visit.");
+          return;
+        }
+      }
+
       if (!Number.isFinite(visitLat) || !Number.isFinite(visitLng)) {
-        Alert.alert("Coordinates Missing", "Please enter valid latitude and longitude.");
+        Alert.alert(
+          "Coordinates Missing",
+          visitInputMode === "customer"
+            ? "Customer address se coordinates resolve nahi ho paaye. Manual Location mode use karo ya valid address do."
+            : "Please enter valid latitude and longitude."
+        );
         return;
       }
     }
@@ -324,8 +443,8 @@ export default function TasksScreen() {
       visitSequence: isFieldVisit ? Math.max(1, Number.parseInt(visitSequence, 10) || 1) : null,
       visitLatitude: isFieldVisit ? visitLat : null,
       visitLongitude: isFieldVisit ? visitLng : null,
-      visitLocationLabel: isFieldVisit ? visitLocationLabel.trim() : null,
-      visitLocationAddress: isFieldVisit ? visitLocationAddress.trim() || null : null,
+      visitLocationLabel: isFieldVisit ? resolvedVisitLabel : null,
+      visitLocationAddress: isFieldVisit ? resolvedVisitAddress || null : null,
       arrivalAt: null,
       departureAt: null,
       autoCaptureConversationId: null,
@@ -348,6 +467,9 @@ export default function TasksScreen() {
     setNewPriority("medium");
     setVisitDate(toMumbaiDateKey(new Date()));
     setVisitSequence("1");
+    setVisitInputMode("customer");
+    setCustomerQuery("");
+    setSelectedCustomerId("");
     setVisitLocationLabel("");
     setVisitLocationAddress("");
     setVisitLatitude("");
@@ -368,7 +490,9 @@ export default function TasksScreen() {
     newTitle,
     selectedAssigneeId,
     selectedTeamId,
+    selectedCustomer,
     visitDate,
+    visitInputMode,
     visitLatitude,
     visitLocationAddress,
     visitLocationLabel,
@@ -608,58 +732,195 @@ export default function TasksScreen() {
                   onChangeText={setVisitSequence}
                   keyboardType="number-pad"
                 />
-                <TextInput
-                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-                  placeholder="Location label (e.g., Client A Office)"
-                  placeholderTextColor={colors.textTertiary}
-                  value={visitLocationLabel}
-                  onChangeText={setVisitLocationLabel}
-                />
-                <TextInput
-                  style={[styles.modalInput, styles.modalTextarea, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-                  placeholder="Location address (optional)"
-                  placeholderTextColor={colors.textTertiary}
-                  value={visitLocationAddress}
-                  onChangeText={setVisitLocationAddress}
-                  multiline
-                  numberOfLines={2}
-                />
-                <View style={styles.coordinateRow}>
-                  <TextInput
-                    style={[
-                      styles.modalInput,
-                      {
-                        flex: 1,
-                        color: colors.text,
-                        backgroundColor: colors.surfaceSecondary,
-                        borderColor: colors.border,
-                        fontFamily: "Inter_400Regular",
-                      },
-                    ]}
-                    placeholder="Latitude"
-                    placeholderTextColor={colors.textTertiary}
-                    value={visitLatitude}
-                    onChangeText={setVisitLatitude}
-                    keyboardType="decimal-pad"
-                  />
-                  <TextInput
-                    style={[
-                      styles.modalInput,
-                      {
-                        flex: 1,
-                        color: colors.text,
-                        backgroundColor: colors.surfaceSecondary,
-                        borderColor: colors.border,
-                        fontFamily: "Inter_400Regular",
-                      },
-                    ]}
-                    placeholder="Longitude"
-                    placeholderTextColor={colors.textTertiary}
-                    value={visitLongitude}
-                    onChangeText={setVisitLongitude}
-                    keyboardType="decimal-pad"
-                  />
+                <View style={styles.selectorWrap}>
+                  <Text style={[styles.selectorLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                    Visit Source
+                  </Text>
+                  <View style={styles.selectorRow}>
+                    {([
+                      { value: "customer", label: "Choose Customer" },
+                      { value: "manual", label: "Manual Location" },
+                    ] as const).map((entry) => (
+                      <Pressable
+                        key={entry.value}
+                        onPress={() => setVisitInputMode(entry.value)}
+                        style={[
+                          styles.selectorChip,
+                          {
+                            backgroundColor:
+                              visitInputMode === entry.value ? colors.primary : colors.surfaceSecondary,
+                            borderColor: visitInputMode === entry.value ? colors.primary : colors.border,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.selectorChipText,
+                            {
+                              color: visitInputMode === entry.value ? "#FFFFFF" : colors.textSecondary,
+                              fontFamily: "Inter_500Medium",
+                            },
+                          ]}
+                        >
+                          {entry.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
                 </View>
+                {visitInputMode === "customer" ? (
+                  <>
+                    <TextInput
+                      style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                      placeholder="Search customer by name, email, address..."
+                      placeholderTextColor={colors.textTertiary}
+                      value={customerQuery}
+                      onChangeText={setCustomerQuery}
+                    />
+                    <View
+                      style={[
+                        styles.customerPickerWrap,
+                        { backgroundColor: colors.surfaceSecondary, borderColor: colors.border },
+                      ]}
+                    >
+                      {customerOptionsLoading ? (
+                        <Text style={[styles.customerPickerHint, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                          Loading customers...
+                        </Text>
+                      ) : filteredCustomerOptions.length ? (
+                        filteredCustomerOptions.map((customer) => {
+                          const customerId = getThirdPartyId(customer);
+                          const isSelected = customerId === selectedCustomerId;
+                          return (
+                            <Pressable
+                              key={customerId || `${getThirdPartyLabel(customer)}_${customer.email || ""}`}
+                              onPress={() => {
+                                setSelectedCustomerId(customerId);
+                                setVisitLocationLabel(getThirdPartyLabel(customer));
+                                setVisitLocationAddress(getThirdPartyAddress(customer));
+                                if (!newTitle.trim()) {
+                                  setNewTitle(`Visit: ${getThirdPartyLabel(customer)}`);
+                                }
+                              }}
+                              style={({ pressed }) => [
+                                styles.customerPickerRow,
+                                {
+                                  borderBottomColor: colors.borderLight,
+                                  backgroundColor: isSelected
+                                    ? `${colors.primary}12`
+                                    : pressed
+                                      ? colors.surface
+                                      : "transparent",
+                                },
+                              ]}
+                            >
+                              <View style={styles.customerPickerTextWrap}>
+                                <Text
+                                  style={[
+                                    styles.customerPickerTitle,
+                                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                  ]}
+                                  numberOfLines={1}
+                                >
+                                  {getThirdPartyLabel(customer)}
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.customerPickerMeta,
+                                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                  ]}
+                                  numberOfLines={2}
+                                >
+                                  {getThirdPartyAddress(customer) || customer.email?.trim() || "No address available"}
+                                </Text>
+                              </View>
+                              {isSelected ? (
+                                <Ionicons name="checkmark-circle" size={18} color={colors.primary} />
+                              ) : null}
+                            </Pressable>
+                          );
+                        })
+                      ) : (
+                        <Text style={[styles.customerPickerHint, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                          No matching customers found. Switch to Manual Location if needed.
+                        </Text>
+                      )}
+                    </View>
+                    {selectedCustomer ? (
+                      <View
+                        style={[
+                          styles.selectedCustomerCard,
+                          { backgroundColor: colors.surfaceSecondary, borderColor: colors.border },
+                        ]}
+                      >
+                        <Text style={[styles.selectedCustomerTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          {getThirdPartyLabel(selectedCustomer)}
+                        </Text>
+                        <Text style={[styles.selectedCustomerMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                          {getThirdPartyAddress(selectedCustomer) || "Address unavailable"}
+                        </Text>
+                        <Text style={[styles.selectedCustomerMeta, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                          Coordinates will be auto-resolved from this customer address.
+                        </Text>
+                      </View>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <TextInput
+                      style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                      placeholder="Location label (e.g., Client A Office)"
+                      placeholderTextColor={colors.textTertiary}
+                      value={visitLocationLabel}
+                      onChangeText={setVisitLocationLabel}
+                    />
+                    <TextInput
+                      style={[styles.modalInput, styles.modalTextarea, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                      placeholder="Location address (optional)"
+                      placeholderTextColor={colors.textTertiary}
+                      value={visitLocationAddress}
+                      onChangeText={setVisitLocationAddress}
+                      multiline
+                      numberOfLines={2}
+                    />
+                    <View style={styles.coordinateRow}>
+                      <TextInput
+                        style={[
+                          styles.modalInput,
+                          {
+                            flex: 1,
+                            color: colors.text,
+                            backgroundColor: colors.surfaceSecondary,
+                            borderColor: colors.border,
+                            fontFamily: "Inter_400Regular",
+                          },
+                        ]}
+                        placeholder="Latitude"
+                        placeholderTextColor={colors.textTertiary}
+                        value={visitLatitude}
+                        onChangeText={setVisitLatitude}
+                        keyboardType="decimal-pad"
+                      />
+                      <TextInput
+                        style={[
+                          styles.modalInput,
+                          {
+                            flex: 1,
+                            color: colors.text,
+                            backgroundColor: colors.surfaceSecondary,
+                            borderColor: colors.border,
+                            fontFamily: "Inter_400Regular",
+                          },
+                        ]}
+                        placeholder="Longitude"
+                        placeholderTextColor={colors.textTertiary}
+                        value={visitLongitude}
+                        onChangeText={setVisitLongitude}
+                        keyboardType="decimal-pad"
+                      />
+                    </View>
+                  </>
+                )}
               </>
             ) : null}
 
@@ -840,6 +1101,51 @@ const styles = StyleSheet.create({
   coordinateRow: {
     flexDirection: "row",
     gap: 10,
+  },
+  customerPickerWrap: {
+    borderWidth: 1,
+    borderRadius: 14,
+    overflow: "hidden",
+  },
+  customerPickerRow: {
+    minHeight: 56,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  customerPickerTextWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  customerPickerTitle: {
+    fontSize: 13,
+  },
+  customerPickerMeta: {
+    fontSize: 11.5,
+    lineHeight: 16,
+  },
+  customerPickerHint: {
+    fontSize: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    lineHeight: 18,
+  },
+  selectedCustomerCard: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 5,
+  },
+  selectedCustomerTitle: {
+    fontSize: 13.5,
+  },
+  selectedCustomerMeta: {
+    fontSize: 11.5,
+    lineHeight: 17,
   },
   priorityChip: {
     flex: 1,

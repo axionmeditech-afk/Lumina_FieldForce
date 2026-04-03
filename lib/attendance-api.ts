@@ -2267,11 +2267,18 @@ export async function createDolibarrSalesOrder(
 export async function createDolibarrCustomer(
   payload: DolibarrCustomerCreatePayload
 ): Promise<DolibarrCustomerCreateResult> {
+  const trimmedName = payload.name.trim();
   const customerPayload: Record<string, unknown> = {
-    name: payload.name.trim(),
+    name: trimmedName,
+    nom: trimmedName,
     client: 1,
+    prospect: 1,
+    fournisseur: 0,
     status: 1,
     code_client: "-1",
+    code_fournisseur: "-1",
+    country_code: "IN",
+    country_id: 117,
   };
 
   if (payload.email?.trim()) {

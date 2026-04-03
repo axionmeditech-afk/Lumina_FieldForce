@@ -3629,7 +3629,21 @@ export default function SalesScreen() {
       const nowIso = new Date().toISOString();
       const normalizedNote = departureNotesDraft.trim();
       const normalizedCustomerName = departureCustomerName.trim() || getVisitLabel(departureNotesTask);
-      const updatedTask = await updateTask(departureNotesTask.id, {
+      const syncPayload: Task = {
+        ...departureNotesTask,
+        status: "completed",
+        departureAt: nowIso,
+        arrivalAt: departureNotesTask.arrivalAt ?? nowIso,
+        visitDepartureNotes: normalizedNote || null,
+        visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
+        autoCaptureRecordingActive: false,
+        taskType: "field_visit",
+        assignedTo: user.id,
+        assignedToName: user.name,
+        companyId: user.companyId ?? departureNotesTask.companyId,
+      };
+      await syncVisitNoteTaskRemote(syncPayload);
+      await updateTask(departureNotesTask.id, {
         status: "completed",
         departureAt: nowIso,
         arrivalAt: departureNotesTask.arrivalAt ?? nowIso,
@@ -3637,24 +3651,6 @@ export default function SalesScreen() {
         visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
         autoCaptureRecordingActive: false,
       });
-      const syncPayload: Task = {
-        ...(updatedTask || {
-          ...departureNotesTask,
-          status: "completed",
-          departureAt: nowIso,
-          arrivalAt: departureNotesTask.arrivalAt ?? nowIso,
-          visitDepartureNotes: normalizedNote || null,
-          visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
-          autoCaptureRecordingActive: false,
-        }),
-        taskType: "field_visit",
-        assignedTo: user.id,
-        assignedToName: user.name,
-        companyId: user.companyId ?? updatedTask?.companyId ?? departureNotesTask.companyId,
-      };
-      const synced = await syncVisitNoteTaskRemote(
-        syncPayload
-      );
       let selectedCustomerIdForPos: string | null = null;
       let posStatusMessage: string | null = null;
       if (departureCreateCustomerEnabled) {
@@ -3734,12 +3730,6 @@ export default function SalesScreen() {
           preserveSuccess: true,
         });
         setPosSuccess(posStatusMessage || "Customer selected in Sales POS.");
-      }
-      if (!synced) {
-        Alert.alert(
-          "Saved Locally",
-          "Departure note saved on device, but MySQL sync is unavailable right now."
-        );
       }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {

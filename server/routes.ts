@@ -400,18 +400,54 @@ async function forwardDolibarrRequest(
             }
             const body = { ...(req.body as Record<string, unknown>) };
             if (path === "/thirdparties" && method === "POST") {
+              const normalizedName =
+                typeof body.name === "string"
+                  ? body.name.trim()
+                  : typeof body.nom === "string"
+                    ? body.nom.trim()
+                    : "";
+              if (normalizedName) {
+                body.name = normalizedName;
+                body.nom = normalizedName;
+              }
               const rawClient = body.client;
               const isClientCreate =
                 rawClient === 1 ||
                 rawClient === "1" ||
                 rawClient === true ||
                 (typeof rawClient === "string" && rawClient.trim().toLowerCase() === "true");
+              if (!("client" in body)) {
+                body.client = 1;
+              }
+              if (!("status" in body)) {
+                body.status = 1;
+              }
+              if (!("fournisseur" in body)) {
+                body.fournisseur = 0;
+              }
+              if (!("prospect" in body)) {
+                body.prospect = 1;
+              }
               const hasCustomerCode =
                 typeof body.code_client === "string"
                   ? Boolean(body.code_client.trim())
                   : typeof body.code_client === "number" && Number.isFinite(body.code_client);
               if (isClientCreate && !hasCustomerCode) {
                 body.code_client = "-1";
+              }
+              const hasVendorCode =
+                typeof body.code_fournisseur === "string"
+                  ? Boolean(body.code_fournisseur.trim())
+                  : typeof body.code_fournisseur === "number" &&
+                    Number.isFinite(body.code_fournisseur);
+              if (!hasVendorCode) {
+                body.code_fournisseur = "-1";
+              }
+              if (!("country_code" in body)) {
+                body.country_code = "IN";
+              }
+              if (!("country_id" in body)) {
+                body.country_id = 117;
               }
             }
             return body;
@@ -5596,6 +5632,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await ensureVisitHistoryTable();
       const companyId = normalizedTask.companyId || (await resolveRequestCompanyId(req)) || null;
       const conn = await getMySqlPool();
+      const createdAtSql =
+        toMySqlDateTime(normalizedTask.createdAt) ||
+        new Date().toISOString().slice(0, 19).replace("T", " ");
+      const updatedAtSql = new Date().toISOString().slice(0, 19).replace("T", " ");
       const assignedByName =
         normalizeWhitespace(authRecord?.user.name || "") ||
         normalizeWhitespace(req.auth?.email || "") ||
@@ -5630,7 +5670,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           visit_departure_notes,
           visit_departure_notes_updated_at,
           auto_capture_conversation_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           company_id = VALUES(company_id),
           title = VALUES(title),
@@ -5670,7 +5710,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           normalizedTask.status,
           normalizedTask.priority,
           toMySqlDateTime(normalizedTask.dueDate) || toMySqlDateTime(normalizedTask.createdAt),
-          toMySqlDateTime(normalizedTask.createdAt) || new Date().toISOString().slice(0, 19).replace("T", " "),
+          createdAtSql,
+          updatedAtSql,
           toMySqlDateTime(normalizedTask.visitPlanDate),
           normalizedTask.visitSequence,
           normalizedTask.visitLocationLabel,
