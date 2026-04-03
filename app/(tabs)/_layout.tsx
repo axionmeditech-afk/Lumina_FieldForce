@@ -1,6 +1,39 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Drawer } from "expo-router/drawer";
 import { Ionicons } from "@expo/vector-icons";
+import { HugeiconsIcon } from "@hugeicons/react-native";
+// eslint-disable-next-line import/no-unresolved
+import AddTeamIcon from "@hugeicons/core-free-icons/AddTeamIcon";
+// eslint-disable-next-line import/no-unresolved
+import AiAudioIcon from "@hugeicons/core-free-icons/AiAudioIcon";
+// eslint-disable-next-line import/no-unresolved
+import AnalyticsUpIcon from "@hugeicons/core-free-icons/AnalyticsUpIcon";
+// eslint-disable-next-line import/no-unresolved
+import Award04Icon from "@hugeicons/core-free-icons/Award04Icon";
+// eslint-disable-next-line import/no-unresolved
+import ClipboardClockIcon from "@hugeicons/core-free-icons/ClipboardClockIcon";
+// eslint-disable-next-line import/no-unresolved
+import Configuration01Icon from "@hugeicons/core-free-icons/Configuration01Icon";
+// eslint-disable-next-line import/no-unresolved
+import DashboardSquare02Icon from "@hugeicons/core-free-icons/DashboardSquare02Icon";
+// eslint-disable-next-line import/no-unresolved
+import FingerPrintScanIcon from "@hugeicons/core-free-icons/FingerPrintScanIcon";
+// eslint-disable-next-line import/no-unresolved
+import Invoice04Icon from "@hugeicons/core-free-icons/Invoice04Icon";
+// eslint-disable-next-line import/no-unresolved
+import MoreVerticalCircle02Icon from "@hugeicons/core-free-icons/MoreVerticalCircle02Icon";
+// eslint-disable-next-line import/no-unresolved
+import Note04Icon from "@hugeicons/core-free-icons/Note04Icon";
+// eslint-disable-next-line import/no-unresolved
+import Notification01Icon from "@hugeicons/core-free-icons/Notification01Icon";
+// eslint-disable-next-line import/no-unresolved
+import Route03Icon from "@hugeicons/core-free-icons/Route03Icon";
+// eslint-disable-next-line import/no-unresolved
+import CustomerService01Icon from "@hugeicons/core-free-icons/CustomerService01Icon";
+// eslint-disable-next-line import/no-unresolved
+import WarehouseIcon from "@hugeicons/core-free-icons/WarehouseIcon";
+// eslint-disable-next-line import/no-unresolved
+import WalletAdd02Icon from "@hugeicons/core-free-icons/WalletAdd02Icon";
 import {
   DrawerContentScrollView,
   DrawerItemList,
@@ -214,6 +247,340 @@ function CustomDrawerContent(
   );
 }
 
+function DashboardDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={DashboardSquare02Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function AttendanceDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={FingerPrintScanIcon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function TeamDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={AddTeamIcon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function TasksDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={ClipboardClockIcon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function SalesAiDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={AiAudioIcon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function ViewNotesDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Note04Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function SalesPosDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Invoice04Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function AdminReportsDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={AnalyticsUpIcon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function AdminIncentivesDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Award04Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function AdminStockDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={WarehouseIcon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function RouteTrackingDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Route03Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function BankAccountsDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={WalletAdd02Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function NotificationsDrawerIcon({
+  focused,
+  size,
+  badgeCount = 0,
+}: {
+  focused: boolean;
+  size: number;
+  badgeCount?: number;
+}) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+  const badgeLabel = badgeCount > 99 ? "99+" : badgeCount > 0 ? String(badgeCount) : "";
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Notification01Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+        {badgeLabel ? (
+          <View style={styles.badge}>
+            <Text style={styles.badgeText}>{badgeLabel}</Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function SupportDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={CustomerService01Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function AdminControlsDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Configuration01Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
+function MoreDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={MoreVerticalCircle02Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
 export default function SidebarLayout() {
   const { isDark } = useAppTheme();
   const { user } = useAuth();
@@ -272,9 +639,10 @@ export default function SidebarLayout() {
         drawerInactiveTintColor: palette.inactiveTintColor,
         drawerActiveBackgroundColor: palette.activeBackgroundColor,
         drawerLabelStyle: {
-          fontFamily: "Inter_700Bold",
-          fontSize: 20,
-          lineHeight: 28,
+          fontFamily: "Inter_500Medium",
+          fontSize: 23,
+          lineHeight: 31,
+          letterSpacing: -0.7,
           marginLeft: 2,
         },
         drawerItemStyle: {
@@ -286,40 +654,32 @@ export default function SidebarLayout() {
         },
       }}
     >
-      <Drawer.Screen
-        name="index"
-        options={{
-          title: "Dashboard",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="speedometer-outline" activeIcon="speedometer" focused={focused} size={size} />
-          ),
-        }}
-      />
+        <Drawer.Screen
+          name="index"
+          options={{
+            title: "Dashboard",
+            drawerIcon: ({ focused, size }) => <DashboardDrawerIcon focused={focused} size={size} />,
+          }}
+        />
       <Drawer.Screen
         name="attendance"
         options={{
           title: "Attendance",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="time-outline" activeIcon="time" focused={focused} size={size} />
-          ),
+          drawerIcon: ({ focused, size }) => <AttendanceDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
         name="team"
         options={{
           title: "Team",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="people-outline" activeIcon="people" focused={focused} size={size} />
-          ),
+          drawerIcon: ({ focused, size }) => <TeamDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
         name="tasks"
         options={{
           title: "Tasks",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="checkbox-outline" activeIcon="checkbox" focused={focused} size={size} />
-          ),
+          drawerIcon: ({ focused, size }) => <TasksDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -327,15 +687,7 @@ export default function SidebarLayout() {
         options={{
           title: "Sales AI",
           drawerItemStyle: canSeeSalesAi ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="sparkles-outline"
-              activeIcon="sparkles"
-              focused={focused}
-              size={size}
-              offsetX={0}
-            />
-          ),
+          drawerIcon: ({ focused, size }) => <SalesAiDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -343,15 +695,7 @@ export default function SidebarLayout() {
         options={{
           title: "View Notes",
           drawerItemStyle: canSeeSalesAi ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="document-text-outline"
-              activeIcon="document-text"
-              focused={focused}
-              size={size}
-              offsetX={0}
-            />
-          ),
+          drawerIcon: ({ focused, size }) => <ViewNotesDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -359,15 +703,7 @@ export default function SidebarLayout() {
         options={{
           title: "Sales POS",
           drawerItemStyle: isAdmin ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="cart-outline"
-              activeIcon="cart"
-              focused={focused}
-              size={size}
-              offsetX={0}
-            />
-          ),
+          drawerIcon: ({ focused, size }) => <SalesPosDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -375,15 +711,7 @@ export default function SidebarLayout() {
         options={{
           title: "Admin Reports",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="bar-chart-outline"
-              activeIcon="bar-chart"
-              focused={focused}
-              size={size}
-              offsetX={0}
-            />
-          ),
+          drawerIcon: ({ focused, size }) => <AdminReportsDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -391,15 +719,7 @@ export default function SidebarLayout() {
         options={{
           title: "Admin Incentives",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="ribbon-outline"
-              activeIcon="ribbon"
-              focused={focused}
-              size={size}
-              offsetX={0}
-            />
-          ),
+          drawerIcon: ({ focused, size }) => <AdminIncentivesDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -407,9 +727,7 @@ export default function SidebarLayout() {
         options={{
           title: "Admin Stock",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="cube-outline" activeIcon="cube" focused={focused} size={size} offsetX={0} />
-          ),
+          drawerIcon: ({ focused, size }) => <AdminStockDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -417,9 +735,7 @@ export default function SidebarLayout() {
         options={{
           title: "Route Tracking",
           drawerItemStyle: isAdmin ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="navigate-outline" activeIcon="navigate" focused={focused} size={size} offsetX={0} />
-          ),
+          drawerIcon: ({ focused, size }) => <RouteTrackingDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -427,9 +743,7 @@ export default function SidebarLayout() {
         options={{
           title: "Bank Accounts",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="wallet-outline" activeIcon="wallet" focused={focused} size={size} offsetX={0} />
-          ),
+          drawerIcon: ({ focused, size }) => <BankAccountsDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -447,9 +761,7 @@ export default function SidebarLayout() {
         options={{
           title: "Notifications",
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="notifications-outline"
-              activeIcon="notifications"
+            <NotificationsDrawerIcon
               focused={focused}
               size={size}
               badgeCount={unreadNotificationsCount}
@@ -461,9 +773,7 @@ export default function SidebarLayout() {
         name="support"
         options={{
           title: "Support",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="help-buoy-outline" activeIcon="help-buoy" focused={focused} size={size} />
-          ),
+          drawerIcon: ({ focused, size }) => <SupportDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen
@@ -472,7 +782,7 @@ export default function SidebarLayout() {
           title: "Admin Controls",
           drawerItemStyle: canSeeAdminControls ? undefined : { display: "none" },
           drawerIcon: ({ focused, size }) => (
-            <DrawerIcon icon="shield-checkmark-outline" activeIcon="shield-checkmark" focused={focused} size={size} offsetX={0} />
+            <AdminControlsDrawerIcon focused={focused} size={size} />
           ),
         }}
       />
@@ -480,14 +790,7 @@ export default function SidebarLayout() {
         name="more"
         options={{
           title: "More",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              icon="ellipsis-horizontal-circle-outline"
-              activeIcon="ellipsis-horizontal-circle"
-              focused={focused}
-              size={size}
-            />
-          ),
+          drawerIcon: ({ focused, size }) => <MoreDrawerIcon focused={focused} size={size} />,
         }}
       />
     </Drawer>
@@ -549,15 +852,16 @@ const styles = StyleSheet.create({
   },
   brandName: {
     color: "#F7FAFF",
-    fontSize: 27,
-    letterSpacing: -0.7,
+    fontSize: 25,
+    letterSpacing: -0.9,
     fontFamily: "Inter_700Bold",
   },
   brandMeta: {
     color: "rgba(214, 228, 255, 0.76)",
-    fontSize: 11.5,
-    letterSpacing: 0.5,
+    fontSize: 11,
+    letterSpacing: 1.2,
     fontFamily: "Inter_500Medium",
+    textTransform: "uppercase",
   },
   closePill: {
     minWidth: 94,
@@ -579,8 +883,9 @@ const styles = StyleSheet.create({
   },
   closePillText: {
     color: "#173966",
-    fontSize: 16,
-    fontFamily: "Inter_600SemiBold",
+    fontSize: 15,
+    letterSpacing: -0.2,
+    fontFamily: "Inter_500Medium",
   },
   closePillTextStatic: {
     color: "#F2F7FF",
@@ -589,9 +894,9 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   drawerHeading: {
-    fontFamily: "Inter_700Bold",
-    fontSize: 11,
-    letterSpacing: 1.6,
+    fontFamily: "Inter_500Medium",
+    fontSize: 10.5,
+    letterSpacing: 2.4,
     textTransform: "uppercase",
     marginLeft: 8,
     marginBottom: 10,
@@ -608,14 +913,16 @@ const styles = StyleSheet.create({
   },
   footerText: {
     color: "#F2F7FF",
-    fontSize: 14.5,
-    fontFamily: "Inter_600SemiBold",
+    fontSize: 13.5,
+    letterSpacing: -0.2,
+    fontFamily: "Inter_500Medium",
   },
   footerMeta: {
     color: "rgba(208, 224, 255, 0.68)",
-    fontSize: 12.5,
-    lineHeight: 18,
-    fontFamily: "Inter_500Medium",
+    fontSize: 11.5,
+    lineHeight: 17,
+    letterSpacing: 0.2,
+    fontFamily: "Inter_400Regular",
   },
 });
 

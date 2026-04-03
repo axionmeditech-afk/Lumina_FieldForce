@@ -428,6 +428,27 @@ export interface LocationLog {
   capturedAt: string;
 }
 
+export interface QuickSaleLocationLog {
+  id: string;
+  companyId?: string;
+  salespersonId: string;
+  salespersonName: string;
+  visitTaskId?: string | null;
+  visitLabel?: string | null;
+  visitDepartureNotes?: string | null;
+  visitDepartedAt?: string | null;
+  customerId: string;
+  customerName: string;
+  customerEmail?: string | null;
+  customerAddress?: string | null;
+  orderId: string;
+  itemCount: number;
+  totalAmount: number;
+  latitude: number;
+  longitude: number;
+  capturedAt: string;
+}
+
 export interface RouteHalt {
   id: string;
   userId: string;

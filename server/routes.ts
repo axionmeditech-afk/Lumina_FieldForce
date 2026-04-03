@@ -5254,7 +5254,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const body = req.body as { task?: Partial<Task> };
     const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
-    const normalizedTask = normalizeVisitNoteTask(body?.task || {}, authRecord?.user ?? null);
+    let normalizedTask = normalizeVisitNoteTask(body?.task || {}, authRecord?.user ?? null);
 
     if (!normalizedTask.id) {
       res.status(400).json({ message: "Task id is required." });
@@ -5264,9 +5264,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({ message: "Only field visit tasks can be synced as visit notes." });
       return;
     }
-    if (req.auth?.role === "salesperson" && normalizedTask.assignedTo !== req.auth.sub) {
-      res.status(403).json({ message: "You can only sync your own visit notes." });
-      return;
+    if (req.auth?.role === "salesperson" && req.auth.sub) {
+      normalizedTask = {
+        ...normalizedTask,
+        assignedTo: req.auth.sub,
+        assignedToName:
+          normalizeWhitespace(authRecord?.user.name || "") ||
+          normalizeWhitespace(normalizedTask.assignedToName || "") ||
+          "Salesperson",
+      };
     }
 
     try {

@@ -1,5 +1,6 @@
 import * as LocalAuthentication from "expo-local-authentication";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform } from "react-native";
 
 export interface BiometricSupportStatus {
   available: boolean;
@@ -99,6 +100,10 @@ function mapAuthErrorMessage(code: string): string {
   return code;
 }
 
+function isLegacyAndroidCredentialComboUnsupported(): boolean {
+  return Platform.OS === "android" && typeof Platform.Version === "number" && Platform.Version < 30;
+}
+
 export async function getBiometricSupportStatus(): Promise<BiometricSupportStatus> {
   try {
     const [hasHardware, enrolled, supportedTypes, enrolledLevel] = await Promise.all([
@@ -178,27 +183,66 @@ async function authenticateWithPreferredMethod(
   const promptMessage = isCheckIn ? "Verify identity for Check-In" : "Verify identity for Check-Out";
   const basePromptDescription =
     "Secure attendance uses your device authentication to confirm identity.";
+  const wantsDeviceFallback = options?.allowDeviceFallback === true;
+  const canUseCombinedBiometricAndCredentialPrompt =
+    method === "device_credential" || !isLegacyAndroidCredentialComboUnsupported();
+  const disableDeviceFallback =
+    method === "device_credential"
+      ? false
+      : wantsDeviceFallback && canUseCombinedBiometricAndCredentialPrompt
+        ? false
+        : true;
+  const promptDescription =
+    method === "fingerprint"
+      ? disableDeviceFallback
+        ? `${basePromptDescription} Use fingerprint to continue.`
+        : `${basePromptDescription} You can use fingerprint or choose your phone PIN, pattern, or password.`
+      : method === "face"
+        ? disableDeviceFallback
+          ? `${basePromptDescription} Use face unlock to continue.`
+          : `${basePromptDescription} You can use face unlock or choose your phone PIN, pattern, or password.`
+        : `${basePromptDescription} Use your device PIN, pattern, or password to continue.`;
 
-  const response = await LocalAuthentication.authenticateAsync({
-    promptMessage,
-    promptSubtitle:
-      method === "fingerprint"
-        ? "Use fingerprint to verify attendance"
-        : method === "face"
-          ? "Use face unlock to verify attendance"
-          : "Use your device PIN, pattern, or password",
-    promptDescription:
-      method === "fingerprint"
-        ? `${basePromptDescription} You can use fingerprint or choose your phone PIN, pattern, or password.`
-        : method === "face"
-          ? `${basePromptDescription} You can use face unlock or choose your phone PIN, pattern, or password.`
-          : `${basePromptDescription} Biometric unlock is unavailable, so device credential will be used.`,
-    cancelLabel: "Cancel",
-    fallbackLabel: "Use PIN / Password",
-    disableDeviceFallback: options?.allowDeviceFallback === true ? false : true,
-    requireConfirmation: true,
-    biometricsSecurityLevel: options?.strongOnly ? "strong" : "weak",
-  });
+  let response: LocalAuthentication.LocalAuthenticationResult;
+  try {
+    response = await LocalAuthentication.authenticateAsync({
+      promptMessage,
+      promptSubtitle:
+        method === "fingerprint"
+          ? "Use fingerprint to verify attendance"
+          : method === "face"
+            ? "Use face unlock to verify attendance"
+            : "Use your device PIN, pattern, or password",
+      promptDescription,
+      cancelLabel: "Cancel",
+      fallbackLabel: Platform.OS === "ios" ? "Use PIN / Password" : undefined,
+      disableDeviceFallback,
+      requireConfirmation: true,
+      biometricsSecurityLevel:
+        method === "device_credential" ? undefined : options?.strongOnly ? "strong" : "weak",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Device authentication failed.";
+    if (
+      Platform.OS === "android" &&
+      message.includes("BIOMETRIC_STRONG") &&
+      message.includes("DEVICE_CREDENTIAL")
+    ) {
+      return {
+        success: false,
+        method,
+        errorCode: "not_available",
+        errorMessage:
+          "This Android version does not support biometric and screen-lock fallback together. Please try again with your primary device authentication method.",
+      };
+    }
+    return {
+      success: false,
+      method,
+      errorCode: "auth_exception",
+      errorMessage: message,
+    };
+  }
 
   if (response.success) {
     return {

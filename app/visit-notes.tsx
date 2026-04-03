@@ -60,12 +60,7 @@ export default function VisitNotesScreen() {
     return tasks
       .filter((task) => task.taskType === "field_visit")
       .filter((task) => (isAdminViewer ? true : matchesSalesperson(task, user?.id, user?.name)))
-      .filter(
-        (task) =>
-          task.departureAt ||
-          task.meetingNotes?.trim() ||
-          task.visitDepartureNotes?.trim()
-      )
+      .filter((task) => task.departureAt || task.visitDepartureNotes?.trim())
       .sort((a, b) => {
         const left = new Date(b.visitDepartureNotesUpdatedAt || b.departureAt || b.createdAt).getTime();
         const right = new Date(a.visitDepartureNotesUpdatedAt || a.departureAt || a.createdAt).getTime();
@@ -106,7 +101,7 @@ export default function VisitNotesScreen() {
             </Text>
             <Text style={[styles.heroMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               {isAdminViewer
-                ? "Review salesperson, visit, meeting notes, and departure notes together in a clean table."
+                ? "Review salesperson, visit, and departure notes together in a clean table."
                 : "Review your remarks, dates, and follow-up context after each field visit."}
             </Text>
           </View>
@@ -129,9 +124,6 @@ export default function VisitNotesScreen() {
                   </Text>
                   <Text style={[styles.adminHeaderCell, styles.adminDateCol, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
                     Date
-                  </Text>
-                  <Text style={[styles.adminHeaderCell, styles.adminMeetingCol, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-                    Meeting Note
                   </Text>
                   <Text style={[styles.adminHeaderCell, styles.adminDepartureCol, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
                     Departure Note
@@ -160,9 +152,6 @@ export default function VisitNotesScreen() {
                     <Text style={[styles.adminCell, styles.adminDateCol, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                       {task.visitPlanDate ? formatMumbaiDateKey(task.visitPlanDate) : formatMumbaiDateTime(task.createdAt)}
                     </Text>
-                    <Text style={[styles.adminCell, styles.adminMeetingCol, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                      {task.meetingNotes?.trim() || "--"}
-                    </Text>
                     <Text style={[styles.adminCell, styles.adminDepartureCol, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                       {task.visitDepartureNotes?.trim() || "--"}
                     </Text>
@@ -173,9 +162,8 @@ export default function VisitNotesScreen() {
           </View>
         ) : visitNotes.length ? (
           visitNotes.map((task) => {
-            const meetingNote = task.meetingNotes?.trim() || "";
             const departureNote = task.visitDepartureNotes?.trim() || "";
-            const primaryNote = meetingNote || departureNote || "No note added for this visit.";
+            const primaryNote = departureNote || "No note added for this visit.";
             return (
               <View
                 key={task.id}
@@ -214,24 +202,12 @@ export default function VisitNotesScreen() {
                 </View>
 
                 <View style={[styles.noteBody, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}>
-                  {meetingNote ? (
-                    <Text style={[styles.noteLabel, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
-                      Meeting Note
-                    </Text>
-                  ) : null}
+                  <Text style={[styles.noteLabel, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                    Departure Note
+                  </Text>
                   <Text style={[styles.noteBodyText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                     {primaryNote}
                   </Text>
-                  {meetingNote && departureNote ? (
-                    <>
-                      <Text style={[styles.noteLabel, { color: colors.textTertiary, fontFamily: "Inter_600SemiBold" }]}>
-                        Departure Note
-                      </Text>
-                      <Text style={[styles.noteBodyText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                        {departureNote}
-                      </Text>
-                    </>
-                  ) : null}
                 </View>
 
               </View>
@@ -362,10 +338,6 @@ const styles = StyleSheet.create({
   },
   adminDateCol: {
     width: 150,
-    paddingRight: 14,
-  },
-  adminMeetingCol: {
-    width: 250,
     paddingRight: 14,
   },
   adminDepartureCol: {

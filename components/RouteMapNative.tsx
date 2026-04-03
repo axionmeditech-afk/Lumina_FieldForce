@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Platform, StyleSheet, Text, View } from "react-native";
+import { Animated, Easing, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import MapView, {
   Marker,
   Polyline,
@@ -25,16 +25,58 @@ export interface MultiRoutePath {
 export interface PlannedStopPoint {
   id: string;
   label: string;
+  customerName?: string;
   latitude: number;
   longitude: number;
   status?: "pending" | "in_progress" | "completed";
+  markerKind?: "planned_stop" | "visit_history";
+  summary?: string | null;
+  detail?: string | null;
+  isNearby?: boolean;
+  distanceMeters?: number | null;
 }
+
+export interface QuickSalePoint {
+  id: string;
+  customerName: string;
+  latitude: number;
+  longitude: number;
+  orderId: string;
+  itemCount: number;
+  totalAmount: number;
+  soldAt: string;
+  customerAddress?: string | null;
+  customerEmail?: string | null;
+  visitLabel?: string | null;
+  visitDepartureNotes?: string | null;
+  visitDepartedAt?: string | null;
+  summary?: string | null;
+  detail?: string | null;
+  isNearby?: boolean;
+  distanceMeters?: number | null;
+}
+
+type WebMapMarkerPayload = {
+  id: string;
+  kind: "route" | "planned_stop" | "quick_sale";
+  lat: number;
+  lng: number;
+  color: string;
+  renderMode?: "standard" | "pulse_only";
+  label?: string;
+  title?: string;
+  summary?: string | null;
+  detail?: string | null;
+  isNearby?: boolean;
+  distanceMeters?: number | null;
+};
 
 interface RouteMapNativeProps {
   points: LocationLog[];
   halts: RouteHalt[];
   multiRoutes?: MultiRoutePath[];
   plannedStops?: PlannedStopPoint[];
+  quickSalePoints?: QuickSalePoint[];
   routePath?: RoutePathPoint[];
   mapMode?: RouteMapMode;
   colors: typeof Colors.light;
@@ -100,7 +142,7 @@ function buildOsmHtml(payload: {
   center: { latitude: number; longitude: number };
   bounds: [[number, number], [number, number]] | null;
   routes: Array<{ coords: Array<[number, number]>; color: string }>;
-  markers: Array<{ lat: number; lng: number; color: string; label?: string }>;
+  markers: WebMapMarkerPayload[];
 }) {
   const safeJson = JSON.stringify(payload).replace(/</g, "\\u003c");
   return `<!doctype html>
@@ -160,6 +202,51 @@ function buildOsmHtml(payload: {
         right: 12px;
         bottom: 12px;
       }
+      .route-marker-wrap {
+        position: relative;
+        width: 28px;
+        height: 28px;
+      }
+      .route-marker {
+        width: 22px;
+        height: 22px;
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        border-radius: 999px;
+        border: 3px solid #ffffff;
+        box-shadow: 0 10px 16px rgba(2, 6, 23, 0.35);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #ffffff;
+        font-size: 10px;
+        font-weight: 800;
+      }
+      .route-marker--ghost {
+        opacity: 0;
+        border-color: transparent;
+        box-shadow: none;
+      }
+      .route-marker--nearby {
+        width: 24px;
+        height: 24px;
+        top: 2px;
+        left: 2px;
+      }
+      .route-marker-pulse {
+        position: absolute;
+        inset: 0;
+        border-radius: 999px;
+        background: currentColor;
+        opacity: 0.25;
+        animation: markerPulse 1.75s ease-out infinite;
+      }
+      @keyframes markerPulse {
+        0% { transform: scale(0.82); opacity: 0.34; }
+        70% { transform: scale(1.75); opacity: 0; }
+        100% { transform: scale(1.75); opacity: 0; }
+      }
     </style>
   </head>
   <body>
@@ -200,13 +287,35 @@ function buildOsmHtml(payload: {
       });
 
       (data.markers || []).forEach((marker) => {
-        L.circleMarker([marker.lat, marker.lng], {
-          radius: 6,
-          color: marker.color,
-          fillColor: marker.color,
-          fillOpacity: 0.95,
-          weight: 2,
-        }).addTo(map);
+        const icon = L.divIcon({
+          className: "",
+          html: \`
+            <div class="route-marker-wrap" style="color: \${marker.color || "#22d3ee"}">
+              \${marker.isNearby ? '<div class="route-marker-pulse"></div>' : ""}
+              <div class="route-marker \${marker.isNearby ? "route-marker--nearby" : ""} \${marker.renderMode === "pulse_only" ? "route-marker--ghost" : ""}" style="background: \${marker.color || "#22d3ee"}">
+                \${marker.label || ""}
+              </div>
+            </div>
+          \`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+        });
+        const mapMarker = L.marker([marker.lat, marker.lng], { icon }).addTo(map);
+        if (marker.kind === "planned_stop") {
+          mapMarker.on("click", () => {
+            const payload = JSON.stringify({ type: "planned_stop_press", stopId: marker.id });
+            if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+              window.ReactNativeWebView.postMessage(payload);
+            }
+          });
+        } else if (marker.kind === "quick_sale") {
+          mapMarker.on("click", () => {
+            const payload = JSON.stringify({ type: "quick_sale_press", quickSaleId: marker.id });
+            if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+              window.ReactNativeWebView.postMessage(payload);
+            }
+          });
+        }
       });
     </script>
   </body>
@@ -217,7 +326,7 @@ function buildMaptilerHtml(payload: {
   center: { latitude: number; longitude: number };
   bounds: [[number, number], [number, number]] | null;
   routes: Array<{ coords: Array<[number, number]>; color: string }>;
-  markers: Array<{ lat: number; lng: number; color: string; label?: string }>;
+  markers: WebMapMarkerPayload[];
   styleUrl: string;
   maptilerKey?: string;
 }) {
@@ -270,6 +379,19 @@ function buildMaptilerHtml(payload: {
         border-radius: 999px;
         border: 3px solid #ffffff;
         box-shadow: 0 10px 16px rgba(2, 6, 23, 0.4);
+        position: relative;
+      }
+      .route-marker--nearby {
+        width: 24px;
+        height: 24px;
+      }
+      .route-marker-pulse {
+        position: absolute;
+        inset: -5px;
+        border-radius: 999px;
+        background: inherit;
+        opacity: 0.25;
+        animation: markerPulse 1.75s ease-out infinite;
       }
       .route-marker-label {
         position: absolute;
@@ -280,6 +402,16 @@ function buildMaptilerHtml(payload: {
         font-size: 10px;
         color: #ffffff;
         font-weight: 700;
+      }
+      .route-marker--ghost {
+        opacity: 0;
+        border-color: transparent;
+        box-shadow: none;
+      }
+      @keyframes markerPulse {
+        0% { transform: scale(0.82); opacity: 0.34; }
+        70% { transform: scale(1.75); opacity: 0; }
+        100% { transform: scale(1.75); opacity: 0; }
       }
     </style>
   </head>
@@ -353,17 +485,38 @@ function buildMaptilerHtml(payload: {
 
         (data.markers || []).forEach((marker) => {
           const el = document.createElement("div");
-          el.className = "route-marker";
+          el.className = marker.isNearby ? "route-marker route-marker--nearby" : "route-marker";
+          if (marker.renderMode === "pulse_only") {
+            el.className += " route-marker--ghost";
+          }
           el.style.background = marker.color || "#22d3ee";
+          if (marker.isNearby) {
+            const pulse = document.createElement("div");
+            pulse.className = "route-marker-pulse";
+            el.appendChild(pulse);
+          }
           if (marker.label) {
             const label = document.createElement("div");
             label.className = "route-marker-label";
             label.textContent = marker.label;
             el.appendChild(label);
           }
-          new maplibregl.Marker({ element: el })
-            .setLngLat([marker.lng, marker.lat])
-            .addTo(map);
+          if (marker.kind === "planned_stop") {
+            el.addEventListener("click", () => {
+              const payload = JSON.stringify({ type: "planned_stop_press", stopId: marker.id });
+              if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                window.ReactNativeWebView.postMessage(payload);
+              }
+            });
+          } else if (marker.kind === "quick_sale") {
+            el.addEventListener("click", () => {
+              const payload = JSON.stringify({ type: "quick_sale_press", quickSaleId: marker.id });
+              if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                window.ReactNativeWebView.postMessage(payload);
+              }
+            });
+          }
+          new maplibregl.Marker({ element: el }).setLngLat([marker.lng, marker.lat]).addTo(map);
         });
       });
     </script>
@@ -443,13 +596,56 @@ function resolveMultiRouteColor(index: number, provided?: string | null): string
   return MULTI_ROUTE_COLORS[index % MULTI_ROUTE_COLORS.length];
 }
 
+function getHistoricalVisitAccent(colors: typeof Colors.light): string {
+  return colors.primary || "#2563EB";
+}
+
 function resolvePlannedStopColor(
-  status: PlannedStopPoint["status"],
+  stop: PlannedStopPoint,
   colors: typeof Colors.light
 ): string {
-  if (status === "completed") return colors.success;
-  if (status === "in_progress") return colors.warning;
+  if (stop.markerKind === "visit_history") return getHistoricalVisitAccent(colors);
+  if (stop.status === "completed") return colors.success;
+  if (stop.status === "in_progress") return colors.warning;
   return colors.secondary;
+}
+
+function getNearbyStopAccent(colors: typeof Colors.light): string {
+  return colors.warning || "#F59E0B";
+}
+
+function getQuickSaleAccent(colors: typeof Colors.light): string {
+  return colors.primary || "#6D28D9";
+}
+
+function getPlannedStopTitle(stop: PlannedStopPoint): string {
+  return stop.customerName || stop.label;
+}
+
+function getPlannedStopSummary(stop: PlannedStopPoint): string | null {
+  if (stop.summary?.trim()) return stop.summary.trim();
+  if (stop.markerKind === "visit_history") return "Past visit completed here.";
+  if (stop.status === "completed") return "Completed";
+  if (stop.status === "in_progress") return "In progress";
+  return "Pending";
+}
+
+function getPlannedStopDetail(stop: PlannedStopPoint): string | null {
+  return stop.detail?.trim() || null;
+}
+
+function getQuickSaleSummary(point: QuickSalePoint): string {
+  if (point.summary?.trim()) return point.summary.trim();
+  return `Order #${point.orderId} | ${point.itemCount} items | INR ${Math.round(point.totalAmount)}`;
+}
+
+function getQuickSaleDetail(point: QuickSalePoint): string | null {
+  if (point.detail?.trim()) return point.detail.trim();
+  return point.customerAddress || point.customerEmail || null;
+}
+
+function isHistoryPulseOnly(stop: PlannedStopPoint): boolean {
+  return stop.markerKind === "visit_history";
 }
 
 export function RouteMapNative({
@@ -457,6 +653,7 @@ export function RouteMapNative({
   halts,
   multiRoutes,
   plannedStops,
+  quickSalePoints,
   routePath,
   mapMode = "polyline",
   colors,
@@ -503,6 +700,13 @@ export function RouteMapNative({
       ),
     [plannedStops]
   );
+  const normalizedQuickSalePoints = useMemo(
+    () =>
+      (quickSalePoints || []).filter(
+        (point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude)
+      ),
+    [quickSalePoints]
+  );
   const hasMultiRoutes = normalizedMultiRoutes.length > 0;
   const shouldUseTrackingWidget =
     shouldUseMappls && mapMode === "tracking" && mapplsTrackingEnabled && !hasMultiRoutes;
@@ -527,6 +731,10 @@ export function RouteMapNative({
 
   const mapRef = useRef<MapView | null>(null);
   const trackingWidgetRef = useRef<TrackingWidgetRefLike | null>(null);
+  const nearbyPulse = useRef(new Animated.Value(0)).current;
+  const [selectedPlannedStopId, setSelectedPlannedStopId] = useState<string | null>(null);
+  const [selectedQuickSaleId, setSelectedQuickSaleId] = useState<string | null>(null);
+  const [isInsightModalVisible, setInsightModalVisible] = useState(false);
 
   const coords = useMemo(() => {
     if (routePath && routePath.length >= 2) {
@@ -552,6 +760,10 @@ export function RouteMapNative({
           latitude: stop.latitude,
           longitude: stop.longitude,
         })),
+        ...normalizedQuickSalePoints.map((point) => ({
+          latitude: point.latitude,
+          longitude: point.longitude,
+        })),
       ];
     }
     return [
@@ -560,8 +772,12 @@ export function RouteMapNative({
         latitude: stop.latitude,
         longitude: stop.longitude,
       })),
+      ...normalizedQuickSalePoints.map((point) => ({
+        latitude: point.latitude,
+        longitude: point.longitude,
+      })),
     ];
-  }, [coords, hasMultiRoutes, normalizedMultiRoutes, normalizedPlannedStops]);
+  }, [coords, hasMultiRoutes, normalizedMultiRoutes, normalizedPlannedStops, normalizedQuickSalePoints]);
 
   const region = useMemo(() => buildRegion(allCoords), [allCoords]);
   const bounds = useMemo(() => buildBounds(allCoords), [allCoords]);
@@ -628,10 +844,47 @@ export function RouteMapNative({
     [normalizedMultiRoutes]
   );
   const hasAnyPoints = hasMultiRoutes
-    ? flattenedMultiRoutePoints.length > 0 || normalizedPlannedStops.length > 0
-    : points.length > 0 || normalizedPlannedStops.length > 0;
+    ? flattenedMultiRoutePoints.length > 0 ||
+      normalizedPlannedStops.length > 0 ||
+      normalizedQuickSalePoints.length > 0
+    : points.length > 0 ||
+      normalizedPlannedStops.length > 0 ||
+      normalizedQuickSalePoints.length > 0;
   const panelPoints = hasMultiRoutes ? flattenedMultiRoutePoints : points;
   const panelHalts = hasMultiRoutes ? [] : halts;
+  const nearbyStops = useMemo(
+    () => normalizedPlannedStops.filter((stop) => stop.isNearby),
+    [normalizedPlannedStops]
+  );
+  const nearbyQuickSales = useMemo(
+    () => normalizedQuickSalePoints.filter((point) => point.isNearby),
+    [normalizedQuickSalePoints]
+  );
+  const selectedPlannedStop = useMemo(
+    () => normalizedPlannedStops.find((stop) => stop.id === selectedPlannedStopId) ?? null,
+    [normalizedPlannedStops, selectedPlannedStopId]
+  );
+  const selectedQuickSale = useMemo(
+    () => normalizedQuickSalePoints.find((point) => point.id === selectedQuickSaleId) ?? null,
+    [normalizedQuickSalePoints, selectedQuickSaleId]
+  );
+  const cardQuickSale = selectedQuickSale;
+  const cardPlannedStop = selectedPlannedStop;
+
+  const selectPlannedStop = (stopId: string, openModal = false) => {
+    setSelectedPlannedStopId(stopId);
+    setSelectedQuickSaleId(null);
+    if (openModal) {
+      setInsightModalVisible(true);
+    }
+  };
+  const selectQuickSale = (quickSaleId: string, openModal = false) => {
+    setSelectedQuickSaleId(quickSaleId);
+    setSelectedPlannedStopId(null);
+    if (openModal) {
+      setInsightModalVisible(true);
+    }
+  };
   const multiRouteDefs = useMemo(
     () =>
       normalizedMultiRoutes.map((route, index) => ({
@@ -671,11 +924,13 @@ export function RouteMapNative({
   }, [colors.primary, coords, hasMultiRoutes, multiRouteDefs]);
 
   const osmMarkers = useMemo(() => {
-    const markers: Array<{ lat: number; lng: number; color: string; label?: string }> = [];
+    const markers: WebMapMarkerPayload[] = [];
     if (hasMultiRoutes) {
       for (const route of multiRouteDefs) {
         if (route.endPoint) {
           markers.push({
+            id: `${route.id}_end`,
+            kind: "route",
             lat: route.endPoint.latitude,
             lng: route.endPoint.longitude,
             color: route.color,
@@ -685,6 +940,8 @@ export function RouteMapNative({
     } else {
       if (startPoint) {
         markers.push({
+          id: "route_start",
+          kind: "route",
           lat: startPoint.latitude,
           lng: startPoint.longitude,
           color: colors.success,
@@ -693,6 +950,8 @@ export function RouteMapNative({
       }
       if (endPoint) {
         markers.push({
+          id: "route_end",
+          kind: "route",
           lat: endPoint.latitude,
           lng: endPoint.longitude,
           color: colors.danger,
@@ -701,6 +960,8 @@ export function RouteMapNative({
       }
       for (const halt of halts) {
         markers.push({
+          id: halt.id,
+          kind: "route",
           lat: halt.latitude,
           lng: halt.longitude,
           color: "#F59E0B",
@@ -709,11 +970,42 @@ export function RouteMapNative({
       }
     }
     for (const stop of normalizedPlannedStops) {
+      const historyPulseOnly = isHistoryPulseOnly(stop);
       markers.push({
+        id: stop.id,
+        kind: "planned_stop",
         lat: stop.latitude,
         lng: stop.longitude,
-        color: resolvePlannedStopColor(stop.status, colors),
-        label: "P",
+        renderMode: historyPulseOnly ? "pulse_only" : "standard",
+        color:
+          historyPulseOnly
+            ? getHistoricalVisitAccent(colors)
+            : stop.isNearby && stop.markerKind !== "visit_history"
+            ? getNearbyStopAccent(colors)
+            : resolvePlannedStopColor(stop, colors),
+        label: historyPulseOnly ? "" : stop.isNearby ? "!" : "P",
+        title: stop.customerName || stop.label,
+        summary: stop.summary,
+        detail: stop.detail,
+        isNearby: Boolean(stop.isNearby),
+        distanceMeters: stop.distanceMeters ?? null,
+      });
+    }
+    for (const quickSale of normalizedQuickSalePoints) {
+      markers.push({
+        id: quickSale.id,
+        kind: "quick_sale",
+        lat: quickSale.latitude,
+        lng: quickSale.longitude,
+        color: quickSale.isNearby ? getQuickSaleAccent(colors) : `${getQuickSaleAccent(colors)}CC`,
+        label: quickSale.isNearby ? "$" : "Q",
+        title: quickSale.customerName,
+        summary: `Order #${quickSale.orderId} · ${quickSale.itemCount} items · INR ${Math.round(
+          quickSale.totalAmount
+        )}`,
+        detail: quickSale.customerAddress || quickSale.customerEmail || null,
+        isNearby: Boolean(quickSale.isNearby),
+        distanceMeters: quickSale.distanceMeters ?? null,
       });
     }
     return markers;
@@ -724,8 +1016,56 @@ export function RouteMapNative({
     hasMultiRoutes,
     multiRouteDefs,
     normalizedPlannedStops,
+    normalizedQuickSalePoints,
     startPoint,
   ]);
+
+  useEffect(() => {
+    if (selectedPlannedStopId && !normalizedPlannedStops.some((stop) => stop.id === selectedPlannedStopId)) {
+      setSelectedPlannedStopId(null);
+    }
+  }, [normalizedPlannedStops, selectedPlannedStopId]);
+
+  useEffect(() => {
+    if (
+      selectedQuickSaleId &&
+      !normalizedQuickSalePoints.some((point) => point.id === selectedQuickSaleId)
+    ) {
+      setSelectedQuickSaleId(null);
+    }
+  }, [normalizedQuickSalePoints, selectedQuickSaleId]);
+
+  useEffect(() => {
+    if (isInsightModalVisible && !selectedPlannedStop && !selectedQuickSale) {
+      setInsightModalVisible(false);
+    }
+  }, [isInsightModalVisible, selectedPlannedStop, selectedQuickSale]);
+
+  useEffect(() => {
+    if (!nearbyStops.length) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(nearbyPulse, {
+          toValue: 1,
+          duration: 900,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(nearbyPulse, {
+          toValue: 0,
+          duration: 900,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      nearbyPulse.stopAnimation();
+      nearbyPulse.setValue(0);
+    };
+  }, [nearbyPulse, nearbyQuickSales.length, nearbyStops.length]);
 
   const mapHtml = useMemo(() => {
     if ((!isOsmProvider && !isMaptilerProvider) || !region) return null;
@@ -749,6 +1089,82 @@ export function RouteMapNative({
     }
     return null;
   }, [bounds, isMaptilerProvider, isOsmProvider, maptilerKey, maptilerStyleUrl, osmMarkers, osmRoutes, region]);
+
+  const nearbyPulseOuterStyle = useMemo(
+    () => ({
+      transform: [
+        {
+          scale: nearbyPulse.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0.9, 1.8],
+          }),
+        },
+      ],
+      opacity: nearbyPulse.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.34, 0],
+      }),
+    }),
+    [nearbyPulse]
+  );
+
+  const renderPlannedStopMarker = (stop: PlannedStopPoint) => {
+    const historyPulseOnly = isHistoryPulseOnly(stop);
+    const pulseColor = historyPulseOnly ? getHistoricalVisitAccent(colors) : getNearbyStopAccent(colors);
+
+    return (
+      <Pressable
+        collapsable={false}
+        onPress={() => selectPlannedStop(stop.id, false)}
+        style={styles.markerTouchArea}
+      >
+        {stop.isNearby ? (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.nearbyPulseRing,
+              { backgroundColor: pulseColor },
+              nearbyPulseOuterStyle,
+            ]}
+          />
+        ) : null}
+        {historyPulseOnly ? null : (
+          <View
+            style={[
+              styles.pinWrap,
+              {
+                backgroundColor: stop.isNearby
+                  ? getNearbyStopAccent(colors)
+                  : resolvePlannedStopColor(stop, colors),
+              },
+              stop.isNearby ? styles.pinWrapNearby : null,
+            ]}
+          >
+            <Text style={styles.pinText}>{stop.isNearby ? "!" : "P"}</Text>
+          </View>
+        )}
+      </Pressable>
+    );
+  };
+
+  const handleWebMapMessage = useMemo(
+    () => (event: { nativeEvent?: { data?: string } }) => {
+      const raw = event.nativeEvent?.data;
+      if (!raw) return;
+      try {
+        const parsed = JSON.parse(raw) as { type?: string; stopId?: string; quickSaleId?: string };
+        if (parsed.type === "planned_stop_press" && parsed.stopId) {
+          selectPlannedStop(parsed.stopId, false);
+        }
+        if (parsed.type === "quick_sale_press" && parsed.quickSaleId) {
+          selectQuickSale(parsed.quickSaleId, false);
+        }
+      } catch {
+        // ignore malformed web map events
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (!shouldUseMappls) {
@@ -871,6 +1287,220 @@ export function RouteMapNative({
     trackingPoints,
   ]);
 
+  const selectedInsightCard = cardQuickSale ?? cardPlannedStop;
+  const selectedInsightAccent = cardQuickSale
+    ? getQuickSaleAccent(colors)
+    : cardPlannedStop?.markerKind === "visit_history"
+      ? getHistoricalVisitAccent(colors)
+      : getNearbyStopAccent(colors);
+  const selectedInsightEyebrow = cardQuickSale
+    ? "QUICK SALE"
+    : cardPlannedStop?.markerKind === "visit_history"
+      ? "VISIT HISTORY"
+      : "NEARBY CUSTOMER";
+  const insightDetailText = cardQuickSale
+    ? getQuickSaleDetail(cardQuickSale)
+    : cardPlannedStop
+      ? getPlannedStopDetail(cardPlannedStop)
+      : null;
+
+  const nearbyInfoCard = selectedInsightCard ? (
+    <Pressable
+      pointerEvents="box-none"
+      onPress={() => {
+        if (selectedQuickSale || selectedPlannedStop) {
+          setInsightModalVisible(true);
+        }
+      }}
+      style={[
+        styles.nearbyCard,
+        {
+          borderColor: colors.border,
+          backgroundColor: colors.backgroundElevated,
+          shadowColor: colors.cardShadow,
+        },
+      ]}
+    >
+      <View style={styles.nearbyCardTopRow}>
+        <View style={styles.nearbyCardTextWrap}>
+          <Text style={[styles.nearbyEyebrow, { color: selectedInsightAccent, fontFamily: "Inter_700Bold" }]}>
+            {selectedInsightEyebrow}
+          </Text>
+          <Text style={[styles.nearbyTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+            {cardQuickSale ? cardQuickSale.customerName : cardPlannedStop ? getPlannedStopTitle(cardPlannedStop) : ""}
+          </Text>
+        </View>
+        <View style={[styles.nearbyDistancePill, { backgroundColor: `${selectedInsightAccent}18` }]}>
+          <Text
+            style={[
+              styles.nearbyDistanceText,
+              { color: selectedInsightAccent, fontFamily: "Inter_700Bold" },
+            ]}
+          >
+            {selectedInsightCard.distanceMeters ? `${selectedInsightCard.distanceMeters} m` : "Nearby"}
+          </Text>
+        </View>
+      </View>
+      {cardQuickSale ? (
+        <Text style={[styles.nearbySummary, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+          Order #{selectedQuickSale.orderId} · {selectedQuickSale.itemCount} items · INR{" "}
+          {Math.round(selectedQuickSale.totalAmount)}
+        </Text>
+      ) : null}
+      {selectedInsightCard.summary ? (
+        <Text style={[styles.nearbySummary, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+          {selectedInsightCard.summary}
+        </Text>
+      ) : null}
+      {selectedInsightCard.detail ? (
+        <Text style={[styles.nearbyDetail, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+          {selectedInsightCard.detail}
+        </Text>
+      ) : null}
+    </Pressable>
+  ) : null;
+
+  const closeInsightModal = () => {
+    setInsightModalVisible(false);
+  };
+
+  const insightModal = (selectedPlannedStop || selectedQuickSale) ? (
+    <Modal
+      transparent
+      animationType="fade"
+      visible={isInsightModalVisible}
+      onRequestClose={closeInsightModal}
+    >
+      <Pressable style={[styles.detailOverlay, { backgroundColor: colors.overlay }]} onPress={closeInsightModal}>
+        <Pressable
+          onPress={() => {}}
+          style={[
+            styles.detailCard,
+            {
+              backgroundColor: colors.backgroundElevated,
+              borderColor: colors.border,
+              shadowColor: colors.cardShadow,
+            },
+          ]}
+        >
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.detailScrollContent}>
+            <View style={styles.detailHeader}>
+              <View style={styles.detailHeaderText}>
+                <Text
+                  style={[
+                    styles.detailEyebrow,
+                    {
+                      color: selectedQuickSale
+                        ? getQuickSaleAccent(colors)
+                        : selectedPlannedStop?.markerKind === "visit_history"
+                          ? getHistoricalVisitAccent(colors)
+                          : getNearbyStopAccent(colors),
+                      fontFamily: "Inter_700Bold",
+                    },
+                  ]}
+                >
+                  {selectedQuickSale
+                    ? "QUICK SALE"
+                    : selectedPlannedStop?.markerKind === "visit_history"
+                      ? "VISIT HISTORY"
+                      : "PLANNED VISIT"}
+                </Text>
+                <Text style={[styles.detailTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                  {selectedQuickSale
+                    ? selectedQuickSale.customerName
+                    : selectedPlannedStop
+                      ? getPlannedStopTitle(selectedPlannedStop)
+                      : ""}
+                </Text>
+              </View>
+              <Pressable onPress={closeInsightModal} style={styles.detailCloseButton}>
+                <Text style={[styles.detailCloseText, { color: colors.textSecondary, fontFamily: "Inter_700Bold" }]}>
+                  Close
+                </Text>
+              </Pressable>
+            </View>
+
+            {selectedQuickSale ? (
+              <>
+                <Text style={[styles.detailSummary, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                  {getQuickSaleSummary(selectedQuickSale)}
+                </Text>
+                <View style={styles.detailMetaList}>
+                  <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                    Sold at: {formatMumbaiTime(selectedQuickSale.soldAt)}
+                  </Text>
+                  {selectedQuickSale.customerAddress ? (
+                    <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      Address: {selectedQuickSale.customerAddress}
+                    </Text>
+                  ) : null}
+                  {selectedQuickSale.customerEmail ? (
+                    <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      Email: {selectedQuickSale.customerEmail}
+                    </Text>
+                  ) : null}
+                  {selectedQuickSale.visitLabel ? (
+                    <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      Visit: {selectedQuickSale.visitLabel}
+                    </Text>
+                  ) : null}
+                  {selectedQuickSale.visitDepartedAt ? (
+                    <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      Departed: {formatMumbaiTime(selectedQuickSale.visitDepartedAt)}
+                    </Text>
+                  ) : null}
+                  {selectedQuickSale.visitDepartureNotes ? (
+                    <View style={[styles.detailNoteBox, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+                      <Text style={[styles.detailNoteLabel, { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" }]}>
+                        Visit Notes
+                      </Text>
+                      <Text style={[styles.detailNoteText, { color: colors.text, fontFamily: "Inter_400Regular" }]}>
+                        {selectedQuickSale.visitDepartureNotes}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </>
+            ) : selectedPlannedStop ? (
+              <>
+                {getPlannedStopSummary(selectedPlannedStop) ? (
+                  <Text style={[styles.detailSummary, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                    {getPlannedStopSummary(selectedPlannedStop)}
+                  </Text>
+                ) : null}
+                {getPlannedStopDetail(selectedPlannedStop) ? (
+                  <Text style={[styles.detailBody, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                    {getPlannedStopDetail(selectedPlannedStop)}
+                  </Text>
+                ) : null}
+                <View style={styles.detailMetaList}>
+                  {typeof selectedPlannedStop.distanceMeters === "number" ? (
+                    <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      Distance: {selectedPlannedStop.distanceMeters} m
+                    </Text>
+                  ) : null}
+                  {selectedPlannedStop.status ? (
+                    <Text style={[styles.detailMetaText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      Status: {selectedPlannedStop.status.replace("_", " ")}
+                    </Text>
+                  ) : null}
+                </View>
+              </>
+            ) : null}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  ) : null;
+
+  const renderMapWithFooter = (mapNode: React.ReactNode) => (
+    <View style={styles.mapBlock}>
+      {mapNode}
+      {nearbyInfoCard}
+      {insightModal}
+    </View>
+  );
+
   if (Platform.OS === "web") {
     return <RouteMapPanel points={panelPoints} halts={panelHalts} colors={colors} height={height} />;
   }
@@ -949,7 +1579,7 @@ export function RouteMapNative({
         );
       }
 
-      return (
+      return renderMapWithFooter(
         <View style={[styles.container, { height, borderColor: colors.border }]}> 
           <MapplsGL.MapView style={StyleSheet.absoluteFill} onMapError={() => {}}>
             <TrackingWidget
@@ -991,15 +1621,47 @@ export function RouteMapNative({
                 key={`planned_stop_${stop.id}`}
                 id={`planned_stop_${stop.id}`}
                 coordinate={[stop.longitude, stop.latitude]}
+                onSelected={() => selectPlannedStop(stop.id, false)}
               >
-                <View
-                  style={[
-                    styles.pinWrap,
-                    { backgroundColor: resolvePlannedStopColor(stop.status, colors) },
-                  ]}
+                {renderPlannedStopMarker(stop)}
+              </MapplsGL.PointAnnotation>
+            ))}
+            {normalizedQuickSalePoints.map((sale) => (
+              <MapplsGL.PointAnnotation
+                key={`quick_sale_${sale.id}`}
+                id={`quick_sale_${sale.id}`}
+                coordinate={[sale.longitude, sale.latitude]}
+                onSelected={() => {
+                  selectQuickSale(sale.id, false);
+                }}
+              >
+                <Pressable
+                  collapsable={false}
+                  onPress={() => {
+                    selectQuickSale(sale.id, false);
+                  }}
+                  style={styles.markerTouchArea}
                 >
-                  <Text style={styles.pinText}>P</Text>
-                </View>
+                  {sale.isNearby ? (
+                    <Animated.View
+                      pointerEvents="none"
+                      style={[
+                        styles.nearbyPulseRing,
+                        { backgroundColor: getQuickSaleAccent(colors) },
+                        nearbyPulseOuterStyle,
+                      ]}
+                    />
+                  ) : null}
+                  <View
+                    style={[
+                      styles.pinWrap,
+                      { backgroundColor: getQuickSaleAccent(colors) },
+                      sale.isNearby ? styles.pinWrapNearby : null,
+                    ]}
+                  >
+                    <Text style={styles.pinText}>{sale.isNearby ? "$" : "Q"}</Text>
+                  </View>
+                </Pressable>
               </MapplsGL.PointAnnotation>
             ))}
           </MapplsGL.MapView>
@@ -1010,7 +1672,7 @@ export function RouteMapNative({
     const centerCoordinate: [number, number] = [region.longitude, region.latitude];
 
     if (hasMultiRoutes) {
-      return (
+      return renderMapWithFooter(
         <View style={[styles.container, { height, borderColor: colors.border }]}> 
           <MapplsGL.MapView style={StyleSheet.absoluteFill} onMapError={() => {}}>
             <MapplsGL.Camera zoomLevel={12} centerCoordinate={centerCoordinate} />
@@ -1055,15 +1717,47 @@ export function RouteMapNative({
                 key={`planned_stop_${stop.id}`}
                 id={`planned_stop_${stop.id}`}
                 coordinate={[stop.longitude, stop.latitude]}
+                onSelected={() => selectPlannedStop(stop.id, false)}
               >
-                <View
-                  style={[
-                    styles.pinWrap,
-                    { backgroundColor: resolvePlannedStopColor(stop.status, colors) },
-                  ]}
+                {renderPlannedStopMarker(stop)}
+              </MapplsGL.PointAnnotation>
+            ))}
+            {normalizedQuickSalePoints.map((sale) => (
+              <MapplsGL.PointAnnotation
+                key={`quick_sale_${sale.id}`}
+                id={`quick_sale_${sale.id}`}
+                coordinate={[sale.longitude, sale.latitude]}
+                onSelected={() => {
+                  selectQuickSale(sale.id, false);
+                }}
+              >
+                <Pressable
+                  collapsable={false}
+                  onPress={() => {
+                    selectQuickSale(sale.id, false);
+                  }}
+                  style={styles.markerTouchArea}
                 >
-                  <Text style={styles.pinText}>P</Text>
-                </View>
+                  {sale.isNearby ? (
+                    <Animated.View
+                      pointerEvents="none"
+                      style={[
+                        styles.nearbyPulseRing,
+                        { backgroundColor: getQuickSaleAccent(colors) },
+                        nearbyPulseOuterStyle,
+                      ]}
+                    />
+                  ) : null}
+                  <View
+                    style={[
+                      styles.pinWrap,
+                      { backgroundColor: getQuickSaleAccent(colors) },
+                      sale.isNearby ? styles.pinWrapNearby : null,
+                    ]}
+                  >
+                    <Text style={styles.pinText}>{sale.isNearby ? "$" : "Q"}</Text>
+                  </View>
+                </Pressable>
               </MapplsGL.PointAnnotation>
             ))}
           </MapplsGL.MapView>
@@ -1080,7 +1774,7 @@ export function RouteMapNative({
       },
     };
 
-    return (
+    return renderMapWithFooter(
       <View style={[styles.container, { height, borderColor: colors.border }]}> 
         <MapplsGL.MapView style={StyleSheet.absoluteFill} onMapError={() => {}}>
           <MapplsGL.Camera zoomLevel={12} centerCoordinate={centerCoordinate} />
@@ -1143,15 +1837,46 @@ export function RouteMapNative({
               key={`planned_stop_${stop.id}`}
               id={`planned_stop_${stop.id}`}
               coordinate={[stop.longitude, stop.latitude]}
+              onSelected={() => selectPlannedStop(stop.id, false)}
             >
-              <View
-                style={[
-                  styles.pinWrap,
-                  { backgroundColor: resolvePlannedStopColor(stop.status, colors) },
-                ]}
+              {renderPlannedStopMarker(stop)}
+            </MapplsGL.PointAnnotation>
+          ))}
+          {normalizedQuickSalePoints.map((sale) => (
+            <MapplsGL.PointAnnotation
+              key={`quick_sale_${sale.id}`}
+              id={`quick_sale_${sale.id}`}
+              coordinate={[sale.longitude, sale.latitude]}
+              onSelected={() => {
+                selectQuickSale(sale.id, false);
+              }}
+            >
+              <Pressable
+                onPress={() => {
+                  selectQuickSale(sale.id, false);
+                }}
+                style={styles.markerTouchArea}
               >
-                <Text style={styles.pinText}>P</Text>
-              </View>
+                {sale.isNearby ? (
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[
+                      styles.nearbyPulseRing,
+                      { backgroundColor: getQuickSaleAccent(colors) },
+                      nearbyPulseOuterStyle,
+                    ]}
+                  />
+                ) : null}
+                <View
+                  style={[
+                    styles.pinWrap,
+                    { backgroundColor: getQuickSaleAccent(colors) },
+                    sale.isNearby ? styles.pinWrapNearby : null,
+                  ]}
+                >
+                  <Text style={styles.pinText}>{sale.isNearby ? "$" : "Q"}</Text>
+                </View>
+              </Pressable>
             </MapplsGL.PointAnnotation>
           ))}
         </MapplsGL.MapView>
@@ -1203,7 +1928,7 @@ export function RouteMapNative({
       );
     }
 
-    return (
+    return renderMapWithFooter(
       <View style={[styles.container, { height, borderColor: colors.border }]}> 
         <WebView
           originWhitelist={["*"]}
@@ -1213,6 +1938,7 @@ export function RouteMapNative({
           nestedScrollEnabled
           javaScriptEnabled
           domStorageEnabled
+          onMessage={handleWebMapMessage}
         />
       </View>
     );
@@ -1252,7 +1978,7 @@ export function RouteMapNative({
     );
   }
 
-  return (
+  return renderMapWithFooter(
     <View style={[styles.container, { height, borderColor: colors.border }]}> 
       <MapView
         ref={mapRef}
@@ -1328,14 +2054,61 @@ export function RouteMapNative({
                   coordinate={{ latitude: stop.latitude, longitude: stop.longitude }}
                   title={`Planned Stop: ${stop.label}`}
                   description={
-                    stop.status === "completed"
-                      ? "Completed"
-                      : stop.status === "in_progress"
-                        ? "In progress"
-                        : "Pending"
+                    stop.summary
+                      ? `${stop.summary}${stop.detail ? ` · ${stop.detail}` : ""}`
+                      : stop.status === "completed"
+                        ? "Completed"
+                        : stop.status === "in_progress"
+                          ? "In progress"
+                          : "Pending"
                   }
-                  pinColor={resolvePlannedStopColor(stop.status, colors)}
-                />
+                  onPress={() => selectPlannedStop(stop.id, false)}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  {renderPlannedStopMarker(stop)}
+                </Marker>
+              ))}
+              {normalizedQuickSalePoints.map((sale) => (
+                <Marker
+                  key={`quick_sale_${sale.id}`}
+                  coordinate={{ latitude: sale.latitude, longitude: sale.longitude }}
+                  title={`Quick Sale: ${sale.customerName}`}
+                  description={`Order #${sale.orderId} · ${sale.itemCount} items · INR ${Math.round(
+                    sale.totalAmount
+                  )}${sale.customerAddress ? ` · ${sale.customerAddress}` : ""}`}
+                  onPress={() => {
+                    selectQuickSale(sale.id, false);
+                  }}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  <Pressable
+                    collapsable={false}
+                    onPress={() => {
+                      selectQuickSale(sale.id, false);
+                    }}
+                    style={styles.markerTouchArea}
+                  >
+                    {sale.isNearby ? (
+                      <Animated.View
+                        pointerEvents="none"
+                        style={[
+                          styles.nearbyPulseRing,
+                          { backgroundColor: getQuickSaleAccent(colors) },
+                          nearbyPulseOuterStyle,
+                        ]}
+                      />
+                    ) : null}
+                    <View
+                      style={[
+                        styles.pinWrap,
+                        { backgroundColor: getQuickSaleAccent(colors) },
+                        sale.isNearby ? styles.pinWrapNearby : null,
+                      ]}
+                    >
+                      <Text style={styles.pinText}>{sale.isNearby ? "$" : "Q"}</Text>
+                    </View>
+                  </Pressable>
+                </Marker>
               ))}
             </>
           )}
@@ -1346,14 +2119,63 @@ export function RouteMapNative({
                 coordinate={{ latitude: stop.latitude, longitude: stop.longitude }}
                 title={`Planned Stop: ${stop.label}`}
                 description={
-                  stop.status === "completed"
-                    ? "Completed"
-                    : stop.status === "in_progress"
-                      ? "In progress"
-                      : "Pending"
+                  stop.summary
+                    ? `${stop.summary}${stop.detail ? ` · ${stop.detail}` : ""}`
+                    : stop.status === "completed"
+                      ? "Completed"
+                      : stop.status === "in_progress"
+                        ? "In progress"
+                        : "Pending"
                 }
-                pinColor={resolvePlannedStopColor(stop.status, colors)}
-              />
+                onPress={() => selectPlannedStop(stop.id, false)}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                {renderPlannedStopMarker(stop)}
+              </Marker>
+            ))
+          : null}
+        {hasMultiRoutes
+          ? normalizedQuickSalePoints.map((sale) => (
+              <Marker
+                key={`quick_sale_${sale.id}`}
+                coordinate={{ latitude: sale.latitude, longitude: sale.longitude }}
+                title={`Quick Sale: ${sale.customerName}`}
+                description={`Order #${sale.orderId} · ${sale.itemCount} items · INR ${Math.round(
+                  sale.totalAmount
+                )}${sale.customerAddress ? ` · ${sale.customerAddress}` : ""}`}
+                onPress={() => {
+                  selectQuickSale(sale.id, false);
+                }}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                <Pressable
+                  collapsable={false}
+                  onPress={() => {
+                    selectQuickSale(sale.id, false);
+                  }}
+                  style={styles.markerTouchArea}
+                >
+                  {sale.isNearby ? (
+                    <Animated.View
+                      pointerEvents="none"
+                      style={[
+                        styles.nearbyPulseRing,
+                        { backgroundColor: getQuickSaleAccent(colors) },
+                        nearbyPulseOuterStyle,
+                      ]}
+                    />
+                  ) : null}
+                  <View
+                    style={[
+                      styles.pinWrap,
+                      { backgroundColor: getQuickSaleAccent(colors) },
+                      sale.isNearby ? styles.pinWrapNearby : null,
+                    ]}
+                  >
+                    <Text style={styles.pinText}>{sale.isNearby ? "$" : "Q"}</Text>
+                  </View>
+                </Pressable>
+              </Marker>
             ))
           : null}
       </MapView>
@@ -1362,6 +2184,9 @@ export function RouteMapNative({
 }
 
 const styles = StyleSheet.create({
+  mapBlock: {
+    gap: 10,
+  },
   container: {
     borderRadius: 18,
     borderWidth: 1,
@@ -1394,15 +2219,40 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17,
   },
+  markerTouchArea: {
+    width: 44,
+    height: 44,
+    position: "relative",
+    overflow: "visible",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  nearbyPulseRing: {
+    position: "absolute",
+    left: 5,
+    top: 5,
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+  },
   pinWrap: {
-    minWidth: 22,
+    position: "absolute",
+    left: 11,
+    top: 11,
+    width: 22,
     height: 22,
     borderRadius: 11,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 6,
     borderWidth: 1,
     borderColor: "#FFFFFF",
+  },
+  pinWrapNearby: {
+    left: 10,
+    top: 10,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
   },
   pinText: {
     color: "#FFFFFF",
@@ -1415,5 +2265,120 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "#FFFFFF",
+  },
+  nearbyCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+    gap: 4,
+  },
+  nearbyCardTopRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  nearbyCardTextWrap: {
+    flex: 1,
+    gap: 3,
+  },
+  nearbyEyebrow: {
+    fontSize: 10,
+    letterSpacing: 0.9,
+  },
+  nearbyTitle: {
+    fontSize: 15,
+    lineHeight: 19,
+  },
+  nearbyDistancePill: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  nearbyDistanceText: {
+    fontSize: 11,
+  },
+  nearbySummary: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  nearbyDetail: {
+    fontSize: 11.5,
+    lineHeight: 16,
+  },
+  detailOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+  detailCard: {
+    borderWidth: 1,
+    borderRadius: 22,
+    maxHeight: "76%",
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 8,
+  },
+  detailScrollContent: {
+    padding: 18,
+    gap: 14,
+  },
+  detailHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  detailHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  detailEyebrow: {
+    fontSize: 11,
+    letterSpacing: 0.8,
+  },
+  detailTitle: {
+    fontSize: 20,
+    lineHeight: 24,
+  },
+  detailCloseButton: {
+    paddingVertical: 6,
+  },
+  detailCloseText: {
+    fontSize: 12,
+  },
+  detailSummary: {
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  detailBody: {
+    fontSize: 12.5,
+    lineHeight: 19,
+  },
+  detailMetaList: {
+    gap: 8,
+  },
+  detailMetaText: {
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  detailNoteBox: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 12,
+    gap: 6,
+  },
+  detailNoteLabel: {
+    fontSize: 12,
+  },
+  detailNoteText: {
+    fontSize: 12.5,
+    lineHeight: 18,
   },
 });

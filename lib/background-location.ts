@@ -4,6 +4,7 @@ import * as TaskManager from "expo-task-manager";
 import { Platform } from "react-native";
 import { postLocationBatch } from "@/lib/attendance-api";
 import { getBatteryLevelPercent } from "@/lib/battery";
+import { maybeSendLocationReminder } from "@/lib/location-reminders";
 import { getCurrentUser, getSettings } from "@/lib/storage";
 
 const BACKGROUND_LOCATION_TASK = "trackforce-background-location-task-v1";
@@ -142,6 +143,18 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
     toQueuePoint(currentUser.id, location, batteryLevel)
   );
   await enqueueBackgroundLocationPoints(queuePoints);
+
+  if (settings.notifications !== "false") {
+    const latestPoint = queuePoints[queuePoints.length - 1];
+    if (latestPoint) {
+      await maybeSendLocationReminder({
+        latitude: latestPoint.latitude,
+        longitude: latestPoint.longitude,
+        userId: currentUser.id,
+        companyId: currentUser.companyId ?? null,
+      });
+    }
+  }
 
   if (settings.autoSync !== "false" && settings.offlineMode !== "true") {
     await flushBackgroundLocationQueue();

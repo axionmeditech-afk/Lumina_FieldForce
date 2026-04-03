@@ -21,6 +21,7 @@ import type {
   AttendanceAnomaly,
   AttendancePhoto,
   LocationLog,
+  QuickSaleLocationLog,
   DolibarrSyncLog,
   CompanyProfile,
   UserRole,
@@ -56,6 +57,7 @@ const KEYS = {
   ATTENDANCE_PHOTOS: "@trackforce_attendance_photos",
   ATTENDANCE_ANOMALIES: "@trackforce_attendance_anomalies",
   LOCATION_LOGS: "@trackforce_location_logs",
+  QUICK_SALE_LOCATION_LOGS: "@trackforce_quick_sale_location_logs",
   DOLIBARR_SYNC_LOGS: "@trackforce_dolibarr_sync_logs",
   NOTIFICATIONS: "@trackforce_notifications",
   SUPPORT_THREADS: "@trackforce_support_threads",
@@ -162,6 +164,7 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
   KEYS.ATTENDANCE_PHOTOS,
   KEYS.ATTENDANCE_ANOMALIES,
   KEYS.LOCATION_LOGS,
+  KEYS.QUICK_SALE_LOCATION_LOGS,
   KEYS.DOLIBARR_SYNC_LOGS,
   KEYS.NOTIFICATIONS,
   KEYS.SUPPORT_THREADS,
@@ -3294,6 +3297,21 @@ export async function addLocationLog(locationLog: LocationLog): Promise<void> {
   const logs = await getRawList<LocationLog>(KEYS.LOCATION_LOGS);
   logs.unshift(withCompanyId(locationLog, companyId));
   await setItem(KEYS.LOCATION_LOGS, logs.slice(0, 5000));
+}
+
+export async function getQuickSaleLocationLogs(): Promise<QuickSaleLocationLog[]> {
+  const companyId = await getActiveCompanyId();
+  const logs = await getRawList<QuickSaleLocationLog>(KEYS.QUICK_SALE_LOCATION_LOGS);
+  return logs.filter((log) => matchesCompany(log, companyId));
+}
+
+export async function addQuickSaleLocationLog(log: QuickSaleLocationLog): Promise<void> {
+  const companyId = await getActiveCompanyId();
+  const logs = await getRawList<QuickSaleLocationLog>(KEYS.QUICK_SALE_LOCATION_LOGS);
+  const nextLog = withCompanyId(log, companyId ?? log.companyId ?? DEFAULT_COMPANY_ID);
+  const filtered = logs.filter((entry) => entry.id !== nextLog.id);
+  filtered.unshift(nextLog);
+  await setItem(KEYS.QUICK_SALE_LOCATION_LOGS, filtered.slice(0, 3000));
 }
 
 export async function getDolibarrSyncLogs(): Promise<DolibarrSyncLog[]> {

@@ -212,6 +212,20 @@ export interface DolibarrOrderCreateResult {
   message?: string;
 }
 
+export interface DolibarrCustomerCreatePayload {
+  name: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  note?: string;
+}
+
+export interface DolibarrCustomerCreateResult {
+  ok: boolean;
+  customerId: number | null;
+  message?: string;
+}
+
 export interface RemoteStateResponse<T> {
   key: string;
   value: T | null;
@@ -2218,6 +2232,40 @@ export async function createDolibarrSalesOrder(
     ok: Boolean(orderId),
     orderId,
     message: orderId ? "Sales order created." : "Sales order created but ID not returned.",
+  };
+}
+
+export async function createDolibarrCustomer(
+  payload: DolibarrCustomerCreatePayload
+): Promise<DolibarrCustomerCreateResult> {
+  const customerPayload: Record<string, unknown> = {
+    name: payload.name.trim(),
+    client: 1,
+    status: 1,
+  };
+
+  if (payload.email?.trim()) {
+    customerPayload.email = payload.email.trim();
+  }
+  if (payload.phone?.trim()) {
+    customerPayload.phone = payload.phone.trim();
+  }
+  if (payload.address?.trim()) {
+    customerPayload.address = payload.address.trim();
+  }
+  if (payload.note?.trim()) {
+    customerPayload.note_public = payload.note.trim();
+  }
+
+  const response = await fetchJson<Record<string, unknown>>("/dolibarr/proxy/thirdparties", {
+    method: "POST",
+    body: JSON.stringify(customerPayload),
+  });
+  const customerId = parseDolibarrEntityId(response);
+  return {
+    ok: Boolean(customerId),
+    customerId,
+    message: customerId ? "Customer created." : "Customer created but ID not returned.",
   };
 }
 

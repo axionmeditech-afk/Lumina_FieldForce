@@ -27,9 +27,11 @@ import {
   getApiBaseUrlCandidates,
   getAdminLiveMapRoutes,
   getAdminRouteTimeline,
+  getDolibarrOrders,
   getDolibarrProducts,
   getDolibarrThirdParties,
   getRemoteState,
+  createDolibarrCustomer,
   createDolibarrSalesOrder,
   adjustCompanyProductStock,
   validateDolibarrSalesOrder,
@@ -37,6 +39,7 @@ import {
   searchMapplsAutosuggest,
   searchMapplsTextSearch,
   type DolibarrProduct,
+  type DolibarrOrder,
   type DolibarrThirdParty,
   type DolibarrOrderLineInput,
   type MapplsPlaceSuggestion,
@@ -47,27 +50,42 @@ import {
   addTask,
   addAuditLog,
   addConversation,
+  addQuickSaleLocationLog,
   addStockTransfer,
   getAttendance,
   getConversations,
   getLocationLogs,
+  getQuickSaleLocationLogs,
   getTasks,
   resolveAssignedStockistForUser,
   removeTask,
   syncVisitNoteTaskRemote,
   updateTask,
-  updateConversation,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
 import { buildRouteTimeline } from "@/lib/route-analytics";
 import { formatMumbaiDateTime, formatMumbaiTime, isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
-import type { AttendanceRecord, Conversation, Employee, LocationLog, Task } from "@/lib/types";
+import { maybeSendLocationReminder, syncLocationReminderCatalog } from "@/lib/location-reminders";
+import { getLastKnownLocationSafe } from "@/lib/location-service";
+import { haversineDistanceMeters } from "@/lib/geofence";
+import type {
+  AttendanceRecord,
+  Conversation,
+  Employee,
+  LocationLog,
+  QuickSaleLocationLog,
+  Task,
+} from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
-import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNative";
+import {
+  RouteMapNative,
+  type PlannedStopPoint,
+  type QuickSalePoint,
+} from "@/components/RouteMapNative";
 
 type SpeechRecognitionEventName =
   | "start"
@@ -106,6 +124,8 @@ const TRANSCRIPTION_FAILED_MESSAGE = "Transcription failed. Please try again.";
 const ROUTE_SEARCH_RESULTS_LIMIT = 20;
 const ROUTE_NAV_WAYPOINT_LIMIT = 6;
 const POS_PAGE_SIZE = 100;
+const VISIT_NEARBY_RADIUS_METERS = 250;
+const VISIT_RECENT_ORDER_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
 const VOICE_PULSE_BASELINE = Array.from({ length: VOICE_WAVE_BAR_COUNT }, (_, index) => {
   const center = (VOICE_WAVE_BAR_COUNT - 1) / 2;
   const distance = Math.abs(index - center) / center;
@@ -294,6 +314,31 @@ function mergeUniqueProducts(
     if (seen.has(key)) continue;
     seen.add(key);
     all.push(product);
+  }
+  return all;
+}
+
+function mergeUniqueCustomers(
+  current: DolibarrThirdParty[],
+  incoming: DolibarrThirdParty[]
+): DolibarrThirdParty[] {
+  const seen = new Set<string>();
+  const all = [...current];
+  for (const customer of current) {
+    const id = getDolibarrThirdPartyId(customer);
+    const key = id
+      ? `id:${id}`
+      : `name:${getDolibarrThirdPartyLabel(customer)}|email:${customer.email || ""}`;
+    seen.add(key);
+  }
+  for (const customer of incoming) {
+    const id = getDolibarrThirdPartyId(customer);
+    const key = id
+      ? `id:${id}`
+      : `name:${getDolibarrThirdPartyLabel(customer)}|email:${customer.email || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    all.push(customer);
   }
   return all;
 }
@@ -1075,6 +1120,134 @@ function getVisitLabel(task: Task): string {
   return task.visitLocationLabel?.trim() || task.title.trim() || "Field Visit";
 }
 
+function normalizeVisitReminderMatchText(value: string | null | undefined): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/^#\d+\s*/g, "")
+    .replace(/^visit\s*\d+\s*[:\-]?\s*/g, "")
+    .replace(/^dr\.?\s+/g, "")
+    .replace(/^doctor\s+/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getVisitReminderOrderCustomerLabel(order: DolibarrOrder): string {
+  return order.thirdparty_name?.toString().trim() || order.socname?.trim() || order.label?.trim() || "";
+}
+
+function parseVisitReminderOrderDate(order: DolibarrOrder): string | null {
+  const raw = order.date_commande ?? order.date_creation ?? order.date;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return new Date(raw * 1000).toISOString();
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+  return null;
+}
+
+function parseVisitReminderOrderTotal(order: DolibarrOrder): number | null {
+  const raw = order.total_ttc ?? order.total_ht ?? order.total;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function formatVisitReminderDate(value: string | null): string {
+  if (!value) return "recently";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "recently";
+  return parsed.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+
+function formatVisitReminderCurrency(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "";
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function truncateVisitReminderText(value: string | null | undefined, maxLength = 86): string {
+  const cleaned = (value || "").trim().replace(/\s+/g, " ");
+  if (!cleaned) return "";
+  if (cleaned.length <= maxLength) return cleaned;
+  return `${cleaned.slice(0, maxLength - 1).trim()}...`;
+}
+
+function buildVisitReminderSummary(task: Task, recentOrders: DolibarrOrder[]): {
+  customerName: string;
+  summary: string;
+  detail: string | null;
+} {
+  const customerName = getVisitLabel(task);
+  const normalizedTaskLabel = normalizeVisitReminderMatchText(customerName);
+  const recentCutoff = Date.now() - VISIT_RECENT_ORDER_WINDOW_MS;
+  const matchedOrders = recentOrders
+    .map((order) => ({
+      customerLabel: getVisitReminderOrderCustomerLabel(order),
+      date: parseVisitReminderOrderDate(order),
+      total: parseVisitReminderOrderTotal(order),
+    }))
+    .filter((entry) => {
+      if (!entry.customerLabel) return false;
+      const normalizedCustomerLabel = normalizeVisitReminderMatchText(entry.customerLabel);
+      if (!normalizedCustomerLabel || !normalizedTaskLabel) return false;
+      const labelMatches =
+        normalizedTaskLabel.includes(normalizedCustomerLabel) ||
+        normalizedCustomerLabel.includes(normalizedTaskLabel);
+      if (!labelMatches) return false;
+      if (!entry.date) return true;
+      return new Date(entry.date).getTime() >= recentCutoff;
+    })
+    .sort((left, right) => {
+      const leftTime = left.date ? new Date(left.date).getTime() : 0;
+      const rightTime = right.date ? new Date(right.date).getTime() : 0;
+      return rightTime - leftTime;
+    });
+
+  const latestOrder = matchedOrders[0] || null;
+  const noteSnippet = truncateVisitReminderText(task.visitDepartureNotes || "");
+  const addressSnippet = truncateVisitReminderText(task.visitLocationAddress || "", 74);
+
+  if (latestOrder) {
+    const amountLabel = formatVisitReminderCurrency(latestOrder.total);
+    const countLabel =
+      matchedOrders.length > 1 ? `${matchedOrders.length} recent orders` : "Recent order";
+    return {
+      customerName,
+      summary: `${countLabel} · ${formatVisitReminderDate(latestOrder.date)}${
+        amountLabel ? ` · ${amountLabel}` : ""
+      }`,
+      detail: noteSnippet || addressSnippet || "Open Sales AI to decide the next stop.",
+    };
+  }
+
+  if (noteSnippet) {
+    return {
+      customerName,
+      summary: "Saved departure note available",
+      detail: noteSnippet,
+    };
+  }
+
+  return {
+    customerName,
+    summary: addressSnippet || "Planned field visit nearby",
+    detail: addressSnippet && addressSnippet !== "Planned field visit nearby"
+      ? "Open Sales AI to review the stop."
+      : null,
+  };
+}
+
 function getVisitSubtitle(task: Task): string {
   const parts: string[] = [];
   if (task.visitLocationAddress?.trim()) parts.push(task.visitLocationAddress.trim());
@@ -1214,6 +1387,7 @@ export default function SalesScreen() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [locationLogs, setLocationLogs] = useState<LocationLog[]>([]);
+  const [quickSaleLocationLogs, setQuickSaleLocationLogs] = useState<QuickSaleLocationLog[]>([]);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -1223,11 +1397,14 @@ export default function SalesScreen() {
   const [isTranscribingFile, setIsTranscribingFile] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [audioUri, setAudioUri] = useState<string | null>(null);
-  const [meetingNotesDraftByTaskId, setMeetingNotesDraftByTaskId] = useState<Record<string, string>>({});
-  const [meetingNotesSavingTaskId, setMeetingNotesSavingTaskId] = useState<string | null>(null);
   const [departureNotesTask, setDepartureNotesTask] = useState<Task | null>(null);
   const [departureNotesDraft, setDepartureNotesDraft] = useState("");
   const [departureNotesModalVisible, setDepartureNotesModalVisible] = useState(false);
+  const [departureCreateCustomerEnabled, setDepartureCreateCustomerEnabled] = useState(false);
+  const [departureCustomerName, setDepartureCustomerName] = useState("");
+  const [departureCustomerEmail, setDepartureCustomerEmail] = useState("");
+  const [departureCustomerPhone, setDepartureCustomerPhone] = useState("");
+  const [departureCustomerAddress, setDepartureCustomerAddress] = useState("");
   const [recordError, setRecordError] = useState<string | null>(null);
   const [recognitionAvailable, setRecognitionAvailable] = useState(true);
   const [requestBusy, setRequestBusy] = useState(false);
@@ -1251,6 +1428,7 @@ export default function SalesScreen() {
   const [voicePulseBars, setVoicePulseBars] = useState<number[]>(VOICE_PULSE_BASELINE);
   const [voicePulseState, setVoicePulseState] = useState<"idle" | "listening" | "speaking">("idle");
   const [posProducts, setPosProducts] = useState<DolibarrProduct[]>([]);
+  const [recentOrders, setRecentOrders] = useState<DolibarrOrder[]>([]);
   const [posCustomers, setPosCustomers] = useState<DolibarrThirdParty[]>([]);
   const [posProductQuery, setPosProductQuery] = useState("");
   const [posCustomerQuery, setPosCustomerQuery] = useState("");
@@ -1265,6 +1443,7 @@ export default function SalesScreen() {
   const [posProductsPage, setPosProductsPage] = useState(0);
   const [posProductsHasMore, setPosProductsHasMore] = useState(false);
   const [posProductsLoadingMore, setPosProductsLoadingMore] = useState(false);
+  const [posLinkedVisitTaskId, setPosLinkedVisitTaskId] = useState<string | null>(null);
 
   const finalSegmentsRef = useRef<string[]>([]);
   const startedAtRef = useRef<number | null>(null);
@@ -1284,6 +1463,7 @@ export default function SalesScreen() {
   const voicePeakRef = useRef(0);
   const voiceLastInputAtRef = useRef(0);
   const isRecordingStateRef = useRef(false);
+  const latestRoutePointRef = useRef<LocationLog | null>(null);
   const isTranscribingStateRef = useRef(false);
 
   const markVoiceDetected = useCallback(() => {
@@ -1314,6 +1494,7 @@ export default function SalesScreen() {
       taskData,
       employeeData,
       logs,
+      quickSaleLogs,
       attendance,
       remoteLogsState,
       remoteAttendanceState,
@@ -1322,6 +1503,7 @@ export default function SalesScreen() {
       getTasks(),
       getEmployees(),
       getLocationLogs(),
+      getQuickSaleLocationLogs(),
       getAttendance(),
       isAdminViewer
         ? getRemoteState<LocationLog[]>("@trackforce_location_logs").catch(() => ({ value: null }))
@@ -1335,6 +1517,7 @@ export default function SalesScreen() {
       setTasks([]);
       setEmployees([]);
       setLocationLogs([]);
+      setQuickSaleLocationLogs([]);
       setAttendanceRecords([]);
       setSelectedSalespersonId("");
       return;
@@ -1356,6 +1539,7 @@ export default function SalesScreen() {
       ? filterCompanyScoped(remoteAttendanceState.value, user.companyId)
       : [];
     setLocationLogs(dedupeById([...remoteLogs, ...logs]));
+    setQuickSaleLocationLogs(quickSaleLogs);
     setAttendanceRecords(dedupeById([...remoteAttendance, ...attendance]));
 
     const salesEmployees = employeeData.filter((entry) => entry.role === "salesperson");
@@ -1373,13 +1557,15 @@ export default function SalesScreen() {
     setSelectedSalespersonId(selfEmployee?.id || user.id);
   }, [isAdminViewer, user]);
 
-  const loadPosData = useCallback(async () => {
+  const loadPosData = useCallback(async (options?: { preferredCustomerId?: string | null; preserveSuccess?: boolean }) => {
     if (isAdminViewer) return;
     setPosLoading(true);
     setPosError(null);
-    setPosSuccess(null);
+    if (!options?.preserveSuccess) {
+      setPosSuccess(null);
+    }
     try {
-      const [products, customers] = await Promise.all([
+      const [products, customers, orders] = await Promise.all([
         getDolibarrProducts({
           limit: POS_PAGE_SIZE,
           sortfield: "label",
@@ -1388,16 +1574,25 @@ export default function SalesScreen() {
           sellableOnly: true,
         }),
         getDolibarrThirdParties({ limit: 200, sortfield: "nom", sortorder: "asc" }),
+        getDolibarrOrders({ limit: 200, sortfield: "date_commande", sortorder: "desc" }),
       ]);
       const productList = Array.isArray(products) ? products : [];
+      const customerList = Array.isArray(customers) ? customers : [];
       setPosProducts(productList);
+      setRecentOrders(Array.isArray(orders) ? orders : []);
       setPosProductsPage(0);
       setPosProductsHasMore(productList.length >= POS_PAGE_SIZE);
-      setPosCustomers(Array.isArray(customers) ? customers : []);
-      if (!posSelectedCustomerId) {
-        const firstCustomerId = customers && customers.length
-          ? getDolibarrThirdPartyId(customers[0])
-          : null;
+      setPosCustomers(customerList);
+      const preferredCustomerId = options?.preferredCustomerId || posSelectedCustomerId;
+      if (preferredCustomerId) {
+        const matchedCustomer = customerList.find(
+          (entry) => String(getDolibarrThirdPartyId(entry) ?? "") === String(preferredCustomerId)
+        );
+        if (matchedCustomer) {
+          setPosSelectedCustomerId(String(preferredCustomerId));
+        }
+      } else {
+        const firstCustomerId = customerList.length ? getDolibarrThirdPartyId(customerList[0]) : null;
         if (firstCustomerId) {
           setPosSelectedCustomerId(String(firstCustomerId));
         }
@@ -1406,6 +1601,7 @@ export default function SalesScreen() {
       const message =
         error instanceof Error ? error.message : "Unable to load POS data from Dolibarr.";
       setPosError(message);
+      setRecentOrders([]);
     } finally {
       setPosLoading(false);
     }
@@ -1419,27 +1615,41 @@ export default function SalesScreen() {
     void loadPosData();
   }, [loadPosData]);
 
-  useEffect(() => {
-    setMeetingNotesDraftByTaskId((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const task of tasks) {
-        if (task.taskType !== "field_visit") continue;
-        const linkedConversation = task.autoCaptureConversationId
-          ? conversationsById.get(task.autoCaptureConversationId)
-          : null;
-        const seedValue =
-          task.meetingNotes?.trim() ||
-          linkedConversation?.notes?.trim() ||
-          "";
-        if (next[task.id] === undefined) {
-          next[task.id] = seedValue;
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [conversationsById, tasks]);
+  const resolveVisitArrivalSnapshot = useCallback(async () => {
+    const lastKnownLocation = await getLastKnownLocationSafe({
+      requiredAccuracy: 180,
+      maxAgeMs: 10 * 60 * 1000,
+    }).catch(() => null);
+
+    if (
+      typeof lastKnownLocation?.coords.latitude === "number" &&
+      Number.isFinite(lastKnownLocation.coords.latitude) &&
+      typeof lastKnownLocation?.coords.longitude === "number" &&
+      Number.isFinite(lastKnownLocation.coords.longitude)
+    ) {
+      return {
+        latitude: lastKnownLocation.coords.latitude,
+        longitude: lastKnownLocation.coords.longitude,
+        capturedAt: lastKnownLocation.timestamp
+          ? new Date(lastKnownLocation.timestamp).toISOString()
+          : new Date().toISOString(),
+      };
+    }
+    const fallbackRoutePoint = latestRoutePointRef.current;
+    if (
+      typeof fallbackRoutePoint?.latitude === "number" &&
+      Number.isFinite(fallbackRoutePoint.latitude) &&
+      typeof fallbackRoutePoint?.longitude === "number" &&
+      Number.isFinite(fallbackRoutePoint.longitude)
+    ) {
+      return {
+        latitude: fallbackRoutePoint.latitude,
+        longitude: fallbackRoutePoint.longitude,
+        capturedAt: fallbackRoutePoint.capturedAt,
+      };
+    }
+    return null;
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1737,6 +1947,56 @@ export default function SalesScreen() {
     user?.name,
   ]);
 
+  const salespersonVisitTasks = useMemo(() => {
+    if (!selectedSalespersonId) return [] as Task[];
+    return tasks
+      .filter((task) => task.taskType === "field_visit")
+      .filter((task) => {
+        if (isAdminViewer) return task.assignedTo === selectedSalespersonId;
+        const matchesAlias = selectedSalespersonTaskAliases.has(task.assignedTo);
+        const assignedName = normalizeIdentity(task.assignedToName);
+        const userName = normalizeIdentity(user?.name);
+        const selectedName = normalizeIdentity(selectedSalesperson?.name);
+        return (
+          matchesAlias ||
+          (assignedName && assignedName === userName) ||
+          (assignedName && assignedName === selectedName)
+        );
+      })
+      .sort((a, b) => {
+        const timeA = a.departureAt || a.arrivalAt || a.createdAt;
+        const timeB = b.departureAt || b.arrivalAt || b.createdAt;
+        return timeB.localeCompare(timeA);
+      });
+  }, [
+    isAdminViewer,
+    selectedSalesperson?.name,
+    selectedSalespersonId,
+    selectedSalespersonTaskAliases,
+    tasks,
+    user?.name,
+  ]);
+
+  useEffect(() => {
+    if (isAdminViewer || !user?.id) return;
+    void syncLocationReminderCatalog({
+      salespersonId: user.id,
+      companyId: user.companyId ?? null,
+      tasks: salespersonVisitTasks,
+      recentOrders,
+      quickSales: quickSaleLocationLogs,
+    }).catch(() => {
+      // Non-blocking: reminder catalog should never interrupt sales workflow.
+    });
+  }, [
+    isAdminViewer,
+    quickSaleLocationLogs,
+    recentOrders,
+    salespersonVisitTasks,
+    user?.companyId,
+    user?.id,
+  ]);
+
   const selectedDatePlannedStops = useMemo(
     () =>
       selectedDateVisitTasks
@@ -1752,17 +2012,59 @@ export default function SalesScreen() {
         .filter(
           (task) => typeof task.visitLatitude === "number" && typeof task.visitLongitude === "number"
         )
+        .map((task) => {
+          const reminderSummary = buildVisitReminderSummary(task, recentOrders);
+          return {
+            id: task.id,
+            label:
+              typeof task.visitSequence === "number"
+                ? `#${task.visitSequence} ${reminderSummary.customerName}`
+                : reminderSummary.customerName,
+            customerName: reminderSummary.customerName,
+            latitude: task.visitLatitude as number,
+            longitude: task.visitLongitude as number,
+            status: getVisitStatus(task),
+            summary: reminderSummary.summary,
+            detail: reminderSummary.detail,
+          };
+        }),
+    [recentOrders, todaysVisitTasks]
+  );
+
+  const historicalVisitStops = useMemo<PlannedStopPoint[]>(
+    () =>
+      salespersonVisitTasks
+        .filter((task) => getVisitStatus(task) === "completed")
+        .filter(
+          (task) =>
+            typeof task.visitLatitude === "number" &&
+            Number.isFinite(task.visitLatitude) &&
+            typeof task.visitLongitude === "number" &&
+            Number.isFinite(task.visitLongitude)
+        )
+        .filter(
+          (task) =>
+            Boolean(task.visitDepartureNotes?.trim()) ||
+            Boolean(task.autoCaptureConversationId) ||
+            Boolean(task.departureAt)
+        )
+        .slice(0, 24)
         .map((task) => ({
-          id: task.id,
-          label:
-            typeof task.visitSequence === "number"
-              ? `#${task.visitSequence} ${getVisitLabel(task)}`
-              : getVisitLabel(task),
+          id: `history_${task.id}`,
+          label: getVisitLabel(task),
+          customerName: getVisitLabel(task),
           latitude: task.visitLatitude as number,
           longitude: task.visitLongitude as number,
-          status: getVisitStatus(task),
+          status: "completed",
+          markerKind: "visit_history",
+          summary: task.visitDepartureNotes?.trim()
+            ? `Last note: ${task.visitDepartureNotes.trim()}`
+            : "Past visit completed here.",
+          detail: task.departureAt
+            ? `Departed ${formatMumbaiTime(task.departureAt)}${task.visitLocationAddress ? ` • ${task.visitLocationAddress}` : ""}`
+            : task.visitLocationAddress || "Past visit location",
         })),
-    [todaysVisitTasks]
+    [salespersonVisitTasks]
   );
 
   const plannerPreviewStops = useMemo<PlannedStopPoint[]>(
@@ -1775,16 +2077,6 @@ export default function SalesScreen() {
         status: "pending",
       })),
     [routePlanStops]
-  );
-
-  const visiblePlannedStops = useMemo<PlannedStopPoint[]>(
-    () =>
-      isAdminViewer && routePlanDate === todayDateKey
-        ? routePlanDirty
-          ? plannerPreviewStops
-          : plannedStops
-        : plannedStops,
-    [isAdminViewer, plannedStops, plannerPreviewStops, routePlanDate, routePlanDirty, todayDateKey]
   );
 
   const selectedSalespersonAliases = useMemo(() => {
@@ -1954,6 +2246,137 @@ export default function SalesScreen() {
     return [...routeTimeline.points].sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
   }, [routeTimeline.points]);
 
+  useEffect(() => {
+    latestRoutePointRef.current = latestRoutePoint;
+  }, [latestRoutePoint]);
+
+  const nearbyAwarePlannedStops = useMemo<PlannedStopPoint[]>(
+    () =>
+      plannedStops.map((stop) => {
+        if (!latestRoutePoint) {
+          return {
+            ...stop,
+            isNearby: false,
+            distanceMeters: null,
+          };
+        }
+        const distanceMeters = haversineDistanceMeters(
+          latestRoutePoint.latitude,
+          latestRoutePoint.longitude,
+          stop.latitude,
+          stop.longitude
+        );
+        const isNearby =
+          Number.isFinite(distanceMeters) &&
+          distanceMeters <= VISIT_NEARBY_RADIUS_METERS &&
+          stop.status !== "completed";
+        return {
+          ...stop,
+          isNearby,
+          distanceMeters: Math.round(distanceMeters),
+        };
+      }),
+    [latestRoutePoint, plannedStops]
+  );
+
+  const nearbyHistoricalVisitStops = useMemo<PlannedStopPoint[]>(
+    () =>
+      historicalVisitStops.map((stop) => {
+        if (!latestRoutePoint) {
+          return {
+            ...stop,
+            isNearby: false,
+            distanceMeters: null,
+          };
+        }
+        const distanceMeters = haversineDistanceMeters(
+          latestRoutePoint.latitude,
+          latestRoutePoint.longitude,
+          stop.latitude,
+          stop.longitude
+        );
+        const isNearby =
+          Number.isFinite(distanceMeters) && distanceMeters <= VISIT_NEARBY_RADIUS_METERS;
+        return {
+          ...stop,
+          isNearby,
+          distanceMeters: Math.round(distanceMeters),
+        };
+      }),
+    [historicalVisitStops, latestRoutePoint]
+  );
+
+  const nearbyQuickSalePoints = useMemo<QuickSalePoint[]>(
+    () =>
+      quickSaleLocationLogs
+        .filter((entry) => {
+          if (isAdminViewer) {
+            return selectedSalespersonId ? entry.salespersonId === selectedSalespersonId : true;
+          }
+          return entry.salespersonId === user?.id;
+        })
+        .map((entry) => {
+          const distanceMeters = latestRoutePoint
+            ? haversineDistanceMeters(
+                latestRoutePoint.latitude,
+                latestRoutePoint.longitude,
+                entry.latitude,
+                entry.longitude
+              )
+            : null;
+          const isNearby =
+            typeof distanceMeters === "number" &&
+            Number.isFinite(distanceMeters) &&
+            distanceMeters <= VISIT_NEARBY_RADIUS_METERS;
+          return {
+            id: entry.id,
+            customerName: entry.customerName,
+            latitude: entry.latitude,
+            longitude: entry.longitude,
+            orderId: entry.orderId,
+            itemCount: entry.itemCount,
+            totalAmount: entry.totalAmount,
+            soldAt: entry.capturedAt,
+            customerAddress: entry.customerAddress ?? null,
+            customerEmail: entry.customerEmail ?? null,
+            visitLabel: entry.visitLabel ?? null,
+            visitDepartureNotes: entry.visitDepartureNotes ?? null,
+            visitDepartedAt: entry.visitDepartedAt ?? null,
+            isNearby,
+            distanceMeters:
+              typeof distanceMeters === "number" && Number.isFinite(distanceMeters)
+                ? Math.round(distanceMeters)
+                : null,
+          } satisfies QuickSalePoint;
+        }),
+    [isAdminViewer, latestRoutePoint, quickSaleLocationLogs, selectedSalespersonId, user?.id]
+  );
+
+  const visiblePlannedStops = useMemo<PlannedStopPoint[]>(
+    () =>
+      isAdminViewer && routePlanDate === todayDateKey
+        ? routePlanDirty
+          ? plannerPreviewStops
+          : nearbyAwarePlannedStops
+        : nearbyAwarePlannedStops,
+    [
+      isAdminViewer,
+      nearbyAwarePlannedStops,
+      plannerPreviewStops,
+      routePlanDate,
+      routePlanDirty,
+      todayDateKey,
+    ]
+  );
+
+  const mapPlannedStops = useMemo<PlannedStopPoint[]>(
+    () => [
+      ...visiblePlannedStops,
+      ...nearbyHistoricalVisitStops.filter((stop) => stop.markerKind === "visit_history" && stop.isNearby),
+    ],
+    [nearbyHistoricalVisitStops, visiblePlannedStops]
+  );
+
   const currentLocationMeta = latestRoutePoint
     ? `${formatMumbaiTime(latestRoutePoint.capturedAt)} | ${formatBatteryPercent(
         latestRoutePoint.batteryLevel
@@ -2014,6 +2437,23 @@ export default function SalesScreen() {
         : null,
     [latestRouteLatitude, latestRouteLongitude]
   );
+
+  useEffect(() => {
+    if (isAdminViewer || !user?.id || !latestRoutePoint) return;
+    void maybeSendLocationReminder({
+      latitude: latestRoutePoint.latitude,
+      longitude: latestRoutePoint.longitude,
+      userId: user.id,
+      companyId: user.companyId ?? null,
+    }).catch(() => {
+      // Keep live route UI stable if reminder evaluation fails.
+    });
+  }, [
+    isAdminViewer,
+    latestRoutePoint,
+    user?.companyId,
+    user?.id,
+  ]);
 
   useEffect(() => {
     if (!latestRouteOrigin || !nextNavigationStop) {
@@ -2942,9 +3382,15 @@ export default function SalesScreen() {
       setVisitActionTaskId(task.id);
       try {
         const nowIso = new Date().toISOString();
+        const arrivalSnapshot = await resolveVisitArrivalSnapshot();
         await updateTask(task.id, {
           status: "in_progress",
           arrivalAt: task.arrivalAt ?? nowIso,
+          visitLatitude:
+            arrivalSnapshot?.latitude ?? (typeof task.visitLatitude === "number" ? task.visitLatitude : null),
+          visitLongitude:
+            arrivalSnapshot?.longitude ??
+            (typeof task.visitLongitude === "number" ? task.visitLongitude : null),
           departureAt: null,
           autoCaptureRecordingActive: false,
           autoCaptureRecordingStartedAt: task.autoCaptureRecordingStartedAt ?? null,
@@ -2971,7 +3417,7 @@ export default function SalesScreen() {
         setVisitActionTaskId(null);
       }
     },
-    [activeVisitTaskId, isAdminViewer, loadData, user, visitActionTaskId]
+    [activeVisitTaskId, isAdminViewer, loadData, resolveVisitArrivalSnapshot, user, visitActionTaskId]
   );
 
   const handleMeetingStart = useCallback(
@@ -3072,79 +3518,26 @@ export default function SalesScreen() {
     [isAdminViewer, loadData, saveConversation, stopRecordingAndWait, user, visitActionTaskId]
   );
 
-  const saveVisitMeetingNotes = useCallback(
-    async (task: Task) => {
-      if (!user || isAdminViewer) return;
-      if (!task.autoCaptureConversationId) {
-        Alert.alert("Meeting Missing", "End the meeting first to save notes.");
-        return;
-      }
-
-      const normalizedNotes = (meetingNotesDraftByTaskId[task.id] || "").trim();
-      const currentTaskNotes = task.meetingNotes?.trim() || "";
-      const currentConversationNotes =
-        conversationsById.get(task.autoCaptureConversationId)?.notes?.trim() || "";
-
-      if (normalizedNotes === currentTaskNotes && normalizedNotes === currentConversationNotes) {
-        return;
-      }
-
-      setMeetingNotesSavingTaskId(task.id);
-      try {
-        const nowIso = new Date().toISOString();
-        const updatedTask = await updateTask(task.id, {
-          meetingNotes: normalizedNotes || null,
-          meetingNotesUpdatedAt: normalizedNotes ? nowIso : null,
-        });
-        await updateConversation(task.autoCaptureConversationId, {
-          notes: normalizedNotes || undefined,
-        });
-        const synced = await syncVisitNoteTaskRemote(
-          updatedTask || {
-            ...task,
-            meetingNotes: normalizedNotes || null,
-            meetingNotesUpdatedAt: normalizedNotes ? nowIso : null,
-          }
-        );
-        await addAuditLog({
-          id: createLocalId("audit"),
-          userId: user.id,
-          userName: user.name,
-          action: "Meeting Notes Updated",
-          details: `${user.name} updated meeting notes for ${getVisitLabel(task)}.`,
-          timestamp: nowIso,
-          module: "Sales Intelligence",
-        });
-        await loadData();
-        if (!synced) {
-          Alert.alert(
-            "Saved Locally",
-            "Meeting notes saved on device, but MySQL sync is unavailable right now."
-          );
-        }
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      } catch (error) {
-        Alert.alert(
-          "Unable to Save Notes",
-          error instanceof Error ? error.message : "Meeting notes could not be saved."
-        );
-      } finally {
-        setMeetingNotesSavingTaskId(null);
-      }
-    },
-    [conversationsById, isAdminViewer, loadData, meetingNotesDraftByTaskId, user]
-  );
-
   const closeDepartureNotesModal = useCallback(() => {
     if (visitActionTaskId) return;
     setDepartureNotesModalVisible(false);
     setDepartureNotesTask(null);
     setDepartureNotesDraft("");
+    setDepartureCreateCustomerEnabled(false);
+    setDepartureCustomerName("");
+    setDepartureCustomerEmail("");
+    setDepartureCustomerPhone("");
+    setDepartureCustomerAddress("");
   }, [visitActionTaskId]);
 
   const openDepartureNotesModal = useCallback((task: Task) => {
     setDepartureNotesTask(task);
     setDepartureNotesDraft(task.visitDepartureNotes?.trim() ?? "");
+    setDepartureCreateCustomerEnabled(false);
+    setDepartureCustomerName(getVisitLabel(task));
+    setDepartureCustomerEmail("");
+    setDepartureCustomerPhone("");
+    setDepartureCustomerAddress(task.visitLocationAddress?.trim() ?? "");
     setDepartureNotesModalVisible(true);
   }, []);
 
@@ -3155,6 +3548,7 @@ export default function SalesScreen() {
     try {
       const nowIso = new Date().toISOString();
       const normalizedNote = departureNotesDraft.trim();
+      const normalizedCustomerName = departureCustomerName.trim() || getVisitLabel(departureNotesTask);
       const updatedTask = await updateTask(departureNotesTask.id, {
         status: "completed",
         departureAt: nowIso,
@@ -3163,8 +3557,8 @@ export default function SalesScreen() {
         visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
         autoCaptureRecordingActive: false,
       });
-      const synced = await syncVisitNoteTaskRemote(
-        updatedTask || {
+      const syncPayload: Task = {
+        ...(updatedTask || {
           ...departureNotesTask,
           status: "completed",
           departureAt: nowIso,
@@ -3172,8 +3566,66 @@ export default function SalesScreen() {
           visitDepartureNotes: normalizedNote || null,
           visitDepartureNotesUpdatedAt: normalizedNote ? nowIso : null,
           autoCaptureRecordingActive: false,
-        }
+        }),
+        taskType: "field_visit",
+        assignedTo: user.id,
+        assignedToName: user.name,
+        companyId: user.companyId ?? updatedTask?.companyId ?? departureNotesTask.companyId,
+      };
+      const synced = await syncVisitNoteTaskRemote(
+        syncPayload
       );
+      let selectedCustomerIdForPos: string | null = null;
+      let posStatusMessage: string | null = null;
+      if (departureCreateCustomerEnabled) {
+        if (!normalizedCustomerName) {
+          throw new Error("Please enter a customer name before creating the customer.");
+        }
+
+        const normalizedCustomerEmail = departureCustomerEmail.trim().toLowerCase();
+        const existingCustomer =
+          posCustomers.find((entry) => {
+            const labelMatches =
+              normalizeSearchText(getDolibarrThirdPartyLabel(entry)) ===
+              normalizeSearchText(normalizedCustomerName);
+            const emailMatches =
+              Boolean(normalizedCustomerEmail) &&
+              (entry.email || "").trim().toLowerCase() === normalizedCustomerEmail;
+            return labelMatches || emailMatches;
+          }) || null;
+
+        if (existingCustomer) {
+          const existingCustomerId = getDolibarrThirdPartyId(existingCustomer);
+          if (existingCustomerId) {
+            selectedCustomerIdForPos = String(existingCustomerId);
+            posStatusMessage = `${getDolibarrThirdPartyLabel(existingCustomer)} selected in Sales POS.`;
+          }
+        } else {
+          const createdCustomer = await createDolibarrCustomer({
+            name: normalizedCustomerName,
+            email: departureCustomerEmail.trim() || undefined,
+            phone: departureCustomerPhone.trim() || undefined,
+            address: departureCustomerAddress.trim() || undefined,
+            note: normalizedNote || undefined,
+          });
+          const createdCustomerId = createdCustomer.customerId;
+          if (!createdCustomerId) {
+            throw new Error(createdCustomer.message || "Customer created but ID was not returned.");
+          }
+          selectedCustomerIdForPos = String(createdCustomerId);
+          setPosCustomers((current) =>
+            mergeUniqueCustomers(current, [
+              {
+                id: createdCustomerId,
+                name: normalizedCustomerName,
+                email: departureCustomerEmail.trim() || undefined,
+                address: departureCustomerAddress.trim() || undefined,
+              },
+            ])
+          );
+          posStatusMessage = `${normalizedCustomerName} created and selected in Sales POS.`;
+        }
+      }
       await addAuditLog({
         id: createLocalId("audit"),
         userId: user.id,
@@ -3187,7 +3639,22 @@ export default function SalesScreen() {
       setDepartureNotesModalVisible(false);
       setDepartureNotesTask(null);
       setDepartureNotesDraft("");
+      setDepartureCreateCustomerEnabled(false);
+      setDepartureCustomerName("");
+      setDepartureCustomerEmail("");
+      setDepartureCustomerPhone("");
+      setDepartureCustomerAddress("");
       await loadData();
+      if (selectedCustomerIdForPos) {
+        setPosLinkedVisitTaskId(syncPayload.id);
+        setPosSelectedCustomerId(selectedCustomerIdForPos);
+        setPosCustomerQuery("");
+        await loadPosData({
+          preferredCustomerId: selectedCustomerIdForPos,
+          preserveSuccess: true,
+        });
+        setPosSuccess(posStatusMessage || "Customer selected in Sales POS.");
+      }
       if (!synced) {
         Alert.alert(
           "Saved Locally",
@@ -3204,10 +3671,17 @@ export default function SalesScreen() {
       setVisitActionTaskId(null);
     }
   }, [
+    departureCreateCustomerEnabled,
+    departureCustomerAddress,
+    departureCustomerEmail,
+    departureCustomerName,
+    departureCustomerPhone,
     departureNotesDraft,
     departureNotesTask,
     isAdminViewer,
     loadData,
+    loadPosData,
+    posCustomers,
     user,
     visitActionTaskId,
   ]);
@@ -3267,10 +3741,6 @@ export default function SalesScreen() {
     () => todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress") ?? null,
     [todaysVisitTasks]
   );
-  const conversationsById = useMemo(
-    () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
-    [conversations]
-  );
   const remainingVisits = Math.max(visitSummary.total - visitSummary.completed, 0);
   const salesHeroMeta = activeVisitTask
     ? `Active: ${getVisitLabel(activeVisitTask)}`
@@ -3289,6 +3759,11 @@ export default function SalesScreen() {
       ) || null
     );
   }, [posCustomers, posSelectedCustomerId]);
+
+  const linkedPosVisitTask = useMemo(
+    () => tasks.find((entry) => entry.id === posLinkedVisitTaskId) ?? null,
+    [posLinkedVisitTaskId, tasks]
+  );
 
   const filteredCustomers = useMemo(() => {
     const query = normalizeSearchText(posCustomerQuery);
@@ -3335,7 +3810,14 @@ export default function SalesScreen() {
     const id = getDolibarrThirdPartyId(party);
     if (!id) return;
     setPosSelectedCustomerId(String(id));
-  }, []);
+    if (
+      linkedPosVisitTask &&
+      normalizeSearchText(getDolibarrThirdPartyLabel(party)) !==
+        normalizeSearchText(getVisitLabel(linkedPosVisitTask))
+    ) {
+      setPosLinkedVisitTaskId(null);
+    }
+  }, [linkedPosVisitTask]);
 
   const handleAddProductToCart = useCallback((product: DolibarrProduct) => {
     const id = getDolibarrProductId(product);
@@ -3441,10 +3923,9 @@ export default function SalesScreen() {
       return;
     }
 
-    const lines: DolibarrOrderLineInput[] = cartItems
-      .map((entry) => {
+    const lines: DolibarrOrderLineInput[] = cartItems.flatMap((entry) => {
         const productId = getDolibarrProductId(entry.product);
-        if (!productId) return null;
+        if (!productId) return [];
         const unitPrice = getDolibarrProductPrice(entry.product);
         const taxRate = getDolibarrProductTaxRate(entry.product);
         const rawProductType = entry.product.type;
@@ -3454,7 +3935,7 @@ export default function SalesScreen() {
             : typeof rawProductType === "string"
               ? Number(rawProductType)
               : 0;
-        return {
+        return [{
           productId,
           qty: entry.qty,
           unitPrice,
@@ -3462,9 +3943,8 @@ export default function SalesScreen() {
           description: entry.product.description || entry.product.label || undefined,
           productType: Number.isFinite(productType) ? productType : 0,
           discountPercent: entry.discountPercent || 0,
-        } satisfies DolibarrOrderLineInput;
-      })
-      .filter((entry): entry is DolibarrOrderLineInput => Boolean(entry));
+        } satisfies DolibarrOrderLineInput];
+      });
 
     if (!lines.length) {
       Alert.alert("Products Missing", "Unable to build sales order lines.");
@@ -3546,8 +4026,48 @@ export default function SalesScreen() {
         }
       }
 
+      if (
+        user &&
+        linkedPosVisitTask &&
+        typeof linkedPosVisitTask.visitLatitude === "number" &&
+        Number.isFinite(linkedPosVisitTask.visitLatitude) &&
+        typeof linkedPosVisitTask.visitLongitude === "number" &&
+        Number.isFinite(linkedPosVisitTask.visitLongitude)
+      ) {
+        const totalAmount = cartItems.reduce((sum, entry) => {
+          const price = getDolibarrProductPrice(entry.product);
+          const discount = Math.max(0, Math.min(100, entry.discountPercent || 0));
+          return sum + price * (1 - discount / 100) * entry.qty;
+        }, 0);
+        await addQuickSaleLocationLog({
+          id: `quick_sale_${result.orderId}_${Date.now()}`,
+          salespersonId: user.id,
+          salespersonName: user.name,
+          visitTaskId: linkedPosVisitTask.id,
+          visitLabel: getVisitLabel(linkedPosVisitTask),
+          visitDepartureNotes: linkedPosVisitTask.visitDepartureNotes?.trim() || null,
+          visitDepartedAt: linkedPosVisitTask.departureAt ?? null,
+          customerId: String(customerId),
+          customerName: getDolibarrThirdPartyLabel(selectedCustomer),
+          customerEmail: selectedCustomer.email?.trim() || null,
+          customerAddress:
+            selectedCustomer.address?.trim() ||
+            selectedCustomer.town?.trim() ||
+            linkedPosVisitTask.visitLocationAddress?.trim() ||
+            null,
+          orderId: String(result.orderId),
+          itemCount: cartItems.reduce((sum, entry) => sum + entry.qty, 0),
+          totalAmount,
+          latitude: linkedPosVisitTask.visitLatitude,
+          longitude: linkedPosVisitTask.visitLongitude,
+          capturedAt: linkedPosVisitTask.arrivalAt || linkedPosVisitTask.departureAt || new Date().toISOString(),
+        });
+      }
+
       setPosSuccess(`Sales order #${result.orderId} created and validated.`);
       setPosCart({});
+      setPosLinkedVisitTaskId(null);
+      await loadData();
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to create sales order.";
@@ -3556,7 +4076,7 @@ export default function SalesScreen() {
     } finally {
       setPosSubmitting(false);
     }
-  }, [cartItems, posSubmitting, selectedCustomer, user]);
+  }, [cartItems, linkedPosVisitTask, loadData, posSubmitting, selectedCustomer, user]);
 
   return (
     <AppCanvas>
@@ -3904,7 +4424,8 @@ export default function SalesScreen() {
                   <RouteMapNative
                     points={routeTimeline.points}
                     halts={routeTimeline.halts}
-                    plannedStops={visiblePlannedStops}
+                    plannedStops={mapPlannedStops}
+                    quickSalePoints={nearbyQuickSalePoints}
                     routePath={routePreviewPath}
                     colors={colors}
                     height={255}
@@ -4136,7 +4657,7 @@ export default function SalesScreen() {
                     <RouteMapNative
                       points={routeTimeline.points}
                       halts={routeTimeline.halts}
-                      plannedStops={visiblePlannedStops}
+                      plannedStops={mapPlannedStops}
                       routePath={routePreviewPath}
                       colors={colors}
                       height={230}
@@ -4263,18 +4784,6 @@ export default function SalesScreen() {
                     const canMeetingEnd = !isAdminViewer && status === "in_progress" && recordingActive;
                     const canDepart =
                       !isAdminViewer && status === "in_progress" && !recordingActive && Boolean(task.autoCaptureConversationId);
-                    const canEditMeetingNotes =
-                      !isAdminViewer && !recordingActive && Boolean(task.autoCaptureConversationId);
-                    const meetingNotesValue = meetingNotesDraftByTaskId[task.id] ?? "";
-                    const normalizedMeetingNotes = meetingNotesValue.trim();
-                    const storedMeetingNotes = (
-                      task.meetingNotes?.trim() ||
-                      (task.autoCaptureConversationId
-                        ? conversationsById.get(task.autoCaptureConversationId)?.notes?.trim()
-                        : "") ||
-                      ""
-                    ).trim();
-                    const hasMeetingNotesChanges = normalizedMeetingNotes !== storedMeetingNotes;
                     const recordingStartAt = task.autoCaptureRecordingStartedAt || task.arrivalAt || null;
                     const recordingStopAt = task.autoCaptureRecordingStoppedAt || task.departureAt || null;
                     const recordingHint =
@@ -4349,95 +4858,6 @@ export default function SalesScreen() {
                             >
                               {task.visitDepartureNotes.trim()}
                               </Text>
-                            </View>
-                          ) : null}
-                          {canEditMeetingNotes ? (
-                            <View
-                              style={[
-                                styles.inlineMeetingNotesCard,
-                                { backgroundColor: colors.surface, borderColor: colors.border },
-                              ]}
-                            >
-                              <View style={styles.inlineMeetingNotesHeader}>
-                                <Text
-                                  style={[
-                                    styles.inlineMeetingNotesTitle,
-                                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                                  ]}
-                                >
-                                  Meeting Notes
-                                </Text>
-                                <Text
-                                  style={[
-                                    styles.inlineMeetingNotesMeta,
-                                    { color: colors.textTertiary, fontFamily: "Inter_500Medium" },
-                                  ]}
-                                >
-                                  Add notes before departure
-                                </Text>
-                              </View>
-                              <TextInput
-                                multiline
-                                maxLength={320}
-                                value={meetingNotesValue}
-                                onChangeText={(text) =>
-                                  setMeetingNotesDraftByTaskId((current) => ({
-                                    ...current,
-                                    [task.id]: text,
-                                  }))
-                                }
-                                placeholder="Write remarks, dates, next step, pricing discussion, or follow-up note."
-                                placeholderTextColor={colors.textTertiary}
-                                textAlignVertical="top"
-                                style={[
-                                  styles.inlineMeetingNotesInput,
-                                  {
-                                    color: colors.text,
-                                    backgroundColor: colors.backgroundElevated,
-                                    borderColor: colors.borderLight,
-                                    fontFamily: "Inter_500Medium",
-                                  },
-                                ]}
-                              />
-                              <View style={styles.inlineMeetingNotesFooter}>
-                                <Text
-                                  style={[
-                                    styles.inlineMeetingNotesCount,
-                                    { color: colors.textTertiary, fontFamily: "Inter_500Medium" },
-                                  ]}
-                                >
-                                  {normalizedMeetingNotes
-                                    ? `${normalizedMeetingNotes.length}/320`
-                                    : "Optional"}
-                                </Text>
-                                <Pressable
-                                  onPress={() => void saveVisitMeetingNotes(task)}
-                                  disabled={meetingNotesSavingTaskId === task.id || !hasMeetingNotesChanges}
-                                  style={({ pressed }) => [
-                                    styles.inlineMeetingNotesSaveButton,
-                                    {
-                                      backgroundColor: colors.primary,
-                                      opacity:
-                                        pressed ||
-                                        meetingNotesSavingTaskId === task.id ||
-                                        !hasMeetingNotesChanges
-                                          ? 0.6
-                                          : 1,
-                                    },
-                                  ]}
-                                >
-                                  {meetingNotesSavingTaskId === task.id ? (
-                                    <ActivityIndicator size="small" color="#FFFFFF" />
-                                  ) : (
-                                    <>
-                                      <Ionicons name="checkmark" size={14} color="#FFFFFF" />
-                                      <Text style={styles.inlineMeetingNotesSaveButtonText}>
-                                        Save Note
-                                      </Text>
-                                    </>
-                                  )}
-                                </Pressable>
-                              </View>
                             </View>
                           ) : null}
                           {isAdminViewer && recordingHint ? (
@@ -4654,6 +5074,15 @@ export default function SalesScreen() {
                     <Ionicons name="checkmark-circle-outline" size={16} color={colors.success} />
                     <Text style={[styles.posStatusText, { color: colors.success, fontFamily: "Inter_500Medium" }]}>
                       {posSuccess}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {linkedPosVisitTask ? (
+                  <View style={[styles.posStatusBanner, { backgroundColor: colors.primary + "10", borderColor: colors.primary + "32" }]}>
+                    <Ionicons name="location-outline" size={16} color={colors.primary} />
+                    <Text style={[styles.posStatusText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
+                      Quick sale is linked to {getVisitLabel(linkedPosVisitTask)}. Order location will use the arrived visit point.
                     </Text>
                   </View>
                 ) : null}
@@ -5308,6 +5737,115 @@ export default function SalesScreen() {
                 },
               ]}
             />
+            <View
+              style={[
+                styles.departureCustomerPanel,
+                { backgroundColor: colors.surface, borderColor: colors.border },
+              ]}
+            >
+              <Pressable
+                onPress={() => setDepartureCreateCustomerEnabled((current) => !current)}
+                style={({ pressed }) => [
+                  styles.departureCustomerToggleRow,
+                  { opacity: pressed ? 0.82 : 1 },
+                ]}
+              >
+                <View style={styles.departureCustomerToggleTextWrap}>
+                  <Text
+                    style={[
+                      styles.departureCustomerToggleTitle,
+                      { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                    ]}
+                  >
+                    Create customer after departure
+                  </Text>
+                  <Text
+                    style={[
+                      styles.departureCustomerToggleHint,
+                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                    ]}
+                  >
+                    If the buyer agreed, create the customer now and keep Sales POS ready with the same customer.
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.departureCustomerCheck,
+                    {
+                      borderColor: departureCreateCustomerEnabled ? colors.success : colors.border,
+                      backgroundColor: departureCreateCustomerEnabled ? colors.success : colors.surface,
+                    },
+                  ]}
+                >
+                  {departureCreateCustomerEnabled ? (
+                    <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+                  ) : null}
+                </View>
+              </Pressable>
+              {departureCreateCustomerEnabled ? (
+                <View style={styles.departureCustomerFields}>
+                  <TextInput
+                    value={departureCustomerName}
+                    onChangeText={setDepartureCustomerName}
+                    placeholder="Customer name"
+                    placeholderTextColor={colors.textTertiary}
+                    style={[
+                      styles.departureCustomerInput,
+                      {
+                        color: colors.text,
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  />
+                  <TextInput
+                    value={departureCustomerEmail}
+                    onChangeText={setDepartureCustomerEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    placeholder="Email (optional)"
+                    placeholderTextColor={colors.textTertiary}
+                    style={[
+                      styles.departureCustomerInput,
+                      {
+                        color: colors.text,
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  />
+                  <TextInput
+                    value={departureCustomerPhone}
+                    onChangeText={setDepartureCustomerPhone}
+                    keyboardType="phone-pad"
+                    placeholder="Phone (optional)"
+                    placeholderTextColor={colors.textTertiary}
+                    style={[
+                      styles.departureCustomerInput,
+                      {
+                        color: colors.text,
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  />
+                  <TextInput
+                    value={departureCustomerAddress}
+                    onChangeText={setDepartureCustomerAddress}
+                    placeholder="Address (optional)"
+                    placeholderTextColor={colors.textTertiary}
+                    style={[
+                      styles.departureCustomerInput,
+                      {
+                        color: colors.text,
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  />
+                </View>
+              ) : null}
+            </View>
             <View style={styles.departureNotesFooter}>
               <Text
                 style={[
@@ -5848,58 +6386,6 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     lineHeight: 18,
   },
-  inlineMeetingNotesCard: {
-    marginTop: 8,
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 10,
-    gap: 8,
-  },
-  inlineMeetingNotesHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  inlineMeetingNotesTitle: {
-    fontSize: 13.5,
-  },
-  inlineMeetingNotesMeta: {
-    fontSize: 11.5,
-  },
-  inlineMeetingNotesInput: {
-    minHeight: 88,
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    fontSize: 12.5,
-    lineHeight: 18,
-    textAlignVertical: "top",
-  },
-  inlineMeetingNotesFooter: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  inlineMeetingNotesCount: {
-    fontSize: 11.5,
-  },
-  inlineMeetingNotesSaveButton: {
-    minHeight: 34,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 6,
-  },
-  inlineMeetingNotesSaveButtonText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontFamily: "Inter_600SemiBold",
-  },
   emptyTimeline: {
     minHeight: 86,
     alignItems: "center",
@@ -5955,6 +6441,46 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     fontSize: 13,
     textAlignVertical: "top",
+  },
+  departureCustomerPanel: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    gap: 12,
+  },
+  departureCustomerToggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  departureCustomerToggleTextWrap: {
+    flex: 1,
+    gap: 4,
+  },
+  departureCustomerToggleTitle: {
+    fontSize: 13.5,
+  },
+  departureCustomerToggleHint: {
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  departureCustomerCheck: {
+    width: 22,
+    height: 22,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  departureCustomerFields: {
+    gap: 10,
+  },
+  departureCustomerInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 13,
   },
   departureNotesFooter: {
     gap: 12,

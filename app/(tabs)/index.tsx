@@ -2,6 +2,7 @@
 import {
   ActivityIndicator,
   AppState,
+  Image,
   Platform,
   Pressable,
   RefreshControl,
@@ -11,10 +12,9 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
 import Animated, {
-  Easing,
   Extrapolation,
   FadeInDown,
   FadeInLeft,
@@ -24,8 +24,6 @@ import Animated, {
   useAnimatedScrollHandler,
   useAnimatedStyle,
   useSharedValue,
-  withRepeat,
-  withTiming,
 } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 import { useAuth } from "@/contexts/AuthContext";
@@ -106,13 +104,6 @@ type CommandHighlight = {
   tone: string;
 };
 
-type HeroBadge = {
-  id: string;
-  text: string;
-  icon: keyof typeof Ionicons.glyphMap | keyof typeof MaterialCommunityIcons.glyphMap;
-  iconLib?: "ion" | "mci";
-};
-
 type DashboardSection =
   | {
       id: string;
@@ -132,7 +123,6 @@ type DashboardSection =
 const LATE_THRESHOLD_HOUR = 9;
 const LATE_THRESHOLD_MINUTE = 45;
 const DASHBOARD_POLL_INTERVAL_MS = 15_000;
-const DASHBOARD_CLOCK_TICK_MS = 10_000;
 const STORAGE_EVENT_THROTTLE_MS = 900;
 const DASHBOARD_WATCH_KEYS = new Set<string>([
   STORAGE_KEYS.EMPLOYEES,
@@ -178,18 +168,6 @@ function formatRelativeTime(timestamp: string): string {
   return `${diffDays}d ago`;
 }
 
-function formatLiveSyncLabel(timestamp: string | null): string {
-  if (!timestamp) return "Syncing...";
-  const parsed = new Date(timestamp);
-  if (Number.isNaN(parsed.getTime())) return "Syncing...";
-  const diffSeconds = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 1000));
-  if (diffSeconds <= 8) return "Live now";
-  if (diffSeconds < 60) return `Updated ${diffSeconds}s ago`;
-  const diffMinutes = Math.floor(diffSeconds / 60);
-  if (diffMinutes < 60) return `Updated ${diffMinutes}m ago`;
-  return `Updated ${parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-}
-
 function normalizeIdentity(value?: string | null): string {
   return (value || "").trim().toLowerCase();
 }
@@ -198,17 +176,21 @@ function getTaskLabel(task: Task): string {
   return task.visitLocationLabel?.trim() || task.title.trim() || "Field visit";
 }
 
-function roleLabel(role?: UserRole | null): string {
-  if (!role) return "Team";
-  if (role === "salesperson") return "Sales";
-  return role.charAt(0).toUpperCase() + role.slice(1);
-}
-
 function getGreetingLabel(): string {
   const hour = new Date().getHours();
   if (hour < 12) return "Good morning";
   if (hour < 17) return "Good afternoon";
   return "Good evening";
+}
+
+function getUserInitials(name?: string | null): string {
+  const parts = (name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+  if (!parts.length) return "LF";
+  return parts.map((part) => part[0]?.toUpperCase() || "").join("") || "LF";
 }
 
 function getSectionEyebrow(sectionId: DashboardSection["id"], isSalesperson: boolean): string {
@@ -292,27 +274,40 @@ function buildQuickLinks(
   colors: ReturnType<typeof useAppTheme>["colors"]
 ): QuickLink[] {
   const isSalesperson = userRole === "salesperson";
-  const links: QuickLink[] = [
-    {
-      id: "attendance",
-      title: "Attendance",
-      subtitle: "Check-ins and approvals",
-      icon: "time-outline",
-      color: colors.primary,
-      route: "/(tabs)/attendance",
-    },
-    ...(isSalesperson
-      ? []
-      : [
-          {
-            id: "team",
-            title: "Team",
-            subtitle: "Member status and ownership",
-            icon: "people-outline",
-            color: colors.secondary,
-            route: "/(tabs)/team",
-          },
-        ]),
+  const links: QuickLink[] = [];
+
+  if (canAccessSalesModule(userRole)) {
+    links.push({
+      id: "sales",
+      title: "Sales",
+      subtitle: "Conversation intelligence",
+      icon: "trending-up-outline",
+      color: "#2F7AF8",
+      route: "/(tabs)/sales",
+    });
+  }
+
+  links.push({
+    id: "attendance",
+    title: "Attendance",
+    subtitle: "Check-ins and approvals",
+    icon: "time-outline",
+    color: colors.primary,
+    route: "/(tabs)/attendance",
+  });
+
+  if (!isSalesperson) {
+    links.push({
+      id: "team",
+      title: "Team",
+      subtitle: "Member status and ownership",
+      icon: "people-outline",
+      color: colors.secondary,
+      route: "/(tabs)/team",
+    });
+  }
+
+  links.push(
     {
       id: "tasks",
       title: "Tasks",
@@ -336,19 +331,8 @@ function buildQuickLinks(
       icon: "notifications-outline",
       color: colors.textSecondary,
       route: "/(tabs)/notifications",
-    },
-  ];
-
-  if (canAccessSalesModule(userRole)) {
-    links.unshift({
-      id: "sales",
-      title: "Sales",
-      subtitle: "Conversation intelligence",
-      icon: "trending-up-outline",
-      color: "#2F7AF8",
-      route: "/(tabs)/sales",
-    });
-  }
+    }
+  );
 
   if (userRole === "admin") {
     links.push({
@@ -451,25 +435,12 @@ export default function DashboardScreen() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
-  const [liveClockTick, setLiveClockTick] = useState(0);
+  const [, setLastSyncedAt] = useState<string | null>(null);
   const inFlightLoadRef = useRef<Promise<void> | null>(null);
 
   useLenisScrollEngine(scrollRef);
 
   const scrollY = useSharedValue(0);
-  const ambientPhase = useSharedValue(0);
-
-  useEffect(() => {
-    ambientPhase.value = withRepeat(
-      withTiming(1, {
-        duration: 5200,
-        easing: Easing.inOut(Easing.ease),
-      }),
-      -1,
-      true
-    );
-  }, [ambientPhase]);
 
   const onScroll = useAnimatedScrollHandler({
     onScroll: (event) => {
@@ -483,27 +454,6 @@ export default function DashboardScreen() {
       },
     ],
     opacity: interpolate(scrollY.value, [0, 180], [1, 0.9], Extrapolation.CLAMP),
-  }));
-  const ambientOrbLeftStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(ambientPhase.value, [0, 1], [-12, 20]) },
-      { translateY: interpolate(ambientPhase.value, [0, 1], [0, -18]) },
-    ],
-    opacity: interpolate(ambientPhase.value, [0, 1], [0.52, 0.82]),
-  }));
-  const ambientOrbRightStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(ambientPhase.value, [0, 1], [16, -10]) },
-      { translateY: interpolate(ambientPhase.value, [0, 1], [-10, 8]) },
-    ],
-    opacity: interpolate(ambientPhase.value, [0, 1], [0.38, 0.72]),
-  }));
-  const heroShimmerStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: interpolate(ambientPhase.value, [0, 1], [-180, 220]) },
-      { rotate: "-18deg" },
-    ],
-    opacity: interpolate(ambientPhase.value, [0, 1], [0.15, 0.3]),
   }));
 
   const loadDashboard = useCallback(async () => {
@@ -613,15 +563,6 @@ export default function DashboardScreen() {
     return unsubscribe;
   }, [loadDashboard]);
 
-  useEffect(() => {
-    const tickId = setInterval(() => {
-      setLiveClockTick((current) => current + 1);
-    }, DASHBOARD_CLOCK_TICK_MS);
-    return () => {
-      clearInterval(tickId);
-    };
-  }, []);
-
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -634,14 +575,11 @@ export default function DashboardScreen() {
   const snapshot = useMemo<DashboardSnapshot>(() => {
     const todayKey = toLocalDateKey(new Date());
     const employeeRoster = employees.filter((employee) => employee.role !== "admin");
-    const employeeIdSet = new Set(employeeRoster.map((employee) => employee.id));
     const validAttendance = attendance.filter((record) => record.approvalStatus !== "rejected");
     const todayRecords = validAttendance.filter(
       (record) => toLocalDateKey(new Date(record.timestamp)) === todayKey
     );
-    const todayCheckins = todayRecords.filter(
-      (record) => record.type === "checkin" && employeeIdSet.has(record.userId)
-    );
+    const todayCheckins = todayRecords.filter((record) => record.type === "checkin");
     const presentUserIds = new Set(todayCheckins.map((record) => record.userId));
     const lateToday = todayCheckins.filter((record) => {
       const parsed = new Date(record.timestamp);
@@ -652,14 +590,11 @@ export default function DashboardScreen() {
           parsed.getMinutes() > LATE_THRESHOLD_MINUTE)
       );
     }).length;
-    const todayCheckouts = todayRecords.filter(
-      (record) => record.type === "checkout" && employeeIdSet.has(record.userId)
-    ).length;
+    const todayCheckouts = todayRecords.filter((record) => record.type === "checkout").length;
     const pendingSignIns = attendance.filter(
       (record) =>
         record.type === "checkin" &&
-        record.approvalStatus === "pending" &&
-        employeeIdSet.has(record.userId)
+        record.approvalStatus === "pending"
     ).length;
     const pendingTasks = tasks.filter((task) => task.status === "pending").length;
     const inProgressTasks = tasks.filter((task) => task.status === "in_progress").length;
@@ -700,7 +635,7 @@ export default function DashboardScreen() {
   }, [attendance, conversations, employees, expenses, notifications, supportThreads, tasks, user]);
 
   const isSalesperson = user?.role === "salesperson";
-  const todayKey = useMemo(() => toLocalDateKey(new Date()), [liveClockTick]);
+  const todayKey = useMemo(() => toLocalDateKey(new Date()), []);
   const userTasks = useMemo(() => {
     if (!user) return [] as Task[];
     const normalizedName = normalizeIdentity(user.name);
@@ -745,24 +680,11 @@ export default function DashboardScreen() {
     () => todaysVisits.filter((task) => task.status === "pending").length,
     [todaysVisits]
   );
-  const nextVisit = useMemo(
-    () => todaysVisits.find((task) => task.status !== "completed") ?? null,
-    [todaysVisits]
-  );
   const userPendingExpenses = useMemo(() => {
     if (!user) return 0;
     return expenses.filter((expense) => expense.userId === user.id && expense.status === "pending")
       .length;
   }, [expenses, user]);
-  const userAttendanceToday = useMemo(() => {
-    if (!user) return [] as AttendanceRecord[];
-    return attendance.filter(
-      (record) => record.userId === user.id && toLocalDateKey(new Date(record.timestamp)) === todayKey
-    );
-  }, [attendance, todayKey, user]);
-  const hasCheckedIn = userAttendanceToday.some((record) => record.type === "checkin");
-  const hasCheckedOut = userAttendanceToday.some((record) => record.type === "checkout");
-  const attendanceStatus = hasCheckedOut ? "Checked out" : hasCheckedIn ? "Checked in" : "Not checked in";
 
   const quickLinks = useMemo(() => buildQuickLinks(user?.role, colors), [colors, user?.role]);
 
@@ -808,7 +730,7 @@ export default function DashboardScreen() {
               id: "present",
               label: "Present Today",
               value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
-              hint: `${snapshot.lateToday} late arrivals`,
+              hint: `${snapshot.presentToday} check-ins logged`,
               icon: "person-add-outline",
               tone: colors.success,
             },
@@ -951,10 +873,6 @@ export default function DashboardScreen() {
   }, [supportThreads]);
 
   const isSalesVisible = canAccessSalesModule(user?.role);
-  const liveSyncLabel = useMemo(
-    () => formatLiveSyncLabel(lastSyncedAt),
-    [lastSyncedAt, liveClockTick]
-  );
   const currentDateLabel = useMemo(
     () =>
       new Date().toLocaleDateString([], {
@@ -962,112 +880,35 @@ export default function DashboardScreen() {
         month: "short",
         day: "numeric",
       }),
-    [liveClockTick]
+    []
   );
-  const greeting = useMemo(() => getGreetingLabel(), [liveClockTick]);
-  const heroSubtitle = isSalesperson
-    ? "Your visits, tasks, and alerts for today."
-    : "Workforce command center with live attendance, support queue, and execution signals.";
+  const greeting = useMemo(() => getGreetingLabel(), []);
+  const heroEmailText = useMemo(() => {
+    const email = user?.email?.trim();
+    if (email) {
+      return email;
+    }
+    return "@lumina.app";
+  }, [user?.email]);
   const heroInsights = useMemo(
-    () =>
-      isSalesperson
-        ? [
-            {
-              id: "visits_done",
-              value: `${visitsCompleted}/${todaysVisits.length}`,
-              label: "Visits done",
-            },
-            {
-              id: "tasks_pending",
-              value: `${userPendingTasks}`,
-              label: "Pending tasks",
-            },
-            {
-              id: "alerts_unread",
-              value: `${snapshot.unreadNotifications}`,
-              label: "Unread alerts",
-            },
-          ]
-        : [
-            {
-              id: "active_now",
-              value: `${snapshot.activeNow}`,
-              label: "Active now",
-            },
-            {
-              id: "pending_signins",
-              value: `${snapshot.pendingSignIns}`,
-              label: "Pending sign-ins",
-            },
-            {
-              id: "today_checkouts",
-              value: `${snapshot.todayCheckouts}`,
-              label: "Checkouts today",
-            },
-          ],
-    [
-      isSalesperson,
-      snapshot.activeNow,
-      snapshot.pendingSignIns,
-      snapshot.todayCheckouts,
-      snapshot.unreadNotifications,
-      todaysVisits.length,
-      userPendingTasks,
-      visitsCompleted,
-    ]
-  );
-  const heroBadges = useMemo<HeroBadge[]>(
-    () =>
-      isSalesperson
-        ? [
-            {
-              id: "sync",
-              icon: "radio-outline",
-              text: liveSyncLabel,
-            },
-            {
-              id: "attendance",
-              icon: hasCheckedOut
-                ? "checkmark-done-outline"
-                : hasCheckedIn
-                  ? "checkmark-circle-outline"
-                  : "time-outline",
-              text: attendanceStatus,
-            },
-            {
-              id: "next_visit",
-              icon: "navigate-outline",
-              text: nextVisit ? `Next: ${getTaskLabel(nextVisit)}` : "No visits scheduled",
-            },
-          ]
-        : [
-            {
-              id: "sync",
-              icon: "radio-outline",
-              text: liveSyncLabel,
-            },
-            {
-              id: "velocity",
-              icon: "lightning-bolt-outline",
-              iconLib: "mci",
-              text: `${snapshot.taskCompletionRate}% delivery velocity`,
-            },
-            {
-              id: "support",
-              icon: "chatbubbles-outline",
-              text: `${snapshot.openSupportThreads} open support threads`,
-            },
-          ],
-    [
-      attendanceStatus,
-      hasCheckedIn,
-      hasCheckedOut,
-      isSalesperson,
-      liveSyncLabel,
-      nextVisit,
-      snapshot.openSupportThreads,
-      snapshot.taskCompletionRate,
-    ]
+    () => [
+      {
+        id: "active_now",
+        value: `${snapshot.activeNow}`,
+        label: "Live now",
+      },
+      {
+        id: "checked_in",
+        value: `${snapshot.presentToday}`,
+        label: "Checked in",
+      },
+      {
+        id: "visits_scheduled",
+        value: todaysVisits.length === 0 ? "NO" : "YES",
+        label: "Visits scheduled",
+      },
+    ],
+    [snapshot.activeNow, snapshot.presentToday, todaysVisits.length]
   );
 
   const dashboardSections = useMemo<DashboardSection[]>(
@@ -1200,144 +1041,213 @@ export default function DashboardScreen() {
         contentContainerStyle={[
           styles.scrollContent,
           {
-            paddingTop: insets.top + 10,
+            paddingTop: insets.top,
             paddingBottom: Math.max(insets.bottom, 20) + 28,
           },
         ]}
       >
-        <View style={styles.navToggleWrap}>
-          <DrawerToggleButton />
-        </View>
-
         <Animated.View entering={FadeInUp.duration(420)} style={[styles.heroWrap, heroAnimatedStyle]}>
           <LinearGradient
             colors={
               isDark
-                ? [colors.accent, colors.primary, colors.secondary]
-                : [colors.heroStart, colors.heroEnd, colors.primary]
+                ? ["#182338", "#111A2F", "#0E1628"]
+                : ["#FFFFFF", "#FBFAFF", "#F6F8FF"]
             }
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={styles.heroCard}
-          >
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.heroOrb,
-                styles.heroOrbLeft,
-                { backgroundColor: `${colors.backgroundElevated}24` },
-                ambientOrbLeftStyle,
-              ]}
+            style={[
+              styles.heroCard,
+              {
+                borderColor: isDark ? colors.border : "rgba(15, 23, 42, 0.07)",
+              },
+            ]}
+            >
+              <LinearGradient
+                pointerEvents="none"
+              colors={
+                isDark
+                  ? ["rgba(59,130,246,0.28)", "rgba(99,102,241,0.14)"]
+                  : ["#6A63FF", "#2FA3F6"]
+              }
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0.9 }}
+              style={styles.heroTopCap}
             />
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.heroOrb,
-                styles.heroOrbRight,
-                { backgroundColor: `${colors.secondary}26` },
-                ambientOrbRightStyle,
-              ]}
-            />
-            <Animated.View pointerEvents="none" style={[styles.heroShimmer, heroShimmerStyle]} />
             <View
               pointerEvents="none"
-              style={[styles.heroGridOverlay, { borderColor: `${colors.backgroundElevated}24` }]}
+              style={[styles.heroGridOverlay, { borderColor: isDark ? `${colors.backgroundElevated}24` : "rgba(15, 23, 42, 0.04)" }]}
             />
             <View style={styles.heroHeaderRow}>
-              <View style={styles.heroDateChip}>
-                <Ionicons name="calendar-outline" size={13} color="#E8F4FF" />
-                <Text style={styles.heroDateText}>{currentDateLabel}</Text>
-              </View>
-              <View style={styles.heroRoleChip}>
-                <Text style={styles.heroRoleText}>{roleLabel(user.role)}</Text>
+              <DrawerToggleButton iconColor="#FFFFFF" iconSize={34} style={{ marginTop: 2 }} />
+              <View style={styles.heroHeaderMeta}>
+                <View
+                  style={[
+                    styles.heroDateChip,
+                    {
+                      backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.18)",
+                      borderColor: isDark ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.22)",
+                    },
+                  ]}
+                >
+                  <Ionicons name="calendar-outline" size={13} color="#E8F4FF" />
+                  <Text style={[styles.heroDateText, { color: "#E8F4FF" }]}>
+                    {currentDateLabel}
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.heroRoleChip,
+                    {
+                      backgroundColor: isDark ? "rgba(9,20,38,0.18)" : "rgba(255,255,255,0.92)",
+                      borderColor: isDark ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.6)",
+                    },
+                  ]}
+                >
+                  <Text style={[styles.heroRoleText, { color: isDark ? "#F3F8FF" : colors.primary }]}>
+                    Live now
+                  </Text>
+                  <View
+                    style={[
+                      styles.heroRoleCountChip,
+                      { backgroundColor: isDark ? "rgba(255,255,255,0.12)" : `${colors.primary}16` },
+                    ]}
+                  >
+                    <Text style={[styles.heroRoleCountText, { color: isDark ? "#F3F8FF" : colors.primary }]}>
+                      {snapshot.activeNow}
+                    </Text>
+                  </View>
+                </View>
               </View>
             </View>
 
-            <Text style={styles.heroGreetingText}>{greeting}</Text>
-            <Text style={styles.heroTitleText}>{user.name}</Text>
-            <Text style={styles.heroSubtitleText}>{heroSubtitle}</Text>
+            <View style={styles.heroProfileStack}>
+              <Pressable
+                onPress={() => router.push("/settings")}
+                style={[
+                  styles.heroAvatarWrap,
+                  {
+                    backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "#FFFFFF",
+                    borderColor: isDark ? "rgba(255,255,255,0.14)" : "rgba(15, 23, 42, 0.06)",
+                  },
+                ]}
+              >
+                {user.avatar ? (
+                  <Image source={{ uri: user.avatar }} style={styles.heroAvatarImage} />
+                ) : (
+                  <Text style={[styles.heroAvatarFallback, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                    {getUserInitials(user.name)}
+                  </Text>
+                )}
+              </Pressable>
+              <Text style={[styles.heroGreetingText, { color: isDark ? "#8FB9FF" : colors.textTertiary }]}>
+                {greeting}
+              </Text>
+              <Text style={[styles.heroTitleText, { color: colors.text }]} numberOfLines={1}>
+                {user.name}
+              </Text>
+              <Text style={[styles.heroHandleText, { color: colors.textTertiary }]}>
+                {heroEmailText}
+              </Text>
+            </View>
 
-            <View style={styles.heroInsightRow}>
+            <View
+              style={[
+                styles.heroInsightRow,
+                isDark
+                  ? {
+                      backgroundColor: "rgba(255,255,255,0.04)",
+                      borderColor: "rgba(255,255,255,0.06)",
+                    }
+                  : styles.heroInsightRowLight,
+              ]}
+            >
               {heroInsights.map((item, index) => (
                 <React.Fragment key={item.id}>
                   <View style={styles.heroInsightItem}>
-                    <Text style={styles.heroInsightValue}>{item.value}</Text>
-                    <Text style={styles.heroInsightLabel}>{item.label}</Text>
+                    <Text style={[styles.heroInsightValue, { color: colors.text }]}>{item.value}</Text>
+                    <Text style={[styles.heroInsightLabel, { color: colors.textSecondary }]}>{item.label}</Text>
                   </View>
-                  {index < heroInsights.length - 1 ? <View style={styles.heroDivider} /> : null}
+                  {index < heroInsights.length - 1 ? (
+                    <View
+                      style={[
+                        styles.heroDivider,
+                        { backgroundColor: isDark ? "rgba(255,255,255,0.12)" : "rgba(15, 23, 42, 0.08)" },
+                      ]}
+                    />
+                  ) : null}
                 </React.Fragment>
               ))}
             </View>
 
-            <View style={styles.heroBadgeRow}>
-              {heroBadges.map((badge) => (
-                <View key={badge.id} style={styles.heroBadge}>
-                  {badge.iconLib === "mci" ? (
-                    <MaterialCommunityIcons name={badge.icon} size={13} color="#DDF5FF" />
-                  ) : (
-                    <Ionicons name={badge.icon} size={13} color="#DDF5FF" />
-                  )}
-                  <Text style={styles.heroBadgeText}>{badge.text}</Text>
-                </View>
+            <View style={styles.commandStripRow}>
+              {commandHighlights.map((highlight, index) => (
+                <Animated.View
+                  key={highlight.id}
+                  entering={
+                    index % 2 === 0
+                      ? FadeInLeft.duration(420).delay(70 + index * 35)
+                      : FadeInRight.duration(420).delay(70 + index * 35)
+                  }
+                  style={[
+                    styles.commandStripCard,
+                    isDark
+                      ? {
+                          borderColor: `${highlight.tone}38`,
+                          backgroundColor: "rgba(255,255,255,0.06)",
+                        }
+                      : {
+                          borderColor: `${highlight.tone}20`,
+                          backgroundColor: "#FFFFFF",
+                        },
+                  ]}
+                >
+                  <View style={[styles.commandStripIcon, { backgroundColor: `${highlight.tone}14` }]}>
+                    <Ionicons name={highlight.icon} size={16} color={highlight.tone} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[
+                        styles.commandStripValue,
+                        { color: colors.text, fontFamily: "Inter_700Bold" },
+                      ]}
+                    >
+                      {highlight.value}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.commandStripLabel,
+                        { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                      ]}
+                    >
+                      {highlight.label}
+                    </Text>
+                  </View>
+                </Animated.View>
               ))}
             </View>
           </LinearGradient>
         </Animated.View>
 
-        <View style={styles.commandStripRow}>
-          {commandHighlights.map((highlight, index) => (
-            <Animated.View
-              key={highlight.id}
-              entering={
-                index % 2 === 0
-                  ? FadeInLeft.duration(420).delay(70 + index * 35)
-                  : FadeInRight.duration(420).delay(70 + index * 35)
-              }
-              style={[
-                styles.commandStripCard,
-                {
-                  borderColor: `${highlight.tone}4A`,
-                  backgroundColor: `${highlight.tone}12`,
-                },
-              ]}
-            >
-              <View style={[styles.commandStripIcon, { backgroundColor: `${highlight.tone}1E` }]}>
-                <Ionicons name={highlight.icon} size={14} color={highlight.tone} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text
-                  style={[
-                    styles.commandStripValue,
-                    { color: colors.text, fontFamily: "Inter_700Bold" },
-                  ]}
-                >
-                  {highlight.value}
-                </Text>
-                <Text
-                  style={[
-                    styles.commandStripLabel,
-                    { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
-                  ]}
-                >
-                  {highlight.label}
-                </Text>
-              </View>
-            </Animated.View>
-          ))}
-        </View>
-
         {metricsSection ? (
         <Animated.View entering={FadeInDown.duration(420).delay(metricsSection.delay)} style={styles.sectionWrap}>
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-              {getSectionEyebrow(metricsSection.id, isSalesperson)}
-            </Text>
-            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {metricsSection.title}
-            </Text>
-            <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {metricsSection.subtitle}
-            </Text>
+          <View style={styles.sectionHeaderRow}>
+            <View style={styles.sectionHeaderContent}>
+              <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+                {getSectionEyebrow(metricsSection.id, isSalesperson)}
+              </Text>
+              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                {metricsSection.title}
+              </Text>
+              <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                {metricsSection.subtitle}
+              </Text>
+            </View>
+            <View style={[styles.sectionActionChip, { backgroundColor: isDark ? colors.surface : "#FFFFFF", borderColor: colors.border }]}>
+              <Text style={[styles.sectionActionText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
+                This Week
+              </Text>
+              <Ionicons name="chevron-down" size={14} color={colors.textSecondary} />
+            </View>
           </View>
           <View style={styles.metricGrid}>
             {metricCards.map((card, index) => (
@@ -1347,19 +1257,20 @@ export default function DashboardScreen() {
                 style={[
                   styles.metricCard,
                   {
-                    borderColor: `${card.tone}40`,
-                    backgroundColor: colors.backgroundElevated,
+                    borderColor: isDark ? `${card.tone}24` : "transparent",
+                    backgroundColor:
+                      isDark
+                        ? colors.backgroundElevated
+                        : ["#EEEDFF", "#FFF2E7", "#E7F6FF", "#ECFAEF"][index % 4],
                   },
                 ]}
               >
-                <View style={[styles.metricCardGlow, { backgroundColor: `${card.tone}14` }]} />
+                <View style={[styles.metricCardGlow, { backgroundColor: isDark ? `${card.tone}14` : `${card.tone}10` }]} />
                 <View style={styles.metricHeader}>
-                  <View style={[styles.metricIconWrap, { backgroundColor: `${card.tone}14` }]}>
-                    <Ionicons name={card.icon} size={16} color={card.tone} />
-                  </View>
                   <Text style={[styles.metricLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                     {card.label}
                   </Text>
+                  <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
                 </View>
                 <Text style={[styles.metricValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                   {card.value}
@@ -1367,8 +1278,8 @@ export default function DashboardScreen() {
                 <Text style={[styles.metricHint, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
                   {card.hint}
                 </Text>
-                <View style={[styles.metricAccentTrack, { backgroundColor: colors.borderLight }]}>
-                  <View style={[styles.metricAccentFill, { backgroundColor: card.tone }]} />
+                <View style={[styles.metricAccentTrack, { backgroundColor: "transparent" }]}>
+                  <View style={[styles.metricAccentFill, { backgroundColor: `${card.tone}22` }]} />
                 </View>
               </Animated.View>
             ))}
@@ -1570,16 +1481,24 @@ export default function DashboardScreen() {
 
         {quickLinksSection ? (
         <Animated.View entering={FadeInDown.duration(420).delay(quickLinksSection.delay)} style={styles.sectionWrap}>
-          <View style={styles.sectionHeader}>
-            <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-              {getSectionEyebrow(quickLinksSection.id, isSalesperson)}
-            </Text>
-            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-              {quickLinksSection.title}
-            </Text>
-            <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {quickLinksSection.subtitle}
-            </Text>
+          <View style={styles.sectionHeaderRow}>
+            <View style={styles.sectionHeaderContent}>
+              <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
+                {getSectionEyebrow(quickLinksSection.id, isSalesperson)}
+              </Text>
+              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                {quickLinksSection.title}
+              </Text>
+              <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                {quickLinksSection.subtitle}
+              </Text>
+            </View>
+            <View style={[styles.sectionActionChip, { backgroundColor: isDark ? colors.surface : "#FFFFFF", borderColor: colors.border }]}>
+              <Text style={[styles.sectionActionText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
+                All
+              </Text>
+              <Ionicons name="chevron-down" size={14} color={colors.textSecondary} />
+            </View>
           </View>
 
           <View style={styles.quickGrid}>
@@ -1590,7 +1509,7 @@ export default function DashboardScreen() {
                 style={[
                   styles.quickCard,
                   {
-                    borderColor: colors.border,
+                    borderColor: isDark ? colors.border : "rgba(15, 23, 42, 0.05)",
                     backgroundColor: colors.backgroundElevated,
                   },
                 ]}
@@ -1801,131 +1720,192 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   scrollContent: {
     width: "100%",
-    maxWidth: 1180,
+    maxWidth: 1060,
     alignSelf: "center",
-    paddingHorizontal: 20,
-  },
-  navToggleWrap: {
-    alignSelf: "flex-start",
-    marginBottom: 14,
+    paddingHorizontal: 18,
   },
   heroWrap: {
-    marginBottom: 16,
+    marginHorizontal: -18,
+    marginBottom: 14,
   },
   heroCard: {
-    borderRadius: 28,
-    paddingHorizontal: 18,
-    paddingTop: 16,
-    paddingBottom: 18,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
+    borderRadius: 0,
+    paddingHorizontal: 24,
+    paddingTop: 10,
+    paddingBottom: 16,
+    borderWidth: 0,
     position: "relative",
     overflow: "hidden",
-    shadowColor: "#0A1D35",
-    shadowOpacity: 0.18,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 6,
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 0,
+  },
+  heroTopCap: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 152,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
   },
   heroOrb: {
     position: "absolute",
-    width: 180,
-    height: 180,
+    width: 150,
+    height: 150,
     borderRadius: 999,
   },
   heroOrbLeft: {
-    top: -74,
-    left: -56,
+    top: -56,
+    left: -34,
   },
   heroOrbRight: {
-    right: -68,
-    bottom: -92,
+    right: -44,
+    bottom: -74,
   },
   heroShimmer: {
     position: "absolute",
-    width: 210,
-    height: 260,
-    top: -80,
+    width: 180,
+    height: 220,
+    top: -60,
     borderRadius: 40,
     backgroundColor: "rgba(255,255,255,0.2)",
   },
   heroGridOverlay: {
     ...StyleSheet.absoluteFillObject,
-    borderWidth: 1,
-    borderRadius: 28,
+    borderWidth: 0,
+    borderRadius: 0,
   },
   heroHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 14,
+    alignItems: "flex-start",
+    marginTop: 2,
+    marginBottom: 6,
+    gap: 8,
+  },
+  heroHeaderMeta: {
+    alignItems: "flex-end",
     gap: 8,
   },
   heroDateChip: {
-    minHeight: 32,
+    minHeight: 36,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.12)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    paddingHorizontal: 12,
+    marginTop: 2,
+    paddingHorizontal: 13,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
   },
   heroDateText: {
-    color: "#E8F4FF",
     fontFamily: "Inter_600SemiBold",
-    fontSize: 11.5,
+    fontSize: 11.8,
     letterSpacing: 0.2,
   },
   heroRoleChip: {
-    minHeight: 32,
+    minHeight: 38,
     borderRadius: 999,
-    backgroundColor: "rgba(9,20,38,0.18)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
-    paddingHorizontal: 12,
-    justifyContent: "center",
+    marginTop: 2,
+    paddingHorizontal: 9,
+    justifyContent: "space-between",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   heroRoleText: {
-    color: "#F3F8FF",
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 11,
-    letterSpacing: 0.4,
+    fontFamily: "Inter_500Medium",
+    fontSize: 11.8,
+    letterSpacing: -0.15,
+  },
+  heroRoleCountChip: {
+    minWidth: 26,
+    height: 24,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  heroRoleCountText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 11.5,
+    letterSpacing: -0.15,
   },
   heroGreetingText: {
-    color: "#D8EBFF",
     fontFamily: "Inter_500Medium",
     fontSize: 12.5,
     letterSpacing: 0.2,
+    textAlign: "center",
+  },
+  heroProfileStack: {
+    alignItems: "center",
+    marginTop: -4,
+    paddingHorizontal: 6,
+  },
+  heroAvatarWrap: {
+    width: 108,
+    height: 108,
+    borderRadius: 54,
+    borderWidth: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    marginTop: -2,
+    marginBottom: 8,
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.14,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 14 },
+    elevation: 6,
+  },
+  heroAvatarImage: {
+    width: "100%",
+    height: "100%",
+  },
+  heroAvatarFallback: {
+    fontSize: 30,
+    letterSpacing: -0.8,
   },
   heroTitleText: {
     marginTop: 2,
-    color: "#FFFFFF",
     fontFamily: "Inter_700Bold",
-    fontSize: 28,
-    letterSpacing: -0.5,
+    fontSize: 31,
+    letterSpacing: -1.2,
+    textAlign: "center",
+  },
+  heroHandleText: {
+    marginTop: 4,
+    fontFamily: "Inter_500Medium",
+    fontSize: 13.5,
+    letterSpacing: -0.2,
+    textAlign: "center",
   },
   heroSubtitleText: {
     marginTop: 6,
-    color: "#EAF2FF",
     fontFamily: "Inter_400Regular",
-    fontSize: 13,
-    lineHeight: 19,
-    maxWidth: "92%",
+    fontSize: 14,
+    lineHeight: 20,
+    maxWidth: "84%",
+    textAlign: "center",
   },
   heroInsightRow: {
-    marginTop: 16,
-    minHeight: 64,
-    borderRadius: 18,
-    backgroundColor: "rgba(7, 16, 34, 0.18)",
+    marginTop: 18,
+    minHeight: 58,
+    borderRadius: 999,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(148,163,184,0.10)",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
     paddingVertical: 8,
+    backgroundColor: "rgba(255,255,255,0.56)",
+  },
+  heroInsightRowLight: {
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderColor: "rgba(15, 23, 42, 0.06)",
   },
   heroInsightItem: {
     flex: 1,
@@ -1933,15 +1913,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   heroInsightValue: {
-    color: "#FFFFFF",
     fontFamily: "Inter_700Bold",
-    fontSize: 18,
+    fontSize: 16,
+    letterSpacing: -0.7,
   },
   heroInsightLabel: {
-    marginTop: 2,
-    color: "#D8E9FF",
-    fontFamily: "Inter_400Regular",
+    marginTop: 1,
+    fontFamily: "Inter_500Medium",
     fontSize: 10.8,
+    textAlign: "center",
   },
   heroDivider: {
     width: 1,
@@ -1955,54 +1935,53 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   heroBadge: {
-    minHeight: 30,
+    minHeight: 34,
     borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.1)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    paddingHorizontal: 11,
+    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
   },
   heroBadgeText: {
-    color: "#E3F0FF",
     fontFamily: "Inter_500Medium",
-    fontSize: 10.5,
+    fontSize: 11,
   },
   commandStripRow: {
-    marginTop: 1,
-    marginBottom: 12,
+    marginTop: 18,
+    marginBottom: 2,
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
+    justifyContent: "space-between",
+    rowGap: 10,
   },
   commandStripCard: {
-    width: "48.4%",
-    minHeight: 74,
-    borderRadius: 18,
+    width: "48.2%",
+    minHeight: 88,
+    borderRadius: 22,
     borderWidth: 1,
-    paddingHorizontal: 11,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 10,
     overflow: "hidden",
   },
   commandStripIcon: {
-    width: 34,
-    height: 34,
+    width: 38,
+    height: 38,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
   },
   commandStripValue: {
-    fontSize: 16,
-    letterSpacing: -0.3,
+    fontSize: 22,
+    letterSpacing: -0.8,
   },
   commandStripLabel: {
-    marginTop: 1,
-    fontSize: 11.2,
+    marginTop: 4,
+    fontSize: 12.2,
+    lineHeight: 17,
   },
   sectionWrap: {
     marginTop: 2,
@@ -2011,90 +1990,114 @@ const styles = StyleSheet.create({
   sectionHeader: {
     marginBottom: 10,
   },
+  sectionHeaderRow: {
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  sectionHeaderContent: {
+    flex: 1,
+  },
   sectionEyebrow: {
     marginBottom: 4,
-    fontSize: 10.5,
-    letterSpacing: 1.2,
+    fontSize: 11,
+    letterSpacing: 1.5,
   },
   sectionTitle: {
-    fontSize: 17,
-    letterSpacing: -0.3,
+    fontSize: 18,
+    letterSpacing: -0.5,
   },
   sectionCaption: {
     marginTop: 3,
-    fontSize: 12.4,
+    fontSize: 12.8,
+  },
+  sectionActionChip: {
+    minHeight: 40,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 1,
+  },
+  sectionActionText: {
+    fontSize: 12.5,
   },
   metricGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
+    justifyContent: "space-between",
+    rowGap: 12,
   },
   metricCard: {
-    width: "48.4%",
+    width: "48.2%",
     borderWidth: 1,
-    borderRadius: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    minHeight: 126,
+    borderRadius: 22,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    minHeight: 132,
     position: "relative",
     overflow: "hidden",
     shadowColor: "#13263F",
     shadowOpacity: 0.06,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 3,
   },
   metricCardGlow: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
-    height: 42,
+    height: 48,
   },
   metricHeader: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     gap: 8,
   },
-  metricIconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   metricLabel: {
-    fontSize: 11.8,
+    fontSize: 13.2,
     flex: 1,
   },
   metricValue: {
-    marginTop: 10,
-    fontSize: 24,
-    letterSpacing: -0.5,
+    marginTop: 18,
+    fontSize: 34,
+    letterSpacing: -1.2,
   },
   metricHint: {
     marginTop: 5,
-    fontSize: 11.2,
-    lineHeight: 16.5,
+    fontSize: 12.2,
+    lineHeight: 17.5,
   },
   metricAccentTrack: {
-    marginTop: 8,
+    marginTop: 10,
     width: "100%",
-    height: 4,
+    height: 28,
     borderRadius: 999,
     overflow: "hidden",
+    justifyContent: "center",
   },
   metricAccentFill: {
-    width: "68%",
-    height: "100%",
+    width: "32%",
+    height: 8,
     borderRadius: 999,
+    alignSelf: "flex-end",
   },
   pulseCard: {
-    borderRadius: 20,
+    borderRadius: 24,
     borderWidth: 1,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 14,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 16,
     marginBottom: 12,
     overflow: "hidden",
   },
@@ -2153,22 +2156,23 @@ const styles = StyleSheet.create({
     fontSize: 18,
   },
   quickGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-  },
+      flexDirection: "row",
+      flexWrap: "wrap",
+      justifyContent: "space-between",
+      rowGap: 12,
+    },
   quickCard: {
     width: "48.4%",
-    borderRadius: 18,
+    borderRadius: 24,
     borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    minHeight: 114,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    minHeight: 126,
     shadowColor: "#13263F",
     shadowOpacity: 0.06,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 3,
   },
   quickCardHeader: {
     flexDirection: "row",
@@ -2191,22 +2195,28 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   quickTitle: {
-    marginTop: 10,
-    fontSize: 14,
+    marginTop: 14,
+    fontSize: 15.5,
+    letterSpacing: -0.4,
   },
   quickSubtitle: {
     marginTop: 4,
-    fontSize: 11.5,
-    lineHeight: 16.5,
+    fontSize: 12,
+    lineHeight: 17.5,
   },
   sectionCard: {
-    borderRadius: 20,
+    borderRadius: 26,
     borderWidth: 1,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 10,
+    paddingHorizontal: 16,
+    paddingTop: 15,
+    paddingBottom: 12,
     marginBottom: 12,
     overflow: "hidden",
+    shadowColor: "#13263F",
+    shadowOpacity: 0.05,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 2,
   },
   emptyInlineWrap: {
     minHeight: 56,
@@ -2220,8 +2230,8 @@ const styles = StyleSheet.create({
   },
   salesCtaButton: {
     marginTop: 12,
-    borderRadius: 14,
-    minHeight: 44,
+    borderRadius: 16,
+    minHeight: 48,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -2314,9 +2324,9 @@ const styles = StyleSheet.create({
   },
   footerSummaryCard: {
     flex: 1,
-    borderRadius: 18,
+    borderRadius: 22,
     borderWidth: 1,
-    minHeight: 92,
+    minHeight: 98,
     alignItems: "center",
     justifyContent: "center",
     gap: 5,

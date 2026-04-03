@@ -6,6 +6,7 @@
     "entryPoint": "./node_modules/expo-router/entry",
     "version": "1.0.0",
     "updates": {
+      "enabled": false,
       "checkAutomatically": "NEVER",
       "fallbackToCacheTimeout": 0
     },
