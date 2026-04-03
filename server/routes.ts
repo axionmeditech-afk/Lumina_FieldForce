@@ -13,6 +13,7 @@ import type {
   SalaryRecord,
   Task,
   UserAccessRequest,
+  VisitHistoryRecord,
   UserRole,
 } from "@/lib/types";
 import {
@@ -677,6 +678,7 @@ const inMemoryStateStore = new Map<string, string>();
 let accessRequestAssignmentColumnsEnsured = false;
 let stockistAssignmentColumnsEnsured = false;
 let taskVisitNotesColumnsEnsured = false;
+let visitHistoryTableEnsured = false;
 
 function setAuthUserRecord(record: AuthUserRecord): void {
   const emailKey = normalizeEmailKey(record.user.email);
@@ -863,7 +865,9 @@ async function ensureTaskVisitNotesColumns(): Promise<void> {
       ADD COLUMN IF NOT EXISTS visit_sequence INT NULL AFTER visit_plan_date,
       ADD COLUMN IF NOT EXISTS visit_location_label VARCHAR(191) NULL AFTER visit_sequence,
       ADD COLUMN IF NOT EXISTS visit_location_address LONGTEXT NULL AFTER visit_location_label,
-      ADD COLUMN IF NOT EXISTS arrival_at DATETIME NULL AFTER visit_location_address,
+      ADD COLUMN IF NOT EXISTS visit_latitude DECIMAL(10,7) NULL AFTER visit_location_address,
+      ADD COLUMN IF NOT EXISTS visit_longitude DECIMAL(10,7) NULL AFTER visit_latitude,
+      ADD COLUMN IF NOT EXISTS arrival_at DATETIME NULL AFTER visit_longitude,
       ADD COLUMN IF NOT EXISTS departure_at DATETIME NULL AFTER arrival_at,
       ADD COLUMN IF NOT EXISTS meeting_notes LONGTEXT NULL AFTER departure_at,
       ADD COLUMN IF NOT EXISTS meeting_notes_updated_at DATETIME NULL AFTER meeting_notes,
@@ -872,6 +876,41 @@ async function ensureTaskVisitNotesColumns(): Promise<void> {
       ADD COLUMN IF NOT EXISTS auto_capture_conversation_id VARCHAR(64) NULL AFTER visit_departure_notes_updated_at
   `);
   taskVisitNotesColumnsEnsured = true;
+}
+
+async function ensureVisitHistoryTable(): Promise<void> {
+  if (visitHistoryTableEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS lff_visit_history (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      company_id VARCHAR(64) NULL,
+      task_id VARCHAR(64) NOT NULL,
+      salesperson_id VARCHAR(64) NOT NULL,
+      salesperson_name VARCHAR(191) NULL,
+      visit_label VARCHAR(191) NOT NULL,
+      visit_location_address LONGTEXT NULL,
+      visit_latitude DECIMAL(10,7) NULL,
+      visit_longitude DECIMAL(10,7) NULL,
+      arrival_at DATETIME NULL,
+      departure_at DATETIME NULL,
+      meeting_notes LONGTEXT NULL,
+      visit_departure_notes LONGTEXT NULL,
+      auto_capture_conversation_id VARCHAR(64) NULL,
+      status VARCHAR(32) NULL,
+      source_created_at DATETIME NULL,
+      source_updated_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_lff_visit_history_task_id (task_id),
+      KEY idx_lff_visit_history_company_salesperson (company_id, salesperson_id),
+      KEY idx_lff_visit_history_salesperson_departure (salesperson_id, departure_at),
+      KEY idx_lff_visit_history_geo (visit_latitude, visit_longitude)
+    )
+  `);
+  visitHistoryTableEnsured = true;
 }
 
 function toMySqlDateTime(value: string | null | undefined): string | null {
@@ -978,8 +1017,18 @@ function mapVisitNoteRowToTask(row: Record<string, unknown>): Task {
         : Number.isFinite(Number(row.visit_sequence))
           ? Number(row.visit_sequence)
           : null,
-    visitLatitude: null,
-    visitLongitude: null,
+    visitLatitude:
+      typeof row.visit_latitude === "number"
+        ? row.visit_latitude
+        : Number.isFinite(Number(row.visit_latitude))
+          ? Number(row.visit_latitude)
+          : null,
+    visitLongitude:
+      typeof row.visit_longitude === "number"
+        ? row.visit_longitude
+        : Number.isFinite(Number(row.visit_longitude))
+          ? Number(row.visit_longitude)
+          : null,
     visitLocationLabel: row.visit_location_label ? String(row.visit_location_label) : null,
     visitLocationAddress: row.visit_location_address ? String(row.visit_location_address) : null,
     arrivalAt: fromMySqlDateTime(row.arrival_at),
@@ -995,6 +1044,135 @@ function mapVisitNoteRowToTask(row: Record<string, unknown>): Task {
       ? String(row.auto_capture_conversation_id)
       : null,
   };
+}
+
+function getVisitHistoryLabel(task: Task): string {
+  return (
+    normalizeWhitespace(task.visitLocationLabel || "") ||
+    normalizeWhitespace(task.title || "") ||
+    "Visit"
+  );
+}
+
+function mapVisitHistoryRow(row: Record<string, unknown>): VisitHistoryRecord {
+  const visitLatitude =
+    typeof row.visit_latitude === "number"
+      ? row.visit_latitude
+      : Number.isFinite(Number(row.visit_latitude))
+        ? Number(row.visit_latitude)
+        : 0;
+  const visitLongitude =
+    typeof row.visit_longitude === "number"
+      ? row.visit_longitude
+      : Number.isFinite(Number(row.visit_longitude))
+        ? Number(row.visit_longitude)
+        : 0;
+  const distanceMeters =
+    typeof row.distance_meters === "number"
+      ? row.distance_meters
+      : Number.isFinite(Number(row.distance_meters))
+        ? Number(row.distance_meters)
+        : null;
+  return {
+    id: String(row.task_id || row.id || ""),
+    companyId: normalizeWhitespace(String(row.company_id || "")) || null,
+    taskId: String(row.task_id || ""),
+    salespersonId: normalizeWhitespace(String(row.salesperson_id || "")),
+    salespersonName: normalizeWhitespace(String(row.salesperson_name || "")),
+    visitLabel: normalizeWhitespace(String(row.visit_label || "")) || "Visit",
+    visitLocationAddress: row.visit_location_address ? String(row.visit_location_address) : null,
+    visitLatitude,
+    visitLongitude,
+    arrivalAt: fromMySqlDateTime(row.arrival_at),
+    departureAt: fromMySqlDateTime(row.departure_at),
+    meetingNotes: row.meeting_notes ? String(row.meeting_notes) : null,
+    visitDepartureNotes: row.visit_departure_notes ? String(row.visit_departure_notes) : null,
+    autoCaptureConversationId: row.auto_capture_conversation_id
+      ? String(row.auto_capture_conversation_id)
+      : null,
+    status: normalizeWhitespace(String(row.status || "")) as VisitHistoryRecord["status"],
+    updatedAt:
+      fromMySqlDateTime(row.updated_at) ||
+      fromMySqlDateTime(row.source_updated_at) ||
+      fromMySqlDateTime(row.departure_at) ||
+      new Date().toISOString(),
+    distanceMeters:
+      typeof distanceMeters === "number" && Number.isFinite(distanceMeters)
+        ? Math.round(distanceMeters)
+        : null,
+  };
+}
+
+async function upsertVisitHistoryInMySql(
+  conn: Pool,
+  task: Task,
+  companyId: string | null
+): Promise<void> {
+  if (
+    typeof task.visitLatitude !== "number" ||
+    !Number.isFinite(task.visitLatitude) ||
+    typeof task.visitLongitude !== "number" ||
+    !Number.isFinite(task.visitLongitude)
+  ) {
+    return;
+  }
+
+  await conn.execute(
+    `INSERT INTO lff_visit_history (
+      company_id,
+      task_id,
+      salesperson_id,
+      salesperson_name,
+      visit_label,
+      visit_location_address,
+      visit_latitude,
+      visit_longitude,
+      arrival_at,
+      departure_at,
+      meeting_notes,
+      visit_departure_notes,
+      auto_capture_conversation_id,
+      status,
+      source_created_at,
+      source_updated_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+      company_id = VALUES(company_id),
+      salesperson_id = VALUES(salesperson_id),
+      salesperson_name = VALUES(salesperson_name),
+      visit_label = VALUES(visit_label),
+      visit_location_address = VALUES(visit_location_address),
+      visit_latitude = VALUES(visit_latitude),
+      visit_longitude = VALUES(visit_longitude),
+      arrival_at = VALUES(arrival_at),
+      departure_at = VALUES(departure_at),
+      meeting_notes = VALUES(meeting_notes),
+      visit_departure_notes = VALUES(visit_departure_notes),
+      auto_capture_conversation_id = VALUES(auto_capture_conversation_id),
+      status = VALUES(status),
+      source_created_at = VALUES(source_created_at),
+      source_updated_at = NOW(),
+      updated_at = NOW()`,
+    [
+      companyId,
+      task.id,
+      task.assignedTo,
+      task.assignedToName,
+      getVisitHistoryLabel(task),
+      task.visitLocationAddress ?? null,
+      task.visitLatitude,
+      task.visitLongitude,
+      toMySqlDateTime(task.arrivalAt),
+      toMySqlDateTime(task.departureAt),
+      task.meetingNotes ?? null,
+      task.visitDepartureNotes ?? null,
+      task.autoCaptureConversationId ?? null,
+      task.status,
+      toMySqlDateTime(task.createdAt),
+    ]
+  );
 }
 
 async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
@@ -5207,7 +5385,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         params.push(req.auth.sub);
       }
 
-      const [rows] = await conn.query<Record<string, unknown>[]>(
+      const [rows] = await conn.query<any[]>(
         `SELECT
           id,
           company_id,
@@ -5225,6 +5403,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           visit_sequence,
           visit_location_label,
           visit_location_address,
+          visit_latitude,
+          visit_longitude,
           arrival_at,
           departure_at,
           meeting_notes,
@@ -5242,6 +5422,117 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to fetch visit notes from MySQL.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.get("/api/visit-history/nearby", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL visit history store is not configured." });
+      return;
+    }
+
+    const latitude = parseOptionalQueryFloat(req.query.latitude);
+    const longitude = parseOptionalQueryFloat(req.query.longitude);
+    if (
+      latitude === null ||
+      longitude === null ||
+      Math.abs(latitude) > 90 ||
+      Math.abs(longitude) > 180
+    ) {
+      res.status(400).json({ message: "Valid latitude and longitude are required." });
+      return;
+    }
+
+    const radiusMeters = Math.max(
+      50,
+      Math.min(5000, parseOptionalQueryFloat(req.query.radius_meters) ?? 250)
+    );
+    const limit = Math.max(1, Math.min(24, parseOptionalInteger(req.query.limit) ?? 8));
+    const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salesperson_id) || "");
+    const salespersonId =
+      req.auth?.role === "salesperson"
+        ? normalizeWhitespace(req.auth.sub || "")
+        : requestedSalespersonId;
+
+    try {
+      await ensureVisitHistoryTable();
+      const conn = await getMySqlPool();
+      const companyId = await resolveRequestCompanyId(req);
+      const latDelta = radiusMeters / 111_320;
+      const lngDelta =
+        radiusMeters /
+        (111_320 * Math.max(0.1, Math.abs(Math.cos((latitude * Math.PI) / 180))));
+      const filters = [
+        "visit_latitude IS NOT NULL",
+        "visit_longitude IS NOT NULL",
+        "departure_at IS NOT NULL",
+        "visit_latitude BETWEEN ? AND ?",
+        "visit_longitude BETWEEN ? AND ?",
+      ];
+      const params: unknown[] = [
+        latitude,
+        longitude,
+        latitude,
+        latitude - latDelta,
+        latitude + latDelta,
+        longitude - lngDelta,
+        longitude + lngDelta,
+      ];
+
+      if (companyId) {
+        filters.push("company_id = ?");
+        params.push(companyId);
+      }
+      if (salespersonId) {
+        filters.push("salesperson_id = ?");
+        params.push(salespersonId);
+      }
+      params.push(radiusMeters);
+
+      const [rows] = await conn.query<any[]>(
+        `SELECT
+          task_id,
+          company_id,
+          salesperson_id,
+          salesperson_name,
+          visit_label,
+          visit_location_address,
+          visit_latitude,
+          visit_longitude,
+          arrival_at,
+          departure_at,
+          meeting_notes,
+          visit_departure_notes,
+          auto_capture_conversation_id,
+          status,
+          source_updated_at,
+          updated_at,
+          ROUND(
+            6371000 * ACOS(
+              LEAST(
+                1,
+                GREATEST(
+                  -1,
+                  COS(RADIANS(?)) * COS(RADIANS(visit_latitude)) *
+                  COS(RADIANS(visit_longitude) - RADIANS(?)) +
+                  SIN(RADIANS(?)) * SIN(RADIANS(visit_latitude))
+                )
+              )
+            )
+          ) AS distance_meters
+        FROM lff_visit_history
+        WHERE ${filters.join(" AND ")}
+        HAVING distance_meters <= ?
+        ORDER BY distance_meters ASC, COALESCE(departure_at, updated_at) DESC
+        LIMIT ${limit}`,
+        params
+      );
+
+      res.json({ items: rows.map(mapVisitHistoryRow) });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to fetch nearby visit history.";
       res.status(500).json({ message });
     }
   });
@@ -5277,6 +5568,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     try {
       await ensureTaskVisitNotesColumns();
+      await ensureVisitHistoryTable();
       const companyId = normalizedTask.companyId || (await resolveRequestCompanyId(req)) || null;
       const conn = await getMySqlPool();
       const assignedByName =
@@ -5304,6 +5596,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           visit_sequence,
           visit_location_label,
           visit_location_address,
+          visit_latitude,
+          visit_longitude,
           arrival_at,
           departure_at,
           meeting_notes,
@@ -5311,7 +5605,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           visit_departure_notes,
           visit_departure_notes_updated_at,
           auto_capture_conversation_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           company_id = VALUES(company_id),
           title = VALUES(title),
@@ -5328,6 +5622,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           visit_sequence = VALUES(visit_sequence),
           visit_location_label = VALUES(visit_location_label),
           visit_location_address = VALUES(visit_location_address),
+          visit_latitude = VALUES(visit_latitude),
+          visit_longitude = VALUES(visit_longitude),
           arrival_at = VALUES(arrival_at),
           departure_at = VALUES(departure_at),
           meeting_notes = VALUES(meeting_notes),
@@ -5354,6 +5650,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           normalizedTask.visitSequence,
           normalizedTask.visitLocationLabel,
           normalizedTask.visitLocationAddress,
+          normalizedTask.visitLatitude,
+          normalizedTask.visitLongitude,
           toMySqlDateTime(normalizedTask.arrivalAt),
           toMySqlDateTime(normalizedTask.departureAt),
           normalizedTask.meetingNotes,
@@ -5361,8 +5659,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           normalizedTask.visitDepartureNotes,
           toMySqlDateTime(normalizedTask.visitDepartureNotesUpdatedAt),
           normalizedTask.autoCaptureConversationId,
-        ]
+        ] as any[]
       );
+
+      await upsertVisitHistoryInMySql(conn, normalizedTask, companyId);
 
       res.json({ ok: true });
     } catch (error) {

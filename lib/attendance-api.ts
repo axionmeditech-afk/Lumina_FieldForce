@@ -14,6 +14,7 @@ import type {
   UserAccessRequest,
   UserRole,
   SalaryRecord,
+  VisitHistoryRecord,
 } from "@/lib/types";
 import Constants from "expo-constants";
 import {
@@ -640,6 +641,34 @@ async function fetchJsonWithTimeout<T>(
 export async function getRemoteState<T>(key: string): Promise<RemoteStateResponse<T>> {
   const encodedKey = encodeURIComponent(key);
   return fetchJson<RemoteStateResponse<T>>(`/state/${encodedKey}`, { method: "GET" });
+}
+
+export async function getNearbyVisitHistory(params: {
+  latitude: number;
+  longitude: number;
+  radiusMeters?: number;
+  salespersonId?: string;
+  limit?: number;
+}): Promise<VisitHistoryRecord[]> {
+  const query = new URLSearchParams({
+    latitude: String(params.latitude),
+    longitude: String(params.longitude),
+  });
+  if (typeof params.radiusMeters === "number" && Number.isFinite(params.radiusMeters)) {
+    query.set("radius_meters", String(Math.max(25, Math.round(params.radiusMeters))));
+  }
+  if (params.salespersonId?.trim()) {
+    query.set("salesperson_id", params.salespersonId.trim());
+  }
+  if (typeof params.limit === "number" && Number.isFinite(params.limit)) {
+    query.set("limit", String(Math.max(1, Math.round(params.limit))));
+  }
+  const response = await fetchJson<{ items?: VisitHistoryRecord[] } | VisitHistoryRecord[]>(
+    `/visit-history/nearby?${query.toString()}`,
+    { method: "GET" }
+  );
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response.items) ? response.items : [];
 }
 
 export async function setRemoteState<T>(key: string, value: T): Promise<void> {

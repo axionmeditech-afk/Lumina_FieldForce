@@ -62,7 +62,7 @@ type WebMapMarkerPayload = {
   lat: number;
   lng: number;
   color: string;
-  renderMode?: "standard" | "pulse_only";
+  renderMode?: "standard" | "alert";
   label?: string;
   title?: string;
   summary?: string | null;
@@ -483,41 +483,111 @@ function buildMaptilerHtml(payload: {
           });
         }
 
-        (data.markers || []).forEach((marker) => {
-          const el = document.createElement("div");
-          el.className = marker.isNearby ? "route-marker route-marker--nearby" : "route-marker";
-          if (marker.renderMode === "pulse_only") {
-            el.className += " route-marker--ghost";
+        const markerFeatures = (data.markers || []).map((marker) => ({
+          type: "Feature",
+          properties: {
+            id: marker.id,
+            kind: marker.kind,
+            color: marker.color || "#22d3ee",
+            label: marker.label || "",
+            renderMode: marker.renderMode || "standard",
+            isNearby: Boolean(marker.isNearby),
+            sortKey: marker.isNearby ? 20 : 10
+          },
+          geometry: {
+            type: "Point",
+            coordinates: [marker.lng, marker.lat]
           }
-          el.style.background = marker.color || "#22d3ee";
-          if (marker.isNearby) {
-            const pulse = document.createElement("div");
-            pulse.className = "route-marker-pulse";
-            el.appendChild(pulse);
-          }
-          if (marker.label) {
-            const label = document.createElement("div");
-            label.className = "route-marker-label";
-            label.textContent = marker.label;
-            el.appendChild(label);
-          }
-          if (marker.kind === "planned_stop") {
-            el.addEventListener("click", () => {
-              const payload = JSON.stringify({ type: "planned_stop_press", stopId: marker.id });
-              if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                window.ReactNativeWebView.postMessage(payload);
+        }));
+
+        if (markerFeatures.length) {
+          map.addSource("routeMarkers", {
+            type: "geojson",
+            data: { type: "FeatureCollection", features: markerFeatures }
+          });
+
+          map.addLayer({
+            id: "routeMarkersPulse",
+            type: "circle",
+            source: "routeMarkers",
+            filter: ["==", ["get", "isNearby"], true],
+            paint: {
+              "circle-color": ["get", "color"],
+              "circle-radius": [
+                "case",
+                ["==", ["get", "renderMode"], "pulse_only"],
+                14,
+                17
+              ],
+              "circle-opacity": 0.18,
+              "circle-stroke-width": 0
+            }
+          });
+
+          map.addLayer({
+            id: "routeMarkersCore",
+            type: "circle",
+            source: "routeMarkers",
+            filter: ["!=", ["get", "renderMode"], "pulse_only"],
+            paint: {
+              "circle-color": ["get", "color"],
+              "circle-radius": [
+                "case",
+                ["==", ["get", "isNearby"], true],
+                12,
+                11
+              ],
+              "circle-stroke-color": "#FFFFFF",
+              "circle-stroke-width": 3
+            }
+          });
+
+          map.addLayer({
+            id: "routeMarkersLabel",
+            type: "symbol",
+            source: "routeMarkers",
+            filter: ["all", ["!=", ["get", "renderMode"], "pulse_only"], ["!=", ["get", "label"], ""]],
+            layout: {
+              "text-field": ["get", "label"],
+              "text-size": 10,
+              "text-font": ["Open Sans Bold"],
+              "text-allow-overlap": true,
+              "text-ignore-placement": true
+            },
+            paint: {
+              "text-color": "#FFFFFF"
+            }
+          });
+
+          const emitMarkerPress = (feature) => {
+            const props = feature && feature.properties ? feature.properties : null;
+            if (!props || !props.id || !props.kind) return;
+            let payload = null;
+            if (props.kind === "planned_stop") {
+              payload = JSON.stringify({ type: "planned_stop_press", stopId: props.id });
+            } else if (props.kind === "quick_sale") {
+              payload = JSON.stringify({ type: "quick_sale_press", quickSaleId: props.id });
+            }
+            if (payload && window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+              window.ReactNativeWebView.postMessage(payload);
+            }
+          };
+
+          ["routeMarkersPulse", "routeMarkersCore", "routeMarkersLabel"].forEach((layerId) => {
+            map.on("click", layerId, (event) => {
+              const feature = event && event.features && event.features[0] ? event.features[0] : null;
+              if (feature) {
+                emitMarkerPress(feature);
               }
             });
-          } else if (marker.kind === "quick_sale") {
-            el.addEventListener("click", () => {
-              const payload = JSON.stringify({ type: "quick_sale_press", quickSaleId: marker.id });
-              if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                window.ReactNativeWebView.postMessage(payload);
-              }
+            map.on("mouseenter", layerId, () => {
+              map.getCanvas().style.cursor = "pointer";
             });
-          }
-          new maplibregl.Marker({ element: el }).setLngLat([marker.lng, marker.lat]).addTo(map);
-        });
+            map.on("mouseleave", layerId, () => {
+              map.getCanvas().style.cursor = "";
+            });
+          });
+        }
       });
     </script>
   </body>
@@ -597,7 +667,7 @@ function resolveMultiRouteColor(index: number, provided?: string | null): string
 }
 
 function getHistoricalVisitAccent(colors: typeof Colors.light): string {
-  return colors.primary || "#2563EB";
+  return colors.warning || "#F59E0B";
 }
 
 function resolvePlannedStopColor(
@@ -644,8 +714,12 @@ function getQuickSaleDetail(point: QuickSalePoint): string | null {
   return point.customerAddress || point.customerEmail || null;
 }
 
-function isHistoryPulseOnly(stop: PlannedStopPoint): boolean {
+function isHistoryAlertMarker(stop: PlannedStopPoint): boolean {
   return stop.markerKind === "visit_history";
+}
+
+function isNearbyCustomerStop(stop: PlannedStopPoint): boolean {
+  return stop.markerKind === "visit_history" && Boolean(stop.isNearby);
 }
 
 export function RouteMapNative({
@@ -853,7 +927,7 @@ export function RouteMapNative({
   const panelPoints = hasMultiRoutes ? flattenedMultiRoutePoints : points;
   const panelHalts = hasMultiRoutes ? [] : halts;
   const nearbyStops = useMemo(
-    () => normalizedPlannedStops.filter((stop) => stop.isNearby),
+    () => normalizedPlannedStops.filter((stop) => isNearbyCustomerStop(stop)),
     [normalizedPlannedStops]
   );
   const nearbyQuickSales = useMemo(
@@ -869,7 +943,10 @@ export function RouteMapNative({
     [normalizedQuickSalePoints, selectedQuickSaleId]
   );
   const cardQuickSale = selectedQuickSale;
-  const cardPlannedStop = selectedPlannedStop;
+  const cardPlannedStop =
+    selectedPlannedStop && selectedPlannedStop.markerKind === "visit_history"
+      ? selectedPlannedStop
+      : null;
 
   const selectPlannedStop = (stopId: string, openModal = false) => {
     setSelectedPlannedStopId(stopId);
@@ -970,24 +1047,22 @@ export function RouteMapNative({
       }
     }
     for (const stop of normalizedPlannedStops) {
-      const historyPulseOnly = isHistoryPulseOnly(stop);
+      const historyAlertMarker = isHistoryAlertMarker(stop);
       markers.push({
         id: stop.id,
         kind: "planned_stop",
         lat: stop.latitude,
         lng: stop.longitude,
-        renderMode: historyPulseOnly ? "pulse_only" : "standard",
+        renderMode: historyAlertMarker ? "alert" : "standard",
         color:
-          historyPulseOnly
+          historyAlertMarker
             ? getHistoricalVisitAccent(colors)
-            : stop.isNearby && stop.markerKind !== "visit_history"
-            ? getNearbyStopAccent(colors)
             : resolvePlannedStopColor(stop, colors),
-        label: historyPulseOnly ? "" : stop.isNearby ? "!" : "P",
+        label: historyAlertMarker ? "!" : "P",
         title: stop.customerName || stop.label,
         summary: stop.summary,
         detail: stop.detail,
-        isNearby: Boolean(stop.isNearby),
+        isNearby: isNearbyCustomerStop(stop),
         distanceMeters: stop.distanceMeters ?? null,
       });
     }
@@ -1036,10 +1111,10 @@ export function RouteMapNative({
   }, [normalizedQuickSalePoints, selectedQuickSaleId]);
 
   useEffect(() => {
-    if (isInsightModalVisible && !selectedPlannedStop && !selectedQuickSale) {
+    if (isInsightModalVisible && !cardPlannedStop && !cardQuickSale) {
       setInsightModalVisible(false);
     }
-  }, [isInsightModalVisible, selectedPlannedStop, selectedQuickSale]);
+  }, [cardPlannedStop, cardQuickSale, isInsightModalVisible]);
 
   useEffect(() => {
     if (!nearbyStops.length) return;
@@ -1109,8 +1184,9 @@ export function RouteMapNative({
   );
 
   const renderPlannedStopMarker = (stop: PlannedStopPoint) => {
-    const historyPulseOnly = isHistoryPulseOnly(stop);
-    const pulseColor = historyPulseOnly ? getHistoricalVisitAccent(colors) : getNearbyStopAccent(colors);
+    const historyAlertMarker = isHistoryAlertMarker(stop);
+    const showNearbyCustomerPulse = isNearbyCustomerStop(stop);
+    const pulseColor = historyAlertMarker ? getHistoricalVisitAccent(colors) : getNearbyStopAccent(colors);
 
     return (
       <Pressable
@@ -1118,7 +1194,7 @@ export function RouteMapNative({
         onPress={() => selectPlannedStop(stop.id, false)}
         style={styles.markerTouchArea}
       >
-        {stop.isNearby ? (
+        {showNearbyCustomerPulse ? (
           <Animated.View
             pointerEvents="none"
             style={[
@@ -1128,21 +1204,22 @@ export function RouteMapNative({
             ]}
           />
         ) : null}
-        {historyPulseOnly ? null : (
-          <View
-            style={[
-              styles.pinWrap,
-              {
-                backgroundColor: stop.isNearby
-                  ? getNearbyStopAccent(colors)
-                  : resolvePlannedStopColor(stop, colors),
-              },
-              stop.isNearby ? styles.pinWrapNearby : null,
-            ]}
-          >
-            <Text style={styles.pinText}>{stop.isNearby ? "!" : "P"}</Text>
-          </View>
-        )}
+        <View
+          style={[
+            styles.pinWrap,
+            {
+              backgroundColor: historyAlertMarker
+                ? getHistoricalVisitAccent(colors)
+                : resolvePlannedStopColor(stop, colors),
+            },
+            showNearbyCustomerPulse ? styles.pinWrapNearby : null,
+            historyAlertMarker ? styles.historyAlertPinWrap : null,
+          ]}
+        >
+          <Text style={[styles.pinText, historyAlertMarker ? styles.historyAlertPinText : null]}>
+            {historyAlertMarker ? "!" : "P"}
+          </Text>
+        </View>
       </Pressable>
     );
   };
@@ -1308,7 +1385,7 @@ export function RouteMapNative({
     <Pressable
       pointerEvents="box-none"
       onPress={() => {
-        if (selectedQuickSale || selectedPlannedStop) {
+        if (cardQuickSale || cardPlannedStop) {
           setInsightModalVisible(true);
         }
       }}
@@ -1364,7 +1441,7 @@ export function RouteMapNative({
     setInsightModalVisible(false);
   };
 
-  const insightModal = (selectedPlannedStop || selectedQuickSale) ? (
+  const insightModal = (cardPlannedStop || cardQuickSale) ? (
     <Modal
       transparent
       animationType="fade"
@@ -2254,10 +2331,20 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
   },
+  historyAlertPinWrap: {
+    left: 9,
+    top: 9,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+  },
   pinText: {
     color: "#FFFFFF",
     fontSize: 11,
     fontFamily: "Inter_700Bold",
+  },
+  historyAlertPinText: {
+    fontSize: 13,
   },
   pointDot: {
     width: 10,

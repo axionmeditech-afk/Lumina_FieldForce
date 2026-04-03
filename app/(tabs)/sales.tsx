@@ -30,6 +30,7 @@ import {
   getDolibarrOrders,
   getDolibarrProducts,
   getDolibarrThirdParties,
+  getNearbyVisitHistory,
   getRemoteState,
   createDolibarrCustomer,
   createDolibarrSalesOrder,
@@ -76,6 +77,7 @@ import type {
   LocationLog,
   QuickSaleLocationLog,
   Task,
+  VisitHistoryRecord,
 } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -1388,6 +1390,7 @@ export default function SalesScreen() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [locationLogs, setLocationLogs] = useState<LocationLog[]>([]);
   const [quickSaleLocationLogs, setQuickSaleLocationLogs] = useState<QuickSaleLocationLog[]>([]);
+  const [nearbyVisitHistory, setNearbyVisitHistory] = useState<VisitHistoryRecord[] | null>(null);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -2031,7 +2034,7 @@ export default function SalesScreen() {
     [recentOrders, todaysVisitTasks]
   );
 
-  const historicalVisitStops = useMemo<PlannedStopPoint[]>(
+  const localHistoricalVisitStops = useMemo<PlannedStopPoint[]>(
     () =>
       salespersonVisitTasks
         .filter((task) => getVisitStatus(task) === "completed")
@@ -2250,6 +2253,49 @@ export default function SalesScreen() {
     latestRoutePointRef.current = latestRoutePoint;
   }, [latestRoutePoint]);
 
+  useEffect(() => {
+    if (!user || !latestRoutePoint || !selectedSalespersonId) {
+      setNearbyVisitHistory([]);
+      return;
+    }
+
+    const salespersonId = isAdminViewer ? selectedSalespersonId : user.id;
+    if (!salespersonId) {
+      setNearbyVisitHistory([]);
+      return;
+    }
+
+    let cancelled = false;
+    void getNearbyVisitHistory({
+      latitude: latestRoutePoint.latitude,
+      longitude: latestRoutePoint.longitude,
+      radiusMeters: VISIT_NEARBY_RADIUS_METERS,
+      salespersonId,
+      limit: 12,
+    })
+      .then((items) => {
+        if (!cancelled) {
+          setNearbyVisitHistory(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNearbyVisitHistory(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isAdminViewer,
+    latestRoutePoint?.capturedAt,
+    latestRoutePoint?.latitude,
+    latestRoutePoint?.longitude,
+    selectedSalespersonId,
+    user?.id,
+  ]);
+
   const nearbyAwarePlannedStops = useMemo<PlannedStopPoint[]>(
     () =>
       plannedStops.map((stop) => {
@@ -2280,8 +2326,41 @@ export default function SalesScreen() {
   );
 
   const nearbyHistoricalVisitStops = useMemo<PlannedStopPoint[]>(
-    () =>
-      historicalVisitStops.map((stop) => {
+    () => {
+      if (nearbyVisitHistory !== null) {
+        return nearbyVisitHistory
+          .filter(
+            (entry) =>
+              typeof entry.visitLatitude === "number" &&
+              Number.isFinite(entry.visitLatitude) &&
+              typeof entry.visitLongitude === "number" &&
+              Number.isFinite(entry.visitLongitude)
+          )
+          .map((entry) => ({
+            id: `history_${entry.taskId}`,
+            label: entry.visitLabel,
+            customerName: entry.visitLabel,
+            latitude: entry.visitLatitude,
+            longitude: entry.visitLongitude,
+            status: "completed",
+            markerKind: "visit_history",
+            summary: entry.visitDepartureNotes?.trim()
+              ? `Last note: ${entry.visitDepartureNotes.trim()}`
+              : entry.meetingNotes?.trim()
+                ? `Meeting note: ${entry.meetingNotes.trim()}`
+                : "Past visit completed here.",
+            detail: entry.departureAt
+              ? `Departed ${formatMumbaiTime(entry.departureAt)}${entry.visitLocationAddress ? ` • ${entry.visitLocationAddress}` : ""}`
+              : entry.visitLocationAddress || "Past visit location",
+            isNearby: true,
+            distanceMeters:
+              typeof entry.distanceMeters === "number" && Number.isFinite(entry.distanceMeters)
+                ? Math.round(entry.distanceMeters)
+                : null,
+          } satisfies PlannedStopPoint));
+      }
+
+      return localHistoricalVisitStops.map((stop) => {
         if (!latestRoutePoint) {
           return {
             ...stop,
@@ -2302,8 +2381,9 @@ export default function SalesScreen() {
           isNearby,
           distanceMeters: Math.round(distanceMeters),
         };
-      }),
-    [historicalVisitStops, latestRoutePoint]
+      });
+    },
+    [localHistoricalVisitStops, latestRoutePoint, nearbyVisitHistory]
   );
 
   const nearbyQuickSalePoints = useMemo<QuickSalePoint[]>(
@@ -5724,6 +5804,10 @@ export default function SalesScreen() {
               maxLength={600}
               value={departureNotesDraft}
               onChangeText={setDepartureNotesDraft}
+              autoCorrect={false}
+              autoComplete="off"
+              textContentType="none"
+              importantForAutofill="no"
               placeholder="Example: Follow up on 15 Apr. Client asked for revised pricing and product brochure."
               placeholderTextColor={colors.textTertiary}
               textAlignVertical="top"
@@ -5787,6 +5871,10 @@ export default function SalesScreen() {
                   <TextInput
                     value={departureCustomerName}
                     onChangeText={setDepartureCustomerName}
+                    autoCorrect={false}
+                    autoComplete="off"
+                    textContentType="organizationName"
+                    importantForAutofill="no"
                     placeholder="Customer name"
                     placeholderTextColor={colors.textTertiary}
                     style={[
@@ -5803,6 +5891,10 @@ export default function SalesScreen() {
                     onChangeText={setDepartureCustomerEmail}
                     autoCapitalize="none"
                     keyboardType="email-address"
+                    autoCorrect={false}
+                    autoComplete="off"
+                    textContentType="none"
+                    importantForAutofill="no"
                     placeholder="Email (optional)"
                     placeholderTextColor={colors.textTertiary}
                     style={[
@@ -5818,6 +5910,10 @@ export default function SalesScreen() {
                     value={departureCustomerPhone}
                     onChangeText={setDepartureCustomerPhone}
                     keyboardType="phone-pad"
+                    autoCorrect={false}
+                    autoComplete="off"
+                    textContentType="none"
+                    importantForAutofill="no"
                     placeholder="Phone (optional)"
                     placeholderTextColor={colors.textTertiary}
                     style={[
@@ -5832,6 +5928,10 @@ export default function SalesScreen() {
                   <TextInput
                     value={departureCustomerAddress}
                     onChangeText={setDepartureCustomerAddress}
+                    autoCorrect={false}
+                    autoComplete="off"
+                    textContentType="fullStreetAddress"
+                    importantForAutofill="no"
                     placeholder="Address (optional)"
                     placeholderTextColor={colors.textTertiary}
                     style={[

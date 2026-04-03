@@ -164,6 +164,26 @@ export interface Task {
   autoCaptureConversationId?: string | null;
 }
 
+export interface VisitHistoryRecord {
+  id: string;
+  companyId?: string | null;
+  taskId: string;
+  salespersonId: string;
+  salespersonName: string;
+  visitLabel: string;
+  visitLocationAddress?: string | null;
+  visitLatitude: number;
+  visitLongitude: number;
+  arrivalAt?: string | null;
+  departureAt?: string | null;
+  meetingNotes?: string | null;
+  visitDepartureNotes?: string | null;
+  autoCaptureConversationId?: string | null;
+  status?: "pending" | "in_progress" | "completed" | null;
+  updatedAt: string;
+  distanceMeters?: number | null;
+}
+
 export interface Team {
   id: string;
   companyId?: string;
