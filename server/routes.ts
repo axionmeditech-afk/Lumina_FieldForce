@@ -391,6 +391,31 @@ async function forwardDolibarrRequest(
   const requestTimeoutMs = path.startsWith("/bankaccounts") ? 30_000 : 15_000;
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
+    const normalizedBody =
+      method === "GET" || method === "HEAD"
+        ? undefined
+        : (() => {
+            if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+              return req.body ?? {};
+            }
+            const body = { ...(req.body as Record<string, unknown>) };
+            if (path === "/thirdparties" && method === "POST") {
+              const rawClient = body.client;
+              const isClientCreate =
+                rawClient === 1 ||
+                rawClient === "1" ||
+                rawClient === true ||
+                (typeof rawClient === "string" && rawClient.trim().toLowerCase() === "true");
+              const hasCustomerCode =
+                typeof body.code_client === "string"
+                  ? Boolean(body.code_client.trim())
+                  : typeof body.code_client === "number" && Number.isFinite(body.code_client);
+              if (isClientCreate && !hasCustomerCode) {
+                body.code_client = "-1";
+              }
+            }
+            return body;
+          })();
     const dispatcher =
       DOLIBARR_INSECURE_TLS && endpoint.startsWith("https:")
         ? new (await import("undici")).Agent({
@@ -404,7 +429,7 @@ async function forwardDolibarrRequest(
         DOLAPIKEY: apiKey,
         "X-Dolibarr-API-Key": apiKey,
       },
-      body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(req.body ?? {}),
+      body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(normalizedBody),
       signal: controller.signal,
     };
     if (dispatcher) {

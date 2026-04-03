@@ -2271,6 +2271,7 @@ export async function createDolibarrCustomer(
     name: payload.name.trim(),
     client: 1,
     status: 1,
+    code_client: "-1",
   };
 
   if (payload.email?.trim()) {
