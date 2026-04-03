@@ -115,6 +115,7 @@ export async function sendDeviceLocalNotification(input: {
   title: string;
   body: string;
   data?: Record<string, string | number | boolean | null>;
+  channelId?: string;
 }): Promise<void> {
   if (!isNativeRuntime()) return;
   await initializeDeviceNotifications();
@@ -129,6 +130,7 @@ export async function sendDeviceLocalNotification(input: {
         body: input.body,
         sound: "default",
         data: input.data || {},
+        ...(Platform.OS === "android" && input.channelId ? { channelId: input.channelId } : {}),
       },
       trigger: null,
     });
@@ -141,6 +143,7 @@ export async function sendDeviceLocalNotification(input: {
           body: input.body,
           sound: "default",
           data: input.data || {},
+          ...(Platform.OS === "android" && input.channelId ? { channelId: input.channelId } : {}),
         },
         trigger: null,
       });

@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { DolibarrOrder } from "@/lib/attendance-api";
 import { haversineDistanceMeters } from "@/lib/geofence";
 import { sendDeviceLocalNotification } from "@/lib/device-notifications";
+import { getCurrentUser, getQuickSaleLocationLogs, getTasks } from "@/lib/storage";
 import type { QuickSaleLocationLog, Task } from "@/lib/types";
 
 const LOCATION_REMINDER_CATALOG_KEY = "@trackforce_location_reminder_catalog_v1";
@@ -9,6 +10,7 @@ const LOCATION_REMINDER_SENT_KEY = "@trackforce_location_reminder_sent_v1";
 const LOCATION_REMINDER_RADIUS_METERS = 250;
 const LOCATION_REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 const RECENT_ORDER_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
+const LOCATION_REMINDER_CATALOG_REFRESH_MS = 15 * 60 * 1000;
 
 type LocationReminderCatalogEntry = {
   id: string;
@@ -44,6 +46,21 @@ function normalizeMatchText(value: string | null | undefined): string {
 
 function getVisitTaskLabel(task: Task): string {
   return task.visitLocationLabel?.trim() || task.title?.trim() || "Planned visit";
+}
+
+function normalizeIdentity(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+function matchesTaskSalesperson(task: Task, salespersonId: string, salespersonName?: string | null): boolean {
+  const normalizedTaskAssignee = normalizeIdentity(task.assignedTo);
+  const normalizedTaskAssigneeName = normalizeIdentity(task.assignedToName);
+  const normalizedSalespersonId = normalizeIdentity(salespersonId);
+  const normalizedSalespersonName = normalizeIdentity(salespersonName);
+  return (
+    (normalizedTaskAssignee && normalizedTaskAssignee === normalizedSalespersonId) ||
+    (normalizedSalespersonName && normalizedTaskAssigneeName === normalizedSalespersonName)
+  );
 }
 
 function parseOrderDate(order: DolibarrOrder): string | null {
@@ -115,6 +132,45 @@ async function readCatalog(): Promise<LocationReminderCatalogPayload> {
   } catch {
     return { items: [], updatedAt: new Date().toISOString() };
   }
+}
+
+async function ensureReminderCatalogReady(input: {
+  userId: string;
+  companyId?: string | null;
+}): Promise<LocationReminderCatalogPayload> {
+  const current = await readCatalog();
+  const isFresh =
+    Number.isFinite(new Date(current.updatedAt).getTime()) &&
+    Date.now() - new Date(current.updatedAt).getTime() < LOCATION_REMINDER_CATALOG_REFRESH_MS;
+  const hasCurrentUserItems = current.items.some(
+    (entry) =>
+      entry.salespersonId === input.userId &&
+      (!entry.companyId || !input.companyId || entry.companyId === input.companyId)
+  );
+
+  if (current.items.length && hasCurrentUserItems && isFresh) {
+    return current;
+  }
+
+  const currentUser = await getCurrentUser().catch(() => null);
+  const [tasks, quickSales] = await Promise.all([
+    getTasks().catch(() => [] as Task[]),
+    getQuickSaleLocationLogs().catch(() => [] as QuickSaleLocationLog[]),
+  ]);
+
+  const salespersonTasks = tasks.filter((task) =>
+    matchesTaskSalesperson(task, input.userId, currentUser?.name || null)
+  );
+
+  await syncLocationReminderCatalog({
+    salespersonId: input.userId,
+    companyId: input.companyId ?? currentUser?.companyId ?? null,
+    tasks: salespersonTasks,
+    recentOrders: [],
+    quickSales,
+  });
+
+  return readCatalog();
 }
 
 async function readSentStore(): Promise<SentReminderStore> {
@@ -252,7 +308,10 @@ export async function maybeSendLocationReminder(input: {
 }): Promise<void> {
   if (!Number.isFinite(input.latitude) || !Number.isFinite(input.longitude)) return;
 
-  const catalog = await readCatalog();
+  const catalog = await ensureReminderCatalogReady({
+    userId: input.userId,
+    companyId: input.companyId ?? null,
+  });
   if (!catalog.items.length) return;
 
   const sentStore = await readSentStore();
@@ -285,6 +344,7 @@ export async function maybeSendLocationReminder(input: {
   await sendDeviceLocalNotification({
     title: nearest.entry.title,
     body: `${nearest.entry.body} (${Math.round(nearest.distanceMeters)} m away)`,
+    channelId: "alerts",
     data: {
       taskId: nearest.entry.taskId,
       kind: "location-reminder",

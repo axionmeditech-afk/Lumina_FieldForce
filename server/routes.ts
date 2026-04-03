@@ -111,6 +111,7 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_attendance_photos",
   "@trackforce_attendance_anomalies",
   "@trackforce_location_logs",
+  "@trackforce_quick_sale_location_logs",
   "@trackforce_dolibarr_sync_logs",
   "@trackforce_notifications",
   "@trackforce_support_threads",
