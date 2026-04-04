@@ -172,6 +172,22 @@ function normalizeIdentity(value?: string | null): string {
   return (value || "").trim().toLowerCase();
 }
 
+function hasOpenAttendanceSession(
+  records: AttendanceRecord[],
+  userId?: string | null,
+  userName?: string | null
+): boolean {
+  const normalizedUserName = normalizeIdentity(userName);
+  const latest = records
+    .filter(
+      (entry) =>
+        (userId && entry.userId === userId) ||
+        (normalizedUserName.length > 0 && normalizeIdentity(entry.userName) === normalizedUserName)
+    )
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
+  return latest?.type === "checkin";
+}
+
 function getTaskLabel(task: Task): string {
   return task.visitLocationLabel?.trim() || task.title.trim() || "Field visit";
 }
@@ -424,6 +440,7 @@ export default function DashboardScreen() {
   const { colors, isDark } = useAppTheme();
   const { user } = useAuth();
   const scrollRef = useRef<ScrollView | null>(null);
+  const [clockNow, setClockNow] = useState(() => new Date());
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -543,6 +560,7 @@ export default function DashboardScreen() {
   useEffect(() => {
     const appStateSubscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
+        setClockNow(new Date());
         void loadDashboard();
       }
     });
@@ -550,6 +568,15 @@ export default function DashboardScreen() {
       appStateSubscription.remove();
     };
   }, [loadDashboard]);
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setClockNow(new Date());
+    }, 30_000);
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     let lastTriggeredAt = 0;
@@ -573,14 +600,16 @@ export default function DashboardScreen() {
   }, [loadDashboard]);
 
   const snapshot = useMemo<DashboardSnapshot>(() => {
-    const todayKey = toLocalDateKey(new Date());
+    const todayKey = toLocalDateKey(clockNow);
     const employeeRoster = employees.filter((employee) => employee.role !== "admin");
     const validAttendance = attendance.filter((record) => record.approvalStatus !== "rejected");
+    const checkedInNowCount = employeeRoster.filter((employee) =>
+      hasOpenAttendanceSession(validAttendance, employee.id, employee.name)
+    ).length;
     const todayRecords = validAttendance.filter(
       (record) => toLocalDateKey(new Date(record.timestamp)) === todayKey
     );
     const todayCheckins = todayRecords.filter((record) => record.type === "checkin");
-    const presentUserIds = new Set(todayCheckins.map((record) => record.userId));
     const lateToday = todayCheckins.filter((record) => {
       const parsed = new Date(record.timestamp);
       if (Number.isNaN(parsed.getTime())) return false;
@@ -612,9 +641,9 @@ export default function DashboardScreen() {
 
     return {
       totalEmployees: employeeRoster.length,
-      presentToday: presentUserIds.size,
+      presentToday: checkedInNowCount,
       lateToday,
-      onLeave: Math.max(employeeRoster.length - presentUserIds.size, 0),
+      onLeave: Math.max(employeeRoster.length - checkedInNowCount, 0),
       activeNow: employeeRoster.filter((employee) => employee.status === "active").length,
       idleNow: employeeRoster.filter((employee) => employee.status === "idle").length,
       offlineNow: employeeRoster.filter((employee) => employee.status === "offline").length,
@@ -632,10 +661,10 @@ export default function DashboardScreen() {
       todayCheckouts,
       highIntentDeals: conversations.filter((entry) => entry.buyingIntent === "high").length,
     };
-  }, [attendance, conversations, employees, expenses, notifications, supportThreads, tasks, user]);
+  }, [attendance, clockNow, conversations, employees, expenses, notifications, supportThreads, tasks, user]);
 
   const isSalesperson = user?.role === "salesperson";
-  const todayKey = useMemo(() => toLocalDateKey(new Date()), []);
+  const todayKey = useMemo(() => toLocalDateKey(clockNow), [clockNow]);
   const userTasks = useMemo(() => {
     if (!user) return [] as Task[];
     const normalizedName = normalizeIdentity(user.name);
@@ -728,9 +757,9 @@ export default function DashboardScreen() {
         : [
             {
               id: "present",
-              label: "Present Today",
+              label: "Checked In Now",
               value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
-              hint: `${snapshot.presentToday} check-ins logged`,
+              hint: `${snapshot.presentToday} open attendance sessions`,
               icon: "person-add-outline",
               tone: colors.success,
             },
@@ -875,14 +904,14 @@ export default function DashboardScreen() {
   const isSalesVisible = canAccessSalesModule(user?.role);
   const currentDateLabel = useMemo(
     () =>
-      new Date().toLocaleDateString([], {
+      clockNow.toLocaleDateString([], {
         weekday: "short",
         month: "short",
         day: "numeric",
       }),
-    []
+    [clockNow]
   );
-  const greeting = useMemo(() => getGreetingLabel(), []);
+  const greeting = useMemo(() => getGreetingLabel(), [clockNow]);
   const heroEmailText = useMemo(() => {
     const email = user?.email?.trim();
     if (email) {
@@ -1041,7 +1070,7 @@ export default function DashboardScreen() {
         contentContainerStyle={[
           styles.scrollContent,
           {
-            paddingTop: insets.top,
+            paddingTop: 0,
             paddingBottom: Math.max(insets.bottom, 20) + 28,
           },
         ]}
@@ -1059,6 +1088,7 @@ export default function DashboardScreen() {
               styles.heroCard,
               {
                 borderColor: isDark ? colors.border : "rgba(15, 23, 42, 0.07)",
+                paddingTop: insets.top + 10,
               },
             ]}
             >
@@ -1093,29 +1123,6 @@ export default function DashboardScreen() {
                   <Text style={[styles.heroDateText, { color: "#E8F4FF" }]}>
                     {currentDateLabel}
                   </Text>
-                </View>
-                <View
-                  style={[
-                    styles.heroRoleChip,
-                    {
-                      backgroundColor: isDark ? "rgba(9,20,38,0.18)" : "rgba(255,255,255,0.92)",
-                      borderColor: isDark ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.6)",
-                    },
-                  ]}
-                >
-                  <Text style={[styles.heroRoleText, { color: isDark ? "#F3F8FF" : colors.primary }]}>
-                    Live now
-                  </Text>
-                  <View
-                    style={[
-                      styles.heroRoleCountChip,
-                      { backgroundColor: isDark ? "rgba(255,255,255,0.12)" : `${colors.primary}16` },
-                    ]}
-                  >
-                    <Text style={[styles.heroRoleCountText, { color: isDark ? "#F3F8FF" : colors.primary }]}>
-                      {snapshot.activeNow}
-                    </Text>
-                  </View>
                 </View>
               </View>
             </View>
@@ -1743,10 +1750,10 @@ const styles = StyleSheet.create({
   },
   heroTopCap: {
     position: "absolute",
-    top: 0,
+    top: -4,
     left: 0,
     right: 0,
-    height: 152,
+    height: 146,
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
   },
@@ -1841,7 +1848,7 @@ const styles = StyleSheet.create({
   },
   heroProfileStack: {
     alignItems: "center",
-    marginTop: -4,
+    marginTop: -10,
     paddingHorizontal: 6,
   },
   heroAvatarWrap: {

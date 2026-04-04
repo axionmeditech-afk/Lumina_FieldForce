@@ -100,19 +100,15 @@ function readTrimmedEnv(name: string): string {
   return typeof raw === "string" ? raw.trim() : "";
 }
 
-const GEMINI_KEY_FROM_ENV =
-  readTrimmedEnv("EXPO_PUBLIC_GEMINI_API_KEY") ||
-  readTrimmedEnv("GEMINI_API_KEY") ||
-  readTrimmedEnv("EXPO_PUBLIC_GEMINI_API") ||
-  readTrimmedEnv("GEMINI_API") ||
-  readTrimmedEnv("gemini_API") ||
-  readTrimmedEnv("gemini_APi");
-const GEMINI_MODEL_FROM_ENV =
-  readTrimmedEnv("EXPO_PUBLIC_GEMINI_MODEL") || readTrimmedEnv("GEMINI_MODEL");
+const GROQ_KEY_FROM_ENV =
+  readTrimmedEnv("EXPO_PUBLIC_GROQ_API_KEY") ||
+  readTrimmedEnv("GROQ_API_KEY");
+const GROQ_MODEL_FROM_ENV =
+  readTrimmedEnv("EXPO_PUBLIC_GROQ_MODEL") || readTrimmedEnv("GROQ_MODEL");
 const AI_ENV_DEFAULTS = {
-  apiKey: GEMINI_KEY_FROM_ENV,
-  model: GEMINI_MODEL_FROM_ENV || "gemini-2.5-flash",
-  projectId: readTrimmedEnv("EXPO_PUBLIC_GEMINI_PROJECT_ID"),
+  apiKey: GROQ_KEY_FROM_ENV,
+  model: GROQ_MODEL_FROM_ENV || "openai/gpt-oss-20b",
+  projectId: readTrimmedEnv("EXPO_PUBLIC_GROQ_PROJECT_ID"),
 };
 
 const HUGGINGFACE_ENV_DEFAULTS = {

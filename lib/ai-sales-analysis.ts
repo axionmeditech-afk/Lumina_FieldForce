@@ -1,4 +1,4 @@
-﻿import type { Conversation } from "@/lib/types";
+import type { Conversation } from "@/lib/types";
 
 interface AnalyzeWithAIInput {
   apiKey: string;
@@ -57,29 +57,28 @@ class AIRequestError extends Error {
   }
 }
 
-interface GeminiErrorShape {
-  code?: number;
+interface GroqErrorShape {
+  code?: string;
   message?: string;
-  status?: string;
+  type?: string;
 }
 
-interface GeminiGenerateContentPayload {
-  error?: GeminiErrorShape;
-  candidates?: Array<{
-    finishReason?: string;
-    content?: {
-      parts?: Array<{ text?: string }>;
+interface GroqChatCompletionPayload {
+  error?: GroqErrorShape;
+  choices?: Array<{
+    message?: {
+      content?: string | null;
+      refusal?: string | null;
     };
+    finish_reason?: string | null;
   }>;
-  promptFeedback?: {
-    blockReason?: string;
-  };
 }
 
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com";
-const GEMINI_DEFAULT_MODELS = [
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-flash",
+const GROQ_CHAT_API_BASE = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_DEFAULT_MODELS = [
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
+  "llama-3.3-70b-versatile",
 ];
 const REQUEST_TIMEOUT_MS = 25_000;
 const MAX_RETRY_ATTEMPTS = 4;
@@ -135,10 +134,10 @@ function dedupeModels(models: string[]): string[] {
   return out;
 }
 
-function buildGeminiModelCandidates(model?: string): string[] {
+function buildGroqModelCandidates(model?: string): string[] {
   const selected = model?.trim() || "";
-  const preferred = selected.toLowerCase().startsWith("gemini-") ? [selected] : [];
-  return dedupeModels([...preferred, ...GEMINI_DEFAULT_MODELS]);
+  const preferred = selected ? [selected] : [];
+  return dedupeModels([...preferred, ...GROQ_DEFAULT_MODELS]);
 }
 
 function extractJson(content: string): string {
@@ -195,22 +194,21 @@ function normalizeUnknownError(error: unknown, model: string): AIRequestError {
   });
 }
 
-function normalizeGeminiError(params: {
+function normalizeGroqError(params: {
   status: number;
   model: string;
   rawMessage?: string;
-  error?: GeminiErrorShape;
+  error?: GroqErrorShape;
 }): AIRequestError {
   const code = String(params.error?.code || "").trim().toLowerCase();
-  const statusText = toLower(params.error?.status);
+  const type = toLower(params.error?.type);
   const message = (params.error?.message || params.rawMessage || "").trim();
   const messageLower = message.toLowerCase();
 
   const isModelIssue =
     params.status === 404 ||
-    statusText === "not_found" ||
-    (messageLower.includes("model") && messageLower.includes("not found")) ||
-    messageLower.includes("not supported for generatecontent");
+    type === "not_found_error" ||
+    /model.*(not found|not available|does not exist|unsupported)/i.test(messageLower);
   if (isModelIssue) {
     return new AIRequestError({
       message: `Model "${params.model}" unavailable. Trying fallback model.`,
@@ -221,14 +219,14 @@ function normalizeGeminiError(params: {
     });
   }
 
-  const looksLikeInvalidKey =
-    params.status === 400 &&
-    (messageLower.includes("api key not valid") ||
-      messageLower.includes("api_key_invalid") ||
-      messageLower.includes("please pass a valid api key"));
-  if (looksLikeInvalidKey || params.status === 401 || params.status === 403 || statusText === "permission_denied") {
+  if (
+    params.status === 401 ||
+    params.status === 403 ||
+    type === "authentication_error" ||
+    /invalid api key|unauthorized|authentication/i.test(messageLower)
+  ) {
     return new AIRequestError({
-      message: "AI key invalid or unauthorized for this project.",
+      message: "Groq API key invalid or unauthorized.",
       status: params.status,
       code: code || "invalid_api_key",
       model: params.model,
@@ -236,10 +234,9 @@ function normalizeGeminiError(params: {
     });
   }
 
-  const isQuota = params.status === 429 && /quota|billing|limit|exceed|resource exhausted/i.test(messageLower);
-  if (isQuota) {
+  if (params.status === 429 && /quota|billing|credits|exceed|limit/i.test(messageLower)) {
     return new AIRequestError({
-      message: "AI quota exhausted / billing limit reached.",
+      message: "Groq quota exhausted or billing limit reached.",
       status: params.status,
       code: code || "quota_exhausted",
       model: params.model,
@@ -247,9 +244,9 @@ function normalizeGeminiError(params: {
     });
   }
 
-  if (params.status === 429 || statusText === "resource_exhausted") {
+  if (params.status === 429) {
     return new AIRequestError({
-      message: "AI rate limit hit. Retrying with backoff.",
+      message: "Groq rate limit hit. Retrying with backoff.",
       status: params.status,
       code: code || "rate_limited",
       model: params.model,
@@ -258,9 +255,9 @@ function normalizeGeminiError(params: {
     });
   }
 
-  if (params.status >= 500 || statusText === "unavailable") {
+  if (params.status >= 500) {
     return new AIRequestError({
-      message: `AI server transient error (${params.status}). Retrying.`,
+      message: `Groq server transient error (${params.status}). Retrying.`,
       status: params.status,
       code: code || "server_error",
       model: params.model,
@@ -271,7 +268,7 @@ function normalizeGeminiError(params: {
 
   if (params.status >= 400 && params.status < 500) {
     return new AIRequestError({
-      message: message || `AI request failed (${params.status}).`,
+      message: message || `Groq request failed (${params.status}).`,
       status: params.status,
       code: code || "bad_request",
       model: params.model,
@@ -280,7 +277,7 @@ function normalizeGeminiError(params: {
   }
 
   return new AIRequestError({
-    message: message || "AI request failed.",
+    message: message || "Groq request failed.",
     status: params.status,
     code: code || "unknown_error",
     model: params.model,
@@ -302,122 +299,117 @@ function truncateTranscript(transcript: string): string {
   ].join("");
 }
 
-async function requestGeminiCompletion(params: {
+function buildResponseSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      interestScore: { type: "integer", minimum: 0, maximum: 100 },
+      pitchScore: { type: "integer", minimum: 0, maximum: 100 },
+      confidenceScore: { type: "integer", minimum: 0, maximum: 100 },
+      talkListenRatio: { type: "integer", minimum: 0, maximum: 100 },
+      sentiment: {
+        type: "string",
+        enum: ["positive", "neutral", "negative"],
+      },
+      buyingIntent: {
+        type: "string",
+        enum: ["high", "medium", "low"],
+      },
+      summary: { type: "string" },
+      keyPhrases: {
+        type: "array",
+        items: { type: "string" },
+      },
+      objections: {
+        type: "array",
+        items: { type: "string" },
+      },
+      improvements: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+    required: [
+      "interestScore",
+      "pitchScore",
+      "confidenceScore",
+      "talkListenRatio",
+      "sentiment",
+      "buyingIntent",
+      "summary",
+      "keyPhrases",
+      "objections",
+      "improvements",
+    ],
+  };
+}
+
+async function requestGroqCompletion(params: {
   apiKey: string;
   model: string;
   systemPrompt: string;
   userPrompt: string;
-  useJsonMode: boolean;
 }): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  const versions = ["v1beta", "v1"] as const;
-  let lastError: AIRequestError | null = null;
 
   try {
-    for (const version of versions) {
-      const endpoint =
-        `${GEMINI_API_BASE}/${version}/models/${encodeURIComponent(params.model)}` +
-        `:generateContent?key=${encodeURIComponent(params.apiKey)}`;
-
-      try {
-        const mergedPrompt = [
-          "System instructions:",
-          params.systemPrompt,
-          "",
-          "User request:",
-          params.userPrompt,
-        ].join("\n");
-
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
+    const response = await fetch(GROQ_CHAT_API_BASE, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: params.model,
+        temperature: 0.1,
+        max_completion_tokens: 1600,
+        messages: [
+          { role: "system", content: params.systemPrompt },
+          { role: "user", content: params.userPrompt },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "sales_conversation_analysis",
+            strict: true,
+            schema: buildResponseSchema(),
           },
-          signal: controller.signal,
-          body: JSON.stringify({
-            contents: [
-              {
-                role: "user",
-                parts: [{ text: mergedPrompt }],
-              },
-            ],
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 1600,
-              ...(params.model.toLowerCase().includes("gemini-2.5")
-                ? { thinkingConfig: { thinkingBudget: 0 } }
-                : {}),
-              ...(params.useJsonMode ? { responseMimeType: "application/json" } : {}),
-            },
-          }),
-        });
+        },
+      }),
+    });
 
-        const rawText = await response.text();
-        let payload: GeminiGenerateContentPayload | undefined;
-        try {
-          payload = rawText ? (JSON.parse(rawText) as GeminiGenerateContentPayload) : undefined;
-        } catch {
-          payload = undefined;
-        }
-
-        if (!response.ok) {
-          throw normalizeGeminiError({
-            status: response.status,
-            model: params.model,
-            rawMessage: rawText,
-            error: payload?.error,
-          });
-        }
-
-        if (payload?.promptFeedback?.blockReason) {
-          throw new AIRequestError({
-            message: `AI blocked response: ${payload.promptFeedback.blockReason}`,
-            status: response.status,
-            code: "blocked",
-            model: params.model,
-            kind: "bad_request",
-          });
-        }
-
-        const content = payload?.candidates?.[0]?.content?.parts
-          ?.map((part) => (typeof part.text === "string" ? part.text : ""))
-          .join("\n")
-          .trim();
-        if (!content) {
-          throw new AIRequestError({
-            message: `AI response was empty for model "${params.model}".`,
-            status: response.status,
-            code: "empty_response",
-            model: params.model,
-            kind: "unknown",
-          });
-        }
-        return content;
-      } catch (error) {
-        const normalized = normalizeUnknownError(error, params.model);
-        lastError = normalized;
-        const looksLikeVersionIssue =
-          normalized.kind === "model_not_available" ||
-          normalized.kind === "bad_request" ||
-          /not found|unsupported/i.test(normalized.message.toLowerCase());
-        if (looksLikeVersionIssue) {
-          continue;
-        }
-        throw normalized;
-      }
+    const rawText = await response.text();
+    let payload: GroqChatCompletionPayload | undefined;
+    try {
+      payload = rawText ? (JSON.parse(rawText) as GroqChatCompletionPayload) : undefined;
+    } catch {
+      payload = undefined;
     }
 
-    throw (
-      lastError ||
-      new AIRequestError({
-        message: "AI request failed.",
-        status: 0,
-        code: "unknown_error",
+    if (!response.ok) {
+      throw normalizeGroqError({
+        status: response.status,
+        model: params.model,
+        rawMessage: rawText,
+        error: payload?.error,
+      });
+    }
+
+    const content = payload?.choices?.[0]?.message?.content?.trim() || "";
+    if (!content) {
+      throw new AIRequestError({
+        message: `Groq response was empty for model "${params.model}".`,
+        status: response.status,
+        code: "empty_response",
         model: params.model,
         kind: "unknown",
-      })
-    );
+      });
+    }
+
+    return content;
   } catch (error) {
     throw normalizeUnknownError(error, params.model);
   } finally {
@@ -465,15 +457,13 @@ export async function analyzeConversationWithAI(
     throw new Error("Transcript is too short for AI analysis.");
   }
 
-  const modelCandidates = buildGeminiModelCandidates(input.model);
+  const modelCandidates = buildGroqModelCandidates(input.model);
   const systemPrompt =
     "You are a strict enterprise sales call analyst for Indian multilingual calls (Hindi/English/Gujarati mix). " +
-    "Return strict JSON only. All scores must be integers 0-100. " +
-    "sentiment: positive|neutral|negative. buyingIntent: high|medium|low. " +
-    "Do not hallucinate facts not present in transcript.";
+    "Return only JSON that matches the provided schema. All scores must be integers from 0 to 100. " +
+    "Do not hallucinate facts that are not present in the transcript.";
   const userPrompt = [
-    "Return JSON with exactly these keys:",
-    "interestScore, pitchScore, confidenceScore, talkListenRatio, sentiment, buyingIntent, summary, keyPhrases, objections, improvements.",
+    "Analyze this sales conversation.",
     "Rules:",
     "- summary max 2 short sentences.",
     "- keyPhrases 3 to 8 short phrases.",
@@ -491,36 +481,16 @@ export async function analyzeConversationWithAI(
 
   for (const model of modelCandidates) {
     try {
-      let rawContent: string;
-      try {
-        rawContent = await requestWithRetry(
-          () =>
-            requestGeminiCompletion({
-              apiKey,
-              model,
-              systemPrompt,
-              userPrompt,
-              useJsonMode: true,
-            }),
-          model
-        );
-      } catch (error) {
-        const normalized = normalizeUnknownError(error, model);
-        if (normalized.kind !== "bad_request") {
-          throw normalized;
-        }
-        rawContent = await requestWithRetry(
-          () =>
-            requestGeminiCompletion({
-              apiKey,
-              model,
-              systemPrompt,
-              userPrompt,
-              useJsonMode: false,
-            }),
-          model
-        );
-      }
+      const rawContent = await requestWithRetry(
+        () =>
+          requestGroqCompletion({
+            apiKey,
+            model,
+            systemPrompt,
+            userPrompt,
+          }),
+        model
+      );
 
       const parsed = JSON.parse(extractJson(rawContent)) as Record<string, unknown>;
       const summary =
@@ -566,4 +536,3 @@ export async function analyzeConversationWithAI(
   }
   throw new Error("No compatible AI model available.");
 }
-

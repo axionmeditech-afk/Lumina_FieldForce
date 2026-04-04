@@ -116,6 +116,29 @@ type RoutePlannerStop = {
   address: string | null;
   latitude: number;
   longitude: number;
+  source?: "location" | "customer";
+  customerId?: string | null;
+};
+type AnalysisRecommendationTone = "positive" | "warning" | "info";
+type AnalysisRecommendation = {
+  id: string;
+  title: string;
+  body: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  tone: AnalysisRecommendationTone;
+};
+type ConversationProductTrend = {
+  id: string;
+  label: string;
+  mentions: number;
+  highIntentCount: number;
+  avgInterest: number;
+};
+type ConversationTrendDigest = {
+  productTrends: ConversationProductTrend[];
+  themeTrends: string[];
+  objectionTrends: string[];
+  recommendations: AnalysisRecommendation[];
 };
 const FALLBACK_SEGMENT_MS = 5000;
 const FALLBACK_POLL_MS = 250;
@@ -128,6 +151,25 @@ const ROUTE_NAV_WAYPOINT_LIMIT = 6;
 const POS_PAGE_SIZE = 100;
 const VISIT_NEARBY_RADIUS_METERS = 250;
 const VISIT_RECENT_ORDER_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
+const RECOMMENDATION_STOP_WORDS = new Set([
+  "sales",
+  "customer",
+  "client",
+  "prospect",
+  "discussion",
+  "follow",
+  "follow up",
+  "requirement",
+  "requirements",
+  "meeting",
+  "details",
+  "product",
+  "products",
+  "solution",
+  "service",
+  "team",
+  "company",
+]);
 const VOICE_PULSE_BASELINE = Array.from({ length: VOICE_WAVE_BAR_COUNT }, (_, index) => {
   const center = (VOICE_WAVE_BAR_COUNT - 1) / 2;
   const distance = Math.abs(index - center) / center;
@@ -228,6 +270,8 @@ function toRoutePlannerStopFromMapplsSuggestion(
     address: suggestion.address?.trim() || null,
     latitude: suggestion.latitude,
     longitude: suggestion.longitude,
+    source: "location",
+    customerId: null,
   };
 }
 
@@ -275,6 +319,264 @@ function getDolibarrProductLabel(product: DolibarrProduct): string {
 
 function getDolibarrThirdPartyLabel(party: DolibarrThirdParty): string {
   return party.name?.trim() || party.nom?.trim() || "Customer";
+}
+
+function getDolibarrThirdPartyAddress(party: DolibarrThirdParty): string {
+  const line1 = (party.address || "").trim();
+  const line2 = [party.town?.trim(), party.zip?.trim()].filter(Boolean).join(", ");
+  return [line1, line2].filter(Boolean).join(" | ").trim();
+}
+
+function normalizeTrendPhrase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function includesTrendPhrase(haystack: string, needle: string): boolean {
+  if (!haystack || !needle) return false;
+  if (needle.includes(" ")) {
+    return haystack.includes(needle);
+  }
+  return ` ${haystack} `.includes(` ${needle} `);
+}
+
+function formatTrendPhraseLabel(value: string): string {
+  return value.replace(/\b\w/g, (segment) => segment.toUpperCase());
+}
+
+function buildConversationTrendDigest(
+  conversations: Conversation[],
+  products: DolibarrProduct[]
+): ConversationTrendDigest {
+  if (!conversations.length) {
+    return {
+      productTrends: [],
+      themeTrends: [],
+      objectionTrends: [],
+      recommendations: [],
+    };
+  }
+
+  const conversationSnapshots = conversations.map((conversation) => ({
+    conversation,
+    corpus: normalizeTrendPhrase(
+      [
+        conversation.customerName,
+        conversation.summary,
+        conversation.transcript || "",
+        conversation.keyPhrases.join(" "),
+        conversation.objections.join(" "),
+        conversation.notes || "",
+      ].join(" ")
+    ),
+  }));
+
+  const productTrendMap = new Map<string, ConversationProductTrend>();
+  for (const product of products) {
+    const label = getDolibarrProductLabel(product);
+    const terms = Array.from(
+      new Set(
+        [label, product.ref || ""]
+          .map((entry) => normalizeTrendPhrase(entry))
+          .filter((entry) => entry.length >= 4 && !RECOMMENDATION_STOP_WORDS.has(entry))
+      )
+    );
+    if (!terms.length) continue;
+
+    let mentions = 0;
+    let highIntentCount = 0;
+    let totalInterest = 0;
+    for (const snapshot of conversationSnapshots) {
+      const matched = terms.some((term) => includesTrendPhrase(snapshot.corpus, term));
+      if (!matched) continue;
+      mentions += 1;
+      totalInterest += snapshot.conversation.interestScore;
+      if (snapshot.conversation.buyingIntent === "high") {
+        highIntentCount += 1;
+      }
+    }
+
+    if (!mentions) continue;
+    const productId = getDolibarrProductId(product);
+    productTrendMap.set(String(productId ?? label), {
+      id: String(productId ?? label),
+      label,
+      mentions,
+      highIntentCount,
+      avgInterest: Math.round(totalInterest / mentions),
+    });
+  }
+
+  const productTrends = [...productTrendMap.values()]
+    .sort((a, b) => {
+      if (b.highIntentCount !== a.highIntentCount) return b.highIntentCount - a.highIntentCount;
+      if (b.mentions !== a.mentions) return b.mentions - a.mentions;
+      return b.avgInterest - a.avgInterest;
+    })
+    .slice(0, 3);
+
+  const themeFrequency = new Map<string, number>();
+  const objectionFrequency = new Map<string, number>();
+  for (const conversation of conversations) {
+    const themePhrases = [...conversation.keyPhrases, ...conversation.summary.split(/[.!?]/)]
+      .map((entry) => normalizeTrendPhrase(entry))
+      .filter(
+        (entry) =>
+          entry.length >= 4 &&
+          entry.length <= 40 &&
+          !RECOMMENDATION_STOP_WORDS.has(entry) &&
+          !/^\d+$/.test(entry)
+      );
+    for (const phrase of themePhrases.slice(0, 6)) {
+      themeFrequency.set(phrase, (themeFrequency.get(phrase) || 0) + 1);
+    }
+
+    for (const objection of conversation.objections) {
+      const cleaned = normalizeTrendPhrase(objection);
+      if (!cleaned || cleaned.length < 4) continue;
+      objectionFrequency.set(cleaned, (objectionFrequency.get(cleaned) || 0) + 1);
+    }
+  }
+
+  const themeTrends = [...themeFrequency.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([phrase]) => formatTrendPhraseLabel(phrase));
+
+  const objectionTrends = [...objectionFrequency.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([phrase]) => formatTrendPhraseLabel(phrase));
+
+  const avgInterest =
+    Math.round(
+      conversations.reduce((sum, conversation) => sum + conversation.interestScore, 0) /
+        Math.max(conversations.length, 1)
+    ) || 0;
+  const avgPitch =
+    Math.round(
+      conversations.reduce((sum, conversation) => sum + conversation.pitchScore, 0) /
+        Math.max(conversations.length, 1)
+    ) || 0;
+  const highIntentCount = conversations.filter((conversation) => conversation.buyingIntent === "high").length;
+
+  const recommendations: AnalysisRecommendation[] = [];
+  if (productTrends[0]) {
+    recommendations.push({
+      id: "product_push",
+      title: `${productTrends[0].label} is the hottest product signal`,
+      body: `${productTrends[0].mentions} conversations mentioned it, with ${productTrends[0].highIntentCount} high-intent buyers and ${productTrends[0].avgInterest}% average interest. Keep demo, pricing, and stock readiness high.`,
+      icon: "cube-outline",
+      tone: "positive",
+    });
+  }
+  if (themeTrends[0]) {
+    recommendations.push({
+      id: "theme_trend",
+      title: `Buyer theme rising: ${themeTrends[0]}`,
+      body: `This theme keeps repeating across saved conversations. Build your next pitch around this need and move it into brochure/demo talking points.`,
+      icon: "trending-up-outline",
+      tone: "info",
+    });
+  }
+  if (objectionTrends[0]) {
+    recommendations.push({
+      id: "objection_watch",
+      title: `Watch objection: ${objectionTrends[0]}`,
+      body: `This objection is coming up repeatedly. Prepare a sharper ROI, pricing, or proof-response script before the next follow-up.`,
+      icon: "alert-circle-outline",
+      tone: "warning",
+    });
+  } else if (avgPitch < 65 || avgInterest < 60) {
+    recommendations.push({
+      id: "coaching",
+      title: "Pitch quality needs stronger conversion framing",
+      body: `Average interest is ${avgInterest}% and average pitch quality is ${avgPitch}%. Use clearer product proof, ask tighter discovery questions, and close with a concrete next step.`,
+      icon: "flash-outline",
+      tone: "warning",
+    });
+  }
+  if (highIntentCount > 0 && recommendations.length < 3) {
+    recommendations.push({
+      id: "follow_up",
+      title: `${highIntentCount} high-intent conversation${highIntentCount > 1 ? "s" : ""} ready for follow-up`,
+      body: `Focus on the most recent high-intent leads first and convert them into quick sales, proposals, or scheduled revisits while intent is still warm.`,
+      icon: "checkmark-done-outline",
+      tone: "positive",
+    });
+  }
+
+  return {
+    productTrends,
+    themeTrends,
+    objectionTrends,
+    recommendations: recommendations.slice(0, 3),
+  };
+}
+
+async function resolveRoutePlannerCustomerStop(party: DolibarrThirdParty): Promise<RoutePlannerStop> {
+  const label = getDolibarrThirdPartyLabel(party);
+  const customerId = getDolibarrThirdPartyId(party);
+  const address = getDolibarrThirdPartyAddress(party);
+  const queries = [address, `${label} ${address}`.trim(), label].filter((value, index, array) => {
+    const cleaned = value.trim();
+    return Boolean(cleaned) && array.findIndex((entry) => entry.trim() === cleaned) === index;
+  });
+
+  for (const query of queries) {
+    try {
+      const textSearch = await searchMapplsTextSearch(query, {
+        region: "ind",
+        limit: 1,
+      });
+      const match = (textSearch.suggestions || [])
+        .map((suggestion, index) => toRoutePlannerStopFromMapplsSuggestion(suggestion, index))
+        .find((item): item is RoutePlannerStop => Boolean(item));
+      if (match) {
+        return {
+          ...match,
+          id: createLocalId("route_customer_stop"),
+          label,
+          address: address || match.address,
+          source: "customer",
+          customerId: customerId ? String(customerId) : null,
+        };
+      }
+    } catch {
+      // fall through to next resolver
+    }
+  }
+
+  for (const query of queries) {
+    try {
+      const geocoded = await Location.geocodeAsync(query);
+      const first = geocoded[0];
+      if (
+        first &&
+        typeof first.latitude === "number" &&
+        Number.isFinite(first.latitude) &&
+        typeof first.longitude === "number" &&
+        Number.isFinite(first.longitude)
+      ) {
+        return {
+          id: createLocalId("route_customer_stop"),
+          label,
+          address: address || query,
+          latitude: first.latitude,
+          longitude: first.longitude,
+          source: "customer",
+          customerId: customerId ? String(customerId) : null,
+        };
+      }
+    } catch {
+      // try next query
+    }
+  }
+
+  throw new Error(`Could not resolve map location for ${label}. Add a manual location for this stop.`);
 }
 
 function getDolibarrProductPrice(product: DolibarrProduct): number {
@@ -358,15 +660,18 @@ const ExpoSpeechRecognitionModule: any = speechPackage?.ExpoSpeechRecognitionMod
 const useSpeechRecognitionEvent: SpeechRecognitionHook =
   speechPackage?.useSpeechRecognitionEvent ?? (() => {});
 const DEFAULT_S2T_MODEL =
-  (process.env.EXPO_PUBLIC_HF_S2T_MODEL || "openai/whisper-large-v3-turbo").trim();
+  (
+    process.env.EXPO_PUBLIC_GROQ_STT_MODEL ||
+    process.env.EXPO_PUBLIC_GROQ_MODEL ||
+    "whisper-large-v3-turbo"
+  ).trim();
 const DEFAULT_S2T_FALLBACK_MODEL =
-  (process.env.EXPO_PUBLIC_HF_S2T_FALLBACK_MODEL || "openai/whisper-large-v3").trim();
+  (process.env.EXPO_PUBLIC_GROQ_STT_FALLBACK_MODEL || "whisper-large-v3").trim();
 const HF_INFERENCE_BASE_URL = (
   process.env.EXPO_PUBLIC_HF_INFERENCE_BASE_URL ||
   "https://router.huggingface.co/hf-inference/models"
 ).trim().replace(/\/+$/, "");
-const ALLOW_HF_STT_FALLBACK =
-  String(process.env.EXPO_PUBLIC_ALLOW_HF_STT_FALLBACK || "false").toLowerCase() === "true";
+const ALLOW_HF_STT_FALLBACK = false;
 let preferredSpeechApiBase: string | null = null;
 
 function normalizeProviderOrder(input: string): string {
@@ -377,10 +682,10 @@ function normalizeProviderOrder(input: string): string {
   const mapped: string[] = [];
   for (const chunk of chunks) {
     if (
-      (chunk === "gemini" || chunk === "google" || chunk === "google_gemini") &&
-      !mapped.includes("gemini")
+      (chunk === "groq" || chunk === "groq_whisper" || chunk === "whisper") &&
+      !mapped.includes("groq")
     ) {
-      mapped.push("gemini");
+      mapped.push("groq");
       continue;
     }
     if (
@@ -406,10 +711,10 @@ function normalizeProviderOrder(input: string): string {
     }
   }
   if (!mapped.length) {
-    return "gemini,revup,local_python,huggingface";
+    return "groq";
   }
-  const reordered = mapped.includes("gemini")
-    ? ["gemini", ...mapped.filter((provider) => provider !== "gemini")]
+  const reordered = mapped.includes("groq")
+    ? ["groq", ...mapped.filter((provider) => provider !== "groq")]
     : mapped.includes("revup")
       ? ["revup", ...mapped.filter((provider) => provider !== "revup")]
       : mapped;
@@ -419,7 +724,7 @@ function normalizeProviderOrder(input: string): string {
 const DEFAULT_STT_PROVIDER_ORDER = normalizeProviderOrder(
   (
     process.env.EXPO_PUBLIC_STT_PROVIDER_ORDER ||
-    "gemini,revup,local_python,huggingface"
+    "groq"
   ).trim()
 );
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
@@ -663,21 +968,16 @@ function uniqModels(...models: string[]): string[] {
 
 function getClientSpeechCredentialHeaders(): Record<string, string> {
   const headers: Record<string, string> = {};
-  const geminiKeys = [
-    process.env.EXPO_PUBLIC_GEMINI_API_KEYS,
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY,
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY_1,
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY_2,
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY_3,
-    process.env.GEMINI_API_KEYS,
-    process.env.GEMINI_API_KEY,
-    process.env.GEMINI_API_KEY_1,
-    process.env.GEMINI_API_KEY_2,
+  const groqKeys = [
+    process.env.EXPO_PUBLIC_GROQ_API_KEYS,
+    process.env.EXPO_PUBLIC_GROQ_API_KEY,
+    process.env.GROQ_API_KEYS,
+    process.env.GROQ_API_KEY,
   ]
     .map((value) => (value || "").trim())
     .filter(Boolean);
-  if (geminiKeys.length) {
-    headers["X-Gemini-Api-Keys"] = Array.from(new Set(geminiKeys.join(",").split(",").map((item) => item.trim()).filter(Boolean))).join(",");
+  if (groqKeys.length) {
+    headers["X-Groq-Api-Key"] = groqKeys[0];
   }
 
   const revupApiKey = (
@@ -1034,6 +1334,32 @@ function resolveRouteSessionWindow(attendanceEvents: AttendanceRecord[]): RouteS
   return lastCompletedWindow;
 }
 
+function resolveCarryoverAttendanceRecord(
+  records: AttendanceRecord[],
+  selectedDateKey: string
+): AttendanceRecord | null {
+  const ordered = [...records].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  let activeCheckIn: AttendanceRecord | null = null;
+
+  for (const entry of ordered) {
+    const entryDateKey = toMumbaiDateKey(new Date(entry.timestamp));
+    if (entryDateKey >= selectedDateKey) {
+      break;
+    }
+
+    if (entry.type === "checkin") {
+      activeCheckIn = entry;
+      continue;
+    }
+
+    if (entry.type === "checkout" && activeCheckIn) {
+      activeCheckIn = null;
+    }
+  }
+
+  return activeCheckIn;
+}
+
 function filterPointsToSessionWindow(
   points: LocationLog[],
   sessionWindow: RouteSessionWindow
@@ -1384,13 +1710,12 @@ export default function SalesScreen() {
   const { colors, isDark } = useAppTheme();
   const { user, company } = useAuth();
   const isAdminViewer = user?.role === "admin";
-  const todayDateKey = toMumbaiDateKey(new Date());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [locationLogs, setLocationLogs] = useState<LocationLog[]>([]);
   const [quickSaleLocationLogs, setQuickSaleLocationLogs] = useState<QuickSaleLocationLog[]>([]);
-  const [nearbyVisitHistory, setNearbyVisitHistory] = useState<VisitHistoryRecord[] | null>(null);
+  const [nearbyVisitHistory, setNearbyVisitHistory] = useState<VisitHistoryRecord[]>([]);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [selectedSalespersonId, setSelectedSalespersonId] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -1417,10 +1742,15 @@ export default function SalesScreen() {
   const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
+  const todayDateKey = useMemo(() => toMumbaiDateKey(new Date()), [mumbaiNowLabel]);
   const [routePlanDate, setRoutePlanDate] = useState(() => toMumbaiDateKey(new Date()));
+  const [routeStopInputMode, setRouteStopInputMode] = useState<"location" | "customer">("location");
   const [routeSearchQuery, setRouteSearchQuery] = useState("");
   const [routeSearchBusy, setRouteSearchBusy] = useState(false);
   const [routeSearchResults, setRouteSearchResults] = useState<RoutePlannerStop[]>([]);
+  const [routePlannerCustomers, setRoutePlannerCustomers] = useState<DolibarrThirdParty[]>([]);
+  const [routePlannerCustomersLoading, setRoutePlannerCustomersLoading] = useState(false);
+  const [routeCustomerAddBusyId, setRouteCustomerAddBusyId] = useState<string | null>(null);
   const [routePlanStops, setRoutePlanStops] = useState<RoutePlannerStop[]>([]);
   const [routePlanDirty, setRoutePlanDirty] = useState(false);
   const [routePlanSaving, setRoutePlanSaving] = useState(false);
@@ -2034,42 +2364,6 @@ export default function SalesScreen() {
     [recentOrders, todaysVisitTasks]
   );
 
-  const localHistoricalVisitStops = useMemo<PlannedStopPoint[]>(
-    () =>
-      salespersonVisitTasks
-        .filter((task) => getVisitStatus(task) === "completed")
-        .filter(
-          (task) =>
-            typeof task.visitLatitude === "number" &&
-            Number.isFinite(task.visitLatitude) &&
-            typeof task.visitLongitude === "number" &&
-            Number.isFinite(task.visitLongitude)
-        )
-        .filter(
-          (task) =>
-            Boolean(task.visitDepartureNotes?.trim()) ||
-            Boolean(task.autoCaptureConversationId) ||
-            Boolean(task.departureAt)
-        )
-        .slice(0, 24)
-        .map((task) => ({
-          id: `history_${task.id}`,
-          label: getVisitLabel(task),
-          customerName: getVisitLabel(task),
-          latitude: task.visitLatitude as number,
-          longitude: task.visitLongitude as number,
-          status: "completed",
-          markerKind: "visit_history",
-          summary: task.visitDepartureNotes?.trim()
-            ? `Last note: ${task.visitDepartureNotes.trim()}`
-            : "Past visit completed here.",
-          detail: task.departureAt
-            ? `Departed ${formatMumbaiTime(task.departureAt)}${task.visitLocationAddress ? ` • ${task.visitLocationAddress}` : ""}`
-            : task.visitLocationAddress || "Past visit location",
-        })),
-    [salespersonVisitTasks]
-  );
-
   const plannerPreviewStops = useMemo<PlannedStopPoint[]>(
     () =>
       routePlanStops.map((stop, index) => ({
@@ -2093,11 +2387,18 @@ export default function SalesScreen() {
   }, [attendanceRecords, selectedSalesperson, selectedSalespersonId, user]);
 
   const selectedSalespersonAttendance = useMemo(
-    () =>
-      attendanceRecords
+    () => {
+      const allAttendance = attendanceRecords
         .filter((entry) => selectedSalespersonAliases.has(entry.userId))
-        .filter((entry) => isMumbaiDateKey(entry.timestamp, todayDateKey))
-        .sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      const carryoverAttendance = resolveCarryoverAttendanceRecord(allAttendance, todayDateKey);
+      return dedupeById(
+        [
+          ...(carryoverAttendance ? [carryoverAttendance] : []),
+          ...allAttendance.filter((entry) => isMumbaiDateKey(entry.timestamp, todayDateKey)),
+        ].sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      );
+    },
     [attendanceRecords, selectedSalespersonAliases, todayDateKey]
   );
 
@@ -2280,7 +2581,7 @@ export default function SalesScreen() {
       })
       .catch(() => {
         if (!cancelled) {
-          setNearbyVisitHistory(null);
+          setNearbyVisitHistory([]);
         }
       });
 
@@ -2326,64 +2627,38 @@ export default function SalesScreen() {
   );
 
   const nearbyHistoricalVisitStops = useMemo<PlannedStopPoint[]>(
-    () => {
-      if (nearbyVisitHistory !== null) {
-        return nearbyVisitHistory
-          .filter(
-            (entry) =>
-              typeof entry.visitLatitude === "number" &&
-              Number.isFinite(entry.visitLatitude) &&
-              typeof entry.visitLongitude === "number" &&
-              Number.isFinite(entry.visitLongitude)
-          )
-          .map((entry) => ({
-            id: `history_${entry.taskId}`,
-            label: entry.visitLabel,
-            customerName: entry.visitLabel,
-            latitude: entry.visitLatitude,
-            longitude: entry.visitLongitude,
-            status: "completed",
-            markerKind: "visit_history",
-            summary: entry.visitDepartureNotes?.trim()
-              ? `Last note: ${entry.visitDepartureNotes.trim()}`
-              : entry.meetingNotes?.trim()
-                ? `Meeting note: ${entry.meetingNotes.trim()}`
-                : "Past visit completed here.",
-            detail: entry.departureAt
-              ? `Departed ${formatMumbaiTime(entry.departureAt)}${entry.visitLocationAddress ? ` • ${entry.visitLocationAddress}` : ""}`
-              : entry.visitLocationAddress || "Past visit location",
-            isNearby: true,
-            distanceMeters:
-              typeof entry.distanceMeters === "number" && Number.isFinite(entry.distanceMeters)
-                ? Math.round(entry.distanceMeters)
-                : null,
-          } satisfies PlannedStopPoint));
-      }
-
-      return localHistoricalVisitStops.map((stop) => {
-        if (!latestRoutePoint) {
-          return {
-            ...stop,
-            isNearby: false,
-            distanceMeters: null,
-          };
-        }
-        const distanceMeters = haversineDistanceMeters(
-          latestRoutePoint.latitude,
-          latestRoutePoint.longitude,
-          stop.latitude,
-          stop.longitude
-        );
-        const isNearby =
-          Number.isFinite(distanceMeters) && distanceMeters <= VISIT_NEARBY_RADIUS_METERS;
-        return {
-          ...stop,
-          isNearby,
-          distanceMeters: Math.round(distanceMeters),
-        };
-      });
-    },
-    [localHistoricalVisitStops, latestRoutePoint, nearbyVisitHistory]
+    () =>
+      nearbyVisitHistory
+        .filter(
+          (entry) =>
+            typeof entry.visitLatitude === "number" &&
+            Number.isFinite(entry.visitLatitude) &&
+            typeof entry.visitLongitude === "number" &&
+            Number.isFinite(entry.visitLongitude)
+        )
+        .map((entry) => ({
+          id: `history_${entry.taskId}`,
+          label: entry.visitLabel,
+          customerName: entry.visitLabel,
+          latitude: entry.visitLatitude,
+          longitude: entry.visitLongitude,
+          status: "completed",
+          markerKind: "visit_history",
+          summary: entry.visitDepartureNotes?.trim()
+            ? `Last note: ${entry.visitDepartureNotes.trim()}`
+            : entry.meetingNotes?.trim()
+              ? `Meeting note: ${entry.meetingNotes.trim()}`
+              : "Past visit completed here.",
+          detail: entry.departureAt
+            ? `Departed ${formatMumbaiTime(entry.departureAt)}${entry.visitLocationAddress ? ` • ${entry.visitLocationAddress}` : ""}`
+            : entry.visitLocationAddress || "Past visit location",
+          isNearby: true,
+          distanceMeters:
+            typeof entry.distanceMeters === "number" && Number.isFinite(entry.distanceMeters)
+              ? Math.round(entry.distanceMeters)
+              : null,
+        } satisfies PlannedStopPoint)),
+    [nearbyVisitHistory]
   );
 
   const nearbyQuickSalePoints = useMemo<QuickSalePoint[]>(
@@ -2637,6 +2912,35 @@ export default function SalesScreen() {
   }, [isAdminViewer, routePlanDate, selectedSalespersonId]);
 
   useEffect(() => {
+    setRouteSearchQuery("");
+    setRouteSearchResults([]);
+  }, [routeStopInputMode]);
+
+  useEffect(() => {
+    if (!isAdminViewer) return;
+    let cancelled = false;
+    setRoutePlannerCustomersLoading(true);
+    void getDolibarrThirdParties({ limit: 250, sortfield: "nom", sortorder: "asc" })
+      .then((customers) => {
+        if (cancelled) return;
+        setRoutePlannerCustomers(Array.isArray(customers) ? customers : []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRoutePlannerCustomers([]);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setRoutePlannerCustomersLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdminViewer]);
+
+  useEffect(() => {
     if (!isAdminViewer) return;
     if (routePlanDirty) return;
     setRoutePlanStops(selectedDatePlannedStops);
@@ -2782,6 +3086,19 @@ export default function SalesScreen() {
     }
   }, [routeSearchQuery]);
 
+  const routeCustomerResults = useMemo(() => {
+    const query = normalizeSearchText(routeSearchQuery);
+    if (!query) return [] as DolibarrThirdParty[];
+    return routePlannerCustomers
+      .filter((party) => {
+        const label = normalizeSearchText(getDolibarrThirdPartyLabel(party));
+        const address = normalizeSearchText(getDolibarrThirdPartyAddress(party));
+        const email = normalizeSearchText((party.email || "").trim());
+        return label.includes(query) || address.includes(query) || email.includes(query);
+      })
+      .slice(0, ROUTE_SEARCH_RESULTS_LIMIT);
+  }, [routePlannerCustomers, routeSearchQuery]);
+
   const handleAddRouteStop = useCallback((stop: RoutePlannerStop) => {
     setRoutePlanStops((current) => {
       const exists = current.some(
@@ -2800,6 +3117,33 @@ export default function SalesScreen() {
     });
     setRoutePlanDirty(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }, []);
+
+  const handleAddCustomerRouteStop = useCallback(async (party: DolibarrThirdParty) => {
+    const rawId = getDolibarrThirdPartyId(party);
+    const busyId = rawId ? String(rawId) : getDolibarrThirdPartyLabel(party);
+    setRouteCustomerAddBusyId(busyId);
+    try {
+      const stop = await resolveRoutePlannerCustomerStop(party);
+      setRoutePlanStops((current) => {
+        const exists = current.some(
+          (entry) =>
+            Math.abs(entry.latitude - stop.latitude) < 0.00005 &&
+            Math.abs(entry.longitude - stop.longitude) < 0.00005
+        );
+        if (exists) return current;
+        return [...current, stop];
+      });
+      setRoutePlanDirty(true);
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch (error) {
+      Alert.alert(
+        "Customer Location Missing",
+        error instanceof Error ? error.message : "Unable to resolve this customer's location."
+      );
+    } finally {
+      setRouteCustomerAddBusyId(null);
+    }
   }, []);
 
   const handleRemoveRouteStop = useCallback((stopId: string) => {
@@ -2938,6 +3282,10 @@ export default function SalesScreen() {
   const avgPitch = visibleConversations.length > 0
     ? Math.round(visibleConversations.reduce((sum, convo) => sum + convo.pitchScore, 0) / visibleConversations.length)
     : 0;
+  const conversationTrendDigest = useMemo(
+    () => buildConversationTrendDigest(visibleConversations, posProducts),
+    [posProducts, visibleConversations]
+  );
 
   const liveTranscript = useMemo(() => {
     return transcriptDraft || interimTranscript;
@@ -4272,15 +4620,60 @@ export default function SalesScreen() {
                       ]}
                     />
 
+                    <View
+                      style={[
+                        styles.routeModeToggleWrap,
+                        { borderColor: colors.border, backgroundColor: colors.surface },
+                      ]}
+                    >
+                      {[
+                        { key: "customer" as const, label: "Customers" },
+                        { key: "location" as const, label: "Location" },
+                      ].map((option) => {
+                        const active = routeStopInputMode === option.key;
+                        return (
+                          <Pressable
+                            key={option.key}
+                            onPress={() => setRouteStopInputMode(option.key)}
+                            style={({ pressed }) => [
+                              styles.routeModeToggleBtn,
+                              {
+                                backgroundColor: active ? colors.primary : "transparent",
+                                opacity: pressed ? 0.82 : 1,
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.routeModeToggleText,
+                                {
+                                  color: active ? "#FFFFFF" : colors.textSecondary,
+                                  fontFamily: active ? "Inter_600SemiBold" : "Inter_500Medium",
+                                },
+                              ]}
+                            >
+                              {option.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+
                     <View style={styles.routeSearchRow}>
                       <TextInput
                         value={routeSearchQuery}
                         onChangeText={setRouteSearchQuery}
                         onSubmitEditing={() => {
-                          void handleSearchRouteLocations();
+                          if (routeStopInputMode === "location") {
+                            void handleSearchRouteLocations();
+                          }
                         }}
-                        returnKeyType="search"
-                        placeholder="Search location, area, company..."
+                        returnKeyType={routeStopInputMode === "location" ? "search" : "done"}
+                        placeholder={
+                          routeStopInputMode === "customer"
+                            ? "Search customer name, address, email..."
+                            : "Search location, area, company..."
+                        }
                         placeholderTextColor={colors.textTertiary}
                         style={[
                           styles.routeSearchInput,
@@ -4292,26 +4685,28 @@ export default function SalesScreen() {
                           },
                         ]}
                       />
-                      <Pressable
-                        onPress={() => void handleSearchRouteLocations()}
-                        disabled={routeSearchBusy}
-                        style={({ pressed }) => [
-                          styles.routeSearchButton,
-                          {
-                            backgroundColor: colors.primary,
-                            opacity: pressed || routeSearchBusy ? 0.75 : 1,
-                          },
-                        ]}
-                      >
-                        {routeSearchBusy ? (
-                          <ActivityIndicator size="small" color="#FFFFFF" />
-                        ) : (
-                          <Ionicons name="search-outline" size={17} color="#FFFFFF" />
-                        )}
-                      </Pressable>
+                      {routeStopInputMode === "location" ? (
+                        <Pressable
+                          onPress={() => void handleSearchRouteLocations()}
+                          disabled={routeSearchBusy}
+                          style={({ pressed }) => [
+                            styles.routeSearchButton,
+                            {
+                              backgroundColor: colors.primary,
+                              opacity: pressed || routeSearchBusy ? 0.75 : 1,
+                            },
+                          ]}
+                        >
+                          {routeSearchBusy ? (
+                            <ActivityIndicator size="small" color="#FFFFFF" />
+                          ) : (
+                            <Ionicons name="search-outline" size={17} color="#FFFFFF" />
+                          )}
+                        </Pressable>
+                      ) : null}
                     </View>
 
-                    {routeSearchResults.length ? (
+                    {routeStopInputMode === "location" && routeSearchResults.length ? (
                       <View
                         style={[
                           styles.routeSearchResultWrap,
@@ -4353,6 +4748,88 @@ export default function SalesScreen() {
                             <Ionicons name="add-circle-outline" size={20} color={colors.primary} />
                           </Pressable>
                         ))}
+                      </View>
+                    ) : null}
+
+                    {routeStopInputMode === "customer" ? (
+                      <View
+                        style={[
+                          styles.routeSearchResultWrap,
+                          { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
+                        ]}
+                      >
+                        {routePlannerCustomersLoading ? (
+                          <View style={styles.routeCustomerEmptyState}>
+                            <ActivityIndicator size="small" color={colors.primary} />
+                            <Text
+                              style={[
+                                styles.routeCustomerEmptyText,
+                                { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                              ]}
+                            >
+                              Loading customers...
+                            </Text>
+                          </View>
+                        ) : routeSearchQuery.trim() && routeCustomerResults.length ? (
+                          routeCustomerResults.map((party) => {
+                            const partyId = getDolibarrThirdPartyId(party);
+                            const busyId = partyId ? String(partyId) : getDolibarrThirdPartyLabel(party);
+                            const isBusy = routeCustomerAddBusyId === busyId;
+                            return (
+                              <Pressable
+                                key={busyId}
+                                onPress={() => void handleAddCustomerRouteStop(party)}
+                                disabled={isBusy}
+                                style={({ pressed }) => [
+                                  styles.routeSearchResultRow,
+                                  {
+                                    borderBottomColor: colors.borderLight,
+                                    opacity: pressed || isBusy ? 0.85 : 1,
+                                  },
+                                ]}
+                              >
+                                <View style={styles.routeSearchResultTextWrap}>
+                                  <Text
+                                    style={[
+                                      styles.routeSearchResultTitle,
+                                      { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                    ]}
+                                    numberOfLines={1}
+                                  >
+                                    {getDolibarrThirdPartyLabel(party)}
+                                  </Text>
+                                  <Text
+                                    style={[
+                                      styles.routeSearchResultMeta,
+                                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                    ]}
+                                    numberOfLines={2}
+                                  >
+                                    {formatSearchAddress(getDolibarrThirdPartyAddress(party) || party.email || null)}
+                                  </Text>
+                                </View>
+                                {isBusy ? (
+                                  <ActivityIndicator size="small" color={colors.primary} />
+                                ) : (
+                                  <Ionicons name="add-circle-outline" size={20} color={colors.primary} />
+                                )}
+                              </Pressable>
+                            );
+                          })
+                        ) : (
+                          <View style={styles.routeCustomerEmptyState}>
+                            <Text
+                              style={[
+                                styles.routeCustomerEmptyText,
+                                { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                              ]}
+                            >
+                              {routeSearchQuery.trim()
+                                ? "No matching customers found."
+                                : "Search a customer and add them between route stops."}
+                            </Text>
+                          </View>
+                        )}
                       </View>
                     ) : null}
 
@@ -4398,6 +4875,18 @@ export default function SalesScreen() {
                                 numberOfLines={1}
                               >
                                 {stop.label}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.routeDraftSource,
+                                  {
+                                    color:
+                                      stop.source === "customer" ? colors.primary : colors.textTertiary,
+                                    fontFamily: "Inter_600SemiBold",
+                                  },
+                                ]}
+                              >
+                                {stop.source === "customer" ? "Customer stop" : "Location stop"}
                               </Text>
                               <Text
                                 style={[
@@ -5724,6 +6213,130 @@ export default function SalesScreen() {
                 </View>
               </LinearGradient>
                 </Animated.View>
+                {conversationTrendDigest.recommendations.length > 0 ? (
+                  <Animated.View entering={FadeInDown.duration(400).delay(190)}>
+                    <View
+                      style={[
+                        styles.recommendationCard,
+                        { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      ]}
+                    >
+                      <View style={styles.recommendationCardHeader}>
+                        <View
+                          style={[
+                            styles.recommendationCardIcon,
+                            { backgroundColor: `${colors.primary}12` },
+                          ]}
+                        >
+                          <Ionicons name="sparkles-outline" size={18} color={colors.primary} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={[
+                              styles.recommendationCardTitle,
+                              { color: colors.text, fontFamily: "Inter_700Bold" },
+                            ]}
+                          >
+                            AI Recommendations
+                          </Text>
+                          <Text
+                            style={[
+                              styles.recommendationCardSubtitle,
+                              { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                            ]}
+                          >
+                            Built from saved conversations, trend phrases, and product mentions.
+                          </Text>
+                        </View>
+                      </View>
+
+                      {conversationTrendDigest.productTrends.length > 0 ? (
+                        <View style={styles.recommendationTrendRow}>
+                          {conversationTrendDigest.productTrends.map((trend) => (
+                            <View
+                              key={trend.id}
+                              style={[
+                                styles.recommendationTrendChip,
+                                {
+                                  backgroundColor: colors.surfaceSecondary,
+                                  borderColor: colors.border,
+                                },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.recommendationTrendName,
+                                  { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                ]}
+                                numberOfLines={1}
+                              >
+                                {trend.label}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.recommendationTrendMeta,
+                                  { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                ]}
+                              >
+                                {trend.mentions} mentions · {trend.avgInterest}% interest
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : null}
+
+                      <View style={styles.recommendationList}>
+                        {conversationTrendDigest.recommendations.map((item) => {
+                          const accentColor =
+                            item.tone === "positive"
+                              ? colors.success
+                              : item.tone === "warning"
+                                ? colors.warning
+                                : colors.primary;
+                          return (
+                            <View
+                              key={item.id}
+                              style={[
+                                styles.recommendationItem,
+                                {
+                                  backgroundColor: `${accentColor}10`,
+                                  borderColor: `${accentColor}24`,
+                                },
+                              ]}
+                            >
+                              <View
+                                style={[
+                                  styles.recommendationItemIcon,
+                                  { backgroundColor: `${accentColor}18` },
+                                ]}
+                              >
+                                <Ionicons name={item.icon} size={16} color={accentColor} />
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text
+                                  style={[
+                                    styles.recommendationItemTitle,
+                                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                                  ]}
+                                >
+                                  {item.title}
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.recommendationItemBody,
+                                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                  ]}
+                                >
+                                  {item.body}
+                                </Text>
+                              </View>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  </Animated.View>
+                ) : null}
               </>
             ) : null}
 
@@ -6066,6 +6679,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     fontSize: 12.5,
   },
+  routeModeToggleWrap: {
+    flexDirection: "row",
+    borderRadius: 10,
+    borderWidth: 1,
+    padding: 4,
+    gap: 6,
+  },
+  routeModeToggleBtn: {
+    flex: 1,
+    minHeight: 34,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+  },
+  routeModeToggleText: {
+    fontSize: 12,
+  },
   routeSearchRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -6109,6 +6740,18 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     lineHeight: 15,
   },
+  routeCustomerEmptyState: {
+    minHeight: 70,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+    gap: 8,
+  },
+  routeCustomerEmptyText: {
+    fontSize: 11.8,
+    lineHeight: 16,
+    textAlign: "center",
+  },
   routeDraftWrap: {
     borderRadius: 10,
     borderWidth: 1,
@@ -6137,6 +6780,9 @@ const styles = StyleSheet.create({
   },
   routeDraftTitle: {
     fontSize: 12.5,
+  },
+  routeDraftSource: {
+    fontSize: 10.5,
   },
   routeDraftMeta: {
     fontSize: 11.5,
@@ -6867,6 +7513,76 @@ const styles = StyleSheet.create({
     width: 1,
     height: 30,
     backgroundColor: "rgba(255,255,255,0.15)",
+  },
+  recommendationCard: {
+    borderWidth: 1,
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 20,
+    gap: 14,
+  },
+  recommendationCardHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  recommendationCardIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recommendationCardTitle: {
+    fontSize: 16,
+    letterSpacing: -0.2,
+  },
+  recommendationCardSubtitle: {
+    marginTop: 2,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  recommendationTrendRow: {
+    gap: 8,
+  },
+  recommendationTrendChip: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 3,
+  },
+  recommendationTrendName: {
+    fontSize: 13,
+  },
+  recommendationTrendMeta: {
+    fontSize: 11.5,
+  },
+  recommendationList: {
+    gap: 10,
+  },
+  recommendationItem: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  recommendationItemIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recommendationItemTitle: {
+    fontSize: 13.5,
+    marginBottom: 4,
+  },
+  recommendationItemBody: {
+    fontSize: 12.5,
+    lineHeight: 18,
   },
   sectionHeader: { marginBottom: 12 },
   sectionTitle: { fontSize: 18, letterSpacing: -0.3 },

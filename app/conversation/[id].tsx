@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -26,11 +26,15 @@ import type { Conversation } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { useAuth } from "@/contexts/AuthContext";
-import { getApiBaseUrlCandidates } from "@/lib/attendance-api";
+import {
+  getApiBaseUrlCandidates,
+  getDolibarrProducts,
+  type DolibarrProduct,
+} from "@/lib/attendance-api";
 import {
   analyzeConversationWithAI,
   type AISalesAnalysisResult,
-} from "@/lib/ai-sales-analysis";
+} from "@/lib/aiSalesAnalysis";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
 
 function normalizeConversationNotes(value: string | undefined | null): string {
@@ -85,6 +89,113 @@ function normalizeApiSecret(value: string | undefined | null): string {
   return value.trim().replace(/^['"]+|['"]+$/g, "");
 }
 
+type ConversationProductRecommendation = {
+  id: string;
+  label: string;
+  ref: string | null;
+  matchedAttributes: string[];
+  reason: string;
+};
+
+const PRODUCT_RECOMMENDATION_STOP_WORDS = new Set([
+  "product",
+  "products",
+  "customer",
+  "client",
+  "sales",
+  "company",
+  "service",
+  "solution",
+  "discussion",
+  "meeting",
+  "follow",
+  "follow up",
+  "details",
+  "need",
+  "needs",
+  "requirement",
+  "requirements",
+]);
+
+function normalizeMatcherText(value: string | undefined | null): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toTitleCase(value: string): string {
+  return value.replace(/\b\w/g, (segment) => segment.toUpperCase());
+}
+
+function buildConversationAttributeCandidates(convo: Conversation): string[] {
+  const summaryBits = convo.summary
+    .split(/[.!?]/)
+    .map((entry) => normalizeMatcherText(entry))
+    .filter(Boolean);
+  const phrases = [...convo.keyPhrases, ...convo.objections, ...summaryBits]
+    .map((entry) => normalizeMatcherText(entry))
+    .filter(
+      (entry) =>
+        entry.length >= 4 &&
+        entry.length <= 48 &&
+        !PRODUCT_RECOMMENDATION_STOP_WORDS.has(entry) &&
+        !/^\d+$/.test(entry)
+    );
+  return [...new Set(phrases)].slice(0, 12);
+}
+
+function buildProductRecommendations(
+  convo: Conversation,
+  products: DolibarrProduct[]
+): ConversationProductRecommendation[] {
+  const attributeCandidates = buildConversationAttributeCandidates(convo);
+  if (!attributeCandidates.length || !products.length) return [];
+
+  const recommendations = products
+    .map((product) => {
+      const label = (product.label || product.ref || "Product").trim();
+      const ref = (product.ref || "").trim() || null;
+      const searchable = normalizeMatcherText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      );
+      if (!searchable) return null;
+
+      const matchedAttributes = attributeCandidates.filter((attribute) => {
+        if (attribute.includes(" ")) {
+          return searchable.includes(attribute);
+        }
+        return ` ${searchable} `.includes(` ${attribute} `);
+      });
+      if (!matchedAttributes.length) return null;
+
+      const highIntentBoost = convo.buyingIntent === "high" ? 2 : convo.buyingIntent === "medium" ? 1 : 0;
+      const score = matchedAttributes.length * 3 + highIntentBoost;
+      const leadAttribute = toTitleCase(matchedAttributes[0]);
+      return {
+        id: String(product.id ?? `${label}_${ref || "product"}`),
+        label,
+        ref,
+        matchedAttributes: matchedAttributes.slice(0, 3).map((entry) => toTitleCase(entry)),
+        reason: `${label} can be pitched because it aligns with ${leadAttribute}${matchedAttributes.length > 1 ? " and similar needs mentioned in the conversation" : " mentioned in the conversation"}.`,
+        score,
+      };
+    })
+    .filter(
+      (
+        item
+      ): item is ConversationProductRecommendation & {
+        score: number;
+      } => Boolean(item)
+    )
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, 3)
+    .map(({ score: _score, ...item }) => item);
+
+  return recommendations;
+}
+
 function resolveAiRuntimeConfig(
   settings: Record<string, string>,
   currentModel?: string
@@ -92,23 +203,17 @@ function resolveAiRuntimeConfig(
   apiKey: string;
   model: string;
 } {
-  const envGeminiKey = (
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY ||
-    process.env.EXPO_PUBLIC_GEMINI_API ||
-    process.env.GEMINI_API_KEY ||
-    process.env.GEMINI_API ||
-    process.env.gemini_API ||
-    process.env.gemini_APi ||
+  const envGroqKey = (
+    process.env.EXPO_PUBLIC_GROQ_API_KEY ||
+    process.env.GROQ_API_KEY ||
     ""
   ).trim();
-  const apiKey = normalizeApiSecret(envGeminiKey || settings.aiApiKey || "");
-  const envGeminiModel = (
-    process.env.EXPO_PUBLIC_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash"
+  const apiKey = normalizeApiSecret(envGroqKey || settings.aiApiKey || "");
+  const envGroqModel = (
+    process.env.EXPO_PUBLIC_GROQ_MODEL || process.env.GROQ_MODEL || "openai/gpt-oss-20b"
   ).trim();
-  const configuredModel = (settings.aiModel || currentModel || envGeminiModel).trim();
-  const model = configuredModel.toLowerCase().startsWith("gemini-")
-    ? configuredModel
-    : envGeminiModel;
+  const configuredModel = (settings.aiModel || currentModel || envGroqModel).trim();
+  const model = configuredModel || envGroqModel;
   return {
     apiKey,
     model,
@@ -188,11 +293,12 @@ export default function ConversationDetailScreen() {
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [aiConfigured, setAiConfigured] = useState(false);
-  const [aiModel, setAiModel] = useState("gemini-2.5-flash");
+  const [aiModel, setAiModel] = useState("openai/gpt-oss-20b");
   const [audioBusy, setAudioBusy] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioPositionMs, setAudioPositionMs] = useState(0);
   const [audioDurationMs, setAudioDurationMs] = useState(0);
+  const [productCatalog, setProductCatalog] = useState<DolibarrProduct[]>([]);
   const autoAttemptedRef = useRef(false);
   const audioSoundRef = useRef<Audio.Sound | null>(null);
 
@@ -205,14 +311,29 @@ export default function ConversationDetailScreen() {
     const settings = await getSettings();
     const runtimeConfig = resolveAiRuntimeConfig(settings);
     setAiConfigured(Boolean(runtimeConfig.apiKey));
-    setAiModel(runtimeConfig.model || "gemini-2.5-flash");
+    setAiModel(runtimeConfig.model || "openai/gpt-oss-20b");
+  }, []);
+
+  const loadProductCatalog = useCallback(async () => {
+    try {
+      const products = await getDolibarrProducts({ limit: 120 });
+      setProductCatalog(Array.isArray(products) ? products : []);
+    } catch {
+      setProductCatalog([]);
+    }
   }, []);
 
   useEffect(() => {
     autoAttemptedRef.current = false;
     void loadConversation();
     void loadAiConfig();
-  }, [loadConversation, loadAiConfig]);
+    void loadProductCatalog();
+  }, [loadAiConfig, loadConversation, loadProductCatalog]);
+
+  const productRecommendations = useMemo(
+    () => (convo ? buildProductRecommendations(convo, productCatalog) : []),
+    [convo, productCatalog]
+  );
 
   const runAiAnalysis = useCallback(
     async (mode: "auto" | "manual") => {
@@ -236,7 +357,7 @@ export default function ConversationDetailScreen() {
         if (mode === "manual") {
           Alert.alert(
             "AI API Key Missing",
-            "Configure the Gemini key in env/code, then run analysis."
+            "Configure the Groq key in env/code, then run analysis."
           );
         }
         return;
@@ -775,6 +896,81 @@ export default function ConversationDetailScreen() {
           </Animated.View>
         ) : null}
 
+        {canViewAnalysis && productRecommendations.length > 0 ? (
+          <Animated.View entering={FadeInDown.duration(400).delay(480)}>
+            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+              Recommended Products to Pitch
+            </Text>
+            <View style={[styles.listCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+              {productRecommendations.map((item, idx) => (
+                <View
+                  key={item.id}
+                  style={[
+                    styles.productRecommendationItem,
+                    idx < productRecommendations.length - 1 && {
+                      borderBottomWidth: 0.5,
+                      borderBottomColor: colors.borderLight,
+                    },
+                  ]}
+                >
+                  <View style={[styles.productRecommendationIcon, { backgroundColor: colors.primary + "15" }]}>
+                    <Ionicons name="cube-outline" size={16} color={colors.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={styles.productRecommendationHeader}>
+                      <Text
+                        style={[
+                          styles.productRecommendationTitle,
+                          { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                        ]}
+                      >
+                        {item.label}
+                      </Text>
+                      {item.ref ? (
+                        <View style={[styles.metaPill, { backgroundColor: colors.secondary + "18" }]}>
+                          <Text
+                            style={[
+                              styles.metaPillText,
+                              { color: colors.secondary, fontFamily: "Inter_600SemiBold" },
+                            ]}
+                          >
+                            {item.ref}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text
+                      style={[
+                        styles.productRecommendationReason,
+                        { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                      ]}
+                    >
+                      {item.reason}
+                    </Text>
+                    <View style={styles.productAttributeRow}>
+                      {item.matchedAttributes.map((attribute) => (
+                        <View
+                          key={`${item.id}_${attribute}`}
+                          style={[styles.productAttributeChip, { backgroundColor: colors.primary + "12" }]}
+                        >
+                          <Text
+                            style={[
+                              styles.productAttributeChipText,
+                              { color: colors.primary, fontFamily: "Inter_500Medium" },
+                            ]}
+                          >
+                            {attribute}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </Animated.View>
+        ) : null}
+
         {canViewAnalysis && convo.objections.length > 0 && (
           <Animated.View entering={FadeInDown.duration(400).delay(500)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
@@ -1044,6 +1240,49 @@ const styles = StyleSheet.create({
   tag: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
   tagText: { fontSize: 12 },
   listCard: { borderRadius: 16, overflow: "hidden", marginBottom: 20, borderWidth: 1 },
+  productRecommendationItem: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  productRecommendationIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  productRecommendationHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginBottom: 6,
+  },
+  productRecommendationTitle: {
+    flex: 1,
+    fontSize: 14,
+  },
+  productRecommendationReason: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  productAttributeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 10,
+  },
+  productAttributeChip: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  productAttributeChipText: { fontSize: 11.5 },
   listItem: {
     flexDirection: "row",
     alignItems: "flex-start",

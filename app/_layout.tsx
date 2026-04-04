@@ -15,7 +15,8 @@ import {
   stopBackgroundLocationTracking,
 } from "@/lib/background-location";
 import { flushAttendanceQueue } from "@/lib/attendance-api";
-import { getSettings, isCheckedIn, subscribeSettingsUpdates } from "@/lib/storage";
+import { getAttendance, getSettings, isCheckedIn, setCheckedIn, subscribeSettingsUpdates } from "@/lib/storage";
+import type { AttendanceRecord } from "@/lib/types";
 import { applyHapticsPolicy } from "@/lib/haptics-policy";
 import {
   initializeDeviceNotifications,
@@ -31,6 +32,23 @@ import {
 } from "@expo-google-fonts/inter";
 
 SplashScreen.preventAutoHideAsync();
+
+function resolveCheckedInFromRecords(
+  records: AttendanceRecord[],
+  userId: string,
+  userName?: string | null
+): boolean | null {
+  const normalizedUserName = (userName || "").trim().toLowerCase();
+  const latest = records
+    .filter(
+      (entry) =>
+        entry.userId === userId ||
+        ((entry.userName || "").trim().toLowerCase() === normalizedUserName && normalizedUserName.length > 0)
+    )
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
+  if (!latest) return null;
+  return latest.type === "checkin";
+}
 
 function FragmentKeyboardProvider({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
@@ -93,7 +111,12 @@ function AppShell() {
         return;
       }
 
-      const checkedIn = await isCheckedIn();
+      const [checkedInFlag, attendanceRecords] = await Promise.all([isCheckedIn(), getAttendance()]);
+      const derivedCheckedIn = resolveCheckedInFromRecords(attendanceRecords, user.id, user.name);
+      const checkedIn = derivedCheckedIn ?? checkedInFlag;
+      if (checkedIn !== checkedInFlag) {
+        await setCheckedIn(checkedIn);
+      }
       if (!checkedIn) {
         await stopBackgroundLocationTracking();
         return;
@@ -109,7 +132,7 @@ function AppShell() {
         await flushBackgroundLocationQueue();
       }
     },
-    [user?.id]
+    [user?.id, user?.name]
   );
 
   useEffect(() => {

@@ -204,15 +204,15 @@ function buildOsmHtml(payload: {
       }
       .route-marker-wrap {
         position: relative;
-        width: 28px;
-        height: 28px;
+        width: 36px;
+        height: 36px;
       }
       .route-marker {
         width: 22px;
         height: 22px;
         position: absolute;
-        top: 3px;
-        left: 3px;
+        top: 7px;
+        left: 7px;
         border-radius: 999px;
         border: 3px solid #ffffff;
         box-shadow: 0 10px 16px rgba(2, 6, 23, 0.35);
@@ -229,23 +229,31 @@ function buildOsmHtml(payload: {
         box-shadow: none;
       }
       .route-marker--nearby {
-        width: 24px;
-        height: 24px;
-        top: 2px;
-        left: 2px;
+        width: 26px;
+        height: 26px;
+        top: 5px;
+        left: 5px;
       }
       .route-marker-pulse {
         position: absolute;
-        inset: 0;
+        inset: -1px;
         border-radius: 999px;
         background: currentColor;
-        opacity: 0.25;
-        animation: markerPulse 1.75s ease-out infinite;
+        opacity: 0.28;
+        animation: markerPulse 1.6s linear infinite;
+      }
+      .route-marker-pulse--secondary {
+        inset: 4px;
+        opacity: 0.2;
+        animation-duration: 1.6s;
+        animation-delay: 0.22s;
       }
       @keyframes markerPulse {
-        0% { transform: scale(0.82); opacity: 0.34; }
-        70% { transform: scale(1.75); opacity: 0; }
-        100% { transform: scale(1.75); opacity: 0; }
+        0% { transform: scale(0.78); opacity: 0; }
+        10% { transform: scale(0.94); opacity: 0.64; }
+        22% { transform: scale(1.26); opacity: 0.22; }
+        34% { transform: scale(1.52); opacity: 0; }
+        100% { transform: scale(1.52); opacity: 0; }
       }
     </style>
   </head>
@@ -292,13 +300,14 @@ function buildOsmHtml(payload: {
           html: \`
             <div class="route-marker-wrap" style="color: \${marker.color || "#22d3ee"}">
               \${marker.isNearby ? '<div class="route-marker-pulse"></div>' : ""}
+              \${marker.isNearby ? '<div class="route-marker-pulse route-marker-pulse--secondary"></div>' : ""}
               <div class="route-marker \${marker.isNearby ? "route-marker--nearby" : ""} \${marker.renderMode === "pulse_only" ? "route-marker--ghost" : ""}" style="background: \${marker.color || "#22d3ee"}">
                 \${marker.label || ""}
               </div>
             </div>
           \`,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14],
+          iconSize: [36, 36],
+          iconAnchor: [18, 18],
         });
         const mapMarker = L.marker([marker.lat, marker.lng], { icon }).addTo(map);
         if (marker.kind === "planned_stop") {
@@ -382,16 +391,16 @@ function buildMaptilerHtml(payload: {
         position: relative;
       }
       .route-marker--nearby {
-        width: 24px;
-        height: 24px;
+        width: 26px;
+        height: 26px;
       }
       .route-marker-pulse {
         position: absolute;
-        inset: -5px;
+        inset: -8px;
         border-radius: 999px;
         background: inherit;
-        opacity: 0.25;
-        animation: markerPulse 1.75s ease-out infinite;
+        opacity: 0.28;
+        animation: markerPulse 1.6s linear infinite;
       }
       .route-marker-label {
         position: absolute;
@@ -409,9 +418,11 @@ function buildMaptilerHtml(payload: {
         box-shadow: none;
       }
       @keyframes markerPulse {
-        0% { transform: scale(0.82); opacity: 0.34; }
-        70% { transform: scale(1.75); opacity: 0; }
-        100% { transform: scale(1.75); opacity: 0; }
+        0% { transform: scale(0.78); opacity: 0; }
+        10% { transform: scale(0.94); opacity: 0.64; }
+        22% { transform: scale(1.26); opacity: 0.22; }
+        34% { transform: scale(1.52); opacity: 0; }
+        100% { transform: scale(1.52); opacity: 0; }
       }
     </style>
   </head>
@@ -516,10 +527,10 @@ function buildMaptilerHtml(payload: {
               "circle-radius": [
                 "case",
                 ["==", ["get", "renderMode"], "pulse_only"],
-                14,
-                17
+                17,
+                21
               ],
-              "circle-opacity": 0.18,
+              "circle-opacity": 0.24,
               "circle-stroke-width": 0
             }
           });
@@ -534,7 +545,7 @@ function buildMaptilerHtml(payload: {
               "circle-radius": [
                 "case",
                 ["==", ["get", "isNearby"], true],
-                12,
+                14,
                 11
               ],
               "circle-stroke-color": "#FFFFFF",
@@ -1122,16 +1133,18 @@ export function RouteMapNative({
       Animated.sequence([
         Animated.timing(nearbyPulse, {
           toValue: 1,
-          duration: 900,
-          easing: Easing.out(Easing.quad),
+          duration: 210,
+          easing: Easing.out(Easing.cubic),
           useNativeDriver: true,
         }),
+        Animated.delay(80),
         Animated.timing(nearbyPulse, {
           toValue: 0,
-          duration: 900,
-          easing: Easing.inOut(Easing.quad),
+          duration: 230,
+          easing: Easing.in(Easing.quad),
           useNativeDriver: true,
         }),
+        Animated.delay(520),
       ])
     );
     loop.start();
@@ -1171,13 +1184,31 @@ export function RouteMapNative({
         {
           scale: nearbyPulse.interpolate({
             inputRange: [0, 1],
-            outputRange: [0.9, 1.8],
+            outputRange: [0.82, 1.72],
           }),
         },
       ],
       opacity: nearbyPulse.interpolate({
         inputRange: [0, 1],
-        outputRange: [0.34, 0],
+        outputRange: [0, 0.68],
+      }),
+    }),
+    [nearbyPulse]
+  );
+
+  const nearbyPulseInnerStyle = useMemo(
+    () => ({
+      transform: [
+        {
+          scale: nearbyPulse.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0.92, 1.28],
+          }),
+        },
+      ],
+      opacity: nearbyPulse.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0, 0.4],
       }),
     }),
     [nearbyPulse]
@@ -1195,14 +1226,24 @@ export function RouteMapNative({
         style={styles.markerTouchArea}
       >
         {showNearbyCustomerPulse ? (
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.nearbyPulseRing,
-              { backgroundColor: pulseColor },
-              nearbyPulseOuterStyle,
-            ]}
-          />
+          <>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.nearbyPulseRing,
+                { backgroundColor: pulseColor },
+                nearbyPulseOuterStyle,
+              ]}
+            />
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.nearbyPulseRingInner,
+                { backgroundColor: pulseColor },
+                nearbyPulseInnerStyle,
+              ]}
+            />
+          </>
         ) : null}
         <View
           style={[
@@ -2297,8 +2338,8 @@ const styles = StyleSheet.create({
     lineHeight: 17,
   },
   markerTouchArea: {
-    width: 44,
-    height: 44,
+    width: 48,
+    height: 48,
     position: "relative",
     overflow: "visible",
     alignItems: "center",
@@ -2306,16 +2347,24 @@ const styles = StyleSheet.create({
   },
   nearbyPulseRing: {
     position: "absolute",
-    left: 5,
-    top: 5,
+    left: 2,
+    top: 2,
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+  },
+  nearbyPulseRingInner: {
+    position: "absolute",
+    left: 7,
+    top: 7,
     width: 34,
     height: 34,
     borderRadius: 999,
   },
   pinWrap: {
     position: "absolute",
-    left: 11,
-    top: 11,
+    left: 13,
+    top: 13,
     width: 22,
     height: 22,
     borderRadius: 11,
@@ -2325,15 +2374,15 @@ const styles = StyleSheet.create({
     borderColor: "#FFFFFF",
   },
   pinWrapNearby: {
-    left: 10,
-    top: 10,
+    left: 12,
+    top: 12,
     width: 24,
     height: 24,
     borderRadius: 12,
   },
   historyAlertPinWrap: {
-    left: 9,
-    top: 9,
+    left: 11,
+    top: 11,
     width: 26,
     height: 26,
     borderRadius: 13,

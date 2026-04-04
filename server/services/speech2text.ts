@@ -10,6 +10,11 @@ const HF_INFERENCE_BASE_URL = (
 const REVUP_API_BASE_URL = (
   process.env.REVUP_API_BASE_URL?.trim() || "https://revapi.reverieinc.com"
 ).replace(/\/+$/, "");
+const GROQ_API_BASE_URL = (
+  process.env.GROQ_API_BASE_URL?.trim() ||
+  process.env.EXPO_PUBLIC_GROQ_API_BASE_URL?.trim() ||
+  "https://api.groq.com/openai/v1"
+).replace(/\/+$/, "");
 const GEMINI_API_BASE_URL = (
   process.env.GEMINI_API_BASE_URL?.trim() ||
   process.env.EXPO_PUBLIC_GEMINI_API_BASE_URL?.trim() ||
@@ -18,11 +23,13 @@ const GEMINI_API_BASE_URL = (
 const REVUP_APP_NAME = process.env.REVUP_APP_NAME?.trim() || "stt_file";
 const REVUP_DEFAULT_SOURCE_LANG = process.env.REVUP_SOURCE_LANG?.trim() || "en";
 const REVUP_DEFAULT_DOMAIN = process.env.REVUP_DOMAIN?.trim() || "generic";
-const DEFAULT_GEMINI_STT_MODEL = (
-  process.env.GEMINI_STT_MODEL?.trim() ||
-  process.env.GEMINI_MODEL?.trim() ||
-  process.env.EXPO_PUBLIC_GEMINI_MODEL?.trim() ||
-  "gemini-2.5-flash-lite"
+const DEFAULT_GROQ_STT_MODEL = (
+  process.env.GROQ_STT_MODEL?.trim() ||
+  process.env.GROQ_TRANSCRIPTION_MODEL?.trim() ||
+  process.env.EXPO_PUBLIC_GROQ_STT_MODEL?.trim() ||
+  process.env.GROQ_MODEL?.trim() ||
+  process.env.EXPO_PUBLIC_GROQ_MODEL?.trim() ||
+  "whisper-large-v3-turbo"
 ).trim();
 const DEFAULT_FAIRSEQ_S2T_MODEL =
   process.env.HF_S2T_MODEL?.trim() || "openai/whisper-large-v3-turbo";
@@ -30,7 +37,7 @@ const DEFAULT_FALLBACK_MODEL =
   process.env.HF_STT_FALLBACK_MODEL?.trim() || "openai/whisper-large-v3";
 const DEFAULT_PROVIDER_ORDER = (
   process.env.SPEECH_TO_TEXT_PROVIDER_ORDER?.trim() ||
-  "gemini,revup,local_python,huggingface"
+  "groq"
 ).toLowerCase();
 const LOCAL_STT_ENABLED =
   (process.env.LOCAL_STT_ENABLED?.trim() || "true").toLowerCase() !== "false";
@@ -55,12 +62,16 @@ const REVUP_TIMEOUT_MS = Math.max(
   20_000,
   Number(process.env.REVUP_TIMEOUT_MS || 120_000)
 );
+const GROQ_TIMEOUT_MS = Math.max(
+  20_000,
+  Number(process.env.GROQ_TIMEOUT_MS || 120_000)
+);
 const GEMINI_TIMEOUT_MS = Math.max(
   20_000,
   Number(process.env.GEMINI_TIMEOUT_MS || 120_000)
 );
 
-type SpeechProvider = "gemini" | "revup" | "local_python" | "huggingface";
+type SpeechProvider = "groq" | "gemini" | "revup" | "local_python" | "huggingface";
 
 export interface DiarizedTranscriptEntry {
   transcript: string;
@@ -97,7 +108,7 @@ interface TranscribeRequest {
   model?: string | null;
   fallbackModel?: string | null;
   huggingFaceToken?: string | null;
-  geminiApiKey?: string | null;
+  groqApiKey?: string | null;
   revupApiKey?: string | null;
   revupAppId?: string | null;
   provider?: string | null;
@@ -123,10 +134,10 @@ function isLikelyHuggingFaceModel(value: string | null | undefined): boolean {
   return candidate.includes("/");
 }
 
-function isLikelyGeminiModel(value: string | null | undefined): boolean {
+function isLikelyGroqTranscriptionModel(value: string | null | undefined): boolean {
   const candidate = value?.trim().toLowerCase();
   if (!candidate) return false;
-  return candidate.startsWith("gemini");
+  return candidate.includes("whisper") || candidate.includes("distil-whisper");
 }
 
 function appendUniqueKey(target: string[], value: string | null | undefined): void {
@@ -145,23 +156,13 @@ function appendKeyList(target: string[], value: string | null | undefined): void
   }
 }
 
-function getGeminiApiKeyPool(explicitKey?: string | null): string[] {
+function getGroqApiKeyPool(explicitKey?: string | null): string[] {
   const keys: string[] = [];
   appendKeyList(keys, explicitKey);
-  appendKeyList(keys, process.env.GEMINI_API_KEYS);
-  appendKeyList(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEYS);
-  appendUniqueKey(keys, process.env.GEMINI_API_KEY);
-  appendUniqueKey(keys, process.env.GEMINI_API_KEY_1);
-  appendUniqueKey(keys, process.env.GEMINI_API);
-  appendUniqueKey(keys, process.env.GEMINI_API_KEY_2);
-  appendUniqueKey(keys, process.env.GEMINI_API_KEY_3);
-  appendUniqueKey(keys, process.env.GEMINI_SECONDARY_API_KEY);
-  appendUniqueKey(keys, process.env.GEMINI_API_KEY_BACKUP);
-  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY);
-  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY_1);
-  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY_2);
-  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY_3);
-  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API);
+  appendKeyList(keys, process.env.GROQ_API_KEYS);
+  appendKeyList(keys, process.env.EXPO_PUBLIC_GROQ_API_KEYS);
+  appendUniqueKey(keys, process.env.GROQ_API_KEY);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GROQ_API_KEY);
   return keys;
 }
 
@@ -180,10 +181,10 @@ function parseProviderOrder(input: string): SpeechProvider[] {
   const providers: SpeechProvider[] = [];
   for (const chunk of chunks) {
     if (
-      (chunk === "gemini" || chunk === "google" || chunk === "google_gemini") &&
-      !providers.includes("gemini")
+      (chunk === "groq" || chunk === "groq_whisper" || chunk === "whisper") &&
+      !providers.includes("groq")
     ) {
-      providers.push("gemini");
+      providers.push("groq");
       continue;
     }
     if (
@@ -211,10 +212,10 @@ function parseProviderOrder(input: string): SpeechProvider[] {
     }
   }
   if (!providers.length) {
-    providers.push("gemini", "revup", "local_python", "huggingface");
+    providers.push("groq", "revup", "local_python", "huggingface");
   }
-  if (providers.includes("gemini")) {
-    return ["gemini", ...providers.filter((provider) => provider !== "gemini")];
+  if (providers.includes("groq")) {
+    return ["groq", ...providers.filter((provider) => provider !== "groq")];
   }
   if (providers.includes("revup")) {
     return ["revup", ...providers.filter((provider) => provider !== "revup")];
@@ -471,6 +472,9 @@ function combineWarnings(...warnings: (string | undefined | null)[]): string | u
 }
 
 function getModelWarning(provider: SpeechProvider, model: string): string | undefined {
+  if (provider === "groq") {
+    return "Groq Whisper transcription is optimized for fast speech-to-text. Speaker separation quality still depends on the audio.";
+  }
   if (provider === "gemini") {
     return "Gemini STT quality varies with accent/noise and may not always include speaker separation.";
   }
@@ -968,6 +972,147 @@ async function callGeminiModel(params: {
   throw new Speech2TextError("Gemini speech-to-text request timed out.", 504);
 }
 
+async function callGroqModel(params: {
+  model: string;
+  audio: Buffer;
+  mimeType: string;
+  apiKey: string;
+  languageCode?: string;
+}): Promise<{
+  transcript: string;
+  latencyMs: number;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
+  const startedAt = Date.now();
+  const endpoint = `${GROQ_API_BASE_URL}/audio/transcriptions`;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+    try {
+      const formData = new FormData();
+      formData.append(
+        "file",
+        new Blob([toBlobCompatiblePart(params.audio)], { type: params.mimeType }),
+        `audio${guessFileExtension(params.mimeType)}`
+      );
+      formData.append("model", params.model);
+      formData.append("response_format", "verbose_json");
+      if (params.languageCode?.trim()) {
+        formData.append("language", params.languageCode.trim());
+      }
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${params.apiKey}`,
+        },
+        body: formData,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      const payload = parseBody(text);
+
+      if (!response.ok) {
+        const message = getErrorMessage(response.status, payload);
+        if (attempt === 0 && shouldRetry(response.status, message)) {
+          await sleep(TRANSCRIBE_RETRY_DELAY_MS);
+          continue;
+        }
+        throw new Speech2TextError(message, response.status);
+      }
+
+      const transcript = extractTranscript(payload);
+      if (!transcript) {
+        throw new Speech2TextError("Groq STT returned empty transcript.", 422);
+      }
+
+      return {
+        transcript,
+        latencyMs: Date.now() - startedAt,
+        diarizedTranscript: {
+          entries: [{ transcript, speakerId: null, startTimeSeconds: null, endTimeSeconds: null }],
+        },
+      };
+    } catch (error) {
+      if (attempt === 0 && error instanceof DOMException && error.name === "AbortError") {
+        continue;
+      }
+      if (error instanceof Speech2TextError) throw error;
+      const message =
+        error instanceof Error ? error.message : "Groq STT request failed.";
+      throw new Speech2TextError(message, 502);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw new Speech2TextError("Groq speech-to-text request timed out.", 504);
+}
+
+function shouldRotateGroqKey(error: unknown): boolean {
+  if (!(error instanceof Speech2TextError)) return false;
+  const message = error.message.toLowerCase();
+  if ([401, 403, 429].includes(error.statusCode)) return true;
+  if (/\bquota\b|\brate\b|credits|billing|api key|permission|unauthorized/.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+async function runGroqWithKeyRotation(params: {
+  model: string;
+  audio: Buffer;
+  mimeType: string;
+  apiKeys: string[];
+  languageCode?: string;
+}): Promise<{
+  transcript: string;
+  model: string;
+  fallbackUsed: boolean;
+  latencyMs: number;
+  warning?: string;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
+  const failures: string[] = [];
+  for (let index = 0; index < params.apiKeys.length; index += 1) {
+    const key = params.apiKeys[index];
+    try {
+      const result = await callGroqModel({
+        model: params.model,
+        audio: params.audio,
+        mimeType: params.mimeType,
+        apiKey: key,
+        languageCode: params.languageCode,
+      });
+      return {
+        transcript: result.transcript,
+        model: params.model,
+        fallbackUsed: index > 0,
+        latencyMs: result.latencyMs,
+        warning:
+          index > 0 ? `Groq backup key #${index + 1} activated after primary key failure.` : undefined,
+        ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Groq STT failed unexpectedly.";
+      failures.push(`key#${index + 1}: ${message}`);
+      if (index < params.apiKeys.length - 1 && shouldRotateGroqKey(error)) {
+        continue;
+      }
+      if (index < params.apiKeys.length - 1 && !shouldRotateGroqKey(error)) {
+        continue;
+      }
+    }
+  }
+
+  throw new Speech2TextError(
+    failures.join(" | ") || "Groq STT failed for all configured API keys.",
+    502
+  );
+}
+
 function shouldRotateGeminiKey(error: unknown): boolean {
   if (!(error instanceof Speech2TextError)) return false;
   const message = error.message.toLowerCase();
@@ -1046,7 +1191,7 @@ export async function transcribeSpeechWithFairseqS2T(
 
   const rawMimeType = request.mimeType?.trim().toLowerCase() || "audio/webm";
   const mimeType = rawMimeType === "audio/mp4" ? "audio/m4a" : rawMimeType;
-  const geminiApiKeys = getGeminiApiKeyPool(request.geminiApiKey);
+  const groqApiKeys = getGroqApiKeyPool(request.groqApiKey);
   const revupApiKey =
     request.revupApiKey?.trim() ||
     process.env.REVUP_API_KEY?.trim() ||
@@ -1064,9 +1209,11 @@ export async function transcribeSpeechWithFairseqS2T(
     "";
 
   const requestedModel = request.model?.trim() || "";
-  const geminiModel = isLikelyGeminiModel(requestedModel)
+  const groqModel = isLikelyGroqTranscriptionModel(requestedModel)
     ? requestedModel
-    : DEFAULT_GEMINI_STT_MODEL;
+    : DEFAULT_GROQ_STT_MODEL;
+  const geminiApiKeys: string[] = [];
+  const geminiModel = requestedModel;
   const localModel = resolveLocalModel(requestedModel);
   const hfPrimaryModel =
     requestedModel && isLikelyHuggingFaceModel(requestedModel)
@@ -1075,12 +1222,49 @@ export async function transcribeSpeechWithFairseqS2T(
   const hfFallbackModel = toModelId(request.fallbackModel, DEFAULT_FALLBACK_MODEL);
   const providerOrder = parseProviderOrder(request.provider?.trim() || DEFAULT_PROVIDER_ORDER);
 
+  let groqFailure: string | null = null;
   let geminiFailure: string | null = null;
   let revupFailure: string | null = null;
   let localFailure: string | null = null;
   let huggingFaceFailure: string | null = null;
 
   for (const provider of providerOrder) {
+    if (provider === "groq") {
+      if (!groqApiKeys.length) {
+        groqFailure = "Groq API key missing.";
+        continue;
+      }
+      try {
+        const result = await runGroqWithKeyRotation({
+          model: groqModel,
+          audio: request.audio,
+          mimeType,
+          apiKeys: groqApiKeys,
+          languageCode: request.languageCode?.trim() || "",
+        });
+        return {
+          transcript: result.transcript,
+          provider: "groq",
+          model: result.model,
+          fallbackUsed: result.fallbackUsed,
+          warning: combineWarnings(
+            revupFailure,
+            localFailure,
+            huggingFaceFailure,
+            result.warning,
+            getModelWarning("groq", result.model)
+          ),
+          latencyMs: result.latencyMs,
+          ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Groq STT failed unexpectedly.";
+        groqFailure = message;
+      }
+      continue;
+    }
+
     if (provider === "gemini") {
       if (!geminiApiKeys.length) {
         geminiFailure = "Gemini API key missing.";
@@ -1102,6 +1286,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: result.model,
           fallbackUsed: result.fallbackUsed,
           warning: combineWarnings(
+            groqFailure,
             revupFailure,
             localFailure,
             huggingFaceFailure,
@@ -1139,6 +1324,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: REVUP_APP_NAME,
           fallbackUsed: false,
           warning: combineWarnings(
+            groqFailure,
             geminiFailure,
             localFailure,
             huggingFaceFailure,
@@ -1175,6 +1361,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: localModel,
           fallbackUsed: false,
           warning: combineWarnings(
+            groqFailure,
             geminiFailure,
             revupFailure,
             getModelWarning("local_python", localModel)
@@ -1203,6 +1390,7 @@ export async function transcribeSpeechWithFairseqS2T(
       return {
         ...hfResult,
         warning: combineWarnings(
+          groqFailure,
           geminiFailure,
           revupFailure,
           localFailure,
@@ -1217,7 +1405,7 @@ export async function transcribeSpeechWithFairseqS2T(
   }
 
   throw new Speech2TextError(
-    combineWarnings(geminiFailure, revupFailure, localFailure, huggingFaceFailure) ||
+    combineWarnings(groqFailure, geminiFailure, revupFailure, localFailure, huggingFaceFailure) ||
       "All speech-to-text providers failed.",
     502
   );

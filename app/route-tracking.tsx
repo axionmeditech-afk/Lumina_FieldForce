@@ -94,6 +94,32 @@ function normalizeIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+function resolveCarryoverAttendanceRecord(
+  records: AttendanceRecord[],
+  selectedDate: string
+): AttendanceRecord | null {
+  const ordered = [...records].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  let activeCheckIn: AttendanceRecord | null = null;
+
+  for (const entry of ordered) {
+    const entryDateKey = toMumbaiDateKey(new Date(entry.timestamp));
+    if (entryDateKey >= selectedDate) {
+      break;
+    }
+
+    if (entry.type === "checkin") {
+      activeCheckIn = entry;
+      continue;
+    }
+
+    if (entry.type === "checkout" && activeCheckIn) {
+      activeCheckIn = null;
+    }
+  }
+
+  return activeCheckIn;
+}
+
 function addTrackedUserIdAliases(bucket: Set<string>, value: string | null | undefined): void {
   const normalized = (value || "").trim();
   if (!normalized) return;
@@ -391,7 +417,7 @@ export default function RouteTrackingScreen() {
   const isPrivilegedViewer =
     user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
   const canViewTracking = isPrivilegedViewer;
-  const selectedDate = useMemo(() => getMumbaiDateKeyByOffset(dayOffset), [dayOffset]);
+  const selectedDate = useMemo(() => getMumbaiDateKeyByOffset(dayOffset), [dayOffset, mumbaiNowLabel]);
   const visibleEmployees = useMemo(() => {
     if (!user) return [];
     if (isPrivilegedViewer) {
@@ -672,10 +698,25 @@ export default function RouteTrackingScreen() {
         mergedAttendanceSnapshot,
         selectedUserId
       );
-      const selectedUserAttendance = mergedAttendanceSnapshot
-        .filter((entry) => aliases.has(entry.userId))
-        .filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate))
+      const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
+      const selectedUserAttendanceAll = mergedAttendanceSnapshot
+        .filter(
+          (entry) =>
+            aliases.has(entry.userId) ||
+            (selectedEmployeeNameForAttendance &&
+              normalizeIdentity(entry.userName) === selectedEmployeeNameForAttendance)
+        )
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      const carryoverAttendance = resolveCarryoverAttendanceRecord(
+        selectedUserAttendanceAll,
+        selectedDate
+      );
+      const selectedUserAttendance = dedupeById(
+        [
+          ...(carryoverAttendance ? [carryoverAttendance] : []),
+          ...selectedUserAttendanceAll.filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate)),
+        ].sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      );
       const sessionWindow = resolveRouteSessionWindow(selectedUserAttendance);
       const latestLocalSelectedAttendance =
         selectedUserAttendance.length > 0
@@ -724,15 +765,7 @@ export default function RouteTrackingScreen() {
       }
 
       const localTimeline = buildRouteTimeline(selectedUserId, selectedDate, dayLocalPoints);
-      const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
-      const localAttendanceEvents = mergedAttendanceSnapshot
-        .filter((entry) => isMumbaiDateKey(entry.timestamp, selectedDate))
-        .filter(
-          (entry) =>
-            aliases.has(entry.userId) ||
-            (selectedEmployeeNameForAttendance &&
-              normalizeIdentity(entry.userName) === selectedEmployeeNameForAttendance)
-        )
+      const localAttendanceEvents = selectedUserAttendance
         .map((entry) => ({
           id: entry.id,
           type: entry.type,

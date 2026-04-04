@@ -50,7 +50,7 @@ import {
   isMySqlStateEnabled,
   setMySqlStateValue,
 } from "@/server/services/mysql-state";
-import { analyzeConversationWithAI } from "@/lib/ai-sales-analysis";
+import { analyzeConversationWithAI } from "@/lib/aiSalesAnalysis";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 
 const MAX_LOCATION_ACCURACY_METERS = 120;
@@ -58,8 +58,14 @@ const MAX_EVIDENCE_AGE_MS = 2 * 60 * 1000;
 const MAX_CAPTURE_DRIFT_MS = 2 * 60 * 1000;
 const MIN_LOCATION_SAMPLE_COUNT = 2;
 const MAX_TRANSCRIBE_AUDIO_BYTES = 12 * 1024 * 1024;
+const DEFAULT_GROQ_API_KEY =
+  (
+    process.env.GROQ_API_KEY ||
+    process.env.EXPO_PUBLIC_GROQ_API_KEY ||
+    ""
+  ).trim();
 const DEFAULT_AI_MODEL =
-  (process.env.GEMINI_MODEL || process.env.EXPO_PUBLIC_GEMINI_MODEL || "gemini-2.5-flash").trim();
+  (process.env.GROQ_MODEL || process.env.EXPO_PUBLIC_GROQ_MODEL || "openai/gpt-oss-20b").trim();
 const DOLIBARR_ENV_ENDPOINT = (
   process.env.DOLIBARR_ENDPOINT ||
   process.env.DOLIBARR_BASE_URL ||
@@ -3980,14 +3986,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const apiKey = normalizeApiSecret(
-      process.env.GEMINI_API_KEY ||
-        process.env.EXPO_PUBLIC_GEMINI_API_KEY ||
-        process.env.GEMINI_API ||
-        process.env.EXPO_PUBLIC_GEMINI_API ||
-        process.env.gemini_API ||
-        process.env.gemini_APi
-    );
+    const apiKey = normalizeApiSecret(DEFAULT_GROQ_API_KEY);
     if (!apiKey) {
       res.status(500).json({ message: "AI key not configured on server." });
       return;
@@ -4002,7 +4001,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         salespersonName,
       });
       res.json({
-        provider: "ai",
+        provider: "groq",
         model,
         result,
       });
@@ -4390,8 +4389,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const withDiarizationRaw = firstString(req.query.with_diarization) || null;
       const withTimestampsRaw = firstString(req.query.with_timestamps) || null;
       const numSpeakersRaw = firstString(req.query.num_speakers) || null;
-      const geminiApiKeysHeader = firstString(req.header("x-gemini-api-keys"));
-      const geminiApiKeyHeader = firstString(req.header("x-gemini-api-key"));
+      const groqApiKeyHeader = firstString(req.header("x-groq-api-key"));
       const revupApiKeyHeader = firstString(req.header("x-revup-api-key"));
       const revupAppIdHeader = firstString(req.header("x-revup-app-id"));
       const hfTokenHeader = firstString(req.header("x-hf-token"));
@@ -4420,11 +4418,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           withDiarization,
           withTimestamps,
           numSpeakers,
-          geminiApiKey:
-            geminiApiKeysHeader ||
-            geminiApiKeyHeader ||
-            firstString(req.query.gemini_api_keys) ||
-            firstString(req.query.gemini_api_key) ||
+          groqApiKey:
+            groqApiKeyHeader ||
+            firstString(req.query.groq_api_key) ||
             null,
           revupApiKey:
             revupApiKeyHeader || firstString(req.query.revup_api_key) || null,

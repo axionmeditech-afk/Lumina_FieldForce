@@ -65,24 +65,17 @@ export default function SettingsScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const aiKeyFromEnv = (
-    process.env.EXPO_PUBLIC_GEMINI_API_KEY ||
-    process.env.EXPO_PUBLIC_GEMINI_API ||
-    process.env.GEMINI_API_KEY ||
-    process.env.GEMINI_API ||
-    process.env.gemini_API ||
-    process.env.gemini_APi ||
+    process.env.EXPO_PUBLIC_GROQ_API_KEY ||
+    process.env.GROQ_API_KEY ||
     ""
   ).trim();
   const configuredAiModel = (
-    process.env.EXPO_PUBLIC_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash"
+    process.env.EXPO_PUBLIC_GROQ_MODEL || process.env.GROQ_MODEL || "openai/gpt-oss-20b"
   ).trim();
   const hasAiEnvKey = Boolean(
-    (process.env.EXPO_PUBLIC_GEMINI_API_KEY || "").trim() ||
-      (process.env.EXPO_PUBLIC_GEMINI_API || "").trim() ||
-      (process.env.GEMINI_API_KEY || "").trim() ||
-      (process.env.GEMINI_API || "").trim() ||
-      (process.env.gemini_API || "").trim() ||
-      (process.env.gemini_APi || "").trim()
+    (process.env.EXPO_PUBLIC_GROQ_API_KEY || "").trim() ||
+      (process.env.GROQ_API_KEY || "").trim() ||
+      aiKeyFromEnv
   );
   const hasHuggingFaceEnvKey = Boolean(
     (process.env.EXPO_PUBLIC_HUGGINGFACE_API_KEY || "").trim() ||

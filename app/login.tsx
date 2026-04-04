@@ -10,6 +10,7 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  Image,
 } from "react-native";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -29,6 +30,8 @@ const SIGNUP_ROLES: { label: string; value: UserRole }[] = [
   { label: "HR", value: "hr" },
 ];
 const AUTH_BRAND_NAME = "Lumina FieldForce";
+const AUTH_HERO_GRADIENT = ["#0F4C81", "#79B9FF"] as const;
+const AUTH_BUTTON_GRADIENT = ["#0E63C9", "#67B7FF"] as const;
 
 export default function LoginScreen() {
   const { login, signup } = useAuth();
@@ -48,10 +51,7 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
 
   const screenSubtitle = useMemo(() => {
-    if (mode === "signin") {
-      return `Sign in to ${AUTH_BRAND_NAME} with your company account`;
-    }
-    return `Join ${AUTH_BRAND_NAME}. Submit account request for admin approval and company access.`;
+    return "";
   }, [mode]);
   const selectedRoleLabel = useMemo(
     () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "Sales",
@@ -135,30 +135,79 @@ export default function LoginScreen() {
         <ScrollView
           contentContainerStyle={[
             styles.scrollContent,
-            { paddingTop: insets.top + 46, paddingBottom: insets.bottom + 40 },
+            { paddingTop: 0, paddingBottom: insets.bottom + 44 },
           ]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <Animated.View entering={FadeInUp.duration(600)} style={styles.header}>
-            <View style={styles.logoContainer}>
-              <LinearGradient
-                colors={[colors.heroStart, colors.heroEnd]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.logoBox}
-              >
-                <MaterialCommunityIcons name="shield-check" size={32} color="#FFFFFF" />
-              </LinearGradient>
+          <Animated.View
+            entering={FadeInUp.duration(600)}
+            style={[styles.header, { paddingTop: insets.top + 8 }]}
+          >
+            <View style={styles.heroGlowLayer} pointerEvents="none">
+              <View
+                style={[styles.heroGlowOrb, styles.heroGlowOrbPrimary, { backgroundColor: "rgba(64, 156, 255, 0.28)" }]}
+              />
+              <View
+                style={[styles.heroGlowOrb, styles.heroGlowOrbSecondary, { backgroundColor: "rgba(13, 87, 181, 0.2)" }]}
+              />
             </View>
-            <Text style={[styles.title, { color: colors.text }]}>{AUTH_BRAND_NAME}</Text>
-            <Text style={[styles.subtitle, { color: colors.textSecondary }]}>{screenSubtitle}</Text>
+
+            <LinearGradient
+              colors={AUTH_HERO_GRADIENT as unknown as string[]}
+              start={{ x: 0.1, y: 0 }}
+              end={{ x: 0.9, y: 1 }}
+              style={styles.heroBackdrop}
+            />
+            <View style={styles.heroPanel}>
+              <View style={styles.brandRow}>
+                <View style={styles.logoContainer}>
+                  <Image
+                    source={require("../assets/images/logo.png")}
+                    style={styles.logoImage}
+                    resizeMode="contain"
+                  />
+                </View>
+                <Text style={[styles.brandRowTitle, { color: "#F7FBFF" }]}>{AUTH_BRAND_NAME}</Text>
+              </View>
+
+              <View
+                style={[
+                  styles.heroBadge,
+                  styles.heroBadgeMinimal,
+                  { backgroundColor: "rgba(255,255,255,0.14)", borderColor: "rgba(255,255,255,0.16)" },
+                ]}
+              >
+                <View style={[styles.heroBadgeDot, { backgroundColor: "#FFFFFF" }]} />
+                <Text style={[styles.heroBadgeText, { color: "#EAF3FF" }]}>
+                  Enterprise sales workspace
+                </Text>
+              </View>
+              <Text style={[styles.subtitle, { color: "rgba(240,247,255,0.84)" }]}>{screenSubtitle}</Text>
+            </View>
           </Animated.View>
 
           <Animated.View
             entering={FadeInDown.duration(600).delay(200)}
-            style={[styles.formContainer, { backgroundColor: colors.glass, borderColor: colors.border }]}
+            style={[
+              styles.formContainer,
+              {
+                backgroundColor: "#FFFFFF",
+                borderColor: "rgba(15, 76, 129, 0.08)",
+                paddingBottom: 34,
+                marginBottom: 6,
+              },
+            ]}
           >
+            <View style={styles.formHeader}>
+              <Text style={[styles.formEyebrow, { color: colors.primary }]}>
+                {mode === "signin" ? "Welcome Back" : "Create Access Request"}
+              </Text>
+              <Text style={[styles.formTitle, { color: colors.text }]}>
+                {mode === "signin" ? "Access your workspace" : "Request your company workspace"}
+              </Text>
+            </View>
+
             <View style={[styles.modeSwitch, { backgroundColor: colors.surfaceSecondary, borderColor: colors.border }]}>
               <Pressable
                 onPress={() => {
@@ -355,7 +404,7 @@ export default function LoginScreen() {
               ]}
             >
               <LinearGradient
-                colors={[colors.heroStart, colors.heroEnd]}
+                colors={AUTH_BUTTON_GRADIENT as unknown as string[]}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.loginButtonGradient}
@@ -369,6 +418,15 @@ export default function LoginScreen() {
                 )}
               </LinearGradient>
             </Pressable>
+
+            <View style={[styles.formFooter, { borderTopColor: colors.borderLight }]}>
+              <MaterialCommunityIcons name="lightning-bolt-circle" size={18} color={colors.primary} />
+              <Text style={[styles.formFooterText, { color: colors.textSecondary }]}>
+                {mode === "signin"
+                  ? "Use your approved company credentials to continue."
+                  : "New accounts stay pending until admin approval."}
+              </Text>
+            </View>
           </Animated.View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -424,53 +482,147 @@ const styles = StyleSheet.create({
     paddingHorizontal: 22,
   },
   header: {
-    alignItems: "center",
-    marginBottom: 30,
-  },
-  logoContainer: {
-    marginBottom: 20,
-  },
-  logoBox: {
-    width: 74,
-    height: 74,
-    borderRadius: 24,
+    marginBottom: 0,
+    minHeight: 230,
     justifyContent: "center",
     alignItems: "center",
+    position: "relative",
   },
-  title: {
-    fontSize: 34,
+  heroGlowLayer: {
+    position: "absolute",
+    inset: 0,
+  },
+  heroGlowOrb: {
+    position: "absolute",
+    borderRadius: 999,
+  },
+  heroGlowOrbPrimary: {
+    width: 180,
+    height: 180,
+    top: -18,
+    right: -20,
+  },
+  heroGlowOrbSecondary: {
+    width: 140,
+    height: 140,
+    left: -12,
+    bottom: 8,
+  },
+  heroBackdrop: {
+    position: "absolute",
+    left: -18,
+    right: -18,
+    top: -18,
+    bottom: 18,
+    borderBottomLeftRadius: 68,
+    borderBottomRightRadius: 68,
+    opacity: 0.96,
+    transform: [{ scaleX: 1.04 }],
+  },
+  heroPanel: {
+    paddingHorizontal: 18,
+    paddingTop: 6,
+    paddingBottom: 10,
+    gap: 6,
+    alignItems: "center",
+    width: "100%",
+  },
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 0,
+    width: "100%",
+  },
+  logoContainer: {
+    width: 100,
+    height: 100,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  logoImage: {
+    width: "100%",
+    height: "100%",
+  },
+  brandRowTitle: {
+    fontSize: 28,
     fontFamily: "Inter_700Bold",
-    letterSpacing: -1.2,
+    letterSpacing: -0.7,
+  },
+  heroBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  heroBadgeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+  },
+  heroBadgeText: {
+    fontSize: 10.5,
+    fontFamily: "Inter_600SemiBold",
+  },
+  heroBadgeMinimal: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginTop: -10,
+    marginBottom: 15,
   },
   subtitle: {
-    fontSize: 14,
+    fontSize: 12,
     fontFamily: "Inter_400Regular",
-    marginTop: 8,
+    lineHeight: 17,
+    maxWidth: 280,
     textAlign: "center",
-    maxWidth: 320,
   },
   formContainer: {
     borderRadius: 28,
     borderWidth: 1,
     padding: 22,
     gap: 14,
+    marginTop: -42,
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.16,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 14 },
+    elevation: 12,
+  },
+  formHeader: {
+    gap: 4,
+  },
+  formEyebrow: {
+    fontSize: 11.5,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  formTitle: {
+    fontSize: 22,
+    fontFamily: "Inter_700Bold",
+    letterSpacing: -0.45,
   },
   modeSwitch: {
     borderRadius: 14,
     borderWidth: 1,
     padding: 4,
     flexDirection: "row",
-    marginBottom: 6,
+    marginBottom: 8,
   },
   modeChip: {
     flex: 1,
-    minHeight: 36,
+    minHeight: 40,
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
   },
   modeChipText: {
-    fontSize: 12.5,
+    fontSize: 13,
     fontFamily: "Inter_600SemiBold",
   },
   inputWrapper: {
@@ -547,5 +699,19 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
     letterSpacing: 0.2,
     color: "#FFFFFF",
+  },
+  formFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderTopWidth: 1,
+    paddingTop: 14,
+    marginTop: 4,
+  },
+  formFooterText: {
+    flex: 1,
+    fontSize: 12.5,
+    fontFamily: "Inter_500Medium",
+    lineHeight: 18,
   },
 });

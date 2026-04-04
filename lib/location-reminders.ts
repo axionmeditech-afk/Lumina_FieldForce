@@ -1,15 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import type { DolibarrOrder } from "@/lib/attendance-api";
+import { getNearbyVisitHistory, type DolibarrOrder } from "@/lib/attendance-api";
 import { haversineDistanceMeters } from "@/lib/geofence";
 import { sendDeviceLocalNotification } from "@/lib/device-notifications";
-import { getCurrentUser, getQuickSaleLocationLogs, getTasks } from "@/lib/storage";
-import type { QuickSaleLocationLog, Task } from "@/lib/types";
+import { getCurrentUser, getQuickSaleLocationLogs } from "@/lib/storage";
+import type { QuickSaleLocationLog, Task, VisitHistoryRecord } from "@/lib/types";
 
 const LOCATION_REMINDER_CATALOG_KEY = "@trackforce_location_reminder_catalog_v1";
 const LOCATION_REMINDER_SENT_KEY = "@trackforce_location_reminder_sent_v1";
 const LOCATION_REMINDER_RADIUS_METERS = 250;
 const LOCATION_REMINDER_COOLDOWN_MS = 4 * 60 * 60 * 1000;
-const RECENT_ORDER_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
 const LOCATION_REMINDER_CATALOG_REFRESH_MS = 15 * 60 * 1000;
 
 type LocationReminderCatalogEntry = {
@@ -32,68 +31,6 @@ type LocationReminderCatalogPayload = {
 
 type SentReminderStore = Record<string, string>;
 
-function normalizeMatchText(value: string | null | undefined): string {
-  return (value || "")
-    .toLowerCase()
-    .replace(/^#\d+\s*/g, "")
-    .replace(/^visit\s*\d+\s*[:\-]?\s*/g, "")
-    .replace(/^dr\.?\s+/g, "")
-    .replace(/^doctor\s+/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function getVisitTaskLabel(task: Task): string {
-  return task.visitLocationLabel?.trim() || task.title?.trim() || "Planned visit";
-}
-
-function normalizeIdentity(value: string | null | undefined): string {
-  return (value || "").trim().toLowerCase();
-}
-
-function matchesTaskSalesperson(task: Task, salespersonId: string, salespersonName?: string | null): boolean {
-  const normalizedTaskAssignee = normalizeIdentity(task.assignedTo);
-  const normalizedTaskAssigneeName = normalizeIdentity(task.assignedToName);
-  const normalizedSalespersonId = normalizeIdentity(salespersonId);
-  const normalizedSalespersonName = normalizeIdentity(salespersonName);
-  return (
-    (normalizedTaskAssignee && normalizedTaskAssignee === normalizedSalespersonId) ||
-    (normalizedSalespersonName && normalizedTaskAssigneeName === normalizedSalespersonName)
-  );
-}
-
-function parseOrderDate(order: DolibarrOrder): string | null {
-  const raw = order.date_commande ?? order.date_creation ?? order.date;
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return new Date(raw * 1000).toISOString();
-  }
-  if (typeof raw === "string" && raw.trim()) {
-    const parsed = new Date(raw);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.toISOString();
-    }
-  }
-  return null;
-}
-
-function parseOrderTotal(order: DolibarrOrder): number | null {
-  const raw = order.total_ttc ?? order.total_ht ?? order.total;
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-  if (typeof raw === "string" && raw.trim()) {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function formatShortDate(value: string | null): string {
-  if (!value) return "recently";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "recently";
-  return parsed.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
-}
-
 function formatCurrency(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "";
   return new Intl.NumberFormat("en-IN", {
@@ -110,12 +47,42 @@ function truncateText(value: string | null | undefined, maxLength = 92): string 
   return `${cleaned.slice(0, maxLength - 1).trim()}...`;
 }
 
-function getOrderCustomerLabel(order: DolibarrOrder): string {
-  return order.thirdparty_name?.toString().trim() || order.socname?.trim() || order.label?.trim() || "";
-}
-
 function readSentKey(userId: string, entryId: string): string {
   return `${userId}:${entryId}`;
+}
+
+function mapVisitHistoryReminderEntry(
+  entry: VisitHistoryRecord,
+  input: { salespersonId: string; companyId?: string | null }
+): LocationReminderCatalogEntry | null {
+  if (
+    typeof entry.visitLatitude !== "number" ||
+    !Number.isFinite(entry.visitLatitude) ||
+    typeof entry.visitLongitude !== "number" ||
+    !Number.isFinite(entry.visitLongitude)
+  ) {
+    return null;
+  }
+
+  const label = entry.visitLabel?.trim() || "Past visit";
+  const noteSnippet = truncateText(entry.visitDepartureNotes || entry.meetingNotes || "");
+  let body = `You are near a past visit for ${label}.`;
+  if (noteSnippet) {
+    body = `${body} Last note: ${noteSnippet}`;
+  }
+
+  return {
+    id: `visit_${entry.taskId}`,
+    taskId: entry.taskId,
+    salespersonId: input.salespersonId,
+    companyId: input.companyId ?? null,
+    label,
+    latitude: entry.visitLatitude,
+    longitude: entry.visitLongitude,
+    title: `${label} nearby`,
+    body,
+    updatedAt: entry.updatedAt || new Date().toISOString(),
+  } satisfies LocationReminderCatalogEntry;
 }
 
 async function readCatalog(): Promise<LocationReminderCatalogPayload> {
@@ -153,19 +120,12 @@ async function ensureReminderCatalogReady(input: {
   }
 
   const currentUser = await getCurrentUser().catch(() => null);
-  const [tasks, quickSales] = await Promise.all([
-    getTasks().catch(() => [] as Task[]),
-    getQuickSaleLocationLogs().catch(() => [] as QuickSaleLocationLog[]),
-  ]);
-
-  const salespersonTasks = tasks.filter((task) =>
-    matchesTaskSalesperson(task, input.userId, currentUser?.name || null)
-  );
+  const quickSales = await getQuickSaleLocationLogs().catch(() => [] as QuickSaleLocationLog[]);
 
   await syncLocationReminderCatalog({
     salespersonId: input.userId,
     companyId: input.companyId ?? currentUser?.companyId ?? null,
-    tasks: salespersonTasks,
+    tasks: [],
     recentOrders: [],
     quickSales,
   });
@@ -195,73 +155,6 @@ export async function syncLocationReminderCatalog(input: {
   recentOrders: DolibarrOrder[];
   quickSales?: QuickSaleLocationLog[];
 }): Promise<void> {
-  const recentCutoff = Date.now() - RECENT_ORDER_WINDOW_MS;
-  const visitItems = input.tasks
-    .filter((task) => task.taskType === "field_visit")
-    .filter((task) => task.status === "completed" || Boolean(task.departureAt))
-    .filter(
-      (task) =>
-        typeof task.visitLatitude === "number" &&
-        Number.isFinite(task.visitLatitude) &&
-        typeof task.visitLongitude === "number" &&
-        Number.isFinite(task.visitLongitude)
-    )
-    .map((task) => {
-      const taskLabel = getVisitTaskLabel(task);
-      const noteSnippet = truncateText(task.visitDepartureNotes || task.meetingNotes || "");
-      const matchedOrders = input.recentOrders
-        .map((order) => ({
-          order,
-          customerLabel: getOrderCustomerLabel(order),
-          date: parseOrderDate(order),
-          total: parseOrderTotal(order),
-        }))
-        .filter((entry) => {
-          if (!entry.customerLabel) return false;
-          const normalizedTaskLabel = normalizeMatchText(taskLabel);
-          const normalizedCustomerLabel = normalizeMatchText(entry.customerLabel);
-          if (!normalizedCustomerLabel || !normalizedTaskLabel) return false;
-          const labelMatches =
-            normalizedTaskLabel.includes(normalizedCustomerLabel) ||
-            normalizedCustomerLabel.includes(normalizedTaskLabel);
-          if (!labelMatches) return false;
-          if (!entry.date) return true;
-          return new Date(entry.date).getTime() >= recentCutoff;
-        })
-        .sort((left, right) => {
-          const leftTime = left.date ? new Date(left.date).getTime() : 0;
-          const rightTime = right.date ? new Date(right.date).getTime() : 0;
-          return rightTime - leftTime;
-        });
-
-      const latestOrder = matchedOrders[0] || null;
-      const title = `${taskLabel} nearby`;
-      let body = `You are near a past visit for ${taskLabel}.`;
-      if (latestOrder) {
-        const amountLabel = formatCurrency(latestOrder.total);
-        const countLabel =
-          matchedOrders.length > 1 ? `${matchedOrders.length} recent orders` : "a recent order";
-        body = `${taskLabel} also has ${countLabel}. Latest ${formatShortDate(latestOrder.date)}${
-          amountLabel ? ` for ${amountLabel}` : ""
-        }.`;
-      }
-      if (noteSnippet) {
-        body = `${body} Last note: ${noteSnippet}`;
-      }
-      return {
-        id: `visit_${task.id}`,
-        taskId: task.id,
-        salespersonId: input.salespersonId,
-        companyId: input.companyId ?? null,
-        label: taskLabel,
-        latitude: task.visitLatitude as number,
-        longitude: task.visitLongitude as number,
-        title,
-        body,
-        updatedAt: new Date().toISOString(),
-      } satisfies LocationReminderCatalogEntry;
-    });
-
   const quickSaleItems = (input.quickSales || [])
     .filter(
       (sale) =>
@@ -289,7 +182,7 @@ export async function syncLocationReminderCatalog(input: {
       } satisfies LocationReminderCatalogEntry;
     });
 
-  const items = [...visitItems, ...quickSaleItems];
+  const items = [...quickSaleItems];
 
   await AsyncStorage.setItem(
     LOCATION_REMINDER_CATALOG_KEY,
@@ -312,11 +205,29 @@ export async function maybeSendLocationReminder(input: {
     userId: input.userId,
     companyId: input.companyId ?? null,
   });
-  if (!catalog.items.length) return;
+  const nearbyVisitHistory = await getNearbyVisitHistory({
+    latitude: input.latitude,
+    longitude: input.longitude,
+    radiusMeters: LOCATION_REMINDER_RADIUS_METERS,
+    salespersonId: input.userId,
+    limit: 8,
+  }).catch(() => [] as VisitHistoryRecord[]);
+
+  const visitHistoryItems = nearbyVisitHistory
+    .map((entry) =>
+      mapVisitHistoryReminderEntry(entry, {
+        salespersonId: input.userId,
+        companyId: input.companyId ?? null,
+      })
+    )
+    .filter((entry): entry is LocationReminderCatalogEntry => Boolean(entry));
+
+  const combinedItems = [...visitHistoryItems, ...catalog.items];
+  if (!combinedItems.length) return;
 
   const sentStore = await readSentStore();
   const now = Date.now();
-  const eligible = catalog.items
+  const eligible = combinedItems
     .filter((entry) => entry.salespersonId === input.userId)
     .filter((entry) => !entry.companyId || !input.companyId || entry.companyId === input.companyId)
     .map((entry) => ({
