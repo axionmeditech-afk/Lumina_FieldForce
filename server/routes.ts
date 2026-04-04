@@ -1311,6 +1311,14 @@ async function ensureConversationsTable(): Promise<void> {
       ADD COLUMN IF NOT EXISTS created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER key_phrases_json,
       ADD COLUMN IF NOT EXISTS updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at
   `);
+  try {
+    await conn.execute(`
+      ALTER TABLE lff_conversations
+        MODIFY COLUMN transcript LONGTEXT NULL
+    `);
+  } catch {
+    // keep conversation table bootstrap resilient across MySQL variants
+  }
   conversationsTableEnsured = true;
 }
 
@@ -1420,7 +1428,7 @@ function normalizeConversationPayload(
     transcript:
       normalizeOptionalText(payload.transcript) ??
       normalizeOptionalText(base?.transcript) ??
-      undefined,
+      "",
     transcriptStatus: normalizeConversationStatus(
       payload.transcriptStatus,
       normalizeConversationStatus(base?.transcriptStatus)
@@ -1491,7 +1499,7 @@ function mapConversationRow(row: Record<string, unknown>): Conversation {
       fromMySqlDateTime(row.created_at) ||
       new Date().toISOString(),
     duration: toRequiredText(row.duration, "00:00"),
-    transcript: row.transcript ? String(row.transcript) : undefined,
+    transcript: row.transcript ? String(row.transcript) : "",
     transcriptStatus: normalizeConversationStatus(row.transcript_status),
     audioUri: row.audio_uri ? String(row.audio_uri) : null,
     transcriptionError: row.transcription_error ? String(row.transcription_error) : null,
@@ -1631,6 +1639,7 @@ async function upsertConversationInMySql(
   conversation: Conversation,
   companyId: string | null
 ): Promise<void> {
+  const safeTranscript = normalizeOptionalText(conversation.transcript) ?? "";
   await conn.execute(
     `INSERT INTO lff_conversations (
       id,
@@ -1693,7 +1702,7 @@ async function upsertConversationInMySql(
       conversation.customerName,
       toMySqlDateTime(conversation.date) || new Date().toISOString().slice(0, 19).replace("T", " "),
       conversation.duration,
-      conversation.transcript ?? null,
+      safeTranscript,
       conversation.transcriptStatus,
       conversation.audioUri ?? null,
       conversation.transcriptionError ?? null,

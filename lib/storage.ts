@@ -3223,8 +3223,7 @@ export async function getConversations(): Promise<Conversation[]> {
     await setLocalOnlyItem(KEYS.CONVERSATIONS, scopedRemote);
     return scopedRemote;
   }
-  const local = await getLocalOnlyList<Conversation>(KEYS.CONVERSATIONS);
-  return local.filter((conversation) => matchesCompany(conversation, companyId));
+  return [];
 }
 
 export async function addConversation(conversation: Conversation): Promise<void> {
