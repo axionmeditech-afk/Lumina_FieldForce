@@ -94,6 +94,7 @@ type ConversationProductRecommendation = {
   label: string;
   ref: string | null;
   matchedAttributes: string[];
+  matchedKeyPhrases: string[];
   reason: string;
 };
 
@@ -129,21 +130,44 @@ function toTitleCase(value: string): string {
   return value.replace(/\b\w/g, (segment) => segment.toUpperCase());
 }
 
-function buildConversationAttributeCandidates(convo: Conversation): string[] {
+function buildConversationAttributeCandidates(
+  convo: Conversation
+): Array<{ phrase: string; source: "key_phrase" | "objection" | "summary" }> {
   const summaryBits = convo.summary
     .split(/[.!?]/)
     .map((entry) => normalizeMatcherText(entry))
     .filter(Boolean);
-  const phrases = [...convo.keyPhrases, ...convo.objections, ...summaryBits]
-    .map((entry) => normalizeMatcherText(entry))
-    .filter(
-      (entry) =>
-        entry.length >= 4 &&
-        entry.length <= 48 &&
-        !PRODUCT_RECOMMENDATION_STOP_WORDS.has(entry) &&
-        !/^\d+$/.test(entry)
-    );
-  return [...new Set(phrases)].slice(0, 12);
+
+  const tagged = [
+    ...convo.keyPhrases.map((entry) => ({
+      phrase: normalizeMatcherText(entry),
+      source: "key_phrase" as const,
+    })),
+    ...convo.objections.map((entry) => ({
+      phrase: normalizeMatcherText(entry),
+      source: "objection" as const,
+    })),
+    ...summaryBits.map((entry) => ({
+      phrase: entry,
+      source: "summary" as const,
+    })),
+  ].filter(
+    (entry) =>
+      entry.phrase.length >= 4 &&
+      entry.phrase.length <= 48 &&
+      !PRODUCT_RECOMMENDATION_STOP_WORDS.has(entry.phrase) &&
+      !/^\d+$/.test(entry.phrase)
+  );
+
+  const seen = new Set<string>();
+  const unique: Array<{ phrase: string; source: "key_phrase" | "objection" | "summary" }> = [];
+  for (const entry of tagged) {
+    if (seen.has(entry.phrase)) continue;
+    seen.add(entry.phrase);
+    unique.push(entry);
+    if (unique.length >= 12) break;
+  }
+  return unique;
 }
 
 function buildProductRecommendations(
@@ -162,23 +186,37 @@ function buildProductRecommendations(
       );
       if (!searchable) return null;
 
-      const matchedAttributes = attributeCandidates.filter((attribute) => {
-        if (attribute.includes(" ")) {
-          return searchable.includes(attribute);
+      const matchedCandidates = attributeCandidates.filter((candidate) => {
+        if (candidate.phrase.includes(" ")) {
+          return searchable.includes(candidate.phrase);
         }
-        return ` ${searchable} `.includes(` ${attribute} `);
+        return ` ${searchable} `.includes(` ${candidate.phrase} `);
       });
-      if (!matchedAttributes.length) return null;
+      if (!matchedCandidates.length) return null;
 
       const highIntentBoost = convo.buyingIntent === "high" ? 2 : convo.buyingIntent === "medium" ? 1 : 0;
-      const score = matchedAttributes.length * 3 + highIntentBoost;
-      const leadAttribute = toTitleCase(matchedAttributes[0]);
+      const keyPhraseMatches = matchedCandidates.filter((entry) => entry.source === "key_phrase");
+      const matchedAttributes = matchedCandidates.slice(0, 4).map((entry) => toTitleCase(entry.phrase));
+      const matchedKeyPhrases = keyPhraseMatches.slice(0, 3).map((entry) => toTitleCase(entry.phrase));
+      const leadAttribute = matchedAttributes[0];
+      const score =
+        matchedCandidates.length * 3 +
+        keyPhraseMatches.length * 2 +
+        highIntentBoost;
       return {
         id: String(product.id ?? `${label}_${ref || "product"}`),
         label,
         ref,
-        matchedAttributes: matchedAttributes.slice(0, 3).map((entry) => toTitleCase(entry)),
-        reason: `${label} can be pitched because it aligns with ${leadAttribute}${matchedAttributes.length > 1 ? " and similar needs mentioned in the conversation" : " mentioned in the conversation"}.`,
+        matchedAttributes,
+        matchedKeyPhrases,
+        reason:
+          matchedKeyPhrases.length > 0
+            ? `${label} is a strong fit because the customer mentioned ${matchedKeyPhrases
+                .slice(0, 2)
+                .join(" and ")} in the key phrases.`
+            : `${label} can be pitched because it aligns with ${leadAttribute}${
+                matchedAttributes.length > 1 ? " and similar needs mentioned in the conversation" : " mentioned in the conversation"
+              }.`,
         score,
       };
     })
@@ -353,22 +391,15 @@ export default function ConversationDetailScreen() {
       setAiConfigured(Boolean(apiKey));
       setAiModel(configuredModel);
 
-      if (!apiKey) {
-        if (mode === "manual") {
-          Alert.alert(
-            "AI API Key Missing",
-            "Configure the Groq key in env/code, then run analysis."
-          );
-        }
-        return;
-      }
-
       setAnalysisBusy(true);
       setAnalysisError(null);
 
       try {
         let result: AISalesAnalysisResult;
         try {
+          if (!apiKey) {
+            throw new Error("Client Groq key missing. Using backend AI analysis.");
+          }
           result = await analyzeConversationWithAI({
             apiKey,
             model: configuredModel,
@@ -384,9 +415,12 @@ export default function ConversationDetailScreen() {
               ? String((directError as any).kind)
               : "";
           const shouldFallbackToBackend =
+            !apiKey ||
             directKind === "invalid_api_key" ||
             directKind === "network_error" ||
-            /unauthorized|permission denied|valid api key|api key/i.test(directMessage.toLowerCase());
+            /unauthorized|permission denied|valid api key|api key|client groq key missing/i.test(
+              directMessage.toLowerCase()
+            );
           if (!shouldFallbackToBackend) {
             throw directError;
           }
@@ -899,7 +933,7 @@ export default function ConversationDetailScreen() {
         {canViewAnalysis && productRecommendations.length > 0 ? (
           <Animated.View entering={FadeInDown.duration(400).delay(480)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-              Recommended Products to Pitch
+              Recommended Products by Key Phrases
             </Text>
             <View style={[styles.listCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
               {productRecommendations.map((item, idx) => (
@@ -947,6 +981,25 @@ export default function ConversationDetailScreen() {
                     >
                       {item.reason}
                     </Text>
+                    {item.matchedKeyPhrases.length > 0 ? (
+                      <View style={styles.productAttributeRow}>
+                        {item.matchedKeyPhrases.map((phrase) => (
+                          <View
+                            key={`${item.id}_phrase_${phrase}`}
+                            style={[styles.productKeyPhraseChip, { backgroundColor: colors.secondary + "14" }]}
+                          >
+                            <Text
+                              style={[
+                                styles.productKeyPhraseChipText,
+                                { color: colors.secondary, fontFamily: "Inter_500Medium" },
+                              ]}
+                            >
+                              Key phrase: {phrase}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
                     <View style={styles.productAttributeRow}>
                       {item.matchedAttributes.map((attribute) => (
                         <View
@@ -1275,6 +1328,14 @@ const styles = StyleSheet.create({
     gap: 8,
     marginTop: 10,
   },
+  productKeyPhraseChip: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  productKeyPhraseChipText: { fontSize: 11.5 },
   productAttributeChip: {
     minHeight: 28,
     borderRadius: 999,

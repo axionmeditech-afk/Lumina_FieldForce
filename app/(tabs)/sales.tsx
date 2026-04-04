@@ -60,6 +60,8 @@ import {
   getTasks,
   resolveAssignedStockistForUser,
   removeTask,
+  STORAGE_KEYS,
+  subscribeStorageUpdates,
   syncVisitNoteTaskRemote,
   updateTask,
 } from "@/lib/storage";
@@ -647,6 +649,27 @@ function mergeUniqueCustomers(
   return all;
 }
 
+function mergeConversationsById(
+  current: Conversation[],
+  incoming: Conversation[]
+): Conversation[] {
+  const byId = new Map<string, Conversation>();
+  for (const entry of current) {
+    if (entry?.id) {
+      byId.set(entry.id, entry);
+    }
+  }
+  for (const entry of incoming) {
+    if (entry?.id) {
+      byId.set(entry.id, {
+        ...byId.get(entry.id),
+        ...entry,
+      });
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => b.date.localeCompare(a.date));
+}
+
 const speechPackage: any = (() => {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- optional runtime import avoids route crash when native module is unavailable
@@ -727,6 +750,7 @@ const DEFAULT_STT_PROVIDER_ORDER = normalizeProviderOrder(
     "groq"
   ).trim()
 );
+const FORCE_GROQ_TRANSCRIPTION = true;
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
 const SPEECH_API_HEALTH_CACHE_TTL_MS = 45_000;
 const speechApiHealthCache = new Map<string, { ok: boolean; checkedAt: number }>();
@@ -1856,12 +1880,7 @@ export default function SalesScreen() {
       return;
     }
 
-    if (isAdminViewer) {
-      setConversations(convos);
-    } else {
-      // Conversation transcript/analysis visibility is restricted to admin only.
-      setConversations([]);
-    }
+    setConversations(convos);
 
     setTasks(taskData);
     setEmployees(employeeData);
@@ -1942,6 +1961,13 @@ export default function SalesScreen() {
 
   useEffect(() => {
     void loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    return subscribeStorageUpdates((event) => {
+      if (event.key !== STORAGE_KEYS.CONVERSATIONS) return;
+      void loadData();
+    });
   }, [loadData]);
 
   useEffect(() => {
@@ -3266,7 +3292,13 @@ export default function SalesScreen() {
   ]);
 
   const visibleConversations = useMemo(() => {
-    if (!isAdminViewer) return [];
+    if (!isAdminViewer) {
+      return conversations.filter(
+        (conversation) =>
+          conversation.salespersonId === user?.id ||
+          conversation.salespersonName === user?.name
+      );
+    }
     if (!selectedSalespersonId) return conversations;
     const selectedName = selectedSalesperson?.name;
     return conversations.filter(
@@ -3274,7 +3306,7 @@ export default function SalesScreen() {
         conversation.salespersonId === selectedSalespersonId ||
         (selectedName ? conversation.salespersonName === selectedName : false)
     );
-  }, [conversations, isAdminViewer, selectedSalesperson?.name, selectedSalespersonId]);
+  }, [conversations, isAdminViewer, selectedSalesperson?.name, selectedSalespersonId, user?.id, user?.name]);
 
   const avgInterest = visibleConversations.length > 0
     ? Math.round(visibleConversations.reduce((sum, convo) => sum + convo.interestScore, 0) / visibleConversations.length)
@@ -3523,6 +3555,32 @@ export default function SalesScreen() {
         setCustomerName(options.customerNameOverride.trim());
       }
 
+      if (FORCE_GROQ_TRANSCRIPTION) {
+        setRequestBusy(true);
+        try {
+          finalSegmentsRef.current = [];
+          setTranscriptDraft("");
+          setInterimTranscript("");
+          setRecordError(null);
+          setAudioUri(null);
+          setElapsedMs(0);
+          startedAtRef.current = Date.now();
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          await startFallbackRecording();
+          return true;
+        } catch (error) {
+          setRecordError(
+            getErrorMessage(
+              error,
+              "Groq recorder could not start. Check microphone permission and try again."
+            )
+          );
+          return false;
+        } finally {
+          setRequestBusy(false);
+        }
+      }
+
       if (!ExpoSpeechRecognitionModule) {
         setRequestBusy(true);
         try {
@@ -3698,7 +3756,7 @@ export default function SalesScreen() {
 
   const retranscribeAudio = useCallback(() => {
     if (!audioUri) return;
-    if (!ExpoSpeechRecognitionModule || !recognitionAvailable) {
+    if (FORCE_GROQ_TRANSCRIPTION || !ExpoSpeechRecognitionModule || !recognitionAvailable) {
       void transcribeWithFallbackApi(audioUri);
       return;
     }
@@ -3756,6 +3814,7 @@ export default function SalesScreen() {
         });
 
         await addConversation(conversation);
+        setConversations((current) => mergeConversationsById(current, [conversation]));
         await addAuditLog({
           id: `audit_sales_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
           userId: salespersonId,

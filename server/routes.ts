@@ -7,6 +7,7 @@ import type {
   AppUser,
   AttendanceCheckPayload,
   AttendanceRecord,
+  Conversation,
   Geofence,
   LocationLog,
   NotificationAudience,
@@ -747,6 +748,8 @@ let accessRequestAssignmentColumnsEnsured = false;
 let stockistAssignmentColumnsEnsured = false;
 let taskVisitNotesColumnsEnsured = false;
 let visitHistoryTableEnsured = false;
+let conversationsTableEnsured = false;
+let legacyConversationsMigrated = false;
 
 function setAuthUserRecord(record: AuthUserRecord): void {
   const emailKey = normalizeEmailKey(record.user.email);
@@ -1241,6 +1244,508 @@ async function upsertVisitHistoryInMySql(
       toMySqlDateTime(task.createdAt),
     ]
   );
+}
+
+async function ensureConversationsTable(): Promise<void> {
+  if (conversationsTableEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS lff_conversations (
+      id VARCHAR(64) NOT NULL,
+      company_id VARCHAR(64) NULL,
+      salesperson_id VARCHAR(64) NOT NULL,
+      salesperson_name VARCHAR(191) NOT NULL,
+      customer_name VARCHAR(191) NOT NULL,
+      conversation_date DATETIME NOT NULL,
+      duration VARCHAR(32) NOT NULL,
+      transcript LONGTEXT NULL,
+      transcript_status VARCHAR(32) NULL,
+      audio_uri LONGTEXT NULL,
+      transcription_error LONGTEXT NULL,
+      source VARCHAR(32) NULL,
+      analysis_provider VARCHAR(32) NULL,
+      interest_score INT NOT NULL DEFAULT 0,
+      pitch_score INT NOT NULL DEFAULT 0,
+      confidence_score INT NOT NULL DEFAULT 0,
+      talk_listen_ratio DECIMAL(8,2) NOT NULL DEFAULT 0,
+      sentiment VARCHAR(16) NULL,
+      buying_intent VARCHAR(16) NULL,
+      objections_json LONGTEXT NULL,
+      improvements_json LONGTEXT NULL,
+      summary LONGTEXT NULL,
+      notes LONGTEXT NULL,
+      key_phrases_json LONGTEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_lff_conversations_company_date (company_id, conversation_date),
+      KEY idx_lff_conversations_salesperson_date (salesperson_id, conversation_date)
+    )
+  `);
+  await conn.execute(`
+    ALTER TABLE lff_conversations
+      ADD COLUMN IF NOT EXISTS company_id VARCHAR(64) NULL AFTER id,
+      ADD COLUMN IF NOT EXISTS salesperson_id VARCHAR(64) NOT NULL DEFAULT '' AFTER company_id,
+      ADD COLUMN IF NOT EXISTS salesperson_name VARCHAR(191) NOT NULL DEFAULT 'Sales Rep' AFTER salesperson_id,
+      ADD COLUMN IF NOT EXISTS customer_name VARCHAR(191) NOT NULL DEFAULT 'Customer' AFTER salesperson_name,
+      ADD COLUMN IF NOT EXISTS conversation_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER customer_name,
+      ADD COLUMN IF NOT EXISTS duration VARCHAR(32) NOT NULL DEFAULT '00:00' AFTER conversation_date,
+      ADD COLUMN IF NOT EXISTS transcript LONGTEXT NULL AFTER duration,
+      ADD COLUMN IF NOT EXISTS transcript_status VARCHAR(32) NULL AFTER transcript,
+      ADD COLUMN IF NOT EXISTS audio_uri LONGTEXT NULL AFTER transcript_status,
+      ADD COLUMN IF NOT EXISTS transcription_error LONGTEXT NULL AFTER audio_uri,
+      ADD COLUMN IF NOT EXISTS source VARCHAR(32) NULL AFTER transcription_error,
+      ADD COLUMN IF NOT EXISTS analysis_provider VARCHAR(32) NULL AFTER source,
+      ADD COLUMN IF NOT EXISTS interest_score INT NOT NULL DEFAULT 0 AFTER analysis_provider,
+      ADD COLUMN IF NOT EXISTS pitch_score INT NOT NULL DEFAULT 0 AFTER interest_score,
+      ADD COLUMN IF NOT EXISTS confidence_score INT NOT NULL DEFAULT 0 AFTER pitch_score,
+      ADD COLUMN IF NOT EXISTS talk_listen_ratio DECIMAL(8,2) NOT NULL DEFAULT 0 AFTER confidence_score,
+      ADD COLUMN IF NOT EXISTS sentiment VARCHAR(16) NULL AFTER talk_listen_ratio,
+      ADD COLUMN IF NOT EXISTS buying_intent VARCHAR(16) NULL AFTER sentiment,
+      ADD COLUMN IF NOT EXISTS objections_json LONGTEXT NULL AFTER buying_intent,
+      ADD COLUMN IF NOT EXISTS improvements_json LONGTEXT NULL AFTER objections_json,
+      ADD COLUMN IF NOT EXISTS summary LONGTEXT NULL AFTER improvements_json,
+      ADD COLUMN IF NOT EXISTS notes LONGTEXT NULL AFTER summary,
+      ADD COLUMN IF NOT EXISTS key_phrases_json LONGTEXT NULL AFTER notes,
+      ADD COLUMN IF NOT EXISTS created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER key_phrases_json,
+      ADD COLUMN IF NOT EXISTS updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at
+  `);
+  conversationsTableEnsured = true;
+}
+
+function normalizeOptionalText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeConversationStatus(
+  value: unknown,
+  fallback: Conversation["transcriptStatus"] = "completed"
+): Conversation["transcriptStatus"] {
+  if (value === "pending" || value === "completed" || value === "failed") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeConversationProvider(
+  value: unknown,
+  fallback: Conversation["analysisProvider"] = "rules"
+): Conversation["analysisProvider"] {
+  if (value === "seed" || value === "rules" || value === "ai") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeConversationSource(
+  value: unknown,
+  fallback: Conversation["source"] = "recorded"
+): Conversation["source"] {
+  if (value === "seed" || value === "recorded" || value === "imported") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeConversationSentiment(
+  value: unknown,
+  fallback: Conversation["sentiment"] = "neutral"
+): Conversation["sentiment"] {
+  if (value === "positive" || value === "neutral" || value === "negative") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeConversationBuyingIntent(
+  value: unknown,
+  fallback: Conversation["buyingIntent"] = "medium"
+): Conversation["buyingIntent"] {
+  if (value === "high" || value === "medium" || value === "low") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeConversationScore(value: unknown, fallback = 0): number {
+  const parsed =
+    typeof value === "number" ? value : Number.isFinite(Number(value)) ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+function normalizeTalkListenRatio(value: unknown, fallback = 0): number {
+  const parsed =
+    typeof value === "number" ? value : Number.isFinite(Number(value)) ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.round(parsed * 100) / 100);
+}
+
+function normalizeConversationPayload(
+  payload: Partial<Conversation>,
+  fallbackUser?: AppUser | null,
+  base?: Conversation | null
+): Conversation {
+  const nowIso = new Date().toISOString();
+  const resolvedDate =
+    normalizeOptionalText(payload.date) ||
+    normalizeOptionalText(base?.date) ||
+    nowIso;
+  return {
+    id:
+      normalizeWhitespace(String(payload.id ?? base?.id ?? "")) ||
+      `conv_${Date.now()}_${randomUUID().slice(0, 8)}`,
+    companyId:
+      normalizeWhitespace(String(payload.companyId ?? base?.companyId ?? "")) ||
+      fallbackUser?.companyId ||
+      undefined,
+    salespersonId:
+      normalizeWhitespace(String(payload.salespersonId ?? base?.salespersonId ?? "")) ||
+      fallbackUser?.id ||
+      "",
+    salespersonName:
+      normalizeWhitespace(String(payload.salespersonName ?? base?.salespersonName ?? "")) ||
+      normalizeWhitespace(fallbackUser?.name || "") ||
+      "Sales Rep",
+    customerName:
+      normalizeWhitespace(String(payload.customerName ?? base?.customerName ?? "")) ||
+      "Customer",
+    date: resolvedDate,
+    duration:
+      normalizeWhitespace(String(payload.duration ?? base?.duration ?? "")) ||
+      "00:00",
+    transcript:
+      normalizeOptionalText(payload.transcript) ??
+      normalizeOptionalText(base?.transcript) ??
+      undefined,
+    transcriptStatus: normalizeConversationStatus(
+      payload.transcriptStatus,
+      normalizeConversationStatus(base?.transcriptStatus)
+    ),
+    audioUri:
+      normalizeOptionalText(payload.audioUri) ??
+      normalizeOptionalText(base?.audioUri) ??
+      null,
+    transcriptionError:
+      normalizeOptionalText(payload.transcriptionError) ??
+      normalizeOptionalText(base?.transcriptionError) ??
+      null,
+    source: normalizeConversationSource(
+      payload.source,
+      normalizeConversationSource(base?.source)
+    ),
+    analysisProvider: normalizeConversationProvider(
+      payload.analysisProvider,
+      normalizeConversationProvider(base?.analysisProvider)
+    ),
+    interestScore: normalizeConversationScore(
+      payload.interestScore,
+      normalizeConversationScore(base?.interestScore)
+    ),
+    pitchScore: normalizeConversationScore(
+      payload.pitchScore,
+      normalizeConversationScore(base?.pitchScore)
+    ),
+    confidenceScore: normalizeConversationScore(
+      payload.confidenceScore,
+      normalizeConversationScore(base?.confidenceScore)
+    ),
+    talkListenRatio: normalizeTalkListenRatio(
+      payload.talkListenRatio,
+      normalizeTalkListenRatio(base?.talkListenRatio)
+    ),
+    sentiment: normalizeConversationSentiment(
+      payload.sentiment,
+      normalizeConversationSentiment(base?.sentiment)
+    ),
+    buyingIntent: normalizeConversationBuyingIntent(
+      payload.buyingIntent,
+      normalizeConversationBuyingIntent(base?.buyingIntent)
+    ),
+    objections: parseStringArrayJson(payload.objections ?? base?.objections ?? []),
+    improvements: parseStringArrayJson(payload.improvements ?? base?.improvements ?? []),
+    summary:
+      normalizeOptionalText(payload.summary) ??
+      normalizeOptionalText(base?.summary) ??
+      "",
+    notes:
+      normalizeOptionalText(payload.notes) ??
+      normalizeOptionalText(base?.notes) ??
+      undefined,
+    keyPhrases: parseStringArrayJson(payload.keyPhrases ?? base?.keyPhrases ?? []),
+  };
+}
+
+function mapConversationRow(row: Record<string, unknown>): Conversation {
+  return {
+    id: normalizeWhitespace(String(row.id || "")),
+    companyId: normalizeWhitespace(String(row.company_id || "")) || undefined,
+    salespersonId: normalizeWhitespace(String(row.salesperson_id || "")),
+    salespersonName: toRequiredText(row.salesperson_name, "Sales Rep"),
+    customerName: toRequiredText(row.customer_name, "Customer"),
+    date:
+      fromMySqlDateTime(row.conversation_date) ||
+      fromMySqlDateTime(row.created_at) ||
+      new Date().toISOString(),
+    duration: toRequiredText(row.duration, "00:00"),
+    transcript: row.transcript ? String(row.transcript) : undefined,
+    transcriptStatus: normalizeConversationStatus(row.transcript_status),
+    audioUri: row.audio_uri ? String(row.audio_uri) : null,
+    transcriptionError: row.transcription_error ? String(row.transcription_error) : null,
+    source: normalizeConversationSource(row.source),
+    analysisProvider: normalizeConversationProvider(row.analysis_provider),
+    interestScore: normalizeConversationScore(row.interest_score),
+    pitchScore: normalizeConversationScore(row.pitch_score),
+    confidenceScore: normalizeConversationScore(row.confidence_score),
+    talkListenRatio: normalizeTalkListenRatio(row.talk_listen_ratio),
+    sentiment: normalizeConversationSentiment(row.sentiment),
+    buyingIntent: normalizeConversationBuyingIntent(row.buying_intent),
+    objections: parseStringArrayJson(row.objections_json),
+    improvements: parseStringArrayJson(row.improvements_json),
+    summary: row.summary ? String(row.summary) : "",
+    notes: row.notes ? String(row.notes) : undefined,
+    keyPhrases: parseStringArrayJson(row.key_phrases_json),
+  };
+}
+
+async function listConversationsFromMySql(options: {
+  companyId?: string | null;
+  salespersonId?: string | null;
+  limit?: number | null;
+}): Promise<Conversation[]> {
+  await ensureConversationsTable();
+  const conn = await getMySqlPool();
+  const filters: string[] = [];
+  const params: unknown[] = [];
+  if (options.companyId) {
+    filters.push("company_id = ?");
+    params.push(options.companyId);
+  }
+  if (options.salespersonId) {
+    filters.push("salesperson_id = ?");
+    params.push(options.salespersonId);
+  }
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const limitClause =
+    typeof options.limit === "number" && Number.isFinite(options.limit)
+      ? `LIMIT ${Math.max(1, Math.min(500, Math.trunc(options.limit)))}`
+      : "";
+  const [rows] = await conn.query<any[]>(
+    `SELECT
+      id,
+      company_id,
+      salesperson_id,
+      salesperson_name,
+      customer_name,
+      conversation_date,
+      duration,
+      transcript,
+      transcript_status,
+      audio_uri,
+      transcription_error,
+      source,
+      analysis_provider,
+      interest_score,
+      pitch_score,
+      confidence_score,
+      talk_listen_ratio,
+      sentiment,
+      buying_intent,
+      objections_json,
+      improvements_json,
+      summary,
+      notes,
+      key_phrases_json,
+      created_at,
+      updated_at
+    FROM lff_conversations
+    ${whereClause}
+    ORDER BY conversation_date DESC, updated_at DESC
+    ${limitClause}`,
+    params
+  );
+  return (rows || []).map(mapConversationRow);
+}
+
+async function getConversationByIdFromMySql(
+  conversationId: string,
+  options: {
+    companyId?: string | null;
+    salespersonId?: string | null;
+  }
+): Promise<Conversation | null> {
+  await ensureConversationsTable();
+  const conn = await getMySqlPool();
+  const filters = ["id = ?"];
+  const params: unknown[] = [conversationId];
+  if (options.companyId) {
+    filters.push("company_id = ?");
+    params.push(options.companyId);
+  }
+  if (options.salespersonId) {
+    filters.push("salesperson_id = ?");
+    params.push(options.salespersonId);
+  }
+  const [rows] = await conn.query<any[]>(
+    `SELECT
+      id,
+      company_id,
+      salesperson_id,
+      salesperson_name,
+      customer_name,
+      conversation_date,
+      duration,
+      transcript,
+      transcript_status,
+      audio_uri,
+      transcription_error,
+      source,
+      analysis_provider,
+      interest_score,
+      pitch_score,
+      confidence_score,
+      talk_listen_ratio,
+      sentiment,
+      buying_intent,
+      objections_json,
+      improvements_json,
+      summary,
+      notes,
+      key_phrases_json,
+      created_at,
+      updated_at
+    FROM lff_conversations
+    WHERE ${filters.join(" AND ")}
+    LIMIT 1`,
+    params
+  );
+  if (!rows?.length) return null;
+  return mapConversationRow(rows[0]);
+}
+
+async function upsertConversationInMySql(
+  conn: Pool,
+  conversation: Conversation,
+  companyId: string | null
+): Promise<void> {
+  await conn.execute(
+    `INSERT INTO lff_conversations (
+      id,
+      company_id,
+      salesperson_id,
+      salesperson_name,
+      customer_name,
+      conversation_date,
+      duration,
+      transcript,
+      transcript_status,
+      audio_uri,
+      transcription_error,
+      source,
+      analysis_provider,
+      interest_score,
+      pitch_score,
+      confidence_score,
+      talk_listen_ratio,
+      sentiment,
+      buying_intent,
+      objections_json,
+      improvements_json,
+      summary,
+      notes,
+      key_phrases_json,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE
+      company_id = VALUES(company_id),
+      salesperson_id = VALUES(salesperson_id),
+      salesperson_name = VALUES(salesperson_name),
+      customer_name = VALUES(customer_name),
+      conversation_date = VALUES(conversation_date),
+      duration = VALUES(duration),
+      transcript = VALUES(transcript),
+      transcript_status = VALUES(transcript_status),
+      audio_uri = VALUES(audio_uri),
+      transcription_error = VALUES(transcription_error),
+      source = VALUES(source),
+      analysis_provider = VALUES(analysis_provider),
+      interest_score = VALUES(interest_score),
+      pitch_score = VALUES(pitch_score),
+      confidence_score = VALUES(confidence_score),
+      talk_listen_ratio = VALUES(talk_listen_ratio),
+      sentiment = VALUES(sentiment),
+      buying_intent = VALUES(buying_intent),
+      objections_json = VALUES(objections_json),
+      improvements_json = VALUES(improvements_json),
+      summary = VALUES(summary),
+      notes = VALUES(notes),
+      key_phrases_json = VALUES(key_phrases_json),
+      updated_at = NOW()`,
+    [
+      conversation.id,
+      companyId,
+      conversation.salespersonId,
+      conversation.salespersonName,
+      conversation.customerName,
+      toMySqlDateTime(conversation.date) || new Date().toISOString().slice(0, 19).replace("T", " "),
+      conversation.duration,
+      conversation.transcript ?? null,
+      conversation.transcriptStatus,
+      conversation.audioUri ?? null,
+      conversation.transcriptionError ?? null,
+      conversation.source ?? null,
+      conversation.analysisProvider ?? null,
+      conversation.interestScore,
+      conversation.pitchScore,
+      conversation.confidenceScore,
+      conversation.talkListenRatio,
+      conversation.sentiment,
+      conversation.buyingIntent,
+      JSON.stringify(conversation.objections || []),
+      JSON.stringify(conversation.improvements || []),
+      conversation.summary ?? "",
+      conversation.notes ?? null,
+      JSON.stringify(conversation.keyPhrases || []),
+    ]
+  );
+}
+
+async function migrateLegacyConversationsStateToMySql(): Promise<void> {
+  if (legacyConversationsMigrated) return;
+  if (!isMySqlStateEnabled()) return;
+  await ensureConversationsTable();
+  let raw: string | null = null;
+  try {
+    raw = await getMySqlStateValue("@trackforce_conversations");
+  } catch {
+    raw = null;
+  }
+  if (!raw) {
+    legacyConversationsMigrated = true;
+    return;
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (!Array.isArray(parsed) || !parsed.length) {
+    legacyConversationsMigrated = true;
+    return;
+  }
+  const conn = await getMySqlPool();
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const normalized = normalizeConversationPayload(entry as Partial<Conversation>, null);
+    if (!normalized.salespersonId) continue;
+    await upsertConversationInMySql(conn, normalized, normalized.companyId ?? null);
+  }
+  legacyConversationsMigrated = true;
 }
 
 async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
@@ -5414,6 +5919,159 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to read remote state value.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.get("/api/conversations", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL conversations store is not configured." });
+      return;
+    }
+    try {
+      await ensureConversationsTable();
+      await migrateLegacyConversationsStateToMySql();
+      const companyId = await resolveRequestCompanyId(req);
+      const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salespersonId) || "");
+      const salespersonId =
+        req.auth?.role === "salesperson"
+          ? normalizeWhitespace(req.auth.sub || "")
+          : requestedSalespersonId || null;
+      const limit =
+        parseOptionalInteger(req.query.limit) ??
+        250;
+      const items = await listConversationsFromMySql({
+        companyId,
+        salespersonId,
+        limit,
+      });
+      res.json({ items });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to fetch conversations from MySQL.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.post("/api/conversations", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL conversations store is not configured." });
+      return;
+    }
+    const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
+    const body = req.body as { conversation?: Partial<Conversation> } | Partial<Conversation>;
+    const payload =
+      body && "conversation" in body && body.conversation && typeof body.conversation === "object"
+        ? body.conversation
+        : (body as Partial<Conversation>);
+    let normalizedConversation = normalizeConversationPayload(payload || {}, authRecord?.user ?? null);
+    if (!normalizedConversation.id) {
+      res.status(400).json({ message: "Conversation id is required." });
+      return;
+    }
+    if (req.auth?.role === "salesperson" && req.auth.sub) {
+      normalizedConversation = {
+        ...normalizedConversation,
+        salespersonId: normalizeWhitespace(req.auth.sub || ""),
+        salespersonName:
+          normalizeWhitespace(authRecord?.user.name || "") ||
+          normalizedConversation.salespersonName,
+      };
+    }
+    if (!normalizedConversation.salespersonId) {
+      res.status(400).json({ message: "Salesperson id is required." });
+      return;
+    }
+
+    try {
+      await ensureConversationsTable();
+      await migrateLegacyConversationsStateToMySql();
+      const companyId =
+        normalizedConversation.companyId || (await resolveRequestCompanyId(req)) || null;
+      const conn = await getMySqlPool();
+      normalizedConversation = {
+        ...normalizedConversation,
+        companyId: companyId || undefined,
+      };
+      await upsertConversationInMySql(conn, normalizedConversation, companyId);
+      res.status(201).json(mapConversationRow({
+        id: normalizedConversation.id,
+        company_id: companyId,
+        salesperson_id: normalizedConversation.salespersonId,
+        salesperson_name: normalizedConversation.salespersonName,
+        customer_name: normalizedConversation.customerName,
+        conversation_date: normalizedConversation.date,
+        duration: normalizedConversation.duration,
+        transcript: normalizedConversation.transcript ?? null,
+        transcript_status: normalizedConversation.transcriptStatus,
+        audio_uri: normalizedConversation.audioUri ?? null,
+        transcription_error: normalizedConversation.transcriptionError ?? null,
+        source: normalizedConversation.source ?? null,
+        analysis_provider: normalizedConversation.analysisProvider ?? null,
+        interest_score: normalizedConversation.interestScore,
+        pitch_score: normalizedConversation.pitchScore,
+        confidence_score: normalizedConversation.confidenceScore,
+        talk_listen_ratio: normalizedConversation.talkListenRatio,
+        sentiment: normalizedConversation.sentiment,
+        buying_intent: normalizedConversation.buyingIntent,
+        objections_json: JSON.stringify(normalizedConversation.objections || []),
+        improvements_json: JSON.stringify(normalizedConversation.improvements || []),
+        summary: normalizedConversation.summary ?? "",
+        notes: normalizedConversation.notes ?? null,
+        key_phrases_json: JSON.stringify(normalizedConversation.keyPhrases || []),
+      }));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to store conversation in MySQL.";
+      res.status(500).json({ message });
+    }
+  });
+
+  app.patch("/api/conversations/:id", requireAuth, async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "MySQL conversations store is not configured." });
+      return;
+    }
+    const conversationId = normalizeWhitespace(firstString(req.params.id) || "");
+    if (!conversationId) {
+      res.status(400).json({ message: "Conversation id is required." });
+      return;
+    }
+    const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
+    try {
+      await ensureConversationsTable();
+      await migrateLegacyConversationsStateToMySql();
+      const companyId = await resolveRequestCompanyId(req);
+      const salespersonId =
+        req.auth?.role === "salesperson" ? normalizeWhitespace(req.auth.sub || "") : null;
+      const current = await getConversationByIdFromMySql(conversationId, {
+        companyId,
+        salespersonId,
+      });
+      if (!current) {
+        res.status(404).json({ message: "Conversation not found." });
+        return;
+      }
+      const body = req.body as { updates?: Partial<Conversation> } | Partial<Conversation>;
+      const updates =
+        body && "updates" in body && body.updates && typeof body.updates === "object"
+          ? body.updates
+          : (body as Partial<Conversation>);
+      const merged = normalizeConversationPayload(
+        {
+          ...current,
+          ...updates,
+          id: current.id,
+        },
+        authRecord?.user ?? null,
+        current
+      );
+      const conn = await getMySqlPool();
+      await upsertConversationInMySql(conn, merged, companyId || current.companyId || null);
+      res.json(merged);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to update conversation in MySQL.";
       res.status(500).json({ message });
     }
   });

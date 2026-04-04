@@ -94,6 +94,20 @@ let seedDataPromise: Promise<void> | null = null;
 
 export const STORAGE_KEYS = { ...KEYS } as const;
 
+function notifyStorageUpdated(key: string): void {
+  const event: StorageUpdateEvent = {
+    key,
+    updatedAt: new Date().toISOString(),
+  };
+  for (const listener of storageUpdateListeners) {
+    try {
+      listener(event);
+    } catch {
+      // Keep local write path resilient if one live update subscriber fails.
+    }
+  }
+}
+
 function readTrimmedEnv(name: string): string {
   // eslint-disable-next-line expo/no-dynamic-env-var -- central helper intentionally resolves env keys by name
   const raw = process.env[name];
@@ -367,6 +381,11 @@ async function removePendingRemoteStateWrite(key: string): Promise<void> {
   await writePendingRemoteStateWrites(next);
 }
 
+async function hasPendingRemoteStateWrite(key: string): Promise<boolean> {
+  const queue = await readPendingRemoteStateWrites();
+  return queue.some((entry) => entry.key === key);
+}
+
 async function flushPendingRemoteStateWrites(): Promise<void> {
   const queue = await readPendingRemoteStateWrites();
   if (!queue.length) return;
@@ -587,8 +606,149 @@ export async function syncVisitNoteTaskRemote(task: Task): Promise<void> {
   }
   throw new Error(
     failures.length
-      ? `Visit sync failed. ${failures.join(" | ")}`
+      ? `Visit sync failed. ${failures.join(" | ")}` 
       : "Visit sync failed because the server could not be reached."
+  );
+}
+
+function mergeConversationsById(entries: Conversation[]): Conversation[] {
+  const byId = new Map<string, Conversation>();
+  for (const entry of entries) {
+    if (!entry?.id) continue;
+    byId.set(entry.id, {
+      ...byId.get(entry.id),
+      ...entry,
+    });
+  }
+  return Array.from(byId.values()).sort((a, b) => b.date.localeCompare(a.date));
+}
+
+async function fetchRemoteConversations(): Promise<Conversation[] | null> {
+  const token = await getApiToken();
+  if (!token) return null;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/conversations?limit=250`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status >= 500) continue;
+        return null;
+      }
+      const payload = (await response.json()) as { items?: Conversation[] } | Conversation[];
+      if (Array.isArray(payload)) return payload;
+      return Array.isArray(payload?.items) ? payload.items : [];
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function createRemoteConversationInternal(conversation: Conversation): Promise<Conversation> {
+  const token = await getApiToken();
+  if (!token) {
+    throw new Error("API session missing. Please sign in again so conversations can sync to the server.");
+  }
+  const apiBases = await getRemoteStateApiCandidates();
+  const body = JSON.stringify({ conversation });
+  const failures: string[] = [];
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/conversations`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      const preview = text.trim().replace(/\s+/g, " ");
+      if (!response.ok) {
+        failures.push(`${apiBase} -> HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
+        if (response.status < 500) break;
+        continue;
+      }
+      try {
+        return JSON.parse(text) as Conversation;
+      } catch {
+        return conversation;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Conversation save failed.";
+      failures.push(`${apiBase} -> ${message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(
+    failures.length
+      ? `Conversation save failed. ${failures.join(" | ")}`
+      : "Conversation save failed because the server could not be reached."
+  );
+}
+
+async function updateRemoteConversationInternal(
+  conversationId: string,
+  updates: Partial<Conversation>
+): Promise<Conversation> {
+  const token = await getApiToken();
+  if (!token) {
+    throw new Error("API session missing. Please sign in again so conversations can sync to the server.");
+  }
+  const apiBases = await getRemoteStateApiCandidates();
+  const body = JSON.stringify({ updates });
+  const failures: string[] = [];
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body,
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      const preview = text.trim().replace(/\s+/g, " ");
+      if (!response.ok) {
+        failures.push(`${apiBase} -> HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
+        if (response.status < 500) break;
+        continue;
+      }
+      try {
+        return JSON.parse(text) as Conversation;
+      } catch {
+        return updates as Conversation;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Conversation update failed.";
+      failures.push(`${apiBase} -> ${message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error(
+    failures.length
+      ? `Conversation update failed. ${failures.join(" | ")}`
+      : "Conversation update failed because the server could not be reached."
   );
 }
 
@@ -929,6 +1089,12 @@ async function getItem<T>(key: string): Promise<T | null> {
     return localValue;
   }
 
+  const hasPendingWrite = await hasPendingRemoteStateWrite(key);
+  if (hasPendingWrite && localValue !== null) {
+    // Keep the latest local write visible until the queued remote sync succeeds.
+    return localValue;
+  }
+
   if (remoteValue === null) {
     if (localValue !== null) {
       // Bootstrap remote state from first successful local value.
@@ -978,17 +1144,7 @@ async function setItem<T>(key: string, value: T): Promise<void> {
       }
     }
   }
-  const event: StorageUpdateEvent = {
-    key,
-    updatedAt: new Date().toISOString(),
-  };
-  for (const listener of storageUpdateListeners) {
-    try {
-      listener(event);
-    } catch {
-      // Keep local write path resilient if one live update subscriber fails.
-    }
-  }
+  notifyStorageUpdated(key);
 }
 
 export function subscribeStorageUpdates(listener: StorageUpdateListener): () => void {
@@ -1000,6 +1156,25 @@ export function subscribeStorageUpdates(listener: StorageUpdateListener): () => 
 
 async function getRawList<T>(key: string): Promise<T[]> {
   return (await getItem<T[]>(key)) || [];
+}
+
+async function getLocalOnlyItem<T>(key: string): Promise<T | null> {
+  const raw = await AsyncStorage.getItem(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function getLocalOnlyList<T>(key: string): Promise<T[]> {
+  return (await getLocalOnlyItem<T[]>(key)) || [];
+}
+
+async function setLocalOnlyItem<T>(key: string, value: T): Promise<void> {
+  await AsyncStorage.setItem(key, JSON.stringify(value));
+  notifyStorageUpdated(key);
 }
 
 async function getActiveCompanyId(): Promise<string | null> {
@@ -3042,15 +3217,25 @@ export async function updateIncentivePayoutStatus(
 
 export async function getConversations(): Promise<Conversation[]> {
   const companyId = await getActiveCompanyId();
-  const conversations = await getRawList<Conversation>(KEYS.CONVERSATIONS);
-  return conversations.filter((conversation) => matchesCompany(conversation, companyId));
+  const remote = await fetchRemoteConversations();
+  if (remote) {
+    const scopedRemote = remote.filter((conversation) => matchesCompany(conversation, companyId));
+    await setLocalOnlyItem(KEYS.CONVERSATIONS, scopedRemote);
+    return scopedRemote;
+  }
+  const local = await getLocalOnlyList<Conversation>(KEYS.CONVERSATIONS);
+  return local.filter((conversation) => matchesCompany(conversation, companyId));
 }
 
 export async function addConversation(conversation: Conversation): Promise<void> {
   const companyId = await getActiveCompanyId();
-  const conversations = await getRawList<Conversation>(KEYS.CONVERSATIONS);
-  conversations.unshift(withCompanyId(conversation, companyId));
-  await setItem(KEYS.CONVERSATIONS, conversations);
+  const candidate = withCompanyId(conversation, companyId);
+  const persisted = await createRemoteConversationInternal(candidate);
+  const local = await getLocalOnlyList<Conversation>(KEYS.CONVERSATIONS);
+  await setLocalOnlyItem(
+    KEYS.CONVERSATIONS,
+    mergeConversationsById([persisted, ...local])
+  );
 }
 
 export async function updateConversation(
@@ -3058,16 +3243,19 @@ export async function updateConversation(
   updates: Partial<Conversation>
 ): Promise<void> {
   const companyId = await getActiveCompanyId();
-  const conversations = await getRawList<Conversation>(KEYS.CONVERSATIONS);
-  const index = conversations.findIndex(
+  const local = await getLocalOnlyList<Conversation>(KEYS.CONVERSATIONS);
+  const existingLocal = local.find(
     (conversation) => conversation.id === conversationId && matchesCompany(conversation, companyId)
   );
-  if (index === -1) return;
-  conversations[index] = {
-    ...conversations[index],
-    ...updates,
-  };
-  await setItem(KEYS.CONVERSATIONS, conversations);
+  const persisted = await updateRemoteConversationInternal(conversationId, updates);
+  const mergedConversation = {
+    ...existingLocal,
+    ...persisted,
+    id: conversationId,
+  } as Conversation;
+  const next = local.filter((conversation) => conversation.id !== conversationId);
+  next.unshift(mergedConversation);
+  await setLocalOnlyItem(KEYS.CONVERSATIONS, mergeConversationsById(next));
 }
 
 export async function getAuditLogs(): Promise<AuditLog[]> {
