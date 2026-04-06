@@ -5517,6 +5517,213 @@ export default function SalesScreen() {
     }
   }, [cartItems, linkedPosVisitTask, loadData, posSubmitting, selectedCustomer, user]);
 
+  const shouldShowLiveSuggestions =
+    Boolean(activeVisitTaskId) || Boolean(liveTranscript.trim()) || isRecording || isTranscribingFile;
+
+  const liveSuggestionsSection = shouldShowLiveSuggestions ? (
+    <Animated.View
+      entering={FadeInDown.duration(360).delay(84)}
+      style={[
+        styles.liveSuggestionCard,
+        { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+      ]}
+    >
+      <View style={styles.liveSuggestionHeader}>
+        <View style={styles.liveSuggestionTitleWrap}>
+          <View style={[styles.liveSuggestionIcon, { backgroundColor: colors.primary + "14" }]}>
+            <Ionicons name="sparkles-outline" size={16} color={colors.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text
+              style={[
+                styles.liveSuggestionTitle,
+                { color: colors.text, fontFamily: "Inter_700Bold" },
+              ]}
+            >
+              Live Product Suggestions
+            </Text>
+            <Text
+              style={[
+                styles.liveSuggestionMeta,
+                { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+              ]}
+            >
+              Products will continue updating from live phrases as soon as the meeting starts.
+            </Text>
+          </View>
+        </View>
+        <View
+          style={[
+            styles.liveSuggestionStatusChip,
+            {
+              backgroundColor:
+                isRecording || isTranscribingFile
+                  ? colors.success + "14"
+                  : colors.surfaceSecondary,
+            },
+          ]}
+        >
+          <Text
+            style={[
+              styles.liveSuggestionStatusText,
+              {
+                color:
+                  isRecording || isTranscribingFile
+                    ? colors.success
+                    : colors.textSecondary,
+                fontFamily: "Inter_700Bold",
+              },
+            ]}
+          >
+            {isRecording ? "Listening" : isTranscribingFile ? "Transcribing" : "Standby"}
+          </Text>
+        </View>
+      </View>
+
+      {liveDetectedPhrases.length ? (
+        <View style={styles.liveSuggestionPhraseWrap}>
+          {liveDetectedPhrases.map((phrase) => (
+            <View
+              key={`live_phrase_${phrase}`}
+              style={[
+                styles.liveSuggestionPhraseChip,
+                { backgroundColor: colors.primary + "10" },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.liveSuggestionPhraseText,
+                  { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                ]}
+              >
+                {phrase}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <Text
+          style={[
+            styles.liveSuggestionHint,
+            { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+          ]}
+        >
+          Phrases are being captured. As soon as clear specs or product needs are detected, matching products will appear below.
+        </Text>
+      )}
+
+      {liveProductSuggestions.length ? (
+        <View style={styles.liveSuggestionList}>
+          {liveProductSuggestions.map((item) => (
+            <View
+              key={`live_product_${item.id}`}
+              style={[
+                styles.liveSuggestionRow,
+                { backgroundColor: colors.surface, borderColor: colors.borderLight },
+              ]}
+            >
+              <View style={[styles.liveSuggestionProductIcon, { backgroundColor: colors.secondary + "12" }]}>
+                <Ionicons name="cube-outline" size={15} color={colors.secondary} />
+              </View>
+              <View style={styles.liveSuggestionTextWrap}>
+                <View style={styles.liveSuggestionRowHeader}>
+                  <Text
+                    style={[
+                      styles.liveSuggestionRowTitle,
+                      { color: colors.text, fontFamily: "Inter_700Bold" },
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                  {item.ref ? (
+                    <View
+                      style={[
+                        styles.liveSuggestionRefChip,
+                        { backgroundColor: colors.secondary + "16" },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.liveSuggestionRefText,
+                          { color: colors.secondary, fontFamily: "Inter_700Bold" },
+                        ]}
+                      >
+                        {item.ref}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+                <Text
+                  style={[
+                    styles.liveSuggestionReason,
+                    { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                  ]}
+                >
+                  {item.reason}
+                </Text>
+                <View style={styles.liveSuggestionMatchWrap}>
+                  {item.matchedSpecifications.map((entry) => (
+                    <View
+                      key={`${item.id}_live_spec_${entry}`}
+                      style={[
+                        styles.liveSuggestionMatchChip,
+                        { backgroundColor: colors.primary + "10" },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.liveSuggestionMatchText,
+                          { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                        ]}
+                      >
+                        Spec: {entry}
+                      </Text>
+                    </View>
+                  ))}
+                  {item.matchedKeyPhrases.map((entry) => (
+                    <View
+                      key={`${item.id}_live_phrase_${entry}`}
+                      style={[
+                        styles.liveSuggestionMatchChip,
+                        { backgroundColor: colors.secondary + "12" },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.liveSuggestionMatchText,
+                          { color: colors.secondary, fontFamily: "Inter_600SemiBold" },
+                        ]}
+                      >
+                        Phrase: {entry}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : hasLiveSuggestionSignals ? (
+        <View
+          style={[
+            styles.liveSuggestionEmpty,
+            { backgroundColor: colors.surface, borderColor: colors.borderLight },
+          ]}
+        >
+          <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
+          <Text
+            style={[
+              styles.liveSuggestionEmptyText,
+              { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+            ]}
+          >
+            Live suggestions will update here as soon as clearer specs or product needs are detected.
+          </Text>
+        </View>
+      ) : null}
+    </Animated.View>
+  ) : null;
+
   const salesTrendRecommendationsSection = !isAdminViewer ? (
     <Animated.View entering={FadeInDown.duration(400).delay(86)}>
       <View style={styles.sectionHeader}>
@@ -5683,7 +5890,7 @@ export default function SalesScreen() {
   return (
     <AppCanvas>
       <FlatList
-        data={visibleConversations}
+        data={isAdminViewer ? visibleConversations : []}
         keyExtractor={(item) => item.id}
         contentContainerStyle={[styles.listContent, { paddingTop: insets.top + 16 }]}
         showsVerticalScrollIndicator={false}
@@ -6400,7 +6607,7 @@ export default function SalesScreen() {
                         <Text
                           style={[styles.meetingFocusMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}
                         >
-                          Map, route preview aur nearby checks pause hain taaki live phrases se product match sabse fast aaye.
+                          Map, route preview, and nearby checks are paused so live phrase-based product matching stays as fast as possible.
                         </Text>
                       </View>
                     </View>
@@ -6790,7 +6997,7 @@ export default function SalesScreen() {
                   ]}
                 >
                   {meetingFocusMode
-                    ? "Meeting record ho rahi hai. Background map aur refresh abhi pause hain, live suggestions niche aa rahi hain."
+                    ? "Meeting recording is active. Background map and refresh are paused, and live suggestions are updating below."
                     : activeVisitTaskId
                     ? "Visit active. Tap Meeting Start when meeting begins, then Meeting End, then Departure."
                     : "Tap Arrived, then Meeting Start when the meeting begins, Meeting End, and finally Departure."}
@@ -6798,209 +7005,7 @@ export default function SalesScreen() {
               </Animated.View>
             ) : null}
 
-            {!isAdminViewer && (Boolean(activeVisitTaskId) || Boolean(liveTranscript.trim()) || isRecording || isTranscribingFile) ? (
-              <Animated.View
-                entering={FadeInDown.duration(360).delay(84)}
-                style={[
-                  styles.liveSuggestionCard,
-                  { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                ]}
-              >
-                <View style={styles.liveSuggestionHeader}>
-                  <View style={styles.liveSuggestionTitleWrap}>
-                    <View style={[styles.liveSuggestionIcon, { backgroundColor: colors.primary + "14" }]}>
-                      <Ionicons name="sparkles-outline" size={16} color={colors.primary} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={[
-                          styles.liveSuggestionTitle,
-                          { color: colors.text, fontFamily: "Inter_700Bold" },
-                        ]}
-                      >
-                        Live Product Suggestions
-                      </Text>
-                      <Text
-                        style={[
-                          styles.liveSuggestionMeta,
-                          { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
-                        ]}
-                      >
-                        Meeting start hote hi live phrases se products suggest hote rahenge.
-                      </Text>
-                    </View>
-                  </View>
-                  <View
-                    style={[
-                      styles.liveSuggestionStatusChip,
-                      {
-                        backgroundColor:
-                          isRecording || isTranscribingFile
-                            ? colors.success + "14"
-                            : colors.surfaceSecondary,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.liveSuggestionStatusText,
-                        {
-                          color:
-                            isRecording || isTranscribingFile
-                              ? colors.success
-                              : colors.textSecondary,
-                          fontFamily: "Inter_700Bold",
-                        },
-                      ]}
-                    >
-                      {isRecording ? "Listening" : isTranscribingFile ? "Transcribing" : "Standby"}
-                    </Text>
-                  </View>
-                </View>
-
-                {liveDetectedPhrases.length ? (
-                  <View style={styles.liveSuggestionPhraseWrap}>
-                    {liveDetectedPhrases.map((phrase) => (
-                      <View
-                        key={`live_phrase_${phrase}`}
-                        style={[
-                          styles.liveSuggestionPhraseChip,
-                          { backgroundColor: colors.primary + "10" },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.liveSuggestionPhraseText,
-                            { color: colors.primary, fontFamily: "Inter_600SemiBold" },
-                          ]}
-                        >
-                          {phrase}
-                        </Text>
-                      </View>
-                    ))}
-                  </View>
-                ) : (
-                  <Text
-                    style={[
-                      styles.liveSuggestionHint,
-                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                    ]}
-                  >
-                    Abhi phrases collect ho rahe hain. Jaisi hi clear specs ya needs milengi, products niche dikhne lagenge.
-                  </Text>
-                )}
-
-                {liveProductSuggestions.length ? (
-                  <View style={styles.liveSuggestionList}>
-                    {liveProductSuggestions.map((item) => (
-                      <View
-                        key={`live_product_${item.id}`}
-                        style={[
-                          styles.liveSuggestionRow,
-                          { backgroundColor: colors.surface, borderColor: colors.borderLight },
-                        ]}
-                      >
-                        <View style={[styles.liveSuggestionProductIcon, { backgroundColor: colors.secondary + "12" }]}>
-                          <Ionicons name="cube-outline" size={15} color={colors.secondary} />
-                        </View>
-                        <View style={styles.liveSuggestionTextWrap}>
-                          <View style={styles.liveSuggestionRowHeader}>
-                            <Text
-                              style={[
-                                styles.liveSuggestionRowTitle,
-                                { color: colors.text, fontFamily: "Inter_700Bold" },
-                              ]}
-                            >
-                              {item.label}
-                            </Text>
-                            {item.ref ? (
-                              <View
-                                style={[
-                                  styles.liveSuggestionRefChip,
-                                  { backgroundColor: colors.secondary + "16" },
-                                ]}
-                              >
-                                <Text
-                                  style={[
-                                    styles.liveSuggestionRefText,
-                                    { color: colors.secondary, fontFamily: "Inter_700Bold" },
-                                  ]}
-                                >
-                                  {item.ref}
-                                </Text>
-                              </View>
-                            ) : null}
-                          </View>
-                          <Text
-                            style={[
-                              styles.liveSuggestionReason,
-                              { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
-                            ]}
-                          >
-                            {item.reason}
-                          </Text>
-                          <View style={styles.liveSuggestionMatchWrap}>
-                            {item.matchedSpecifications.map((entry) => (
-                              <View
-                                key={`${item.id}_live_spec_${entry}`}
-                                style={[
-                                  styles.liveSuggestionMatchChip,
-                                  { backgroundColor: colors.primary + "10" },
-                                ]}
-                              >
-                                <Text
-                                  style={[
-                                    styles.liveSuggestionMatchText,
-                                    { color: colors.primary, fontFamily: "Inter_600SemiBold" },
-                                  ]}
-                                >
-                                  Spec: {entry}
-                                </Text>
-                              </View>
-                            ))}
-                            {item.matchedKeyPhrases.map((entry) => (
-                              <View
-                                key={`${item.id}_live_phrase_${entry}`}
-                                style={[
-                                  styles.liveSuggestionMatchChip,
-                                  { backgroundColor: colors.secondary + "12" },
-                                ]}
-                              >
-                                <Text
-                                  style={[
-                                    styles.liveSuggestionMatchText,
-                                    { color: colors.secondary, fontFamily: "Inter_600SemiBold" },
-                                  ]}
-                                >
-                                  Phrase: {entry}
-                                </Text>
-                              </View>
-                            ))}
-                          </View>
-                        </View>
-                      </View>
-                    ))}
-                  </View>
-                ) : hasLiveSuggestionSignals ? (
-                  <View
-                    style={[
-                      styles.liveSuggestionEmpty,
-                      { backgroundColor: colors.surface, borderColor: colors.borderLight },
-                    ]}
-                  >
-                    <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
-                    <Text
-                      style={[
-                        styles.liveSuggestionEmptyText,
-                        { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
-                      ]}
-                    >
-                      Aur thodi clear specs ya product needs aate hi yahin live suggestions update hongi.
-                    </Text>
-                  </View>
-                ) : null}
-              </Animated.View>
-            ) : null}
+            {!isAdminViewer ? liveSuggestionsSection : null}
 
             {salesTrendRecommendationsSection}
 
@@ -7613,6 +7618,8 @@ export default function SalesScreen() {
                 }}
               />
 
+              {liveSuggestionsSection}
+
               <View style={styles.captureFooter}>
                 <Text style={[styles.captureHint, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                   {audioUri ? "Audio captured and ready." : "You're ready to record."}
@@ -7740,7 +7747,7 @@ export default function SalesScreen() {
                 { color: colors.textTertiary, fontFamily: "Inter_400Regular" },
               ]}
             >
-              Meeting khatam hote hi customer ne jo specs aur phrases bole, unke basis par ye products suggest kiye gaye hain.
+              These products were suggested based on the specs and phrases the customer mentioned during the meeting.
             </Text>
             <ScrollView
               style={styles.meetingRecommendationList}
@@ -7855,7 +7862,7 @@ export default function SalesScreen() {
                       { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
                     ]}
                   >
-                    Is meeting me clear product spec match nahi mila. Aap notes/departure ke baad POS se manual pitch continue kar sakte ho.
+                    No clear product-spec match was found for this meeting. You can continue the pitch manually from POS after notes and departure.
                   </Text>
                 </View>
               )}
