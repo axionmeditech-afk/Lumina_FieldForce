@@ -143,6 +143,16 @@ type MeetingConversationProductRecommendation = {
   matchedSpecifications: string[];
   reason: string;
 };
+type IndexedConversationRecommendationProduct = {
+  id: string;
+  label: string;
+  ref: string | null;
+  searchable: string;
+  specificationSearchable: string;
+  compactSpecificationSearchable: string;
+  keywordSet: Set<string>;
+  specificationTokenSet: Set<string>;
+};
 type TranscriptDrivenProductSignals = {
   phrases: string[];
   specifications: string[];
@@ -171,8 +181,9 @@ type RoutePlannerStop = {
   source?: "location" | "customer";
   customerId?: string | null;
 };
-const FALLBACK_SEGMENT_MS = 5000;
-const FALLBACK_POLL_MS = 250;
+const FALLBACK_SEGMENT_MS = 2500;
+const FALLBACK_POLL_MS = 100;
+const LIVE_HINT_RESTART_DELAY_MS = 180;
 const TRANSCRIBE_LOADING_RETRY_DELAY_MS = 800;
 const VOICE_WAVE_BAR_COUNT = 31;
 const RECORDING_START_FAILED_MESSAGE = "Recording could not start. Please try again.";
@@ -386,6 +397,11 @@ function sanitizeConversationTranscript(value: string): string {
     cleaned = cleaned.slice(repeatedLeadingNoiseMatch[0].length).trim();
   }
 
+  cleaned = cleaned.replace(
+    /\b((?:[a-z\u00C0-\u024F]+\s+){1,4}[a-z\u00C0-\u024F]+)\b(?:\s+\1){4,}/giu,
+    "$1"
+  );
+
   return cleaned.replace(/\s+/g, " ").trim();
 }
 
@@ -486,37 +502,154 @@ function extractConversationRecommendationKeywords(phrases: string[]): string[] 
   return keywords;
 }
 
-function buildTranscriptDrivenProductSignals(
-  transcript: string,
+function buildConversationRecommendationProductIndex(
   products: DolibarrProduct[]
+): IndexedConversationRecommendationProduct[] {
+  return products
+    .map((product) => {
+      const label = getDolibarrProductLabel(product);
+      const ref = product.ref?.trim() || null;
+      const searchable = normalizeConversationRecommendationText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      );
+      const specificationSearchable = normalizeConversationSpecificationSearchText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      );
+      if (!searchable && !specificationSearchable) return null;
+      return {
+        id: String(getDolibarrProductId(product) ?? `${label}_${ref || "product"}`),
+        label,
+        ref,
+        searchable,
+        specificationSearchable,
+        compactSpecificationSearchable: specificationSearchable.replace(/\s+/g, ""),
+        keywordSet: new Set(
+          searchable
+            .split(" ")
+            .map((entry) => normalizeConversationRecommendationKeyword(entry))
+            .filter(Boolean)
+        ),
+        specificationTokenSet: new Set(
+          specificationSearchable
+            .split(" ")
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+        ),
+      } satisfies IndexedConversationRecommendationProduct;
+    })
+    .filter((item): item is IndexedConversationRecommendationProduct => Boolean(item));
+}
+
+function buildMeetingConversationProductRecommendationsFromSignals(
+  signals: TranscriptDrivenProductSignals,
+  indexedProducts: IndexedConversationRecommendationProduct[],
+  buyingIntent?: Conversation["buyingIntent"]
+): MeetingConversationProductRecommendation[] {
+  const phraseCandidates = signals.phrases;
+  const specificationTokens = signals.specifications;
+  const keywordCandidates = extractConversationRecommendationKeywords(phraseCandidates);
+  if (!phraseCandidates.length && !specificationTokens.length) return [];
+  if (!indexedProducts.length) return [];
+
+  return indexedProducts
+    .map((product) => {
+      const matchedKeyPhrases = phraseCandidates
+        .filter((phrase) => {
+          if (
+            phrase.includes(" ")
+              ? product.searchable.includes(phrase)
+              : ` ${product.searchable} `.includes(` ${phrase} `)
+          ) {
+            return true;
+          }
+          const phraseKeywords = normalizeConversationRecommendationText(phrase)
+            .split(" ")
+            .map((entry) => normalizeConversationRecommendationKeyword(entry))
+            .filter(
+              (entry) =>
+                entry.length >= 3 &&
+                !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(entry) &&
+                !/^\d+(?:\.\d+)?$/.test(entry)
+            );
+          if (!phraseKeywords.length) return false;
+          const overlapCount = phraseKeywords.filter((entry) => product.keywordSet.has(entry)).length;
+          const requiredOverlap = phraseKeywords.length >= 2 ? 2 : 1;
+          return overlapCount >= requiredOverlap;
+        })
+        .slice(0, 3)
+        .map((phrase) => toConversationRecommendationTitle(phrase));
+      const matchedKeywordSignals = keywordCandidates
+        .filter((entry) => product.keywordSet.has(entry))
+        .slice(0, 4)
+        .map((entry) => toConversationRecommendationTitle(entry));
+      const matchedSpecifications = specificationTokens
+        .filter((token) => {
+          const variants = extractConversationRecommendationSpecVariants(token);
+          return variants.some(
+            (variant) =>
+              product.specificationSearchable.includes(variant) ||
+              product.compactSpecificationSearchable.includes(variant.replace(/\s+/g, "")) ||
+              product.specificationTokenSet.has(variant)
+          );
+        })
+        .slice(0, 3)
+        .map((token) => toConversationRecommendationTitle(token));
+      if (!matchedKeyPhrases.length && !matchedSpecifications.length && !matchedKeywordSignals.length) {
+        return null;
+      }
+
+      const specReason =
+        matchedSpecifications.length > 0
+          ? `${product.label} matches the requested spec ${matchedSpecifications.slice(0, 2).join(" and ")}.`
+          : "";
+      const phraseReason =
+        matchedKeyPhrases.length > 0
+          ? `${product.label} fits because the customer mentioned ${matchedKeyPhrases.slice(0, 2).join(" and ")}.`
+          : matchedKeywordSignals.length > 0
+            ? `${product.label} connects with keywords like ${matchedKeywordSignals.slice(0, 2).join(" and ")}.`
+            : `${product.label} aligns with the conversation requirements.`;
+      const score =
+        matchedSpecifications.length * 6 +
+        matchedKeyPhrases.length * 4 +
+        matchedKeywordSignals.length * 2 +
+        (buyingIntent === "high" ? 2 : buyingIntent === "medium" ? 1 : 0);
+
+      return {
+        id: product.id,
+        label: product.label,
+        ref: product.ref,
+        matchedKeyPhrases,
+        matchedSpecifications,
+        reason: [specReason, phraseReason].filter(Boolean).join(" "),
+        score,
+      };
+    })
+    .filter(
+      (
+        item
+      ): item is MeetingConversationProductRecommendation & {
+        score: number;
+      } => Boolean(item)
+    )
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, CONVERSATION_RECOMMENDATION_PRODUCT_LIMIT)
+    .map(({ score: _score, ...item }) => item);
+}
+
+function buildTranscriptDrivenProductSignalsFromIndex(
+  transcript: string,
+  indexedProducts: IndexedConversationRecommendationProduct[]
 ): TranscriptDrivenProductSignals {
   const normalizedTranscript = normalizeConversationRecommendationText(transcript);
   const specificationTranscript = normalizeConversationSpecificationSearchText(transcript);
   const tokens = normalizedTranscript.match(/[a-z0-9.+-]{2,}/g) || [];
   const specifications = extractConversationRecommendationSpecifications(transcript);
-  if (!products.length || (!tokens.length && !specifications.length)) {
+  if (!indexedProducts.length || (!tokens.length && !specifications.length)) {
     return {
       phrases: [],
       specifications,
     };
   }
-
-  const productSearchables = products.map((product) => ({
-    searchable: normalizeConversationRecommendationText(
-      [product.label, product.ref, product.description].filter(Boolean).join(" ")
-    ),
-    specSearchable: normalizeConversationSpecificationSearchText(
-      [product.label, product.ref, product.description].filter(Boolean).join(" ")
-    ),
-    keywordSet: new Set(
-      normalizeConversationRecommendationText(
-        [product.label, product.ref, product.description].filter(Boolean).join(" ")
-      )
-        .split(" ")
-        .map((entry) => normalizeConversationRecommendationKeyword(entry))
-        .filter(Boolean)
-    ),
-  }));
 
   const candidateScores = new Map<string, number>();
   for (let size = 1; size <= 4; size += 1) {
@@ -543,14 +676,14 @@ function buildTranscriptDrivenProductSignals(
             !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(entry) &&
             !/^\d+(?:\.\d+)?$/.test(entry)
         );
-      for (const product of productSearchables) {
-        if (!product.searchable && !product.specSearchable) continue;
+      for (const product of indexedProducts) {
+        if (!product.searchable && !product.specificationSearchable) continue;
         if (
           (phrase.includes(" ")
             ? product.searchable.includes(phrase)
             : ` ${product.searchable} `.includes(` ${phrase} `)) ||
           specificationTranscript.includes(phrase) ||
-          product.specSearchable.includes(phrase) ||
+          product.specificationSearchable.includes(phrase) ||
           normalizedWindowKeywords.some((entry) => product.keywordSet.has(entry))
         ) {
           matchCount += 1;
@@ -579,6 +712,16 @@ function buildTranscriptDrivenProductSignals(
   };
 }
 
+function buildTranscriptDrivenProductSignals(
+  transcript: string,
+  products: DolibarrProduct[]
+): TranscriptDrivenProductSignals {
+  return buildTranscriptDrivenProductSignalsFromIndex(
+    transcript,
+    buildConversationRecommendationProductIndex(products)
+  );
+}
+
 function buildMeetingConversationProductRecommendations(
   conversation: Conversation,
   products: DolibarrProduct[]
@@ -592,118 +735,11 @@ function buildMeetingConversationProductRecommendations(
     .filter(Boolean)
     .join(" ");
   const signals = buildTranscriptDrivenProductSignals(transcriptSource, products);
-  const phraseCandidates = signals.phrases;
-  const specificationTokens = signals.specifications;
-  const keywordCandidates = extractConversationRecommendationKeywords(phraseCandidates);
-  if (!phraseCandidates.length && !specificationTokens.length) return [];
-  if (!products.length) return [];
-
-  return products
-    .map((product) => {
-      const label = getDolibarrProductLabel(product);
-      const ref = product.ref?.trim() || null;
-      const searchable = normalizeConversationRecommendationText(
-        [product.label, product.ref, product.description].filter(Boolean).join(" ")
-      );
-      const specificationSearchable = normalizeConversationSpecificationSearchText(
-        [product.label, product.ref, product.description].filter(Boolean).join(" ")
-      );
-      const compactSpecificationSearchable = specificationSearchable.replace(/\s+/g, "");
-      const productKeywordSet = new Set(
-        searchable
-          .split(" ")
-          .map((entry) => normalizeConversationRecommendationKeyword(entry))
-          .filter(Boolean)
-      );
-      const productSpecificationTokens = new Set(
-        specificationSearchable
-          .split(" ")
-          .map((entry) => entry.trim())
-          .filter(Boolean)
-      );
-      if (!searchable && !specificationSearchable) return null;
-
-      const matchedKeyPhrases = phraseCandidates
-        .filter((phrase) => {
-          if (
-            phrase.includes(" ")
-              ? searchable.includes(phrase)
-              : ` ${searchable} `.includes(` ${phrase} `)
-          ) {
-            return true;
-          }
-          const phraseKeywords = normalizeConversationRecommendationText(phrase)
-            .split(" ")
-            .map((entry) => normalizeConversationRecommendationKeyword(entry))
-            .filter(
-              (entry) =>
-                entry.length >= 3 &&
-                !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(entry) &&
-                !/^\d+(?:\.\d+)?$/.test(entry)
-            );
-          if (!phraseKeywords.length) return false;
-          const overlapCount = phraseKeywords.filter((entry) => productKeywordSet.has(entry)).length;
-          const requiredOverlap = phraseKeywords.length >= 2 ? 2 : 1;
-          return overlapCount >= requiredOverlap;
-        })
-        .slice(0, 3)
-        .map((phrase) => toConversationRecommendationTitle(phrase));
-      const matchedKeywordSignals = keywordCandidates
-        .filter((entry) => productKeywordSet.has(entry))
-        .slice(0, 4)
-        .map((entry) => toConversationRecommendationTitle(entry));
-      const matchedSpecifications = specificationTokens
-        .filter((token) => {
-          const variants = extractConversationRecommendationSpecVariants(token);
-          return variants.some(
-            (variant) =>
-              specificationSearchable.includes(variant) ||
-              compactSpecificationSearchable.includes(variant.replace(/\s+/g, "")) ||
-              productSpecificationTokens.has(variant)
-          );
-        })
-        .slice(0, 3)
-        .map((token) => toConversationRecommendationTitle(token));
-      if (!matchedKeyPhrases.length && !matchedSpecifications.length && !matchedKeywordSignals.length) {
-        return null;
-      }
-
-      const specReason =
-        matchedSpecifications.length > 0
-          ? `${label} matches the requested spec ${matchedSpecifications.slice(0, 2).join(" and ")}.`
-          : "";
-      const phraseReason =
-        matchedKeyPhrases.length > 0
-          ? `${label} fits because the customer mentioned ${matchedKeyPhrases.slice(0, 2).join(" and ")}.`
-          : matchedKeywordSignals.length > 0
-            ? `${label} connects with keywords like ${matchedKeywordSignals.slice(0, 2).join(" and ")}.`
-          : `${label} aligns with the conversation requirements.`;
-      const score =
-        matchedSpecifications.length * 6 +
-        matchedKeyPhrases.length * 4 +
-        matchedKeywordSignals.length * 2 +
-        (conversation.buyingIntent === "high" ? 2 : conversation.buyingIntent === "medium" ? 1 : 0);
-
-      return {
-        id: String(getDolibarrProductId(product) ?? `${label}_${ref || "product"}`),
-        label,
-        ref,
-        matchedKeyPhrases,
-        matchedSpecifications,
-        reason: [specReason, phraseReason].filter(Boolean).join(" "),
-        score,
-      };
-    })
-    .filter(
-      (
-        item
-      ): item is MeetingConversationProductRecommendation & {
-        score: number;
-      } => Boolean(item)
-    )
-    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
-    .slice(0, CONVERSATION_RECOMMENDATION_PRODUCT_LIMIT)
-    .map(({ score: _score, ...item }) => item);
+  return buildMeetingConversationProductRecommendationsFromSignals(
+    signals,
+    buildConversationRecommendationProductIndex(products),
+    conversation.buyingIntent
+  );
 }
 
 function parseNumericId(value: unknown): number | null {
@@ -2180,6 +2216,8 @@ export default function SalesScreen() {
   const [saving, setSaving] = useState(false);
   const [visitActionTaskId, setVisitActionTaskId] = useState<string | null>(null);
   const [activeVisitTaskId, setActiveVisitTaskId] = useState<string | null>(null);
+  const meetingFocusMode =
+    !isAdminViewer && (isRecording || isTranscribingFile || Boolean(activeVisitTaskId));
   const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
@@ -2238,6 +2276,8 @@ export default function SalesScreen() {
   const fallbackChunkBufferRef = useRef<Map<number, string>>(new Map());
   const fallbackTranscribeTasksRef = useRef<Set<Promise<void>>>(new Set());
   const startFallbackRecordingRef = useRef<(() => Promise<void>) | null>(null);
+  const liveHintSpeechActiveRef = useRef(false);
+  const liveHintSpeechRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceDetectedUntilRef = useRef(0);
   const voicePulseFrameRef = useRef(0);
   const voiceLevelRef = useRef(0);
@@ -2612,8 +2652,9 @@ export default function SalesScreen() {
   }, [user]);
 
   useEffect(() => {
+    if (meetingFocusMode) return;
     void loadSalesTrendRecommendations();
-  }, [loadSalesTrendRecommendations]);
+  }, [loadSalesTrendRecommendations, meetingFocusMode]);
 
   const resolveVisitArrivalSnapshot = useCallback(async () => {
     const lastKnownLocation = await getLastKnownLocationSafe({
@@ -2652,11 +2693,12 @@ export default function SalesScreen() {
   }, []);
 
   useEffect(() => {
+    if (meetingFocusMode) return;
     const timer = setInterval(() => {
       void loadData();
     }, LIVE_ROUTE_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [loadData]);
+  }, [loadData, meetingFocusMode]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -2732,6 +2774,11 @@ export default function SalesScreen() {
     return () => {
       fallbackLoopRunningRef.current = false;
       fallbackStopRequestedRef.current = true;
+      liveHintSpeechActiveRef.current = false;
+      if (liveHintSpeechRestartTimerRef.current) {
+        clearTimeout(liveHintSpeechRestartTimerRef.current);
+        liveHintSpeechRestartTimerRef.current = null;
+      }
       try {
         ExpoSpeechRecognitionModule?.abort?.();
       } catch {
@@ -2753,6 +2800,39 @@ export default function SalesScreen() {
     }
     setTranscriptDraft(finalSegmentsRef.current.join(" ").trim());
   }, []);
+
+  const startLiveHintSpeechRecognition = useCallback(() => {
+    if (!ExpoSpeechRecognitionModule) return;
+    if (!recognitionAvailable) return;
+    if (liveHintSpeechActiveRef.current) return;
+    if (!fallbackLoopRunningRef.current || fallbackStopRequestedRef.current) return;
+    if (liveHintSpeechRestartTimerRef.current) {
+      clearTimeout(liveHintSpeechRestartTimerRef.current);
+      liveHintSpeechRestartTimerRef.current = null;
+    }
+
+    liveHintSpeechActiveRef.current = true;
+    try {
+      ExpoSpeechRecognitionModule.start({
+        interimResults: true,
+        continuous: true,
+        addsPunctuation: false,
+        maxAlternatives: 1,
+        volumeChangeEventOptions: {
+          enabled: true,
+          intervalMillis: 45,
+        },
+        androidIntentOptions: {
+          EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 60_000,
+          EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 12_000,
+          EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 8_000,
+          EXTRA_MASK_OFFENSIVE_WORDS: false,
+        },
+      });
+    } catch {
+      liveHintSpeechActiveRef.current = false;
+    }
+  }, [recognitionAvailable]);
 
   useSpeechRecognitionEvent("start", () => {
     voicePulseFrameRef.current = 0;
@@ -2797,6 +2877,20 @@ export default function SalesScreen() {
 
   useSpeechRecognitionEvent("error", (event) => {
     const message = event.message || TRANSCRIPTION_FAILED_MESSAGE;
+    if (sessionModeRef.current === "audio-fallback") {
+      liveHintSpeechActiveRef.current = false;
+      if (
+        fallbackLoopRunningRef.current &&
+        !fallbackStopRequestedRef.current &&
+        !liveHintSpeechRestartTimerRef.current
+      ) {
+        liveHintSpeechRestartTimerRef.current = setTimeout(() => {
+          liveHintSpeechRestartTimerRef.current = null;
+          startLiveHintSpeechRecognition();
+        }, LIVE_HINT_RESTART_DELAY_MS);
+      }
+      return;
+    }
     const shouldAutoFallback =
       recordingModeRef.current === "speech" &&
       sessionModeRef.current === "recording" &&
@@ -2833,6 +2927,20 @@ export default function SalesScreen() {
   });
 
   useSpeechRecognitionEvent("end", () => {
+    if (sessionModeRef.current === "audio-fallback") {
+      liveHintSpeechActiveRef.current = false;
+      if (
+        fallbackLoopRunningRef.current &&
+        !fallbackStopRequestedRef.current &&
+        !liveHintSpeechRestartTimerRef.current
+      ) {
+        liveHintSpeechRestartTimerRef.current = setTimeout(() => {
+          liveHintSpeechRestartTimerRef.current = null;
+          startLiveHintSpeechRecognition();
+        }, LIVE_HINT_RESTART_DELAY_MS);
+      }
+      return;
+    }
     if (startedAtRef.current !== null) {
       setElapsedMs(Date.now() - startedAtRef.current);
       startedAtRef.current = null;
@@ -2913,7 +3021,10 @@ export default function SalesScreen() {
     todayDateKey,
     user?.name,
   ]);
-
+  const activeVisitTask = useMemo(
+    () => todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress") ?? null,
+    [todaysVisitTasks]
+  );
   const selectedDateVisitTasks = useMemo(() => {
     if (!selectedSalespersonId) return [] as Task[];
     return tasks
@@ -2978,7 +3089,7 @@ export default function SalesScreen() {
   ]);
 
   useEffect(() => {
-    if (isAdminViewer || !user?.id) return;
+    if (isAdminViewer || !user?.id || meetingFocusMode) return;
     void syncLocationReminderCatalog({
       salespersonId: user.id,
       companyId: user.companyId ?? null,
@@ -2990,6 +3101,7 @@ export default function SalesScreen() {
     });
   }, [
     isAdminViewer,
+    meetingFocusMode,
     quickSaleLocationLogs,
     recentOrders,
     salespersonVisitTasks,
@@ -3461,7 +3573,7 @@ export default function SalesScreen() {
   );
 
   useEffect(() => {
-    if (isAdminViewer || !user?.id || !latestRoutePoint) return;
+    if (isAdminViewer || !user?.id || !latestRoutePoint || meetingFocusMode) return;
     void maybeSendLocationReminder({
       latitude: latestRoutePoint.latitude,
       longitude: latestRoutePoint.longitude,
@@ -3473,12 +3585,13 @@ export default function SalesScreen() {
   }, [
     isAdminViewer,
     latestRoutePoint,
+    meetingFocusMode,
     user?.companyId,
     user?.id,
   ]);
 
   useEffect(() => {
-    if (!latestRouteOrigin || !nextNavigationStop) {
+    if (meetingFocusMode || !latestRouteOrigin || !nextNavigationStop) {
       setRoutePreview(null);
       setRoutePreviewError(null);
       setRoutePreviewBusy(false);
@@ -3529,6 +3642,7 @@ export default function SalesScreen() {
     };
   }, [
     latestRouteOrigin,
+    meetingFocusMode,
     navigationStops,
     nextNavigationStop,
   ]);
@@ -3980,53 +4094,52 @@ export default function SalesScreen() {
     [salesTrendRecommendations]
   );
 
-  const liveTranscript = useMemo(() => {
-    return transcriptDraft || interimTranscript;
-  }, [interimTranscript, transcriptDraft]);
+  const liveRecommendationProductIndex = useMemo(
+    () => buildConversationRecommendationProductIndex(posProducts),
+    [posProducts]
+  );
 
-  const liveRecommendationConversation = useMemo(() => {
-    if (isAdminViewer) return null;
-    const transcript = sanitizeConversationTranscript(liveTranscript);
-    const inferredCustomerName = activeVisitTask ? getVisitLabel(activeVisitTask) : customerName.trim();
-    if (!transcript || transcript.length < 12 || !inferredCustomerName) {
-      return null;
-    }
-    return buildConversationFromTranscript({
-      salespersonId: user?.id ?? "sales_unknown",
-      salespersonName: user?.name ?? "Sales Rep",
-      customerName: inferredCustomerName,
-      transcript,
-      durationMs: elapsedMs,
-      audioUri: null,
-    });
-  }, [activeVisitTask, customerName, elapsedMs, isAdminViewer, liveTranscript, user?.id, user?.name]);
+  const liveTranscript = useMemo(() => {
+    const finalTranscript = sanitizeConversationTranscript(transcriptDraft);
+    const partialTranscript = sanitizeConversationTranscript(interimTranscript);
+    if (!finalTranscript) return partialTranscript;
+    if (!partialTranscript) return finalTranscript;
+    if (finalTranscript === partialTranscript) return finalTranscript;
+    if (finalTranscript.endsWith(partialTranscript)) return finalTranscript;
+    return `${finalTranscript} ${partialTranscript}`.trim();
+  }, [interimTranscript, transcriptDraft]);
 
   const liveTranscriptSignals = useMemo(
     () =>
-      buildTranscriptDrivenProductSignals(
+      buildTranscriptDrivenProductSignalsFromIndex(
         sanitizeConversationTranscript(liveTranscript),
-        posProducts
+        liveRecommendationProductIndex
       ),
-    [liveTranscript, posProducts]
+    [liveRecommendationProductIndex, liveTranscript]
   );
 
   const liveDetectedPhrases = useMemo(
     () =>
       [...liveTranscriptSignals.specifications, ...liveTranscriptSignals.phrases]
         .map((entry) => toConversationRecommendationTitle(entry))
-        .slice(0, 6),
+        .slice(0, 8),
     [liveTranscriptSignals]
+  );
+
+  const hasLiveSuggestionSignals = useMemo(
+    () => liveDetectedPhrases.length > 0 || sanitizeConversationTranscript(liveTranscript).length >= 3,
+    [liveDetectedPhrases.length, liveTranscript]
   );
 
   const liveProductSuggestions = useMemo(
     () =>
-      liveRecommendationConversation
-        ? buildMeetingConversationProductRecommendations(
-            liveRecommendationConversation,
-            posProducts
-          ).slice(0, CONVERSATION_RECOMMENDATION_PRODUCT_LIMIT)
+      hasLiveSuggestionSignals
+        ? buildMeetingConversationProductRecommendationsFromSignals(
+            liveTranscriptSignals,
+            liveRecommendationProductIndex
+          )
         : [],
-    [liveRecommendationConversation, posProducts]
+    [hasLiveSuggestionSignals, liveRecommendationProductIndex, liveTranscriptSignals]
   );
 
   useEffect(() => {
@@ -4108,6 +4221,11 @@ export default function SalesScreen() {
     });
     fallbackLoopRunningRef.current = true;
     fallbackStopRequestedRef.current = false;
+    liveHintSpeechActiveRef.current = false;
+    if (liveHintSpeechRestartTimerRef.current) {
+      clearTimeout(liveHintSpeechRestartTimerRef.current);
+      liveHintSpeechRestartTimerRef.current = null;
+    }
     fallbackChunkIndexRef.current = 0;
     fallbackNextChunkToApplyRef.current = 0;
     fallbackChunkBufferRef.current.clear();
@@ -4122,6 +4240,7 @@ export default function SalesScreen() {
     setIsRecording(true);
     setIsTranscribingFile(false);
     setInterimTranscript("Listening...");
+    startLiveHintSpeechRecognition();
 
     const flushFallbackChunks = () => {
       let updated = false;
@@ -4225,6 +4344,16 @@ export default function SalesScreen() {
         }
         fallbackLoopRunningRef.current = false;
         fallbackStopRequestedRef.current = false;
+        liveHintSpeechActiveRef.current = false;
+        if (liveHintSpeechRestartTimerRef.current) {
+          clearTimeout(liveHintSpeechRestartTimerRef.current);
+          liveHintSpeechRestartTimerRef.current = null;
+        }
+        try {
+          ExpoSpeechRecognitionModule?.abort?.();
+        } catch {
+          // no-op
+        }
         fallbackRecordingRef.current = null;
         fallbackChunkBufferRef.current.clear();
         fallbackTranscribeTasksRef.current.clear();
@@ -4241,7 +4370,7 @@ export default function SalesScreen() {
     };
 
     void runFallbackLoop();
-  }, [markVoiceDetected, updateVoicePulseInput]);
+  }, [markVoiceDetected, startLiveHintSpeechRecognition, updateVoicePulseInput]);
 
   useEffect(() => {
     startFallbackRecordingRef.current = startFallbackRecording;
@@ -4251,6 +4380,16 @@ export default function SalesScreen() {
     if (recordingModeRef.current !== "audio-fallback") return;
     fallbackStopRequestedRef.current = true;
     fallbackLoopRunningRef.current = false;
+    liveHintSpeechActiveRef.current = false;
+    if (liveHintSpeechRestartTimerRef.current) {
+      clearTimeout(liveHintSpeechRestartTimerRef.current);
+      liveHintSpeechRestartTimerRef.current = null;
+    }
+    try {
+      ExpoSpeechRecognitionModule?.abort?.();
+    } catch {
+      // no-op
+    }
     setInterimTranscript("Finalizing transcript...");
     const recording = fallbackRecordingRef.current;
     if (!recording) return;
@@ -4388,19 +4527,18 @@ export default function SalesScreen() {
         recordingModeRef.current = "speech";
 
         const startOptions: Record<string, any> = {
-          lang: "en-US",
           interimResults: true,
           continuous: true,
-          addsPunctuation: true,
+          addsPunctuation: false,
           maxAlternatives: 1,
           volumeChangeEventOptions: {
             enabled: true,
-            intervalMillis: 60,
+            intervalMillis: 45,
           },
           androidIntentOptions: {
-            EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 10_000,
-            EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 4_000,
-            EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 2_000,
+            EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 60_000,
+            EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 12_000,
+            EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 8_000,
             EXTRA_MASK_OFFENSIVE_WORDS: false,
           },
         };
@@ -4486,7 +4624,6 @@ export default function SalesScreen() {
     setRecordError(null);
     sessionModeRef.current = "file";
     ExpoSpeechRecognitionModule.start({
-      lang: "en-US",
       interimResults: true,
       audioSource: {
         uri: audioUri,
@@ -4656,6 +4793,7 @@ export default function SalesScreen() {
           module: "Sales Intelligence",
         });
         setActiveVisitTaskId(task.id);
+        void ensureConversationRecommendationProducts().catch(() => {});
         const started = await startRecording({
           customerNameOverride: getVisitLabel(task),
           silent: true,
@@ -4677,7 +4815,15 @@ export default function SalesScreen() {
         setVisitActionTaskId(null);
       }
     },
-    [activeVisitTaskId, isAdminViewer, loadData, startRecording, user, visitActionTaskId]
+    [
+      activeVisitTaskId,
+      ensureConversationRecommendationProducts,
+      isAdminViewer,
+      loadData,
+      startRecording,
+      user,
+      visitActionTaskId,
+    ]
   );
 
   const handleMeetingEnd = useCallback(
@@ -5034,10 +5180,6 @@ export default function SalesScreen() {
       pending,
     };
   }, [todaysVisitTasks]);
-  const activeVisitTask = useMemo(
-    () => todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress") ?? null,
-    [todaysVisitTasks]
-  );
   const remainingVisits = Math.max(visitSummary.total - visitSummary.completed, 0);
   const salesHeroMeta = activeVisitTask
     ? `Active: ${getVisitLabel(activeVisitTask)}`
@@ -6239,106 +6381,148 @@ export default function SalesScreen() {
                   </LinearGradient>
                 </Animated.View>
 
-                <Animated.View
-                  entering={FadeInDown.duration(380).delay(80)}
-                  style={[
-                    styles.salesMapCard,
-                    { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                  ]}
-                >
-                  <View style={styles.salesMapHeader}>
-                    <Text style={[styles.salesMapTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      My Route Map
-                    </Text>
-                    <Text style={[styles.salesMapMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                      {mumbaiNowLabel}
-                    </Text>
-                  </View>
-                  <View style={styles.routeMapShell}>
-                    <RouteMapNative
-                      points={routeTimeline.points}
-                      halts={routeTimeline.halts}
-                      plannedStops={mapPlannedStops}
-                      routePath={routePreviewPath}
-                      colors={colors}
-                      height={230}
-                    />
-                    {!isSelectedSalespersonTrackingActive ? (
-                      <View style={styles.routeMapOverlay}>
-                        <View
-                          style={[
-                            styles.routeMapOverlayCard,
-                            {
-                              borderColor: colors.warning + "55",
-                              backgroundColor: colors.backgroundElevated + "F2",
-                            },
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.routeMapOverlayTitle,
-                              { color: colors.text, fontFamily: "Inter_700Bold" },
-                            ]}
-                          >
-                            {selectedSalespersonTrackingTitle}
-                          </Text>
-                          <Text
-                            style={[
-                              styles.routeMapOverlayText,
-                              { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                            ]}
-                          >
-                            {selectedSalespersonTrackingMessage}
-                          </Text>
-                        </View>
+                {meetingFocusMode ? (
+                  <Animated.View
+                    entering={FadeInDown.duration(380).delay(80)}
+                    style={[
+                      styles.meetingFocusCard,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                    ]}
+                  >
+                    <View style={styles.meetingFocusHeader}>
+                      <View style={[styles.meetingFocusIcon, { backgroundColor: colors.primary + "16" }]}>
+                        <Ionicons name="mic-outline" size={18} color={colors.primary} />
                       </View>
-                    ) : null}
-                  </View>
-                </Animated.View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.meetingFocusTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                          Meeting Focus Mode
+                        </Text>
+                        <Text
+                          style={[styles.meetingFocusMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}
+                        >
+                          Map, route preview aur nearby checks pause hain taaki live phrases se product match sabse fast aaye.
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.meetingFocusStatRow}>
+                      <View style={[styles.meetingFocusStat, { backgroundColor: colors.surface }]}>
+                        <Text style={[styles.meetingFocusStatLabel, { color: colors.textSecondary }]}>Meeting</Text>
+                        <Text style={[styles.meetingFocusStatValue, { color: colors.text }]}>
+                          {activeVisitTask ? getVisitLabel(activeVisitTask) : "Active session"}
+                        </Text>
+                      </View>
+                      <View style={[styles.meetingFocusStat, { backgroundColor: colors.surface }]}>
+                        <Text style={[styles.meetingFocusStatLabel, { color: colors.textSecondary }]}>Live state</Text>
+                        <Text style={[styles.meetingFocusStatValue, { color: colors.text }]}>
+                          {isRecording ? "Listening" : isTranscribingFile ? "Transcribing" : "Focused"}
+                        </Text>
+                      </View>
+                    </View>
+                  </Animated.View>
+                ) : (
+                  <>
+                    <Animated.View
+                      entering={FadeInDown.duration(380).delay(80)}
+                      style={[
+                        styles.salesMapCard,
+                        { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      ]}
+                    >
+                      <View style={styles.salesMapHeader}>
+                        <Text style={[styles.salesMapTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          My Route Map
+                        </Text>
+                        <Text style={[styles.salesMapMeta, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                          {mumbaiNowLabel}
+                        </Text>
+                      </View>
+                      <View style={styles.routeMapShell}>
+                        <RouteMapNative
+                          points={routeTimeline.points}
+                          halts={routeTimeline.halts}
+                          plannedStops={mapPlannedStops}
+                          routePath={routePreviewPath}
+                          colors={colors}
+                          height={230}
+                        />
+                        {!isSelectedSalespersonTrackingActive ? (
+                          <View style={styles.routeMapOverlay}>
+                            <View
+                              style={[
+                                styles.routeMapOverlayCard,
+                                {
+                                  borderColor: colors.warning + "55",
+                                  backgroundColor: colors.backgroundElevated + "F2",
+                                },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.routeMapOverlayTitle,
+                                  { color: colors.text, fontFamily: "Inter_700Bold" },
+                                ]}
+                              >
+                                {selectedSalespersonTrackingTitle}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.routeMapOverlayText,
+                                  { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                                ]}
+                              >
+                                {selectedSalespersonTrackingMessage}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+                      </View>
+                    </Animated.View>
 
-                <Animated.View
-                  entering={FadeInDown.duration(360).delay(110)}
-                  style={[
-                    styles.salesInfoCard,
-                    { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                  ]}
-                >
-                  <View style={[styles.salesInfoIcon, { backgroundColor: `${colors.primary}18` }]}>
-                    {routePreviewBusy ? (
-                      <ActivityIndicator size="small" color={colors.primary} />
-                    ) : (
-                      <Ionicons name="navigate-outline" size={16} color={colors.primary} />
-                    )}
-                  </View>
-                  <View style={styles.salesInfoText}>
-                    <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      Next Stop
-                    </Text>
-                    <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                      {routePreviewSummary}
-                    </Text>
-                  </View>
-                </Animated.View>
+                    <Animated.View
+                      entering={FadeInDown.duration(360).delay(110)}
+                      style={[
+                        styles.salesInfoCard,
+                        { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      ]}
+                    >
+                      <View style={[styles.salesInfoIcon, { backgroundColor: `${colors.primary}18` }]}>
+                        {routePreviewBusy ? (
+                          <ActivityIndicator size="small" color={colors.primary} />
+                        ) : (
+                          <Ionicons name="navigate-outline" size={16} color={colors.primary} />
+                        )}
+                      </View>
+                      <View style={styles.salesInfoText}>
+                        <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          Next Stop
+                        </Text>
+                        <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                          {routePreviewSummary}
+                        </Text>
+                      </View>
+                    </Animated.View>
 
-                <Animated.View
-                  entering={FadeInDown.duration(360).delay(130)}
-                  style={[
-                    styles.salesInfoCard,
-                    { backgroundColor: colors.surface, borderColor: colors.border },
-                  ]}
-                >
-                  <View style={[styles.salesInfoIcon, { backgroundColor: `${colors.secondary}18` }]}>
-                    <Ionicons name="locate-outline" size={16} color={colors.secondary} />
-                  </View>
-                  <View style={styles.salesInfoText}>
-                    <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      {isSelectedSalespersonTrackingActive ? "Current Location" : "Attendance Status"}
-                    </Text>
-                    <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                      {currentLocationMeta}
-                    </Text>
-                  </View>
-                </Animated.View>
+                    <Animated.View
+                      entering={FadeInDown.duration(360).delay(130)}
+                      style={[
+                        styles.salesInfoCard,
+                        { backgroundColor: colors.surface, borderColor: colors.border },
+                      ]}
+                    >
+                      <View style={[styles.salesInfoIcon, { backgroundColor: `${colors.secondary}18` }]}>
+                        <Ionicons name="locate-outline" size={16} color={colors.secondary} />
+                      </View>
+                      <View style={styles.salesInfoText}>
+                        <Text style={[styles.salesInfoTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          {isSelectedSalespersonTrackingActive ? "Current Location" : "Attendance Status"}
+                        </Text>
+                        <Text style={[styles.salesInfoMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                          {currentLocationMeta}
+                        </Text>
+                      </View>
+                    </Animated.View>
+                  </>
+                )}
               </>
             )}
 
@@ -6605,7 +6789,9 @@ export default function SalesScreen() {
                     { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
                   ]}
                 >
-                  {activeVisitTaskId
+                  {meetingFocusMode
+                    ? "Meeting record ho rahi hai. Background map aur refresh abhi pause hain, live suggestions niche aa rahi hain."
+                    : activeVisitTaskId
                     ? "Visit active. Tap Meeting Start when meeting begins, then Meeting End, then Departure."
                     : "Tap Arrived, then Meeting Start when the meeting begins, Meeting End, and finally Departure."}
                 </Text>
@@ -6795,7 +6981,7 @@ export default function SalesScreen() {
                       </View>
                     ))}
                   </View>
-                ) : liveRecommendationConversation ? (
+                ) : hasLiveSuggestionSignals ? (
                   <View
                     style={[
                       styles.liveSuggestionEmpty,
@@ -8351,6 +8537,52 @@ const styles = StyleSheet.create({
   salesInfoMeta: {
     fontSize: 11.5,
     lineHeight: 16,
+  },
+  meetingFocusCard: {
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+    gap: 12,
+    marginBottom: 12,
+  },
+  meetingFocusHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  meetingFocusIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  meetingFocusTitle: {
+    fontSize: 14.5,
+  },
+  meetingFocusMeta: {
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 3,
+  },
+  meetingFocusStatRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  meetingFocusStat: {
+    flex: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  meetingFocusStatLabel: {
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+  },
+  meetingFocusStatValue: {
+    fontSize: 12.5,
+    fontFamily: "Inter_700Bold",
   },
   summaryRow: {
     flexDirection: "row",

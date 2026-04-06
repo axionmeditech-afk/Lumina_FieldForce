@@ -265,10 +265,28 @@ function getExpoLanApiBaseUrl(): string | null {
   return null;
 }
 
+function isAsyncStorageCursorWindowError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /row too big to fit into cursorwindow/i.test(message);
+}
+
+async function safeAsyncStorageGetItem(key: string): Promise<string | null> {
+  try {
+    return await AsyncStorage.getItem(key);
+  } catch (error) {
+    if (isAsyncStorageCursorWindowError(error)) {
+      console.warn(`Clearing oversized AsyncStorage row for key ${key}.`);
+      await AsyncStorage.removeItem(key).catch(() => undefined);
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function getLocalSettingsApiBaseUrl(): Promise<string> {
   const [settingsRaw, userRaw] = await Promise.all([
-    AsyncStorage.getItem(KEYS.SETTINGS),
-    AsyncStorage.getItem(KEYS.USER),
+    safeAsyncStorageGetItem(KEYS.SETTINGS),
+    safeAsyncStorageGetItem(KEYS.USER),
   ]);
   if (!settingsRaw) return "";
 
@@ -344,7 +362,7 @@ async function getRemoteStateApiCandidates(): Promise<string[]> {
 }
 
 async function readPendingRemoteStateWrites(): Promise<PendingRemoteStateWrite[]> {
-  const raw = await AsyncStorage.getItem(REMOTE_STATE_PENDING_WRITES_KEY);
+  const raw = await safeAsyncStorageGetItem(REMOTE_STATE_PENDING_WRITES_KEY);
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as PendingRemoteStateWrite[];
@@ -1108,7 +1126,11 @@ async function filterByCompanyScope<T extends CompanyScoped>(
 }
 
 async function getItem<T>(key: string): Promise<T | null> {
-  const localRaw = await AsyncStorage.getItem(key);
+  if (key === KEYS.CONVERSATIONS) {
+    await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
+    return null;
+  }
+  const localRaw = await safeAsyncStorageGetItem(key);
   const localValue = localRaw ? (JSON.parse(localRaw) as T) : null;
   if (!shouldSyncRemoteStateKey(key)) {
     return localValue;
@@ -1142,6 +1164,11 @@ async function getItem<T>(key: string): Promise<T | null> {
 }
 
 async function setItem<T>(key: string, value: T): Promise<void> {
+  if (key === KEYS.CONVERSATIONS) {
+    await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
+    notifyStorageUpdated(key);
+    return;
+  }
   await AsyncStorage.setItem(key, JSON.stringify(value));
   if (shouldSyncRemoteStateKey(key)) {
     if (key === KEYS.LOCATION_LOGS) {
@@ -1190,7 +1217,11 @@ async function getRawList<T>(key: string): Promise<T[]> {
 }
 
 async function getLocalOnlyItem<T>(key: string): Promise<T | null> {
-  const raw = await AsyncStorage.getItem(key);
+  if (key === KEYS.CONVERSATIONS) {
+    await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
+    return null;
+  }
+  const raw = await safeAsyncStorageGetItem(key);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as T;
@@ -1204,6 +1235,11 @@ async function getLocalOnlyList<T>(key: string): Promise<T[]> {
 }
 
 async function setLocalOnlyItem<T>(key: string, value: T): Promise<void> {
+  if (key === KEYS.CONVERSATIONS) {
+    await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
+    notifyStorageUpdated(key);
+    return;
+  }
   await AsyncStorage.setItem(key, JSON.stringify(value));
   notifyStorageUpdated(key);
 }
@@ -1417,7 +1453,6 @@ async function purgeLegacyDemoProfiles(): Promise<void> {
     KEYS.SALARIES,
     KEYS.TASKS,
     KEYS.EXPENSES,
-    KEYS.CONVERSATIONS,
     KEYS.AUDIT_LOGS,
     KEYS.TEAMS,
     KEYS.ATTENDANCE_PHOTOS,
@@ -1464,8 +1499,9 @@ async function runSeedMigrations(): Promise<void> {
   await ensureAuthUsersSeeded();
   await ensureAccessRequestsSeeded();
   await ensureCurrentUserShape();
+  await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
 
-  const appliedVersion = await AsyncStorage.getItem(KEYS.SEED_VERSION);
+  const appliedVersion = await safeAsyncStorageGetItem(KEYS.SEED_VERSION);
   if (appliedVersion === SEED_VERSION) return;
 
   await Promise.all([
@@ -1474,7 +1510,6 @@ async function runSeedMigrations(): Promise<void> {
     migrateCompanyIdOnCollection<SalaryRecord>(KEYS.SALARIES),
     migrateCompanyIdOnCollection<Task>(KEYS.TASKS),
     migrateCompanyIdOnCollection<Expense>(KEYS.EXPENSES),
-    migrateCompanyIdOnCollection<Conversation>(KEYS.CONVERSATIONS),
     migrateCompanyIdOnCollection<AuditLog>(KEYS.AUDIT_LOGS),
     migrateCompanyIdOnCollection<Geofence>(KEYS.GEOFENCES),
     migrateCompanyIdOnCollection<Team>(KEYS.TEAMS),
@@ -1491,7 +1526,7 @@ async function runSeedMigrations(): Promise<void> {
 }
 
 async function seedDataIfNeededInternal(): Promise<void> {
-  const seeded = await AsyncStorage.getItem(KEYS.SEEDED);
+  const seeded = await safeAsyncStorageGetItem(KEYS.SEEDED);
   if (seeded) {
     await runSeedMigrations();
     return;
@@ -1503,7 +1538,6 @@ async function seedDataIfNeededInternal(): Promise<void> {
     setItem(KEYS.SALARIES, []),
     setItem(KEYS.TASKS, []),
     setItem(KEYS.EXPENSES, []),
-    setItem(KEYS.CONVERSATIONS, []),
     setItem(KEYS.AUDIT_LOGS, []),
     setItem(KEYS.GEOFENCES, []),
     setItem(KEYS.TEAMS, []),
@@ -1518,6 +1552,7 @@ async function seedDataIfNeededInternal(): Promise<void> {
     setItem(KEYS.COMPANIES, []),
     setItem(KEYS.AUTH_USERS, []),
   ]);
+  await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
 
   await AsyncStorage.setItem(KEYS.SEEDED, "true");
   await runSeedMigrations();
@@ -2414,7 +2449,7 @@ export async function updateCurrentUserProfile(
 }
 
 async function readCheckedInMap(currentUser?: AppUser | null): Promise<Record<string, boolean>> {
-  const raw = await AsyncStorage.getItem(KEYS.CHECKED_IN);
+  const raw = await safeAsyncStorageGetItem(KEYS.CHECKED_IN);
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw);
@@ -2448,7 +2483,7 @@ type ApiTokenStore = Record<string, string>;
 const GLOBAL_API_TOKEN_KEY = "__global__";
 
 async function readApiTokenStore(currentUser?: AppUser | null): Promise<ApiTokenStore> {
-  const raw = await AsyncStorage.getItem(KEYS.API_TOKEN);
+  const raw = await safeAsyncStorageGetItem(KEYS.API_TOKEN);
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw);
@@ -4011,7 +4046,7 @@ export async function setAttendanceQueue<T = Record<string, unknown>>(queue: T[]
 }
 
 export async function getOrCreateDeviceId(): Promise<string> {
-  const current = await AsyncStorage.getItem(KEYS.DEVICE_ID);
+  const current = await safeAsyncStorageGetItem(KEYS.DEVICE_ID);
   if (current) return current;
 
   const generated = `device_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
