@@ -6402,6 +6402,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.delete(
+    "/api/visit-notes/:taskId",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (req, res) => {
+      if (!isMySqlStateEnabled()) {
+        res.status(503).json({ message: "MySQL visit notes store is not configured." });
+        return;
+      }
+
+      const taskId = normalizeWhitespace(firstString(req.params.taskId) || "");
+      if (!taskId) {
+        res.status(400).json({ message: "Task id is required." });
+        return;
+      }
+
+      try {
+        await ensureTaskVisitNotesColumns();
+        await ensureVisitHistoryTable();
+        const companyId = (await resolveRequestCompanyId(req)) || null;
+        const conn = await getMySqlPool();
+
+        const deleteParams = companyId ? [taskId, companyId] : [taskId];
+        const deleteWhere = companyId ? "id = ? AND company_id = ?" : "id = ?";
+        const deleteHistoryWhere = companyId ? "task_id = ? AND company_id = ?" : "task_id = ?";
+
+        await conn.execute(
+          `DELETE FROM lff_visit_history WHERE ${deleteHistoryWhere}`,
+          deleteParams as any[]
+        );
+
+        const [result] = await conn.execute<any>(
+          `DELETE FROM lff_tasks WHERE ${deleteWhere} AND task_type = 'field_visit'`,
+          deleteParams as any[]
+        );
+
+        if (!result?.affectedRows) {
+          res.status(404).json({ message: "Field visit not found." });
+          return;
+        }
+
+        res.json({ ok: true, taskId });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to delete field visit from MySQL.";
+        res.status(500).json({ message });
+      }
+    }
+  );
+
   app.put("/api/state/:key", requireAuth, async (req, res) => {
     const key = decodeURIComponent(firstString(req.params.key) || "").trim();
     if (!key) {

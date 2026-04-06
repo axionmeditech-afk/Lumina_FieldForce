@@ -53,7 +53,53 @@ const STOP_WORDS = new Set([
   "hello",
   "thanks",
   "thank",
+  "haan",
+  "ha",
+  "han",
+  "acha",
+  "accha",
+  "nahi",
+  "nahin",
+  "kya",
+  "kar",
+  "karna",
+  "karne",
+  "krna",
+  "krne",
+  "bolo",
+  "boliye",
+  "de",
+  "dijiye",
+  "sakta",
+  "sakte",
+  "sakta",
+  "wale",
+  "wala",
+  "wali",
+  "liye",
+  "aur",
+  "sir",
+  "madam",
+  "bhai",
 ]);
+
+const SPOKEN_NUMBER_WORDS: Record<string, string> = {
+  zero: "0",
+  one: "1",
+  two: "2",
+  three: "3",
+  four: "4",
+  five: "5",
+  six: "6",
+  seven: "7",
+  eight: "8",
+  nine: "9",
+};
+
+const SPEC_UNIT_PATTERN =
+  /\b\d+(?:\.\d+)?\s?(?:mm|cm|ml|l|ltr|micron|microns|g|kg|gsm|inch|inches|gauge|ga|cc)\b/gi;
+const SPEC_DIMENSION_PATTERN =
+  /\b\d+(?:\.\d+)?\s?[x*]\s?\d+(?:\.\d+)?(?:\s?[x*]\s?\d+(?:\.\d+)?)?\b/gi;
 
 const POSITIVE_SIGNALS = [
   "interested",
@@ -127,6 +173,57 @@ function splitSentences(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function normalizeSpokenSpecificationPhrases(value: string): string {
+  return value.replace(
+    /\b(zero|one|two|three|four|five|six|seven|eight|nine)\s+point\s+(zero|one|two|three|four|five|six|seven|eight|nine)\b/gi,
+    (_, whole: string, fraction: string) =>
+      `${SPOKEN_NUMBER_WORDS[whole.toLowerCase()]}.${SPOKEN_NUMBER_WORDS[fraction.toLowerCase()]}`
+  );
+}
+
+function normalizePhraseText(value: string): string {
+  return normalizeSpokenSpecificationPhrases(value.toLowerCase())
+    .replace(/speaker\s+[a-z0-9_-]+(?:\s*\[[^\]]+\])?:/gi, " ")
+    .replace(/[^a-z0-9.+\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatPhraseLabel(value: string): string {
+  return value
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => {
+      if (/^\d/.test(part) || part === "mm" || part === "cm" || part === "ml" || part === "cc") {
+        return part;
+      }
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" ");
+}
+
+function scorePhraseCandidate(phrase: string, frequency: number): number {
+  let score = frequency * 3;
+  if (/\d/.test(phrase)) score += 6;
+  if (phrase.split(" ").length >= 2) score += 2;
+  if (phrase.length > 34) score -= 2;
+  return score;
+}
+
+function extractSpecificationPhrases(text: string): string[] {
+  const normalized = normalizePhraseText(text);
+  const set = new Set<string>();
+  for (const raw of normalized.match(SPEC_UNIT_PATTERN) || []) {
+    const cleaned = raw.trim();
+    if (cleaned) set.add(cleaned);
+  }
+  for (const raw of normalized.match(SPEC_DIMENSION_PATTERN) || []) {
+    const cleaned = raw.trim();
+    if (cleaned) set.add(cleaned);
+  }
+  return Array.from(set);
+}
+
 function detectObjections(transcript: string): string[] {
   const lower = transcript.toLowerCase();
   const sentences = splitSentences(transcript);
@@ -141,17 +238,58 @@ function detectObjections(transcript: string): string[] {
 }
 
 function extractKeyPhrases(transcript: string): string[] {
-  const words = transcript.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) || [];
-  const frequency = new Map<string, number>();
-  for (const rawWord of words) {
-    if (STOP_WORDS.has(rawWord)) continue;
-    frequency.set(rawWord, (frequency.get(rawWord) || 0) + 1);
+  const normalized = normalizePhraseText(transcript);
+  const tokens = normalized.match(/[a-z0-9.+-]{2,}/g) || [];
+  const phraseScores = new Map<string, number>();
+
+  for (const spec of extractSpecificationPhrases(normalized)) {
+    phraseScores.set(spec, (phraseScores.get(spec) || 0) + 12);
   }
-  const sorted = [...frequency.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
-    .map(([word]) => word.replace(/(^\w|-\w)/g, (segment) => segment.toUpperCase()));
-  return sorted.length ? sorted : ["Sales Discussion", "Customer Requirement", "Follow-up"];
+
+  for (let size = 1; size <= 3; size += 1) {
+    for (let index = 0; index <= tokens.length - size; index += 1) {
+      const window = tokens.slice(index, index + size);
+      if (
+        window.every((token) => STOP_WORDS.has(token)) ||
+        window.some((token) => token.length <= 1) ||
+        (size === 1 && /^\d+$/.test(window[0]))
+      ) {
+        continue;
+      }
+
+      const phrase = window.join(" ").trim();
+      if (!phrase || phrase.length < 3) continue;
+      if (size >= 2 && window[0] === "speaker") continue;
+      if (size >= 2 && window.every((token) => STOP_WORDS.has(token))) continue;
+
+      const nonStopCount = window.filter((token) => !STOP_WORDS.has(token)).length;
+      if (nonStopCount === 0) continue;
+      if (size >= 2 && nonStopCount < Math.max(1, size - 1)) continue;
+
+      phraseScores.set(phrase, (phraseScores.get(phrase) || 0) + 1);
+    }
+  }
+
+  const ranked = [...phraseScores.entries()]
+    .map(([phrase, frequency]) => ({
+      phrase,
+      frequency,
+      score: scorePhraseCandidate(phrase, frequency),
+    }))
+    .filter((entry) => entry.phrase.length >= 3)
+    .sort((a, b) => b.score - a.score || b.frequency - a.frequency || a.phrase.localeCompare(b.phrase));
+
+  const selected: string[] = [];
+  for (const entry of ranked) {
+    const alreadyCovered = selected.some(
+      (picked) => picked.includes(entry.phrase) || entry.phrase.includes(picked)
+    );
+    if (alreadyCovered) continue;
+    selected.push(formatPhraseLabel(entry.phrase));
+    if (selected.length >= 6) break;
+  }
+
+  return selected.length ? selected : ["Sales Discussion", "Customer Requirement", "Follow-up"];
 }
 
 function buildSummary(transcript: string, buyingIntent: Conversation["buyingIntent"]): string {

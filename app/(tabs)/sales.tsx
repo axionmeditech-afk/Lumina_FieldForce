@@ -27,6 +27,7 @@ import {
   getApiBaseUrlCandidates,
   getAdminLiveMapRoutes,
   getAdminRouteTimeline,
+  getDolibarrOrderDetail,
   getDolibarrOrders,
   getDolibarrProducts,
   getDolibarrThirdParties,
@@ -41,6 +42,7 @@ import {
   searchMapplsTextSearch,
   type DolibarrProduct,
   type DolibarrOrder,
+  type DolibarrOrderLine,
   type DolibarrThirdParty,
   type DolibarrOrderLineInput,
   type MapplsPlaceSuggestion,
@@ -63,6 +65,7 @@ import {
   STORAGE_KEYS,
   subscribeStorageUpdates,
   syncVisitNoteTaskRemote,
+  updateConversation,
   updateTask,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
@@ -112,6 +115,53 @@ type SpeechRecognitionHook = (
   handler: (event: SpeechRecognitionEventPayload) => void
 ) => void;
 type RecordingMode = "speech" | "audio-fallback";
+type SalesTrendTagTone = "hot" | "seasonal" | "consistent" | "emerging";
+type SalesTrendTag = {
+  label: string;
+  tone: SalesTrendTagTone;
+  reason: string;
+};
+type SalesTrendRecommendation = {
+  id: string;
+  label: string;
+  ref: string | null;
+  unitsSold: number;
+  orderCount: number;
+  revenue: number;
+  activeMonths: number;
+  bestMonthLabel: string | null;
+  recentUnitsSold: number;
+  recentOrderCount: number;
+  tags: SalesTrendTag[];
+  reason: string;
+};
+type MeetingConversationProductRecommendation = {
+  id: string;
+  label: string;
+  ref: string | null;
+  matchedKeyPhrases: string[];
+  matchedSpecifications: string[];
+  reason: string;
+};
+type TranscriptDrivenProductSignals = {
+  phrases: string[];
+  specifications: string[];
+};
+type MeetingAiAnalysisResult = Pick<
+  Conversation,
+  | "interestScore"
+  | "pitchScore"
+  | "confidenceScore"
+  | "talkListenRatio"
+  | "sentiment"
+  | "buyingIntent"
+  | "objections"
+  | "improvements"
+  | "summary"
+  | "keyPhrases"
+> & {
+  notes?: string;
+};
 type RoutePlannerStop = {
   id: string;
   label: string;
@@ -120,27 +170,6 @@ type RoutePlannerStop = {
   longitude: number;
   source?: "location" | "customer";
   customerId?: string | null;
-};
-type AnalysisRecommendationTone = "positive" | "warning" | "info";
-type AnalysisRecommendation = {
-  id: string;
-  title: string;
-  body: string;
-  icon: keyof typeof Ionicons.glyphMap;
-  tone: AnalysisRecommendationTone;
-};
-type ConversationProductTrend = {
-  id: string;
-  label: string;
-  mentions: number;
-  highIntentCount: number;
-  avgInterest: number;
-};
-type ConversationTrendDigest = {
-  productTrends: ConversationProductTrend[];
-  themeTrends: string[];
-  objectionTrends: string[];
-  recommendations: AnalysisRecommendation[];
 };
 const FALLBACK_SEGMENT_MS = 5000;
 const FALLBACK_POLL_MS = 250;
@@ -151,27 +180,58 @@ const TRANSCRIPTION_FAILED_MESSAGE = "Transcription failed. Please try again.";
 const ROUTE_SEARCH_RESULTS_LIMIT = 20;
 const ROUTE_NAV_WAYPOINT_LIMIT = 6;
 const POS_PAGE_SIZE = 100;
+const SALES_TREND_ORDER_LIMIT = 60;
+const SALES_TREND_LOOKBACK_DAYS = 365;
+const SALES_TREND_BATCH_SIZE = 6;
+const CONVERSATION_RECOMMENDATION_PRODUCT_LIMIT = 8;
 const VISIT_NEARBY_RADIUS_METERS = 250;
 const VISIT_RECENT_ORDER_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
-const RECOMMENDATION_STOP_WORDS = new Set([
-  "sales",
-  "customer",
-  "client",
-  "prospect",
-  "discussion",
-  "follow",
-  "follow up",
-  "requirement",
-  "requirements",
-  "meeting",
-  "details",
+const CONVERSATION_RECOMMENDATION_STOP_WORDS = new Set([
   "product",
   "products",
-  "solution",
-  "service",
-  "team",
+  "customer",
+  "client",
+  "sales",
   "company",
+  "service",
+  "solution",
+  "discussion",
+  "meeting",
+  "details",
+  "need",
+  "needs",
+  "requirement",
+  "requirements",
+  "pricing",
+  "hai",
+  "hain",
+  "tha",
+  "thi",
+  "the",
+  "aur",
+  "kar",
+  "kr",
+  "liye",
+  "wala",
+  "wali",
+  "wale",
 ]);
+const CONVERSATION_SPEC_UNIT_PATTERN =
+  /\b\d+(?:\.\d+)?\s?(?:mm|cm|ml|l|ltr|micron|microns|g|kg|gsm|inch|inches|in|hp|w|kw|v|volt|volts|amp|amps|a|bar|psi|rpm|cc|mtr|meter|meters|m)\b/gi;
+const CONVERSATION_SPEC_DIMENSION_PATTERN =
+  /\b\d+(?:\.\d+)?\s?[x*]\s?\d+(?:\.\d+)?(?:\s?[x*]\s?\d+(?:\.\d+)?)?\b/gi;
+const SPOKEN_SPEC_NUMBER_WORDS: Record<string, string> = {
+  zero: "0",
+  one: "1",
+  two: "2",
+  three: "3",
+  four: "4",
+  five: "5",
+  six: "6",
+  seven: "7",
+  eight: "8",
+  nine: "9",
+};
 const VOICE_PULSE_BASELINE = Array.from({ length: VOICE_WAVE_BAR_COUNT }, (_, index) => {
   const center = (VOICE_WAVE_BAR_COUNT - 1) / 2;
   const distance = Math.abs(index - center) / center;
@@ -301,6 +361,351 @@ function normalizeSearchText(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeConversationRecommendationText(value: string | undefined | null): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizeConversationTranscript(value: string): string {
+  let cleaned = value
+    .replace(/Speaker\s+[A-Za-z0-9_-]+(?:\s*\[[^\]]+\])?:\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const repeatedLeadingNoiseMatch = cleaned.match(
+    /^((?:\S+\s+){0,3}\S+)(?:\s+\1){4,}\s*/u
+  );
+  if (
+    repeatedLeadingNoiseMatch &&
+    repeatedLeadingNoiseMatch[0] &&
+    (repeatedLeadingNoiseMatch[0].length >= 48 || /[^\x00-\x7F]/.test(repeatedLeadingNoiseMatch[0]))
+  ) {
+    cleaned = cleaned.slice(repeatedLeadingNoiseMatch[0].length).trim();
+  }
+
+  return cleaned.replace(/\s+/g, " ").trim();
+}
+
+function toConversationRecommendationTitle(value: string): string {
+  return value.replace(/\b\w/g, (segment) => segment.toUpperCase());
+}
+
+function normalizeConversationRecommendationKeyword(value: string): string {
+  let normalized = value.trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized.endsWith("ies") && normalized.length > 4) {
+    normalized = `${normalized.slice(0, -3)}y`;
+  } else if (
+    normalized.endsWith("es") &&
+    normalized.length > 4 &&
+    /(ches|shes|xes|zes|ses)$/i.test(normalized)
+  ) {
+    normalized = normalized.slice(0, -2);
+  } else if (normalized.endsWith("s") && normalized.length > 4 && !normalized.endsWith("ss")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+function normalizeSpokenConversationSpecifications(value: string): string {
+  return value.replace(
+    /\b(zero|one|two|three|four|five|six|seven|eight|nine)\s+point\s+(zero|one|two|three|four|five|six|seven|eight|nine)\b/gi,
+    (_, whole: string, fraction: string) =>
+      `${SPOKEN_SPEC_NUMBER_WORDS[whole.toLowerCase()]}.${SPOKEN_SPEC_NUMBER_WORDS[fraction.toLowerCase()]}`
+  );
+}
+
+function normalizeConversationSpecificationSearchText(value: string | undefined | null): string {
+  return normalizeSpokenConversationSpecifications((value || "").toLowerCase())
+    .replace(/(\d)([a-z])/gi, "$1 $2")
+    .replace(/([a-z])(\d)/gi, "$1 $2")
+    .replace(/(\d)\s*[x*]\s*(\d)/gi, "$1x$2")
+    .replace(/[^a-z0-9.+x*]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractConversationRecommendationSpecifications(transcript: string): string[] {
+  const normalizedTranscript = normalizeSpokenConversationSpecifications(transcript.toLowerCase());
+  const specs = new Set<string>();
+  const specMatches = normalizedTranscript.match(CONVERSATION_SPEC_UNIT_PATTERN) || [];
+  const dimensionMatches = normalizedTranscript.match(CONVERSATION_SPEC_DIMENSION_PATTERN) || [];
+  for (const raw of [...specMatches, ...dimensionMatches]) {
+    const cleaned = normalizeConversationSpecificationSearchText(raw);
+    if (cleaned.length >= 2) {
+      specs.add(cleaned);
+    }
+  }
+  const looseNumberMatches =
+    normalizedTranscript.match(/\b\d+(?:\.\d+)?\b/g)?.filter((entry) => entry.includes(".")) || [];
+  for (const entry of looseNumberMatches) {
+    if (entry.length >= 3) {
+      specs.add(normalizeConversationSpecificationSearchText(entry));
+    }
+  }
+  return Array.from(specs).slice(0, 12);
+}
+
+function extractConversationRecommendationSpecVariants(specification: string): string[] {
+  const normalized = normalizeConversationSpecificationSearchText(specification);
+  if (!normalized) return [];
+  const variants = new Set<string>([normalized, normalized.replace(/\s+/g, "")]);
+  const numericFragments = normalized.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  for (const fragment of numericFragments) {
+    if (fragment.length >= 2) {
+      variants.add(fragment);
+      variants.add(fragment.replace(/\./g, ""));
+    }
+  }
+  return Array.from(variants).filter(Boolean);
+}
+
+function extractConversationRecommendationKeywords(phrases: string[]): string[] {
+  const keywords: string[] = [];
+  const seen = new Set<string>();
+  for (const phrase of phrases) {
+    const tokens = normalizeConversationRecommendationText(phrase)
+      .split(" ")
+      .map((entry) => normalizeConversationRecommendationKeyword(entry))
+      .filter(
+        (entry) =>
+          entry.length >= 3 &&
+          !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(entry) &&
+          !/^\d+(?:\.\d+)?$/.test(entry)
+      );
+    for (const token of tokens) {
+      if (seen.has(token)) continue;
+      seen.add(token);
+      keywords.push(token);
+      if (keywords.length >= 24) return keywords;
+    }
+  }
+  return keywords;
+}
+
+function buildTranscriptDrivenProductSignals(
+  transcript: string,
+  products: DolibarrProduct[]
+): TranscriptDrivenProductSignals {
+  const normalizedTranscript = normalizeConversationRecommendationText(transcript);
+  const specificationTranscript = normalizeConversationSpecificationSearchText(transcript);
+  const tokens = normalizedTranscript.match(/[a-z0-9.+-]{2,}/g) || [];
+  const specifications = extractConversationRecommendationSpecifications(transcript);
+  if (!products.length || (!tokens.length && !specifications.length)) {
+    return {
+      phrases: [],
+      specifications,
+    };
+  }
+
+  const productSearchables = products.map((product) => ({
+    searchable: normalizeConversationRecommendationText(
+      [product.label, product.ref, product.description].filter(Boolean).join(" ")
+    ),
+    specSearchable: normalizeConversationSpecificationSearchText(
+      [product.label, product.ref, product.description].filter(Boolean).join(" ")
+    ),
+    keywordSet: new Set(
+      normalizeConversationRecommendationText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      )
+        .split(" ")
+        .map((entry) => normalizeConversationRecommendationKeyword(entry))
+        .filter(Boolean)
+    ),
+  }));
+
+  const candidateScores = new Map<string, number>();
+  for (let size = 1; size <= 4; size += 1) {
+    for (let index = 0; index <= tokens.length - size; index += 1) {
+      const window = tokens.slice(index, index + size);
+      const phrase = window.join(" ").trim();
+      const nonStopCount = window.filter((token) => !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(token)).length;
+      if (
+        !phrase ||
+        phrase.length < 3 ||
+        phrase.length > 42 ||
+        nonStopCount === 0 ||
+        (size === 1 && (CONVERSATION_RECOMMENDATION_STOP_WORDS.has(window[0]) || /^\d+$/.test(window[0])))
+      ) {
+        continue;
+      }
+
+      let matchCount = 0;
+      const normalizedWindowKeywords = window
+        .map((entry) => normalizeConversationRecommendationKeyword(entry))
+        .filter(
+          (entry) =>
+            entry.length >= 3 &&
+            !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(entry) &&
+            !/^\d+(?:\.\d+)?$/.test(entry)
+        );
+      for (const product of productSearchables) {
+        if (!product.searchable && !product.specSearchable) continue;
+        if (
+          (phrase.includes(" ")
+            ? product.searchable.includes(phrase)
+            : ` ${product.searchable} `.includes(` ${phrase} `)) ||
+          specificationTranscript.includes(phrase) ||
+          product.specSearchable.includes(phrase) ||
+          normalizedWindowKeywords.some((entry) => product.keywordSet.has(entry))
+        ) {
+          matchCount += 1;
+        }
+      }
+
+      if (!matchCount) continue;
+      const current = candidateScores.get(phrase) || 0;
+      const score =
+        current + matchCount * 2 + (/\d/.test(phrase) ? 4 : 0) + (size >= 2 ? size : 0);
+      candidateScores.set(phrase, score);
+    }
+  }
+
+  const phrases: string[] = [];
+  for (const [phrase] of [...candidateScores.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+    const alreadyCovered = phrases.some((picked) => picked.includes(phrase) || phrase.includes(picked));
+    if (alreadyCovered) continue;
+    phrases.push(phrase);
+    if (phrases.length >= 12) break;
+  }
+
+  return {
+    phrases,
+    specifications,
+  };
+}
+
+function buildMeetingConversationProductRecommendations(
+  conversation: Conversation,
+  products: DolibarrProduct[]
+): MeetingConversationProductRecommendation[] {
+  const transcriptSource = [
+    conversation.transcript || "",
+    conversation.summary || "",
+    ...(conversation.objections || []),
+    ...(conversation.keyPhrases || []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const signals = buildTranscriptDrivenProductSignals(transcriptSource, products);
+  const phraseCandidates = signals.phrases;
+  const specificationTokens = signals.specifications;
+  const keywordCandidates = extractConversationRecommendationKeywords(phraseCandidates);
+  if (!phraseCandidates.length && !specificationTokens.length) return [];
+  if (!products.length) return [];
+
+  return products
+    .map((product) => {
+      const label = getDolibarrProductLabel(product);
+      const ref = product.ref?.trim() || null;
+      const searchable = normalizeConversationRecommendationText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      );
+      const specificationSearchable = normalizeConversationSpecificationSearchText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      );
+      const compactSpecificationSearchable = specificationSearchable.replace(/\s+/g, "");
+      const productKeywordSet = new Set(
+        searchable
+          .split(" ")
+          .map((entry) => normalizeConversationRecommendationKeyword(entry))
+          .filter(Boolean)
+      );
+      const productSpecificationTokens = new Set(
+        specificationSearchable
+          .split(" ")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+      );
+      if (!searchable && !specificationSearchable) return null;
+
+      const matchedKeyPhrases = phraseCandidates
+        .filter((phrase) => {
+          if (
+            phrase.includes(" ")
+              ? searchable.includes(phrase)
+              : ` ${searchable} `.includes(` ${phrase} `)
+          ) {
+            return true;
+          }
+          const phraseKeywords = normalizeConversationRecommendationText(phrase)
+            .split(" ")
+            .map((entry) => normalizeConversationRecommendationKeyword(entry))
+            .filter(
+              (entry) =>
+                entry.length >= 3 &&
+                !CONVERSATION_RECOMMENDATION_STOP_WORDS.has(entry) &&
+                !/^\d+(?:\.\d+)?$/.test(entry)
+            );
+          if (!phraseKeywords.length) return false;
+          const overlapCount = phraseKeywords.filter((entry) => productKeywordSet.has(entry)).length;
+          const requiredOverlap = phraseKeywords.length >= 2 ? 2 : 1;
+          return overlapCount >= requiredOverlap;
+        })
+        .slice(0, 3)
+        .map((phrase) => toConversationRecommendationTitle(phrase));
+      const matchedKeywordSignals = keywordCandidates
+        .filter((entry) => productKeywordSet.has(entry))
+        .slice(0, 4)
+        .map((entry) => toConversationRecommendationTitle(entry));
+      const matchedSpecifications = specificationTokens
+        .filter((token) => {
+          const variants = extractConversationRecommendationSpecVariants(token);
+          return variants.some(
+            (variant) =>
+              specificationSearchable.includes(variant) ||
+              compactSpecificationSearchable.includes(variant.replace(/\s+/g, "")) ||
+              productSpecificationTokens.has(variant)
+          );
+        })
+        .slice(0, 3)
+        .map((token) => toConversationRecommendationTitle(token));
+      if (!matchedKeyPhrases.length && !matchedSpecifications.length && !matchedKeywordSignals.length) {
+        return null;
+      }
+
+      const specReason =
+        matchedSpecifications.length > 0
+          ? `${label} matches the requested spec ${matchedSpecifications.slice(0, 2).join(" and ")}.`
+          : "";
+      const phraseReason =
+        matchedKeyPhrases.length > 0
+          ? `${label} fits because the customer mentioned ${matchedKeyPhrases.slice(0, 2).join(" and ")}.`
+          : matchedKeywordSignals.length > 0
+            ? `${label} connects with keywords like ${matchedKeywordSignals.slice(0, 2).join(" and ")}.`
+          : `${label} aligns with the conversation requirements.`;
+      const score =
+        matchedSpecifications.length * 6 +
+        matchedKeyPhrases.length * 4 +
+        matchedKeywordSignals.length * 2 +
+        (conversation.buyingIntent === "high" ? 2 : conversation.buyingIntent === "medium" ? 1 : 0);
+
+      return {
+        id: String(getDolibarrProductId(product) ?? `${label}_${ref || "product"}`),
+        label,
+        ref,
+        matchedKeyPhrases,
+        matchedSpecifications,
+        reason: [specReason, phraseReason].filter(Boolean).join(" "),
+        score,
+      };
+    })
+    .filter(
+      (
+        item
+      ): item is MeetingConversationProductRecommendation & {
+        score: number;
+      } => Boolean(item)
+    )
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, CONVERSATION_RECOMMENDATION_PRODUCT_LIMIT)
+    .map(({ score: _score, ...item }) => item);
+}
+
 function parseNumericId(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
   if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
@@ -327,196 +732,6 @@ function getDolibarrThirdPartyAddress(party: DolibarrThirdParty): string {
   const line1 = (party.address || "").trim();
   const line2 = [party.town?.trim(), party.zip?.trim()].filter(Boolean).join(", ");
   return [line1, line2].filter(Boolean).join(" | ").trim();
-}
-
-function normalizeTrendPhrase(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function includesTrendPhrase(haystack: string, needle: string): boolean {
-  if (!haystack || !needle) return false;
-  if (needle.includes(" ")) {
-    return haystack.includes(needle);
-  }
-  return ` ${haystack} `.includes(` ${needle} `);
-}
-
-function formatTrendPhraseLabel(value: string): string {
-  return value.replace(/\b\w/g, (segment) => segment.toUpperCase());
-}
-
-function buildConversationTrendDigest(
-  conversations: Conversation[],
-  products: DolibarrProduct[]
-): ConversationTrendDigest {
-  if (!conversations.length) {
-    return {
-      productTrends: [],
-      themeTrends: [],
-      objectionTrends: [],
-      recommendations: [],
-    };
-  }
-
-  const conversationSnapshots = conversations.map((conversation) => ({
-    conversation,
-    corpus: normalizeTrendPhrase(
-      [
-        conversation.customerName,
-        conversation.summary,
-        conversation.transcript || "",
-        conversation.keyPhrases.join(" "),
-        conversation.objections.join(" "),
-        conversation.notes || "",
-      ].join(" ")
-    ),
-  }));
-
-  const productTrendMap = new Map<string, ConversationProductTrend>();
-  for (const product of products) {
-    const label = getDolibarrProductLabel(product);
-    const terms = Array.from(
-      new Set(
-        [label, product.ref || ""]
-          .map((entry) => normalizeTrendPhrase(entry))
-          .filter((entry) => entry.length >= 4 && !RECOMMENDATION_STOP_WORDS.has(entry))
-      )
-    );
-    if (!terms.length) continue;
-
-    let mentions = 0;
-    let highIntentCount = 0;
-    let totalInterest = 0;
-    for (const snapshot of conversationSnapshots) {
-      const matched = terms.some((term) => includesTrendPhrase(snapshot.corpus, term));
-      if (!matched) continue;
-      mentions += 1;
-      totalInterest += snapshot.conversation.interestScore;
-      if (snapshot.conversation.buyingIntent === "high") {
-        highIntentCount += 1;
-      }
-    }
-
-    if (!mentions) continue;
-    const productId = getDolibarrProductId(product);
-    productTrendMap.set(String(productId ?? label), {
-      id: String(productId ?? label),
-      label,
-      mentions,
-      highIntentCount,
-      avgInterest: Math.round(totalInterest / mentions),
-    });
-  }
-
-  const productTrends = [...productTrendMap.values()]
-    .sort((a, b) => {
-      if (b.highIntentCount !== a.highIntentCount) return b.highIntentCount - a.highIntentCount;
-      if (b.mentions !== a.mentions) return b.mentions - a.mentions;
-      return b.avgInterest - a.avgInterest;
-    })
-    .slice(0, 3);
-
-  const themeFrequency = new Map<string, number>();
-  const objectionFrequency = new Map<string, number>();
-  for (const conversation of conversations) {
-    const themePhrases = [...conversation.keyPhrases, ...conversation.summary.split(/[.!?]/)]
-      .map((entry) => normalizeTrendPhrase(entry))
-      .filter(
-        (entry) =>
-          entry.length >= 4 &&
-          entry.length <= 40 &&
-          !RECOMMENDATION_STOP_WORDS.has(entry) &&
-          !/^\d+$/.test(entry)
-      );
-    for (const phrase of themePhrases.slice(0, 6)) {
-      themeFrequency.set(phrase, (themeFrequency.get(phrase) || 0) + 1);
-    }
-
-    for (const objection of conversation.objections) {
-      const cleaned = normalizeTrendPhrase(objection);
-      if (!cleaned || cleaned.length < 4) continue;
-      objectionFrequency.set(cleaned, (objectionFrequency.get(cleaned) || 0) + 1);
-    }
-  }
-
-  const themeTrends = [...themeFrequency.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([phrase]) => formatTrendPhraseLabel(phrase));
-
-  const objectionTrends = [...objectionFrequency.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 2)
-    .map(([phrase]) => formatTrendPhraseLabel(phrase));
-
-  const avgInterest =
-    Math.round(
-      conversations.reduce((sum, conversation) => sum + conversation.interestScore, 0) /
-        Math.max(conversations.length, 1)
-    ) || 0;
-  const avgPitch =
-    Math.round(
-      conversations.reduce((sum, conversation) => sum + conversation.pitchScore, 0) /
-        Math.max(conversations.length, 1)
-    ) || 0;
-  const highIntentCount = conversations.filter((conversation) => conversation.buyingIntent === "high").length;
-
-  const recommendations: AnalysisRecommendation[] = [];
-  if (productTrends[0]) {
-    recommendations.push({
-      id: "product_push",
-      title: `${productTrends[0].label} is the hottest product signal`,
-      body: `${productTrends[0].mentions} conversations mentioned it, with ${productTrends[0].highIntentCount} high-intent buyers and ${productTrends[0].avgInterest}% average interest. Keep demo, pricing, and stock readiness high.`,
-      icon: "cube-outline",
-      tone: "positive",
-    });
-  }
-  if (themeTrends[0]) {
-    recommendations.push({
-      id: "theme_trend",
-      title: `Buyer theme rising: ${themeTrends[0]}`,
-      body: `This theme keeps repeating across saved conversations. Build your next pitch around this need and move it into brochure/demo talking points.`,
-      icon: "trending-up-outline",
-      tone: "info",
-    });
-  }
-  if (objectionTrends[0]) {
-    recommendations.push({
-      id: "objection_watch",
-      title: `Watch objection: ${objectionTrends[0]}`,
-      body: `This objection is coming up repeatedly. Prepare a sharper ROI, pricing, or proof-response script before the next follow-up.`,
-      icon: "alert-circle-outline",
-      tone: "warning",
-    });
-  } else if (avgPitch < 65 || avgInterest < 60) {
-    recommendations.push({
-      id: "coaching",
-      title: "Pitch quality needs stronger conversion framing",
-      body: `Average interest is ${avgInterest}% and average pitch quality is ${avgPitch}%. Use clearer product proof, ask tighter discovery questions, and close with a concrete next step.`,
-      icon: "flash-outline",
-      tone: "warning",
-    });
-  }
-  if (highIntentCount > 0 && recommendations.length < 3) {
-    recommendations.push({
-      id: "follow_up",
-      title: `${highIntentCount} high-intent conversation${highIntentCount > 1 ? "s" : ""} ready for follow-up`,
-      body: `Focus on the most recent high-intent leads first and convert them into quick sales, proposals, or scheduled revisits while intent is still warm.`,
-      icon: "checkmark-done-outline",
-      tone: "positive",
-    });
-  }
-
-  return {
-    productTrends,
-    themeTrends,
-    objectionTrends,
-    recommendations: recommendations.slice(0, 3),
-  };
 }
 
 async function resolveRoutePlannerCustomerStop(party: DolibarrThirdParty): Promise<RoutePlannerStop> {
@@ -591,6 +806,137 @@ function getDolibarrProductPrice(product: DolibarrProduct): number {
     }
   }
   return 0;
+}
+
+function getDolibarrOrderDate(order: DolibarrOrder): Date | null {
+  const raw = order.date_commande ?? order.date_creation ?? order.date ?? order.tms;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const date = new Date(raw > 1_000_000_000_000 ? raw : raw * 1000);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  return null;
+}
+
+function getDolibarrOrderLineQty(line: DolibarrOrderLine): number {
+  if (typeof line.qty === "number" && Number.isFinite(line.qty)) return Math.max(0, line.qty);
+  if (typeof line.qty === "string" && line.qty.trim()) {
+    const parsed = Number(line.qty);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return 0;
+}
+
+function getDolibarrOrderLineRevenue(line: DolibarrOrderLine, qty: number): number {
+  const candidates = [line.total_ttc, line.total_ht];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+    if (typeof candidate === "string" && candidate.trim()) {
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  if (typeof line.subprice === "number" && Number.isFinite(line.subprice)) return line.subprice * qty;
+  if (typeof line.subprice === "string" && line.subprice.trim()) {
+    const parsed = Number(line.subprice);
+    if (Number.isFinite(parsed)) return parsed * qty;
+  }
+  return 0;
+}
+
+function formatSalesTrendMonthLabel(value: string | null): string {
+  if (!value) return "a peak month";
+  const parsed = new Date(`${value}-01T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
+}
+
+function isReliableTrendProduct(label: string, ref: string | null): boolean {
+  const normalizedLabel = normalizeSearchText(label);
+  const normalizedRef = normalizeSearchText(ref || "");
+  if (!normalizedLabel || normalizedLabel === "product") return false;
+  if (normalizedRef === "na" || normalizedRef === "dummy") return false;
+  return true;
+}
+
+function classifySalesTrendTags(input: {
+  unitsSold: number;
+  orderCount: number;
+  activeMonths: number;
+  recentUnitsSold: number;
+  recentOrderCount: number;
+  bestMonthUnits: number;
+  avgMonthlyUnits: number;
+  bestMonthLabel: string | null;
+}): SalesTrendTag[] {
+  const tags: SalesTrendTag[] = [];
+  const avg = Math.max(0.1, input.avgMonthlyUnits);
+  const bestMonthName = formatSalesTrendMonthLabel(input.bestMonthLabel);
+
+  if (input.recentOrderCount >= 3 || input.recentUnitsSold >= Math.max(6, avg * 1.15)) {
+    tags.push({
+      label: "Hot Pick",
+      tone: "hot",
+      reason: `${input.recentUnitsSold} recent units across ${input.recentOrderCount} recent orders.`,
+    });
+  }
+
+  if (input.activeMonths >= 3 && input.bestMonthUnits >= Math.max(5, avg * 1.8)) {
+    tags.push({
+      label: "Seasonal",
+      tone: "seasonal",
+      reason: `Clear spike seen in ${bestMonthName} versus its normal monthly average.`,
+    });
+  }
+
+  if (
+    input.activeMonths >= 3 &&
+    input.orderCount >= 4 &&
+    input.bestMonthUnits <= Math.max(8, avg * 1.45)
+  ) {
+    tags.push({
+      label: "Consistent",
+      tone: "consistent",
+      reason: `Selling across ${input.activeMonths} active months, not just one short spike.`,
+    });
+  }
+
+  if (input.activeMonths <= 2 && input.recentOrderCount >= 2) {
+    tags.push({
+      label: "Emerging",
+      tone: "emerging",
+      reason: `Recent demand is picking up, but history is still limited.`,
+    });
+  }
+
+  if (!tags.length) {
+    tags.push({
+      label: "Watched Trend",
+      tone: "consistent",
+      reason: `Useful signal, but more sales history is needed for a stronger pattern.`,
+    });
+  }
+
+  return tags.slice(0, 3);
+}
+
+function resolveTrendTagColors(colors: typeof Colors.light, tone: SalesTrendTagTone): {
+  backgroundColor: string;
+  textColor: string;
+} {
+  if (tone === "hot") {
+    return { backgroundColor: colors.success + "14", textColor: colors.success };
+  }
+  if (tone === "seasonal") {
+    return { backgroundColor: colors.warning + "14", textColor: colors.warning };
+  }
+  if (tone === "emerging") {
+    return { backgroundColor: colors.secondary + "14", textColor: colors.secondary };
+  }
+  return { backgroundColor: colors.primary + "12", textColor: colors.primary };
 }
 
 function getDolibarrProductTaxRate(product: DolibarrProduct): number {
@@ -1235,6 +1581,77 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
   throw new Error("Speech-to-text service unavailable.");
 }
 
+async function analyzeConversationWithBackendAIForMeeting(input: {
+  transcript: string;
+  customerName: string;
+  salespersonName: string;
+  model?: string;
+}): Promise<MeetingAiAnalysisResult> {
+  const apiBases = await getApiBaseUrlCandidates();
+  const networkErrors: string[] = [];
+  let lastNonNetworkError = "";
+
+  for (const apiBase of apiBases) {
+    const endpoint = `${apiBase}/ai/analyze`;
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...input,
+          model:
+            input.model ||
+            process.env.EXPO_PUBLIC_GROQ_MODEL ||
+            process.env.GROQ_MODEL ||
+            "openai/gpt-oss-20b",
+        }),
+      });
+
+      const raw = await response.text();
+      let payload: any = null;
+      try {
+        payload = raw ? JSON.parse(raw) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (!response.ok) {
+        const message =
+          typeof payload?.message === "string"
+            ? payload.message
+            : `AI backend failed (${response.status}).`;
+        throw new Error(message);
+      }
+
+      if (payload?.result && typeof payload.result === "object") {
+        return payload.result as MeetingAiAnalysisResult;
+      }
+      if (payload && typeof payload === "object") {
+        return payload as MeetingAiAnalysisResult;
+      }
+      throw new Error("AI backend returned invalid response payload.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "AI backend call failed.";
+      if (/network request failed|failed to fetch|econn|enotfound|timed out/i.test(message.toLowerCase())) {
+        networkErrors.push(`${apiBase} -> ${message}`);
+        continue;
+      }
+      lastNonNetworkError = message;
+      break;
+    }
+  }
+
+  if (lastNonNetworkError) {
+    throw new Error(lastNonNetworkError);
+  }
+  if (networkErrors.length > 0) {
+    throw new Error(`AI backend is unreachable. Tried: ${networkErrors.join(" | ")}`);
+  }
+  throw new Error("AI backend call failed.");
+}
+
 const ROUTE_POINT_INTERVAL_MINUTES = 1;
 const LIVE_ROUTE_REFRESH_MS = 15 * 1000;
 
@@ -1786,6 +2203,13 @@ export default function SalesScreen() {
   const [voicePulseState, setVoicePulseState] = useState<"idle" | "listening" | "speaking">("idle");
   const [posProducts, setPosProducts] = useState<DolibarrProduct[]>([]);
   const [recentOrders, setRecentOrders] = useState<DolibarrOrder[]>([]);
+  const [salesTrendRecommendations, setSalesTrendRecommendations] = useState<SalesTrendRecommendation[]>([]);
+  const [salesTrendLoading, setSalesTrendLoading] = useState(false);
+  const [meetingRecommendationVisible, setMeetingRecommendationVisible] = useState(false);
+  const [meetingRecommendationConversation, setMeetingRecommendationConversation] = useState<Conversation | null>(null);
+  const [meetingRecommendationItems, setMeetingRecommendationItems] = useState<
+    MeetingConversationProductRecommendation[]
+  >([]);
   const [posCustomers, setPosCustomers] = useState<DolibarrThirdParty[]>([]);
   const [posProductQuery, setPosProductQuery] = useState("");
   const [posCustomerQuery, setPosCustomerQuery] = useState("");
@@ -1845,9 +2269,26 @@ export default function SalesScreen() {
     [markVoiceDetected]
   );
 
+  const loadConversations = useCallback(async () => {
+    if (!user) {
+      setConversations([]);
+      return;
+    }
+    try {
+      const convos = await getConversations();
+      setConversations((current) => {
+        if (convos.length === 0 && current.length > 0) {
+          return current;
+        }
+        return convos;
+      });
+    } catch {
+      // Keep the current list on transient failures so the admin feed stays visually stable.
+    }
+  }, [user]);
+
   const loadData = useCallback(async () => {
     const [
-      convos,
       taskData,
       employeeData,
       logs,
@@ -1856,7 +2297,6 @@ export default function SalesScreen() {
       remoteLogsState,
       remoteAttendanceState,
     ] = await Promise.all([
-      getConversations(),
       getTasks(),
       getEmployees(),
       getLocationLogs(),
@@ -1870,7 +2310,6 @@ export default function SalesScreen() {
         : Promise.resolve({ value: null }),
     ]);
     if (!user) {
-      setConversations([]);
       setTasks([]);
       setEmployees([]);
       setLocationLogs([]);
@@ -1879,8 +2318,6 @@ export default function SalesScreen() {
       setSelectedSalespersonId("");
       return;
     }
-
-    setConversations(convos);
 
     setTasks(taskData);
     setEmployees(employeeData);
@@ -1959,20 +2396,224 @@ export default function SalesScreen() {
     }
   }, [isAdminViewer, posSelectedCustomerId]);
 
+  const ensureConversationRecommendationProducts = useCallback(async (): Promise<DolibarrProduct[]> => {
+    if (posProducts.length) {
+      return posProducts;
+    }
+    const products = await getDolibarrProducts({
+      limit: 240,
+      sortfield: "label",
+      sortorder: "asc",
+      manufacturedOnly: true,
+      sellableOnly: true,
+    });
+    const productList = Array.isArray(products) ? products : [];
+    if (productList.length) {
+      setPosProducts((current) => mergeUniqueProducts(current, productList));
+    }
+    return productList;
+  }, [posProducts]);
+
   useEffect(() => {
+    void loadConversations();
     void loadData();
-  }, [loadData]);
+  }, [loadConversations, loadData]);
 
   useEffect(() => {
     return subscribeStorageUpdates((event) => {
       if (event.key !== STORAGE_KEYS.CONVERSATIONS) return;
-      void loadData();
+      void loadConversations();
     });
-  }, [loadData]);
+  }, [loadConversations]);
 
   useEffect(() => {
     void loadPosData();
   }, [loadPosData]);
+
+  const loadSalesTrendRecommendations = useCallback(async () => {
+    if (!user) {
+      setSalesTrendRecommendations([]);
+      return;
+    }
+    setSalesTrendLoading(true);
+    try {
+      const [products, orders] = await Promise.all([
+        getDolibarrProducts({
+          limit: 240,
+          sortfield: "label",
+          sortorder: "asc",
+          manufacturedOnly: true,
+          sellableOnly: true,
+        }).catch(() => [] as DolibarrProduct[]),
+        getDolibarrOrders({
+          limit: SALES_TREND_ORDER_LIMIT,
+          sortfield: "date_commande",
+          sortorder: "desc",
+        }).catch(() => [] as DolibarrOrder[]),
+      ]);
+
+      const recentCutoff = Date.now() - SALES_TREND_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+      const recentHotCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const scopedOrders = (Array.isArray(orders) ? orders : [])
+        .filter((order) => {
+          const date = getDolibarrOrderDate(order);
+          return !date || date.getTime() >= recentCutoff;
+        })
+        .slice(0, SALES_TREND_ORDER_LIMIT);
+
+      if (!scopedOrders.length) {
+        setSalesTrendRecommendations([]);
+        return;
+      }
+
+      const productsById = new Map<number, DolibarrProduct>();
+      for (const product of Array.isArray(products) ? products : []) {
+        const productId = getDolibarrProductId(product);
+        if (productId) {
+          productsById.set(productId, product);
+        }
+      }
+
+      const aggregate = new Map<
+        string,
+        {
+          id: string;
+          label: string;
+          ref: string | null;
+          unitsSold: number;
+          orderCount: number;
+          revenue: number;
+          recentUnitsSold: number;
+          recentOrderIds: Set<string>;
+          monthUnits: Map<string, number>;
+          orderIds: Set<string>;
+        }
+      >();
+
+      for (let index = 0; index < scopedOrders.length; index += SALES_TREND_BATCH_SIZE) {
+        const chunk = scopedOrders.slice(index, index + SALES_TREND_BATCH_SIZE);
+        const details = await Promise.all(
+          chunk.map(async (order) => {
+            if (!order.id) return null;
+            try {
+              return await getDolibarrOrderDetail(order.id);
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        for (const detail of details) {
+          const orderId = detail?.id ? String(detail.id) : null;
+          const sourceOrder = detail?.id
+            ? scopedOrders.find((entry) => String(entry.id) === String(detail.id)) || null
+            : null;
+          const orderDate = sourceOrder ? getDolibarrOrderDate(sourceOrder) : null;
+          const orderMonth = orderDate ? orderDate.toISOString().slice(0, 7) : null;
+          const lines = Array.isArray(detail?.lines) ? detail.lines : [];
+          if (!orderId || !lines.length) continue;
+          for (const line of lines) {
+            const productId = parseNumericId(line.fk_product);
+            const linkedProduct = productId ? productsById.get(productId) : null;
+            const label =
+              linkedProduct ? getDolibarrProductLabel(linkedProduct) : line.product_label?.trim() || line.label?.trim() || "Product";
+            const ref = linkedProduct?.ref?.trim() || null;
+            const key =
+              productId !== null
+                ? `id:${productId}`
+                : ref
+                  ? `ref:${normalizeSearchText(ref)}`
+                  : `label:${normalizeSearchText(label)}`;
+            const qty = getDolibarrOrderLineQty(line);
+            const revenue = getDolibarrOrderLineRevenue(line, qty);
+            const current = aggregate.get(key) || {
+              id: productId !== null ? String(productId) : key,
+              label,
+              ref,
+              unitsSold: 0,
+              orderCount: 0,
+              revenue: 0,
+              recentUnitsSold: 0,
+              recentOrderIds: new Set<string>(),
+              monthUnits: new Map<string, number>(),
+              orderIds: new Set<string>(),
+            };
+            current.unitsSold += qty;
+            current.revenue += revenue;
+            current.orderIds.add(orderId);
+            current.orderCount = current.orderIds.size;
+            if (orderDate && orderDate.getTime() >= recentHotCutoff) {
+              current.recentUnitsSold += qty;
+              current.recentOrderIds.add(orderId);
+            }
+            if (orderMonth) {
+              current.monthUnits.set(orderMonth, (current.monthUnits.get(orderMonth) || 0) + qty);
+            }
+            aggregate.set(key, current);
+          }
+        }
+      }
+
+      const ranked = Array.from(aggregate.values())
+        .filter((item) => isReliableTrendProduct(item.label, item.ref))
+        .map(({ orderIds: _orderIds, recentOrderIds, monthUnits, ...item }) => {
+          const monthlySeries = Array.from(monthUnits.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+          const activeMonths = monthlySeries.length;
+          const bestMonth = monthlySeries.reduce<[string, number] | null>(
+            (best, entry) => (!best || entry[1] > best[1] ? entry : best),
+            null
+          );
+          const bestMonthLabel = bestMonth?.[0] || null;
+          const bestMonthUnits = bestMonth?.[1] || 0;
+          const avgMonthlyUnits =
+            activeMonths > 0 ? monthlySeries.reduce((sum, entry) => sum + entry[1], 0) / activeMonths : 0;
+          const tags = classifySalesTrendTags({
+            unitsSold: item.unitsSold,
+            orderCount: item.orderCount,
+            activeMonths,
+            recentUnitsSold: item.recentUnitsSold,
+            recentOrderCount: recentOrderIds.size,
+            bestMonthUnits,
+            avgMonthlyUnits,
+            bestMonthLabel,
+          });
+          const reliabilityBoost =
+            activeMonths >= 3 ? 6 : activeMonths === 2 ? 3 : 0;
+          const score =
+            item.orderCount * 5 +
+            Math.min(18, item.unitsSold) +
+            item.recentUnitsSold * 2 +
+            reliabilityBoost;
+          return {
+            ...item,
+            activeMonths,
+            bestMonthLabel,
+            recentOrderCount: recentOrderIds.size,
+            tags,
+            reason: tags[0]?.reason || `${item.unitsSold} units sold across ${item.orderCount} recent orders.`,
+            score,
+          };
+        })
+        .filter(
+          (item) =>
+            item.orderCount >= 2 &&
+            (item.activeMonths >= 2 || item.recentOrderCount >= 2 || item.unitsSold >= 8)
+        )
+        .sort((a, b) => b.score - a.score || b.revenue - a.revenue)
+        .slice(0, 5)
+        .map(({ score: _score, ...item }) => item);
+
+      setSalesTrendRecommendations(ranked);
+    } catch {
+      setSalesTrendRecommendations([]);
+    } finally {
+      setSalesTrendLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    void loadSalesTrendRecommendations();
+  }, [loadSalesTrendRecommendations]);
 
   const resolveVisitArrivalSnapshot = useCallback(async () => {
     const lastKnownLocation = await getLastKnownLocationSafe({
@@ -2104,7 +2745,7 @@ export default function SalesScreen() {
   }, []);
 
   const appendTranscriptSegment = useCallback((segment: string) => {
-    const value = segment.trim();
+    const value = sanitizeConversationTranscript(segment.trim());
     if (!value) return;
     const previous = finalSegmentsRef.current[finalSegmentsRef.current.length - 1];
     if (value !== previous) {
@@ -2127,7 +2768,7 @@ export default function SalesScreen() {
   });
 
   useSpeechRecognitionEvent("result", (event) => {
-    const transcript = event.results?.[0]?.transcript?.trim() ?? "";
+    const transcript = sanitizeConversationTranscript(event.results?.[0]?.transcript?.trim() ?? "");
     if (!transcript) return;
     markVoiceDetected();
 
@@ -3300,13 +3941,23 @@ export default function SalesScreen() {
       );
     }
     if (!selectedSalespersonId) return conversations;
-    const selectedName = selectedSalesperson?.name;
+    const selectedName = normalizeIdentity(selectedSalesperson?.name);
+    const currentUserName = normalizeIdentity(user?.name);
     return conversations.filter(
       (conversation) =>
-        conversation.salespersonId === selectedSalespersonId ||
-        (selectedName ? conversation.salespersonName === selectedName : false)
+        selectedSalespersonTaskAliases.has(conversation.salespersonId) ||
+        (selectedName && normalizeIdentity(conversation.salespersonName) === selectedName) ||
+        (currentUserName && normalizeIdentity(conversation.salespersonName) === currentUserName)
     );
-  }, [conversations, isAdminViewer, selectedSalesperson?.name, selectedSalespersonId, user?.id, user?.name]);
+  }, [
+    conversations,
+    isAdminViewer,
+    selectedSalesperson?.name,
+    selectedSalespersonId,
+    selectedSalespersonTaskAliases,
+    user?.id,
+    user?.name,
+  ]);
 
   const avgInterest = visibleConversations.length > 0
     ? Math.round(visibleConversations.reduce((sum, convo) => sum + convo.interestScore, 0) / visibleConversations.length)
@@ -3314,14 +3965,83 @@ export default function SalesScreen() {
   const avgPitch = visibleConversations.length > 0
     ? Math.round(visibleConversations.reduce((sum, convo) => sum + convo.pitchScore, 0) / visibleConversations.length)
     : 0;
-  const conversationTrendDigest = useMemo(
-    () => buildConversationTrendDigest(visibleConversations, posProducts),
-    [posProducts, visibleConversations]
+
+  const normalizedSalesTrendRecommendations = useMemo(
+    () =>
+      (Array.isArray(salesTrendRecommendations) ? salesTrendRecommendations : []).map((item) => ({
+        ...item,
+        tags: Array.isArray(item.tags) ? item.tags : [],
+        unitsSold: Number.isFinite(item.unitsSold) ? item.unitsSold : 0,
+        orderCount: Number.isFinite(item.orderCount) ? item.orderCount : 0,
+        activeMonths: Number.isFinite(item.activeMonths) ? item.activeMonths : 0,
+        recentUnitsSold: Number.isFinite(item.recentUnitsSold) ? item.recentUnitsSold : 0,
+        bestMonthLabel: item.bestMonthLabel || null,
+      })),
+    [salesTrendRecommendations]
   );
 
   const liveTranscript = useMemo(() => {
     return transcriptDraft || interimTranscript;
   }, [interimTranscript, transcriptDraft]);
+
+  const liveRecommendationConversation = useMemo(() => {
+    if (isAdminViewer) return null;
+    const transcript = sanitizeConversationTranscript(liveTranscript);
+    const inferredCustomerName = activeVisitTask ? getVisitLabel(activeVisitTask) : customerName.trim();
+    if (!transcript || transcript.length < 12 || !inferredCustomerName) {
+      return null;
+    }
+    return buildConversationFromTranscript({
+      salespersonId: user?.id ?? "sales_unknown",
+      salespersonName: user?.name ?? "Sales Rep",
+      customerName: inferredCustomerName,
+      transcript,
+      durationMs: elapsedMs,
+      audioUri: null,
+    });
+  }, [activeVisitTask, customerName, elapsedMs, isAdminViewer, liveTranscript, user?.id, user?.name]);
+
+  const liveTranscriptSignals = useMemo(
+    () =>
+      buildTranscriptDrivenProductSignals(
+        sanitizeConversationTranscript(liveTranscript),
+        posProducts
+      ),
+    [liveTranscript, posProducts]
+  );
+
+  const liveDetectedPhrases = useMemo(
+    () =>
+      [...liveTranscriptSignals.specifications, ...liveTranscriptSignals.phrases]
+        .map((entry) => toConversationRecommendationTitle(entry))
+        .slice(0, 6),
+    [liveTranscriptSignals]
+  );
+
+  const liveProductSuggestions = useMemo(
+    () =>
+      liveRecommendationConversation
+        ? buildMeetingConversationProductRecommendations(
+            liveRecommendationConversation,
+            posProducts
+          ).slice(0, CONVERSATION_RECOMMENDATION_PRODUCT_LIMIT)
+        : [],
+    [liveRecommendationConversation, posProducts]
+  );
+
+  useEffect(() => {
+    if (isAdminViewer) return;
+    if (!(isRecording || isTranscribingFile || activeVisitTask?.autoCaptureRecordingActive)) return;
+    if (posProducts.length) return;
+    void ensureConversationRecommendationProducts().catch(() => {});
+  }, [
+    activeVisitTask?.autoCaptureRecordingActive,
+    ensureConversationRecommendationProducts,
+    isAdminViewer,
+    isRecording,
+    isTranscribingFile,
+    posProducts.length,
+  ]);
 
   const transcribeWithFallbackApi = useCallback(
     async (
@@ -3334,7 +4054,7 @@ export default function SalesScreen() {
       if (setBusy) setIsTranscribingFile(true);
       setRecordError(null);
       try {
-        const transcript = await transcribeAudioWithSpeechApi(uri);
+        const transcript = sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(uri));
         if (shouldAppend) {
           appendTranscriptSegment(transcript);
           setInterimTranscript("Listening...");
@@ -3428,7 +4148,7 @@ export default function SalesScreen() {
       const chunkIndex = fallbackChunkIndexRef.current++;
       const task = (async () => {
         try {
-          const transcript = await transcribeAudioWithSpeechApi(uri);
+          const transcript = sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(uri));
           const normalizedTranscript = transcript.trim();
           fallbackChunkBufferRef.current.set(chunkIndex, normalizedTranscript);
           if (normalizedTranscript) {
@@ -3780,10 +4500,10 @@ export default function SalesScreen() {
       navigateToDetail?: boolean;
       overrideCustomerName?: string;
       minTranscriptLength?: number;
-    }): Promise<string | null> => {
+    }): Promise<Conversation | null> => {
       const silent = Boolean(options?.silent);
       const resolvedCustomerName = (options?.overrideCustomerName ?? customerName).trim();
-      const transcript = (transcriptDraft || interimTranscript).trim();
+      const transcript = sanitizeConversationTranscript((transcriptDraft || interimTranscript).trim());
       const minTranscriptLength = Math.max(1, options?.minTranscriptLength ?? 20);
 
       if (!resolvedCustomerName) {
@@ -3838,7 +4558,7 @@ export default function SalesScreen() {
         if (options?.navigateToDetail !== false) {
           router.push({ pathname: "/conversation/[id]", params: { id: conversation.id } });
         }
-        return conversation.id;
+        return conversation;
       } catch (error) {
         if (!silent) {
           Alert.alert(
@@ -3967,21 +4687,56 @@ export default function SalesScreen() {
       setVisitActionTaskId(task.id);
       try {
         await stopRecordingAndWait();
-        const conversationId = await saveConversation({
+        const conversation = await saveConversation({
           silent: true,
           navigateToDetail: false,
           overrideCustomerName: getVisitLabel(task),
           minTranscriptLength: 1,
         });
-        if (!conversationId) {
+        if (!conversation) {
           throw new Error("Recording could not be saved. Please try Meeting End again.");
         }
         const nowIso = new Date().toISOString();
         await updateTask(task.id, {
           autoCaptureRecordingActive: false,
           autoCaptureRecordingStoppedAt: nowIso,
-          autoCaptureConversationId: conversationId,
+          autoCaptureConversationId: conversation.id,
         });
+        let analyzedConversation = conversation;
+        if ((conversation.transcript || "").trim().length >= 20) {
+          try {
+            const aiResult = await analyzeConversationWithBackendAIForMeeting({
+              transcript: conversation.transcript || "",
+              customerName: conversation.customerName,
+              salespersonName: conversation.salespersonName,
+            });
+            const aiUpdates: Partial<Conversation> = {
+              ...aiResult,
+              analysisProvider: "ai",
+            };
+            analyzedConversation = {
+              ...conversation,
+              ...aiUpdates,
+            };
+            await updateConversation(conversation.id, aiUpdates);
+            setConversations((current) => mergeConversationsById(current, [analyzedConversation]));
+          } catch {
+            analyzedConversation = conversation;
+          }
+        }
+        let recommendationItems: MeetingConversationProductRecommendation[] = [];
+        try {
+          const recommendationProducts = await ensureConversationRecommendationProducts();
+          recommendationItems = buildMeetingConversationProductRecommendations(
+            analyzedConversation,
+            recommendationProducts
+          );
+        } catch {
+          recommendationItems = [];
+        }
+        setMeetingRecommendationConversation(analyzedConversation);
+        setMeetingRecommendationItems(recommendationItems);
+        setMeetingRecommendationVisible(true);
         await addAuditLog({
           id: createLocalId("audit"),
           userId: user.id,
@@ -4002,7 +4757,16 @@ export default function SalesScreen() {
         setVisitActionTaskId(null);
       }
     },
-    [isAdminViewer, loadData, saveConversation, stopRecordingAndWait, user, visitActionTaskId]
+    [
+      analyzeConversationWithBackendAIForMeeting,
+      ensureConversationRecommendationProducts,
+      isAdminViewer,
+      loadData,
+      saveConversation,
+      stopRecordingAndWait,
+      user,
+      visitActionTaskId,
+    ]
   );
 
   const closeDepartureNotesModal = useCallback(() => {
@@ -4016,6 +4780,12 @@ export default function SalesScreen() {
     setDepartureCustomerPhone("");
     setDepartureCustomerAddress("");
   }, [visitActionTaskId]);
+
+  const closeMeetingRecommendationModal = useCallback(() => {
+    setMeetingRecommendationVisible(false);
+    setMeetingRecommendationConversation(null);
+    setMeetingRecommendationItems([]);
+  }, []);
 
   const openDepartureNotesModal = useCallback((task: Task) => {
     setDepartureNotesTask(task);
@@ -4178,6 +4948,56 @@ export default function SalesScreen() {
       openDepartureNotesModal(task);
     },
     [isAdminViewer, openDepartureNotesModal, user, visitActionTaskId]
+  );
+
+  const handleVisitDelete = useCallback(
+    (task: Task) => {
+      if (!user || !isAdminViewer) return;
+      if (visitActionTaskId) return;
+      Alert.alert(
+        "Delete Visit",
+        `Delete ${getVisitLabel(task)} from assigned field visits?`,
+        [
+          {
+            text: "Cancel",
+            style: "cancel",
+          },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: () => {
+              setVisitActionTaskId(task.id);
+              void (async () => {
+                try {
+                  const removed = await removeTask(task.id);
+                  if (!removed) {
+                    throw new Error("Visit could not be deleted.");
+                  }
+                  await addAuditLog({
+                    id: createLocalId("audit"),
+                    userId: user.id,
+                    userName: user.name,
+                    action: "Visit Deleted",
+                    details: `${user.name} deleted assigned visit ${getVisitLabel(task)}.`,
+                    timestamp: new Date().toISOString(),
+                    module: "Sales Intelligence",
+                  });
+                  await loadData();
+                } catch (error) {
+                  Alert.alert(
+                    "Unable to Delete Visit",
+                    error instanceof Error ? error.message : "Failed to delete visit."
+                  );
+                } finally {
+                  setVisitActionTaskId(null);
+                }
+              })();
+            },
+          },
+        ]
+      );
+    },
+    [isAdminViewer, loadData, user, visitActionTaskId]
   );
 
   const voicePulseColor =
@@ -4554,6 +5374,169 @@ export default function SalesScreen() {
       setPosSubmitting(false);
     }
   }, [cartItems, linkedPosVisitTask, loadData, posSubmitting, selectedCustomer, user]);
+
+  const salesTrendRecommendationsSection = !isAdminViewer ? (
+    <Animated.View entering={FadeInDown.duration(400).delay(86)}>
+      <View style={styles.sectionHeader}>
+        <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+          Trending Product Recommendations
+        </Text>
+        <Text
+          style={[
+            styles.sectionMetaText,
+            { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+          ]}
+        >
+          Reliable product picks tagged by pattern, not just one-off sales spikes.
+        </Text>
+      </View>
+      <View
+        style={[
+          styles.trendRecommendationsCard,
+          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+        ]}
+      >
+        {salesTrendLoading ? (
+          <View style={styles.trendRecommendationsLoading}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text
+              style={[
+                styles.trendRecommendationsLoadingText,
+                { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+              ]}
+            >
+              Loading recent product trends...
+            </Text>
+          </View>
+        ) : normalizedSalesTrendRecommendations.length ? (
+          normalizedSalesTrendRecommendations.map((item, idx) => (
+            <View
+              key={`sales_trend_${item.id}`}
+              style={[
+                styles.trendRecommendationRow,
+                idx < normalizedSalesTrendRecommendations.length - 1 && {
+                  borderBottomWidth: 0.5,
+                  borderBottomColor: colors.borderLight,
+                },
+              ]}
+            >
+              <View style={[styles.trendRecommendationIcon, { backgroundColor: colors.success + "15" }]}>
+                <Ionicons name="trending-up-outline" size={16} color={colors.success} />
+              </View>
+              <View style={styles.trendRecommendationTextWrap}>
+                <View style={styles.trendRecommendationHeader}>
+                  <Text
+                    style={[
+                      styles.trendRecommendationTitle,
+                      { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                    ]}
+                  >
+                    {item.label}
+                  </Text>
+                  {item.ref ? (
+                    <View style={[styles.trendRecommendationRef, { backgroundColor: colors.secondary + "18" }]}>
+                      <Text
+                        style={[
+                          styles.trendRecommendationRefText,
+                          { color: colors.secondary, fontFamily: "Inter_600SemiBold" },
+                        ]}
+                      >
+                        {item.ref}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+                <Text
+                  style={[
+                    styles.trendRecommendationReason,
+                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                  ]}
+                >
+                  {item.reason}
+                </Text>
+                <View style={styles.trendRecommendationMetrics}>
+                  {(Array.isArray(item.tags) ? item.tags : []).map((tag) => {
+                    const palette = resolveTrendTagColors(colors, tag.tone);
+                    return (
+                      <View
+                        key={`${item.id}_${tag.label}`}
+                        style={[styles.trendTagChip, { backgroundColor: palette.backgroundColor }]}
+                      >
+                        <Text
+                          style={[
+                            styles.trendTagChipText,
+                            { color: palette.textColor, fontFamily: "Inter_600SemiBold" },
+                          ]}
+                        >
+                          {tag.label}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+                <View style={styles.trendRecommendationMetrics}>
+                  <View style={[styles.trendMetricChip, { backgroundColor: colors.success + "12" }]}>
+                    <Text
+                      style={[
+                        styles.trendMetricChipText,
+                        { color: colors.success, fontFamily: "Inter_600SemiBold" },
+                      ]}
+                    >
+                      {item.unitsSold} units
+                    </Text>
+                  </View>
+                  <View style={[styles.trendMetricChip, { backgroundColor: colors.primary + "12" }]}>
+                    <Text
+                      style={[
+                        styles.trendMetricChipText,
+                        { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                      ]}
+                    >
+                      {item.orderCount} orders
+                    </Text>
+                  </View>
+                  {item.activeMonths > 0 ? (
+                    <View style={[styles.trendMetricChip, { backgroundColor: colors.warning + "12" }]}>
+                      <Text
+                        style={[
+                          styles.trendMetricChipText,
+                          { color: colors.warning, fontFamily: "Inter_600SemiBold" },
+                        ]}
+                      >
+                        {item.activeMonths} months
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+                {item.bestMonthLabel ? (
+                  <Text
+                    style={[
+                      styles.trendRecommendationSubnote,
+                      { color: colors.textTertiary, fontFamily: "Inter_500Medium" },
+                    ]}
+                  >
+                    Best month seen: {formatSalesTrendMonthLabel(item.bestMonthLabel)}
+                  </Text>
+                ) : null}
+              </View>
+            </View>
+          ))
+        ) : (
+          <View style={styles.trendRecommendationsEmpty}>
+            <Ionicons name="trending-up-outline" size={18} color={colors.textTertiary} />
+            <Text
+              style={[
+                styles.trendRecommendationsEmptyText,
+                { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+              ]}
+            >
+              No recent product trends available yet.
+            </Text>
+          </View>
+        )}
+      </View>
+    </Animated.View>
+  ) : null;
 
   return (
     <AppCanvas>
@@ -5439,10 +6422,32 @@ export default function SalesScreen() {
                           />
                         </View>
                         <View style={styles.rowTextWrap}>
-                          <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                            {task.visitSequence ? `#${task.visitSequence} ` : ""}
-                            {getVisitLabel(task)}
-                          </Text>
+                          <View style={styles.visitTitleRow}>
+                            <Text style={[styles.rowTime, { color: colors.text, fontFamily: "Inter_600SemiBold", flex: 1 }]}>
+                              {task.visitSequence ? `#${task.visitSequence} ` : ""}
+                              {getVisitLabel(task)}
+                            </Text>
+                            {isAdminViewer ? (
+                              <Pressable
+                                onPress={() => handleVisitDelete(task)}
+                                disabled={isBusy}
+                                style={({ pressed }) => [
+                                  styles.visitDeleteButton,
+                                  {
+                                    backgroundColor: colors.danger + "12",
+                                    borderColor: colors.danger + "30",
+                                    opacity: pressed || isBusy ? 0.7 : 1,
+                                  },
+                                ]}
+                              >
+                                {isBusy ? (
+                                  <ActivityIndicator size="small" color={colors.danger} />
+                                ) : (
+                                  <Ionicons name="trash-outline" size={15} color={colors.danger} />
+                                )}
+                              </Pressable>
+                            ) : null}
+                          </View>
                           <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                             {getVisitSubtitle(task) || "Field visit point"}
                           </Text>
@@ -5606,6 +6611,212 @@ export default function SalesScreen() {
                 </Text>
               </Animated.View>
             ) : null}
+
+            {!isAdminViewer && (Boolean(activeVisitTaskId) || Boolean(liveTranscript.trim()) || isRecording || isTranscribingFile) ? (
+              <Animated.View
+                entering={FadeInDown.duration(360).delay(84)}
+                style={[
+                  styles.liveSuggestionCard,
+                  { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                ]}
+              >
+                <View style={styles.liveSuggestionHeader}>
+                  <View style={styles.liveSuggestionTitleWrap}>
+                    <View style={[styles.liveSuggestionIcon, { backgroundColor: colors.primary + "14" }]}>
+                      <Ionicons name="sparkles-outline" size={16} color={colors.primary} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[
+                          styles.liveSuggestionTitle,
+                          { color: colors.text, fontFamily: "Inter_700Bold" },
+                        ]}
+                      >
+                        Live Product Suggestions
+                      </Text>
+                      <Text
+                        style={[
+                          styles.liveSuggestionMeta,
+                          { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                        ]}
+                      >
+                        Meeting start hote hi live phrases se products suggest hote rahenge.
+                      </Text>
+                    </View>
+                  </View>
+                  <View
+                    style={[
+                      styles.liveSuggestionStatusChip,
+                      {
+                        backgroundColor:
+                          isRecording || isTranscribingFile
+                            ? colors.success + "14"
+                            : colors.surfaceSecondary,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.liveSuggestionStatusText,
+                        {
+                          color:
+                            isRecording || isTranscribingFile
+                              ? colors.success
+                              : colors.textSecondary,
+                          fontFamily: "Inter_700Bold",
+                        },
+                      ]}
+                    >
+                      {isRecording ? "Listening" : isTranscribingFile ? "Transcribing" : "Standby"}
+                    </Text>
+                  </View>
+                </View>
+
+                {liveDetectedPhrases.length ? (
+                  <View style={styles.liveSuggestionPhraseWrap}>
+                    {liveDetectedPhrases.map((phrase) => (
+                      <View
+                        key={`live_phrase_${phrase}`}
+                        style={[
+                          styles.liveSuggestionPhraseChip,
+                          { backgroundColor: colors.primary + "10" },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.liveSuggestionPhraseText,
+                            { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                          ]}
+                        >
+                          {phrase}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : (
+                  <Text
+                    style={[
+                      styles.liveSuggestionHint,
+                      { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                    ]}
+                  >
+                    Abhi phrases collect ho rahe hain. Jaisi hi clear specs ya needs milengi, products niche dikhne lagenge.
+                  </Text>
+                )}
+
+                {liveProductSuggestions.length ? (
+                  <View style={styles.liveSuggestionList}>
+                    {liveProductSuggestions.map((item) => (
+                      <View
+                        key={`live_product_${item.id}`}
+                        style={[
+                          styles.liveSuggestionRow,
+                          { backgroundColor: colors.surface, borderColor: colors.borderLight },
+                        ]}
+                      >
+                        <View style={[styles.liveSuggestionProductIcon, { backgroundColor: colors.secondary + "12" }]}>
+                          <Ionicons name="cube-outline" size={15} color={colors.secondary} />
+                        </View>
+                        <View style={styles.liveSuggestionTextWrap}>
+                          <View style={styles.liveSuggestionRowHeader}>
+                            <Text
+                              style={[
+                                styles.liveSuggestionRowTitle,
+                                { color: colors.text, fontFamily: "Inter_700Bold" },
+                              ]}
+                            >
+                              {item.label}
+                            </Text>
+                            {item.ref ? (
+                              <View
+                                style={[
+                                  styles.liveSuggestionRefChip,
+                                  { backgroundColor: colors.secondary + "16" },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.liveSuggestionRefText,
+                                    { color: colors.secondary, fontFamily: "Inter_700Bold" },
+                                  ]}
+                                >
+                                  {item.ref}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </View>
+                          <Text
+                            style={[
+                              styles.liveSuggestionReason,
+                              { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                            ]}
+                          >
+                            {item.reason}
+                          </Text>
+                          <View style={styles.liveSuggestionMatchWrap}>
+                            {item.matchedSpecifications.map((entry) => (
+                              <View
+                                key={`${item.id}_live_spec_${entry}`}
+                                style={[
+                                  styles.liveSuggestionMatchChip,
+                                  { backgroundColor: colors.primary + "10" },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.liveSuggestionMatchText,
+                                    { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                                  ]}
+                                >
+                                  Spec: {entry}
+                                </Text>
+                              </View>
+                            ))}
+                            {item.matchedKeyPhrases.map((entry) => (
+                              <View
+                                key={`${item.id}_live_phrase_${entry}`}
+                                style={[
+                                  styles.liveSuggestionMatchChip,
+                                  { backgroundColor: colors.secondary + "12" },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.liveSuggestionMatchText,
+                                    { color: colors.secondary, fontFamily: "Inter_600SemiBold" },
+                                  ]}
+                                >
+                                  Phrase: {entry}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                ) : liveRecommendationConversation ? (
+                  <View
+                    style={[
+                      styles.liveSuggestionEmpty,
+                      { backgroundColor: colors.surface, borderColor: colors.borderLight },
+                    ]}
+                  >
+                    <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
+                    <Text
+                      style={[
+                        styles.liveSuggestionEmptyText,
+                        { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                      ]}
+                    >
+                      Aur thodi clear specs ya product needs aate hi yahin live suggestions update hongi.
+                    </Text>
+                  </View>
+                ) : null}
+              </Animated.View>
+            ) : null}
+
+            {salesTrendRecommendationsSection}
 
             {!isAdminViewer ? (
               <Animated.View
@@ -6271,131 +7482,7 @@ export default function SalesScreen() {
                   </View>
                 </View>
               </LinearGradient>
-                </Animated.View>
-                {conversationTrendDigest.recommendations.length > 0 ? (
-                  <Animated.View entering={FadeInDown.duration(400).delay(190)}>
-                    <View
-                      style={[
-                        styles.recommendationCard,
-                        { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                      ]}
-                    >
-                      <View style={styles.recommendationCardHeader}>
-                        <View
-                          style={[
-                            styles.recommendationCardIcon,
-                            { backgroundColor: `${colors.primary}12` },
-                          ]}
-                        >
-                          <Ionicons name="sparkles-outline" size={18} color={colors.primary} />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text
-                            style={[
-                              styles.recommendationCardTitle,
-                              { color: colors.text, fontFamily: "Inter_700Bold" },
-                            ]}
-                          >
-                            AI Recommendations
-                          </Text>
-                          <Text
-                            style={[
-                              styles.recommendationCardSubtitle,
-                              { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                            ]}
-                          >
-                            Built from saved conversations, trend phrases, and product mentions.
-                          </Text>
-                        </View>
-                      </View>
-
-                      {conversationTrendDigest.productTrends.length > 0 ? (
-                        <View style={styles.recommendationTrendRow}>
-                          {conversationTrendDigest.productTrends.map((trend) => (
-                            <View
-                              key={trend.id}
-                              style={[
-                                styles.recommendationTrendChip,
-                                {
-                                  backgroundColor: colors.surfaceSecondary,
-                                  borderColor: colors.border,
-                                },
-                              ]}
-                            >
-                              <Text
-                                style={[
-                                  styles.recommendationTrendName,
-                                  { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                                ]}
-                                numberOfLines={1}
-                              >
-                                {trend.label}
-                              </Text>
-                              <Text
-                                style={[
-                                  styles.recommendationTrendMeta,
-                                  { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                                ]}
-                              >
-                                {trend.mentions} mentions · {trend.avgInterest}% interest
-                              </Text>
-                            </View>
-                          ))}
-                        </View>
-                      ) : null}
-
-                      <View style={styles.recommendationList}>
-                        {conversationTrendDigest.recommendations.map((item) => {
-                          const accentColor =
-                            item.tone === "positive"
-                              ? colors.success
-                              : item.tone === "warning"
-                                ? colors.warning
-                                : colors.primary;
-                          return (
-                            <View
-                              key={item.id}
-                              style={[
-                                styles.recommendationItem,
-                                {
-                                  backgroundColor: `${accentColor}10`,
-                                  borderColor: `${accentColor}24`,
-                                },
-                              ]}
-                            >
-                              <View
-                                style={[
-                                  styles.recommendationItemIcon,
-                                  { backgroundColor: `${accentColor}18` },
-                                ]}
-                              >
-                                <Ionicons name={item.icon} size={16} color={accentColor} />
-                              </View>
-                              <View style={{ flex: 1 }}>
-                                <Text
-                                  style={[
-                                    styles.recommendationItemTitle,
-                                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
-                                  ]}
-                                >
-                                  {item.title}
-                                </Text>
-                                <Text
-                                  style={[
-                                    styles.recommendationItemBody,
-                                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-                                  ]}
-                                >
-                                  {item.body}
-                                </Text>
-                              </View>
-                            </View>
-                          );
-                        })}
-                      </View>
-                    </View>
-                  </Animated.View>
-                ) : null}
+            </Animated.View>
               </>
             ) : null}
 
@@ -6424,6 +7511,184 @@ export default function SalesScreen() {
           ) : null
         }
       />
+      <Modal
+        visible={meetingRecommendationVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeMeetingRecommendationModal}
+      >
+        <View style={styles.departureNotesOverlay}>
+          <View
+            style={[
+              styles.meetingRecommendationCard,
+              { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+            ]}
+          >
+            <Text
+              style={[
+                styles.meetingRecommendationEyebrow,
+                { color: colors.primary, fontFamily: "Inter_700Bold" },
+              ]}
+            >
+              Meeting End Analysis
+            </Text>
+            <Text
+              style={[
+                styles.meetingRecommendationTitle,
+                { color: colors.text, fontFamily: "Inter_700Bold" },
+              ]}
+            >
+              Recommended Products by Conversation Specs
+            </Text>
+            <Text
+              style={[
+                styles.meetingRecommendationMeta,
+                { color: colors.textSecondary, fontFamily: "Inter_600SemiBold" },
+              ]}
+            >
+              {meetingRecommendationConversation?.customerName?.trim() || "Customer"}
+            </Text>
+            <Text
+              style={[
+                styles.meetingRecommendationHint,
+                { color: colors.textTertiary, fontFamily: "Inter_400Regular" },
+              ]}
+            >
+              Meeting khatam hote hi customer ne jo specs aur phrases bole, unke basis par ye products suggest kiye gaye hain.
+            </Text>
+            <ScrollView
+              style={styles.meetingRecommendationList}
+              contentContainerStyle={styles.meetingRecommendationListContent}
+              showsVerticalScrollIndicator={false}
+            >
+              {meetingRecommendationItems.length ? (
+                meetingRecommendationItems.map((item, index) => (
+                  <View
+                    key={`${item.id}_${index}`}
+                    style={[
+                      styles.meetingRecommendationRow,
+                      {
+                        backgroundColor: colors.surface,
+                        borderColor: colors.borderLight,
+                      },
+                    ]}
+                  >
+                    <View style={styles.meetingRecommendationRowHeader}>
+                      <View style={[styles.meetingRecommendationIcon, { backgroundColor: colors.primary + "12" }]}>
+                        <Ionicons name="cube-outline" size={18} color={colors.primary} />
+                      </View>
+                      <View style={styles.meetingRecommendationRowText}>
+                        <View style={styles.meetingRecommendationRowTitleWrap}>
+                          <Text
+                            style={[
+                              styles.meetingRecommendationRowTitle,
+                              { color: colors.text, fontFamily: "Inter_700Bold" },
+                            ]}
+                          >
+                            {item.label}
+                          </Text>
+                          {item.ref ? (
+                            <View
+                              style={[
+                                styles.meetingRecommendationRefChip,
+                                { backgroundColor: colors.secondary + "16" },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.meetingRecommendationRefText,
+                                  { color: colors.secondary, fontFamily: "Inter_700Bold" },
+                                ]}
+                              >
+                                {item.ref}
+                              </Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        <Text
+                          style={[
+                            styles.meetingRecommendationReason,
+                            { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                          ]}
+                        >
+                          {item.reason}
+                        </Text>
+                        <View style={styles.meetingRecommendationChipWrap}>
+                          {item.matchedSpecifications.map((entry) => (
+                            <View
+                              key={`${item.id}_spec_${entry}`}
+                              style={[
+                                styles.meetingRecommendationChip,
+                                { backgroundColor: colors.primary + "10" },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.meetingRecommendationChipText,
+                                  { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                                ]}
+                              >
+                                Spec: {entry}
+                              </Text>
+                            </View>
+                          ))}
+                          {item.matchedKeyPhrases.map((entry) => (
+                            <View
+                              key={`${item.id}_phrase_${entry}`}
+                              style={[
+                                styles.meetingRecommendationChip,
+                                { backgroundColor: colors.secondary + "12" },
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.meetingRecommendationChipText,
+                                  { color: colors.secondary, fontFamily: "Inter_600SemiBold" },
+                                ]}
+                              >
+                                Phrase: {entry}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <View
+                  style={[
+                    styles.meetingRecommendationEmpty,
+                    { backgroundColor: colors.surface, borderColor: colors.borderLight },
+                  ]}
+                >
+                  <Ionicons name="search-outline" size={20} color={colors.textSecondary} />
+                  <Text
+                    style={[
+                      styles.meetingRecommendationEmptyText,
+                      { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
+                    ]}
+                  >
+                    Is meeting me clear product spec match nahi mila. Aap notes/departure ke baad POS se manual pitch continue kar sakte ho.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+            <View style={styles.meetingRecommendationFooter}>
+              <Pressable
+                onPress={closeMeetingRecommendationModal}
+                style={({ pressed }) => [
+                  styles.meetingRecommendationButton,
+                  { backgroundColor: colors.primary, opacity: pressed ? 0.82 : 1 },
+                ]}
+              >
+                <Ionicons name="checkmark-circle-outline" size={16} color="#FFFFFF" />
+                <Text style={styles.meetingRecommendationButtonText}>Continue</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <Modal
         visible={departureNotesModalVisible}
         transparent
@@ -7159,6 +8424,11 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  visitTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   rowTime: {
     fontSize: 12.5,
   },
@@ -7204,6 +8474,14 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
+  },
+  visitDeleteButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
   },
   departureNotesOverlay: {
     flex: 1,
@@ -7314,6 +8592,256 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 13,
     fontFamily: "Inter_600SemiBold",
+  },
+  meetingRecommendationCard: {
+    borderWidth: 1,
+    borderRadius: 22,
+    padding: 18,
+    gap: 10,
+    maxHeight: "82%",
+  },
+  meetingRecommendationEyebrow: {
+    fontSize: 12,
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+  },
+  meetingRecommendationTitle: {
+    fontSize: 20,
+    letterSpacing: -0.4,
+  },
+  meetingRecommendationMeta: {
+    fontSize: 13,
+  },
+  meetingRecommendationHint: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  meetingRecommendationList: {
+    maxHeight: 420,
+  },
+  meetingRecommendationListContent: {
+    gap: 12,
+    paddingVertical: 6,
+  },
+  meetingRecommendationRow: {
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+  },
+  meetingRecommendationRowHeader: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  meetingRecommendationIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  meetingRecommendationRowText: {
+    flex: 1,
+    gap: 8,
+  },
+  meetingRecommendationRowTitleWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  meetingRecommendationRowTitle: {
+    flexShrink: 1,
+    fontSize: 18,
+    lineHeight: 24,
+  },
+  meetingRecommendationRefChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+  },
+  meetingRecommendationRefText: {
+    fontSize: 11,
+  },
+  meetingRecommendationReason: {
+    fontSize: 13.5,
+    lineHeight: 20,
+  },
+  meetingRecommendationChipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  meetingRecommendationChip: {
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  meetingRecommendationChipText: {
+    fontSize: 11.5,
+  },
+  meetingRecommendationEmpty: {
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 16,
+    flexDirection: "row",
+    gap: 10,
+    alignItems: "flex-start",
+  },
+  meetingRecommendationEmptyText: {
+    flex: 1,
+    fontSize: 13.5,
+    lineHeight: 20,
+  },
+  meetingRecommendationFooter: {
+    paddingTop: 6,
+    alignItems: "flex-end",
+  },
+  meetingRecommendationButton: {
+    minHeight: 42,
+    minWidth: 118,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  meetingRecommendationButtonText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontFamily: "Inter_600SemiBold",
+  },
+  liveSuggestionCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 14,
+    gap: 12,
+    marginBottom: 18,
+  },
+  liveSuggestionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10,
+    alignItems: "flex-start",
+  },
+  liveSuggestionTitleWrap: {
+    flex: 1,
+    flexDirection: "row",
+    gap: 10,
+  },
+  liveSuggestionIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  liveSuggestionTitle: {
+    fontSize: 16,
+  },
+  liveSuggestionMeta: {
+    marginTop: 4,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  liveSuggestionStatusChip: {
+    minHeight: 30,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  liveSuggestionStatusText: {
+    fontSize: 11.5,
+    letterSpacing: 0.2,
+  },
+  liveSuggestionHint: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  liveSuggestionPhraseWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  liveSuggestionPhraseChip: {
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+  },
+  liveSuggestionPhraseText: {
+    fontSize: 11.5,
+  },
+  liveSuggestionList: {
+    gap: 10,
+  },
+  liveSuggestionRow: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 12,
+    flexDirection: "row",
+    gap: 10,
+  },
+  liveSuggestionProductIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  liveSuggestionTextWrap: {
+    flex: 1,
+    gap: 7,
+  },
+  liveSuggestionRowHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  liveSuggestionRowTitle: {
+    flexShrink: 1,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  liveSuggestionRefChip: {
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  liveSuggestionRefText: {
+    fontSize: 10.5,
+  },
+  liveSuggestionReason: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  liveSuggestionMatchWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  liveSuggestionMatchChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  liveSuggestionMatchText: {
+    fontSize: 11,
+  },
+  liveSuggestionEmpty: {
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    flexDirection: "row",
+    gap: 8,
+    alignItems: "center",
+  },
+  liveSuggestionEmptyText: {
+    flex: 1,
+    fontSize: 12.5,
+    lineHeight: 18,
   },
   routeHintCard: {
     borderRadius: 12,
@@ -7644,7 +9172,109 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   sectionHeader: { marginBottom: 12 },
+  sectionMetaText: {
+    marginTop: 4,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
   sectionTitle: { fontSize: 18, letterSpacing: -0.3 },
+  trendRecommendationsCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    overflow: "hidden",
+    marginBottom: 18,
+  },
+  trendRecommendationsLoading: {
+    minHeight: 92,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    paddingHorizontal: 16,
+  },
+  trendRecommendationsLoadingText: {
+    fontSize: 12.5,
+  },
+  trendRecommendationsEmpty: {
+    minHeight: 88,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 16,
+  },
+  trendRecommendationsEmptyText: {
+    fontSize: 12.5,
+    textAlign: "center",
+  },
+  trendRecommendationRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  trendRecommendationIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  trendRecommendationTextWrap: {
+    flex: 1,
+    gap: 6,
+  },
+  trendRecommendationHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  trendRecommendationTitle: {
+    flex: 1,
+    fontSize: 14,
+  },
+  trendRecommendationRef: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  trendRecommendationRefText: {
+    fontSize: 10.5,
+    letterSpacing: 0.3,
+  },
+  trendRecommendationReason: {
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  trendTagChip: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  trendTagChipText: {
+    fontSize: 11.5,
+  },
+  trendRecommendationMetrics: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  trendMetricChip: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  trendMetricChipText: {
+    fontSize: 11.5,
+  },
+  trendRecommendationSubnote: {
+    fontSize: 11.5,
+    lineHeight: 16,
+  },
   convoCard: {
     borderRadius: 18,
     padding: 18,

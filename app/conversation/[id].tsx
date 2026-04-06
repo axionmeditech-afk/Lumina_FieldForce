@@ -28,11 +28,14 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   getApiBaseUrlCandidates,
+  getDolibarrOrderDetail,
+  getDolibarrOrders,
   getDolibarrProducts,
+  type DolibarrOrder,
+  type DolibarrOrderLine,
   type DolibarrProduct,
 } from "@/lib/attendance-api";
 import {
-  analyzeConversationWithAI,
   type AISalesAnalysisResult,
 } from "@/lib/aiSalesAnalysis";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
@@ -95,7 +98,23 @@ type ConversationProductRecommendation = {
   ref: string | null;
   matchedAttributes: string[];
   matchedKeyPhrases: string[];
+  matchedSpecifications: string[];
+  trendOrderCount?: number;
+  trendUnitsSold?: number;
+  trendRevenue?: number;
+  trendRank?: number | null;
   reason: string;
+};
+
+type ProductTrendStat = {
+  key: string;
+  productId: number | null;
+  label: string;
+  ref: string | null;
+  qtySold: number;
+  orderCount: number;
+  revenue: number;
+  trendRank: number;
 };
 
 const PRODUCT_RECOMMENDATION_STOP_WORDS = new Set([
@@ -118,6 +137,26 @@ const PRODUCT_RECOMMENDATION_STOP_WORDS = new Set([
   "requirements",
 ]);
 
+const SPEC_UNIT_PATTERN =
+  /\b\d+(?:\.\d+)?\s?(?:mm|cm|ml|l|ltr|micron|microns|g|kg|gsm|inch|inches|in|hp|w|kw|v|volt|volts|amp|amps|a|bar|psi|rpm|cc|mtr|meter|meters|m)\b/gi;
+const SPEC_DIMENSION_PATTERN =
+  /\b\d+(?:\.\d+)?\s?[x*]\s?\d+(?:\.\d+)?(?:\s?[x*]\s?\d+(?:\.\d+)?)?\b/gi;
+const SPOKEN_NUMBER_WORDS: Record<string, string> = {
+  zero: "0",
+  one: "1",
+  two: "2",
+  three: "3",
+  four: "4",
+  five: "5",
+  six: "6",
+  seven: "7",
+  eight: "8",
+  nine: "9",
+};
+const SALES_TREND_ORDER_LIMIT = 24;
+const SALES_TREND_LOOKBACK_DAYS = 45;
+const SALES_TREND_BATCH_SIZE = 6;
+
 function normalizeMatcherText(value: string | undefined | null): string {
   return (value || "")
     .toLowerCase()
@@ -128,6 +167,79 @@ function normalizeMatcherText(value: string | undefined | null): string {
 
 function toTitleCase(value: string): string {
   return value.replace(/\b\w/g, (segment) => segment.toUpperCase());
+}
+
+function parseNumber(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const cleaned = value.trim().replace(/,/g, "");
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseNumericId(value: unknown): number | null {
+  const parsed = parseNumber(value);
+  if (parsed === null) return null;
+  const rounded = Math.trunc(parsed);
+  return Number.isFinite(rounded) && rounded > 0 ? rounded : null;
+}
+
+function parseDateValue(value: unknown): Date | null {
+  if (typeof value === "number") {
+    const ms = value > 1_000_000_000_000 ? value : value * 1000;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === "string") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  return null;
+}
+
+function getOrderDate(order: DolibarrOrder): Date | null {
+  return (
+    parseDateValue(order.date_commande) ??
+    parseDateValue(order.date) ??
+    parseDateValue(order.date_creation) ??
+    parseDateValue(order.tms) ??
+    null
+  );
+}
+
+function getLineQty(line: DolibarrOrderLine): number {
+  return Math.max(0, parseNumber(line.qty) ?? 0);
+}
+
+function getLineRevenue(line: DolibarrOrderLine, qty: number): number {
+  return (
+    parseNumber(line.total_ttc) ??
+    parseNumber(line.total_ht) ??
+    (parseNumber(line.subprice) ?? 0) * qty
+  );
+}
+
+function normalizeSpokenSpecificationPhrases(value: string): string {
+  return value.replace(
+    /\b(zero|one|two|three|four|five|six|seven|eight|nine)\s+point\s+(zero|one|two|three|four|five|six|seven|eight|nine)\b/gi,
+    (_, whole: string, fraction: string) =>
+      `${SPOKEN_NUMBER_WORDS[whole.toLowerCase()]}.${SPOKEN_NUMBER_WORDS[fraction.toLowerCase()]}`
+  );
+}
+
+function normalizeSpecificationSearchText(value: string | undefined | null): string {
+  return normalizeSpokenSpecificationPhrases((value || "").toLowerCase())
+    .replace(/(\d)([a-z])/gi, "$1 $2")
+    .replace(/([a-z])(\d)/gi, "$1 $2")
+    .replace(/(\d)\s*[x*]\s*(\d)/gi, "$1x$2")
+    .replace(/[^a-z0-9.+x*]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function buildConversationAttributeCandidates(
@@ -170,12 +282,63 @@ function buildConversationAttributeCandidates(
   return unique;
 }
 
+function extractConversationSpecificationTokens(convo: Conversation): string[] {
+  const transcript = `${convo.transcript || ""} ${convo.summary || ""} ${(convo.keyPhrases || []).join(" ")}`;
+  const normalizedTranscript = normalizeSpokenSpecificationPhrases(transcript.toLowerCase());
+  const specs = new Set<string>();
+  const specMatches = normalizedTranscript.match(SPEC_UNIT_PATTERN) || [];
+  const dimensionMatches = normalizedTranscript.match(SPEC_DIMENSION_PATTERN) || [];
+
+  for (const raw of [...specMatches, ...dimensionMatches]) {
+    const cleaned = normalizeSpecificationSearchText(raw);
+    if (cleaned.length >= 2) {
+      specs.add(cleaned);
+    }
+  }
+
+  const looseNumberMatches =
+    normalizedTranscript.match(/\b\d+(?:\.\d+)?\b/g)?.filter((entry) => entry.includes(".")) || [];
+  for (const entry of looseNumberMatches) {
+    if (entry.length >= 3) {
+      specs.add(normalizeSpecificationSearchText(entry));
+    }
+  }
+
+  return Array.from(specs).slice(0, 12);
+}
+
+function resolveTrendStatForProduct(
+  product: DolibarrProduct,
+  trendStats: ProductTrendStat[]
+): ProductTrendStat | null {
+  if (!trendStats.length) return null;
+  const productId = parseNumericId(product.id);
+  if (productId) {
+    const byId = trendStats.find((entry) => entry.productId === productId);
+    if (byId) return byId;
+  }
+  const ref = normalizeMatcherText(product.ref);
+  if (ref) {
+    const byRef = trendStats.find((entry) => normalizeMatcherText(entry.ref) === ref);
+    if (byRef) return byRef;
+  }
+  const label = normalizeMatcherText(product.label);
+  if (label) {
+    const byLabel = trendStats.find((entry) => normalizeMatcherText(entry.label) === label);
+    if (byLabel) return byLabel;
+  }
+  return null;
+}
+
 function buildProductRecommendations(
   convo: Conversation,
-  products: DolibarrProduct[]
+  products: DolibarrProduct[],
+  trendStats: ProductTrendStat[]
 ): ConversationProductRecommendation[] {
   const attributeCandidates = buildConversationAttributeCandidates(convo);
-  if (!attributeCandidates.length || !products.length) return [];
+  const specificationTokens = extractConversationSpecificationTokens(convo);
+  if (!attributeCandidates.length && !specificationTokens.length) return [];
+  if (!products.length) return [];
 
   const recommendations = products
     .map((product) => {
@@ -184,7 +347,11 @@ function buildProductRecommendations(
       const searchable = normalizeMatcherText(
         [product.label, product.ref, product.description].filter(Boolean).join(" ")
       );
-      if (!searchable) return null;
+      const specificationSearchable = normalizeSpecificationSearchText(
+        [product.label, product.ref, product.description].filter(Boolean).join(" ")
+      );
+      const compactSpecificationSearchable = specificationSearchable.replace(/\s+/g, "");
+      if (!searchable && !specificationSearchable) return null;
 
       const matchedCandidates = attributeCandidates.filter((candidate) => {
         if (candidate.phrase.includes(" ")) {
@@ -192,31 +359,60 @@ function buildProductRecommendations(
         }
         return ` ${searchable} `.includes(` ${candidate.phrase} `);
       });
-      if (!matchedCandidates.length) return null;
+      const matchedSpecifications = specificationTokens
+        .filter((token) => {
+          const normalizedToken = normalizeSpecificationSearchText(token);
+          if (!normalizedToken) return false;
+          return (
+            specificationSearchable.includes(normalizedToken) ||
+            compactSpecificationSearchable.includes(normalizedToken.replace(/\s+/g, ""))
+          );
+        })
+        .slice(0, 4)
+        .map((token) => toTitleCase(token));
+      if (!matchedCandidates.length && !matchedSpecifications.length) return null;
 
       const highIntentBoost = convo.buyingIntent === "high" ? 2 : convo.buyingIntent === "medium" ? 1 : 0;
       const keyPhraseMatches = matchedCandidates.filter((entry) => entry.source === "key_phrase");
       const matchedAttributes = matchedCandidates.slice(0, 4).map((entry) => toTitleCase(entry.phrase));
       const matchedKeyPhrases = keyPhraseMatches.slice(0, 3).map((entry) => toTitleCase(entry.phrase));
       const leadAttribute = matchedAttributes[0];
+      const trendStat = resolveTrendStatForProduct(product, trendStats);
+      const trendBoost = trendStat
+        ? Math.min(8, trendStat.orderCount * 1.5 + Math.min(4, trendStat.qtySold / 3))
+        : 0;
       const score =
         matchedCandidates.length * 3 +
         keyPhraseMatches.length * 2 +
-        highIntentBoost;
+        matchedSpecifications.length * 4 +
+        highIntentBoost +
+        trendBoost;
+      const specReason =
+        matchedSpecifications.length > 0
+          ? `${label} matches the requested spec ${matchedSpecifications.slice(0, 2).join(" and ")}.`
+          : "";
+      const attributeReason =
+        matchedKeyPhrases.length > 0
+          ? `${label} is a strong fit because the customer mentioned ${matchedKeyPhrases
+              .slice(0, 2)
+              .join(" and ")} in the key phrases.`
+          : leadAttribute
+            ? `${label} can be pitched because it aligns with ${leadAttribute}${
+                matchedAttributes.length > 1 ? " and similar needs mentioned in the conversation" : " mentioned in the conversation"
+              }.`
+            : `${label} matches the conversation requirements.`;
       return {
         id: String(product.id ?? `${label}_${ref || "product"}`),
         label,
         ref,
         matchedAttributes,
         matchedKeyPhrases,
-        reason:
-          matchedKeyPhrases.length > 0
-            ? `${label} is a strong fit because the customer mentioned ${matchedKeyPhrases
-                .slice(0, 2)
-                .join(" and ")} in the key phrases.`
-            : `${label} can be pitched because it aligns with ${leadAttribute}${
-                matchedAttributes.length > 1 ? " and similar needs mentioned in the conversation" : " mentioned in the conversation"
-              }.`,
+        matchedSpecifications,
+        trendOrderCount: trendStat?.orderCount,
+        trendUnitsSold: trendStat?.qtySold,
+        trendRevenue: trendStat?.revenue,
+        trendRank: trendStat?.trendRank ?? null,
+        reason: [specReason, attributeReason].filter(Boolean).join(" "),
         score,
       };
     })
@@ -228,10 +424,113 @@ function buildProductRecommendations(
       } => Boolean(item)
     )
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
-    .slice(0, 3)
+    .slice(0, 6)
     .map(({ score: _score, ...item }) => item);
 
   return recommendations;
+}
+
+function buildTrendingProductRecommendations(
+  convo: Conversation,
+  products: DolibarrProduct[],
+  trendStats: ProductTrendStat[],
+  excludeIds: string[]
+): ConversationProductRecommendation[] {
+  if (!trendStats.length) return [];
+  const excluded = new Set(excludeIds);
+  const byId = new Map<number, DolibarrProduct>();
+  const byRef = new Map<string, DolibarrProduct>();
+  const byLabel = new Map<string, DolibarrProduct>();
+
+  for (const product of products) {
+    const productId = parseNumericId(product.id);
+    if (productId) byId.set(productId, product);
+    const ref = normalizeMatcherText(product.ref);
+    if (ref) byRef.set(ref, product);
+    const label = normalizeMatcherText(product.label);
+    if (label) byLabel.set(label, product);
+  }
+
+  const attributeCandidates = buildConversationAttributeCandidates(convo);
+  const specificationTokens = extractConversationSpecificationTokens(convo);
+
+  return trendStats
+    .map((trend) => {
+      const product =
+        (trend.productId ? byId.get(trend.productId) : undefined) ||
+        (trend.ref ? byRef.get(normalizeMatcherText(trend.ref)) : undefined) ||
+        byLabel.get(normalizeMatcherText(trend.label));
+      const productId = String(product?.id ?? trend.key);
+      if (excluded.has(productId)) return null;
+
+      const label = product?.label?.trim() || trend.label;
+      const ref = product?.ref?.trim() || trend.ref || null;
+      const searchable = normalizeMatcherText(
+        [product?.label, product?.ref, product?.description, label, ref].filter(Boolean).join(" ")
+      );
+      const specificationSearchable = normalizeSpecificationSearchText(
+        [product?.label, product?.ref, product?.description, label, ref].filter(Boolean).join(" ")
+      );
+      const compactSpecificationSearchable = specificationSearchable.replace(/\s+/g, "");
+      const matchedCandidates = attributeCandidates
+        .filter((candidate) =>
+          candidate.phrase.includes(" ")
+            ? searchable.includes(candidate.phrase)
+            : ` ${searchable} `.includes(` ${candidate.phrase} `)
+        )
+        .slice(0, 4);
+      const matchedSpecifications = specificationTokens
+        .filter((token) => {
+          const normalizedToken = normalizeSpecificationSearchText(token);
+          if (!normalizedToken) return false;
+          return (
+            specificationSearchable.includes(normalizedToken) ||
+            compactSpecificationSearchable.includes(normalizedToken.replace(/\s+/g, ""))
+          );
+        })
+        .slice(0, 3)
+        .map((token) => toTitleCase(token));
+      const matchedAttributes = matchedCandidates.map((entry) => toTitleCase(entry.phrase));
+      const matchedKeyPhrases = matchedCandidates
+        .filter((entry) => entry.source === "key_phrase")
+        .slice(0, 3)
+        .map((entry) => toTitleCase(entry.phrase));
+      const score =
+        trend.orderCount * 4 +
+        Math.min(8, trend.qtySold) +
+        matchedCandidates.length * 3 +
+        matchedSpecifications.length * 4;
+      const conversationReason =
+        matchedSpecifications.length > 0
+          ? `It also lines up with the requested spec ${matchedSpecifications.slice(0, 2).join(" and ")}.`
+          : matchedKeyPhrases.length > 0
+            ? `It connects with key phrases like ${matchedKeyPhrases.slice(0, 2).join(" and ")}.`
+            : "";
+      return {
+        id: productId,
+        label,
+        ref,
+        matchedAttributes,
+        matchedKeyPhrases,
+        matchedSpecifications,
+        trendOrderCount: trend.orderCount,
+        trendUnitsSold: trend.qtySold,
+        trendRevenue: trend.revenue,
+        trendRank: trend.trendRank,
+        reason: `${label} is moving fast in recent sales with ${trend.qtySold} units across ${trend.orderCount} orders.${conversationReason ? ` ${conversationReason}` : ""}`,
+        score,
+      };
+    })
+    .filter(
+      (
+        item
+      ): item is ConversationProductRecommendation & {
+        score: number;
+      } => Boolean(item)
+    )
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, 5)
+    .map(({ score: _score, ...item }) => item);
 }
 
 function resolveAiRuntimeConfig(
@@ -328,36 +627,165 @@ export default function ConversationDetailScreen() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const [convo, setConvo] = useState<Conversation | null>(null);
+  const [conversationLoading, setConversationLoading] = useState(true);
+  const [conversationRefreshing, setConversationRefreshing] = useState(false);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const [aiConfigured, setAiConfigured] = useState(false);
   const [aiModel, setAiModel] = useState("openai/gpt-oss-20b");
   const [audioBusy, setAudioBusy] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioPositionMs, setAudioPositionMs] = useState(0);
   const [audioDurationMs, setAudioDurationMs] = useState(0);
   const [productCatalog, setProductCatalog] = useState<DolibarrProduct[]>([]);
+  const [recentSalesTrends, setRecentSalesTrends] = useState<ProductTrendStat[]>([]);
   const autoAttemptedRef = useRef(false);
   const audioSoundRef = useRef<Audio.Sound | null>(null);
 
-  const loadConversation = useCallback(async () => {
-    const convos = await getConversations();
-    setConvo(convos.find((c) => c.id === id) || null);
+  const loadConversation = useCallback(async (options?: { preserveCurrent?: boolean }) => {
+    const preserveCurrent = Boolean(options?.preserveCurrent);
+    if (preserveCurrent) {
+      setConversationRefreshing(true);
+    } else {
+      setConversationLoading(true);
+    }
+    try {
+      const convos = await getConversations();
+      const matched = convos.find((c) => c.id === id) || null;
+      if (matched) {
+        setConvo(matched);
+      } else if (!preserveCurrent) {
+        setConvo(null);
+      }
+    } finally {
+      setConversationLoading(false);
+      setConversationRefreshing(false);
+    }
   }, [id]);
 
   const loadAiConfig = useCallback(async () => {
     const settings = await getSettings();
     const runtimeConfig = resolveAiRuntimeConfig(settings);
-    setAiConfigured(Boolean(runtimeConfig.apiKey));
     setAiModel(runtimeConfig.model || "openai/gpt-oss-20b");
   }, []);
 
   const loadProductCatalog = useCallback(async () => {
     try {
-      const products = await getDolibarrProducts({ limit: 120 });
+      const products = await getDolibarrProducts({ limit: 240 });
       setProductCatalog(Array.isArray(products) ? products : []);
     } catch {
       setProductCatalog([]);
+    }
+  }, []);
+
+  const loadRecentSalesTrends = useCallback(async (products: DolibarrProduct[]) => {
+    try {
+      const recentOrders = await getDolibarrOrders({
+        limit: SALES_TREND_ORDER_LIMIT,
+        sortfield: "date_commande",
+        sortorder: "desc",
+      });
+      const cutoff = Date.now() - SALES_TREND_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+      const filteredOrders = recentOrders.filter((order) => {
+        const date = getOrderDate(order);
+        return !date || date.getTime() >= cutoff;
+      });
+      const targetOrders = (filteredOrders.length > 0 ? filteredOrders : recentOrders).slice(
+        0,
+        SALES_TREND_ORDER_LIMIT
+      );
+      const productById = new Map<number, DolibarrProduct>();
+      for (const product of products) {
+        const productId = parseNumericId(product.id);
+        if (productId) {
+          productById.set(productId, product);
+        }
+      }
+
+      const statsMap = new Map<
+        string,
+        ProductTrendStat & {
+          orderIds: Set<string>;
+        }
+      >();
+
+      for (let index = 0; index < targetOrders.length; index += SALES_TREND_BATCH_SIZE) {
+        const chunk = targetOrders.slice(index, index + SALES_TREND_BATCH_SIZE);
+        const details = await Promise.all(
+          chunk.map(async (order) => {
+            const orderId = order.id;
+            if (orderId === undefined || orderId === null) return null;
+            try {
+              return await getDolibarrOrderDetail(orderId);
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        for (const detail of details) {
+          const orderId = detail?.id;
+          const lines = Array.isArray(detail?.lines) ? detail.lines : [];
+          if (orderId === undefined || orderId === null || !lines.length) continue;
+          const orderKey = String(orderId);
+
+          for (const line of lines) {
+            const productId = parseNumericId(line.fk_product);
+            const product = productId ? productById.get(productId) : undefined;
+            const label =
+              product?.label?.trim() ||
+              line.product_label?.trim() ||
+              line.label?.trim() ||
+              product?.ref?.trim() ||
+              "Product";
+            const ref = product?.ref?.trim() || null;
+            const key =
+              productId !== null
+                ? `id:${productId}`
+                : ref
+                  ? `ref:${normalizeMatcherText(ref)}`
+                  : `label:${normalizeMatcherText(label)}`;
+            const qty = getLineQty(line);
+            const revenue = getLineRevenue(line, qty);
+            const existing = statsMap.get(key) || {
+              key,
+              productId,
+              label,
+              ref,
+              qtySold: 0,
+              orderCount: 0,
+              revenue: 0,
+              trendRank: 0,
+              orderIds: new Set<string>(),
+            };
+            existing.productId = existing.productId ?? productId;
+            existing.label = existing.label || label;
+            existing.ref = existing.ref || ref;
+            existing.qtySold += qty;
+            existing.revenue += revenue;
+            existing.orderIds.add(orderKey);
+            existing.orderCount = existing.orderIds.size;
+            statsMap.set(key, existing);
+          }
+        }
+      }
+
+      const ranked = Array.from(statsMap.values())
+        .map(({ orderIds: _orderIds, ...item }) => item)
+        .sort((a, b) => {
+          if (b.orderCount !== a.orderCount) return b.orderCount - a.orderCount;
+          if (b.qtySold !== a.qtySold) return b.qtySold - a.qtySold;
+          if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+          return a.label.localeCompare(b.label);
+        })
+        .slice(0, 18)
+        .map((item, index) => ({
+          ...item,
+          trendRank: index + 1,
+        }));
+
+      setRecentSalesTrends(ranked);
+    } catch {
+      setRecentSalesTrends([]);
     }
   }, []);
 
@@ -368,9 +796,28 @@ export default function ConversationDetailScreen() {
     void loadProductCatalog();
   }, [loadAiConfig, loadConversation, loadProductCatalog]);
 
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    if (!productCatalog.length) return;
+    void loadRecentSalesTrends(productCatalog);
+  }, [loadRecentSalesTrends, productCatalog, user?.role]);
+
   const productRecommendations = useMemo(
-    () => (convo ? buildProductRecommendations(convo, productCatalog) : []),
-    [convo, productCatalog]
+    () => (convo ? buildProductRecommendations(convo, productCatalog, recentSalesTrends) : []),
+    [convo, productCatalog, recentSalesTrends]
+  );
+
+  const trendingProductRecommendations = useMemo(
+    () =>
+      convo
+        ? buildTrendingProductRecommendations(
+            convo,
+            productCatalog,
+            recentSalesTrends,
+            productRecommendations.map((item) => item.id)
+          )
+        : [],
+    [convo, productCatalog, productRecommendations, recentSalesTrends]
   );
 
   const runAiAnalysis = useCallback(
@@ -387,69 +834,50 @@ export default function ConversationDetailScreen() {
 
       const settings = await getSettings();
       const runtimeConfig = resolveAiRuntimeConfig(settings, aiModel);
-      const { apiKey, model: configuredModel } = runtimeConfig;
-      setAiConfigured(Boolean(apiKey));
+      const { model: configuredModel } = runtimeConfig;
       setAiModel(configuredModel);
 
       setAnalysisBusy(true);
       setAnalysisError(null);
 
       try {
-        let result: AISalesAnalysisResult;
-        try {
-          if (!apiKey) {
-            throw new Error("Client Groq key missing. Using backend AI analysis.");
-          }
-          result = await analyzeConversationWithAI({
-            apiKey,
-            model: configuredModel,
-            transcript: convo.transcript,
-            customerName: convo.customerName,
-            salespersonName: convo.salespersonName,
-          });
-        } catch (directError) {
-          const directMessage =
-            directError instanceof Error ? directError.message : "AI analysis failed.";
-          const directKind =
-            typeof (directError as any)?.kind === "string"
-              ? String((directError as any).kind)
-              : "";
-          const shouldFallbackToBackend =
-            !apiKey ||
-            directKind === "invalid_api_key" ||
-            directKind === "network_error" ||
-            /unauthorized|permission denied|valid api key|api key|client groq key missing/i.test(
-              directMessage.toLowerCase()
-            );
-          if (!shouldFallbackToBackend) {
-            throw directError;
-          }
-          result = await analyzeConversationWithBackendAI({
-            model: configuredModel,
-            transcript: convo.transcript,
-            customerName: convo.customerName,
-            salespersonName: convo.salespersonName,
-          });
-        }
-
-        await updateConversation(convo.id, {
-          ...result,
-          analysisProvider: "ai",
+        const result = await analyzeConversationWithBackendAI({
+          model: configuredModel,
+          transcript: convo.transcript,
+          customerName: convo.customerName,
+          salespersonName: convo.salespersonName,
         });
 
-        if (user) {
-          await addAuditLog({
-            id: `audit_ai_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-            userId: user.id,
-            userName: user.name,
-            action: "AI Analysis Completed",
-            details: `Conversation analyzed with AI for ${convo.customerName}`,
-            timestamp: new Date().toISOString(),
-            module: "Sales AI",
-          });
-        }
+        const persistedUpdates = {
+          ...result,
+          analysisProvider: "ai",
+        } satisfies Partial<Conversation>;
 
-        await loadConversation();
+        setConvo((current) =>
+          current && current.id === convo.id
+            ? ({
+                ...current,
+                ...persistedUpdates,
+              } as Conversation)
+            : current
+        );
+
+        const persistenceTasks: Promise<unknown>[] = [updateConversation(convo.id, persistedUpdates)];
+        if (user) {
+          persistenceTasks.push(
+            addAuditLog({
+              id: `audit_ai_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              userId: user.id,
+              userName: user.name,
+              action: "AI Analysis Completed",
+              details: `Conversation analyzed with AI for ${convo.customerName}`,
+              timestamp: new Date().toISOString(),
+              module: "Sales AI",
+            })
+          );
+        }
+        await Promise.all(persistenceTasks);
+        void loadConversation({ preserveCurrent: true });
         if (mode === "manual") {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           Alert.alert("Analysis Updated", "AI analysis was refreshed successfully.");
@@ -501,7 +929,7 @@ export default function ConversationDetailScreen() {
             });
           }
 
-          await loadConversation();
+          await loadConversation({ preserveCurrent: true });
           const fallbackMsg =
             "AI quota/rate limit detected. Rules-based fallback analysis was applied.";
           setAnalysisError(fallbackMsg);
@@ -562,7 +990,31 @@ export default function ConversationDetailScreen() {
     return (
       <AppCanvas>
         <View style={[styles.loadingContainer, { justifyContent: "center", alignItems: "center" }]}>
-          <Text style={{ color: colors.textSecondary, fontFamily: "Inter_400Regular" }}>Loading...</Text>
+          <View
+            style={[
+              styles.loadingCard,
+              {
+                backgroundColor: colors.backgroundElevated,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={[styles.loadingIconWrap, { backgroundColor: colors.primary + "14" }]}>
+              <MaterialCommunityIcons name="brain" size={24} color={colors.primary} />
+            </View>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={[styles.loadingTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+              Loading analysis
+            </Text>
+            <Text
+              style={[
+                styles.loadingSubtitle,
+                { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+              ]}
+            >
+              Conversation details aur AI insights ready kiye ja rahe hain.
+            </Text>
+          </View>
         </View>
       </AppCanvas>
     );
@@ -646,10 +1098,11 @@ export default function ConversationDetailScreen() {
 
   return (
     <AppCanvas>
-      <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 16 }]}
-        showsVerticalScrollIndicator={false}
-      >
+      <View style={styles.screenWrap}>
+        <ScrollView
+          contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 16 }]}
+          showsVerticalScrollIndicator={false}
+        >
         <View style={styles.headerRow}>
           <Pressable onPress={() => router.back()} hitSlop={12}>
             <Ionicons name="arrow-back" size={24} color={colors.text} />
@@ -839,27 +1292,7 @@ export default function ConversationDetailScreen() {
                   </View>
                 ) : null}
 
-                {!aiConfigured ? (
-                  <View
-                    style={[
-                      styles.analysisBanner,
-                      {
-                        backgroundColor: colors.warning + "12",
-                        borderColor: colors.warning + "40",
-                      },
-                    ]}
-                  >
-                    <Ionicons name="key-outline" size={15} color={colors.warning} />
-                    <Text
-                      style={[
-                        styles.analysisBannerText,
-                        { color: colors.warning, fontFamily: "Inter_500Medium" },
-                      ]}
-                    >
-                      AI env key missing.
-                    </Text>
-                  </View>
-                ) : (
+                {aiModel ? (
                   <Text
                     style={[
                       styles.aiMetaText,
@@ -868,7 +1301,7 @@ export default function ConversationDetailScreen() {
                   >
                     Model: {aiModel}
                   </Text>
-                )}
+                ) : null}
 
                 <Pressable
                   onPress={() => void runAiAnalysis("manual")}
@@ -933,7 +1366,7 @@ export default function ConversationDetailScreen() {
         {canViewAnalysis && productRecommendations.length > 0 ? (
           <Animated.View entering={FadeInDown.duration(400).delay(480)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-              Recommended Products by Key Phrases
+              Recommended Products by Conversation Specs
             </Text>
             <View style={[styles.listCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
               {productRecommendations.map((item, idx) => (
@@ -1000,6 +1433,25 @@ export default function ConversationDetailScreen() {
                         ))}
                       </View>
                     ) : null}
+                    {item.matchedSpecifications.length > 0 ? (
+                      <View style={styles.productAttributeRow}>
+                        {item.matchedSpecifications.map((spec) => (
+                          <View
+                            key={`${item.id}_spec_${spec}`}
+                            style={[styles.productSpecificationChip, { backgroundColor: colors.warning + "14" }]}
+                          >
+                            <Text
+                              style={[
+                                styles.productSpecificationChipText,
+                                { color: colors.warning, fontFamily: "Inter_600SemiBold" },
+                              ]}
+                            >
+                              Spec match: {spec}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
                     <View style={styles.productAttributeRow}>
                       {item.matchedAttributes.map((attribute) => (
                         <View
@@ -1023,6 +1475,7 @@ export default function ConversationDetailScreen() {
             </View>
           </Animated.View>
         ) : null}
+
 
         {canViewAnalysis && convo.objections.length > 0 && (
           <Animated.View entering={FadeInDown.duration(400).delay(500)}>
@@ -1057,13 +1510,79 @@ export default function ConversationDetailScreen() {
         )}
 
         <View style={{ height: 40 }} />
-      </ScrollView>
+        </ScrollView>
+        {(analysisBusy || conversationRefreshing || conversationLoading) ? (
+          <View style={styles.analysisLoadingOverlay} pointerEvents="none">
+            <View
+              style={[
+                styles.analysisLoadingCard,
+                {
+                  backgroundColor: colors.backgroundElevated,
+                  borderColor: colors.border,
+                },
+              ]}
+            >
+              <View style={[styles.analysisLoadingIconWrap, { backgroundColor: colors.primary + "14" }]}>
+                <MaterialCommunityIcons name="brain" size={20} color={colors.primary} />
+              </View>
+              <View style={styles.analysisLoadingTextWrap}>
+                <Text
+                  style={[
+                    styles.analysisLoadingTitle,
+                    { color: colors.text, fontFamily: "Inter_700Bold" },
+                  ]}
+                >
+                  {analysisBusy ? "Re-running AI analysis" : "Refreshing conversation"}
+                </Text>
+                <Text
+                  style={[
+                    styles.analysisLoadingSubtitle,
+                    { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                  ]}
+                >
+                  Purani screen visible rahegi, naya analysis bas update ho raha hai.
+                </Text>
+              </View>
+              <ActivityIndicator size="small" color={colors.primary} />
+            </View>
+          </View>
+        ) : null}
+      </View>
     </AppCanvas>
   );
 }
 
 const styles = StyleSheet.create({
-  loadingContainer: { flex: 1 },
+  loadingContainer: { flex: 1, paddingHorizontal: 24 },
+  loadingCard: {
+    width: "100%",
+    maxWidth: 340,
+    borderWidth: 1,
+    borderRadius: 24,
+    paddingHorizontal: 22,
+    paddingVertical: 24,
+    alignItems: "center",
+    gap: 12,
+  },
+  loadingIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  loadingTitle: {
+    fontSize: 18,
+    textAlign: "center",
+  },
+  loadingSubtitle: {
+    fontSize: 13,
+    lineHeight: 20,
+    textAlign: "center",
+  },
+  screenWrap: {
+    flex: 1,
+  },
   scrollContent: { paddingHorizontal: 20 },
   headerRow: {
     flexDirection: "row",
@@ -1336,6 +1855,22 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   productKeyPhraseChipText: { fontSize: 11.5 },
+  productSpecificationChip: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  productSpecificationChipText: { fontSize: 11.5 },
+  productTrendChip: {
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  productTrendChipText: { fontSize: 11.5 },
   productAttributeChip: {
     minHeight: 28,
     borderRadius: 999,
@@ -1344,6 +1879,46 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   productAttributeChipText: { fontSize: 11.5 },
+  analysisLoadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-start",
+    alignItems: "center",
+    paddingTop: 96,
+    paddingHorizontal: 20,
+  },
+  analysisLoadingCard: {
+    width: "100%",
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    shadowColor: "#000000",
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  analysisLoadingIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  analysisLoadingTextWrap: {
+    flex: 1,
+    gap: 3,
+  },
+  analysisLoadingTitle: {
+    fontSize: 14,
+  },
+  analysisLoadingSubtitle: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
   listItem: {
     flexDirection: "row",
     alignItems: "flex-start",

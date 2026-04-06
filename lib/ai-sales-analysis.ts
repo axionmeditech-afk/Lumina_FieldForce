@@ -80,10 +80,10 @@ const GROQ_DEFAULT_MODELS = [
   "openai/gpt-oss-120b",
   "llama-3.3-70b-versatile",
 ];
-const REQUEST_TIMEOUT_MS = 25_000;
-const MAX_RETRY_ATTEMPTS = 4;
-const BASE_RETRY_DELAY_MS = 800;
-const MAX_TRANSCRIPT_CHARS = 8_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_RETRY_ATTEMPTS = 2;
+const BASE_RETRY_DELAY_MS = 350;
+const MAX_TRANSCRIPT_CHARS = 4_500;
 
 function normalizeApiSecret(value: string | undefined | null): string {
   if (!value) return "";
@@ -365,7 +365,7 @@ async function requestGroqCompletion(params: {
       body: JSON.stringify({
         model: params.model,
         temperature: 0.1,
-        max_completion_tokens: 1600,
+        max_completion_tokens: 700,
         messages: [
           { role: "system", content: params.systemPrompt },
           { role: "user", content: params.userPrompt },
@@ -466,9 +466,9 @@ export async function analyzeConversationWithAI(
     "Analyze this sales conversation.",
     "Rules:",
     "- summary max 2 short sentences.",
-    "- keyPhrases 3 to 8 short phrases.",
+    "- keyPhrases 3 to 6 short phrases.",
     "- objections real objections only, empty array if none.",
-    "- improvements 2 to 6 concrete coaching tips.",
+    "- improvements 2 to 4 concrete coaching tips.",
     "- If transcript contains speaker tags, use them to estimate talkListenRatio realistically.",
     "- Preserve customer intent from mixed-language context; do not over-penalize code-switching.",
     `Customer: ${input.customerName}`,

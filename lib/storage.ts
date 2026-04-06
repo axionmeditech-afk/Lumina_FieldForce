@@ -611,16 +611,47 @@ export async function syncVisitNoteTaskRemote(task: Task): Promise<void> {
   );
 }
 
-function mergeConversationsById(entries: Conversation[]): Conversation[] {
-  const byId = new Map<string, Conversation>();
-  for (const entry of entries) {
-    if (!entry?.id) continue;
-    byId.set(entry.id, {
-      ...byId.get(entry.id),
-      ...entry,
-    });
+async function deleteVisitNoteTaskRemote(taskId: string): Promise<void> {
+  const token = await getApiToken();
+  if (!token) {
+    throw new Error("API session missing. Please sign in again so visit delete can sync to the server.");
   }
-  return Array.from(byId.values()).sort((a, b) => b.date.localeCompare(a.date));
+  const apiBases = await getRemoteStateApiCandidates();
+  const failures: string[] = [];
+
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/visit-notes/${encodeURIComponent(taskId)}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (response.ok) return;
+      if (response.status === 404) return;
+      const text = await response.text();
+      const preview = text.trim().replace(/\s+/g, " ");
+      failures.push(`${apiBase} -> HTTP ${response.status}${preview ? `: ${preview}` : ""}`);
+      if (response.status < 500) {
+        throw new Error(preview || `Visit delete failed with HTTP ${response.status}.`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Visit delete failed.";
+      failures.push(`${apiBase} -> ${message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error(
+    failures.length
+      ? `Visit delete failed. ${failures.join(" | ")}`
+      : "Visit delete failed because the server could not be reached."
+  );
 }
 
 async function fetchRemoteConversations(): Promise<Conversation[] | null> {
@@ -2636,10 +2667,15 @@ export async function updateTask(taskId: string, updates: Partial<Task>): Promis
 export async function removeTask(taskId: string): Promise<boolean> {
   const companyId = await getActiveCompanyId();
   const tasks = await getRawList<Task>(KEYS.TASKS);
+  const existingTask =
+    tasks.find((task) => task.id === taskId && matchesCompany(task, companyId)) ?? null;
+  if (!existingTask) return false;
+  if (existingTask.taskType === "field_visit") {
+    await deleteVisitNoteTaskRemote(taskId);
+  }
   const nextTasks = tasks.filter(
     (task) => !(task.id === taskId && matchesCompany(task, companyId))
   );
-  if (nextTasks.length === tasks.length) return false;
   await setItem(KEYS.TASKS, nextTasks);
   return true;
 }
@@ -3220,7 +3256,7 @@ export async function getConversations(): Promise<Conversation[]> {
   const remote = await fetchRemoteConversations();
   if (remote) {
     const scopedRemote = remote.filter((conversation) => matchesCompany(conversation, companyId));
-    await setLocalOnlyItem(KEYS.CONVERSATIONS, scopedRemote);
+    await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
     return scopedRemote;
   }
   return [];
@@ -3229,32 +3265,18 @@ export async function getConversations(): Promise<Conversation[]> {
 export async function addConversation(conversation: Conversation): Promise<void> {
   const companyId = await getActiveCompanyId();
   const candidate = withCompanyId(conversation, companyId);
-  const persisted = await createRemoteConversationInternal(candidate);
-  const local = await getLocalOnlyList<Conversation>(KEYS.CONVERSATIONS);
-  await setLocalOnlyItem(
-    KEYS.CONVERSATIONS,
-    mergeConversationsById([persisted, ...local])
-  );
+  await createRemoteConversationInternal(candidate);
+  await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
+  notifyStorageUpdated(KEYS.CONVERSATIONS);
 }
 
 export async function updateConversation(
   conversationId: string,
   updates: Partial<Conversation>
 ): Promise<void> {
-  const companyId = await getActiveCompanyId();
-  const local = await getLocalOnlyList<Conversation>(KEYS.CONVERSATIONS);
-  const existingLocal = local.find(
-    (conversation) => conversation.id === conversationId && matchesCompany(conversation, companyId)
-  );
-  const persisted = await updateRemoteConversationInternal(conversationId, updates);
-  const mergedConversation = {
-    ...existingLocal,
-    ...persisted,
-    id: conversationId,
-  } as Conversation;
-  const next = local.filter((conversation) => conversation.id !== conversationId);
-  next.unshift(mergedConversation);
-  await setLocalOnlyItem(KEYS.CONVERSATIONS, mergeConversationsById(next));
+  await updateRemoteConversationInternal(conversationId, updates);
+  await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
+  notifyStorageUpdated(KEYS.CONVERSATIONS);
 }
 
 export async function getAuditLogs(): Promise<AuditLog[]> {
