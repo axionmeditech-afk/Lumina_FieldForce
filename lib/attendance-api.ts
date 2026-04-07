@@ -26,6 +26,7 @@ import {
 } from "@/lib/storage";
 
 const FALLBACK_API_BASE = "http://localhost:5000/api";
+const RELEASE_FALLBACK_API_BASE = "https://api.axionmeditech.com/api";
 
 interface QueueItem {
   type: "checkin" | "checkout";
@@ -427,14 +428,18 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
       })
     : [];
 
+  // If a public HTTPS backend is configured, hard-pin to public API bases even in Expo/dev.
+  // This avoids stale LAN/localhost settings hijacking production traffic inside preview builds.
+  if (publicHttpsEnvApiBases.length > 0) {
+    return [...new Set([...publicHttpsEnvApiBases, RELEASE_FALLBACK_API_BASE, ...publicHttpsSettingsApiBases])];
+  }
+
   // In production, prefer a user-provided public HTTPS API base if available.
   if (!isExpoDevRuntime) {
     if (publicHttpsSettingsApiBases.length > 0) {
-      return [...publicHttpsSettingsApiBases, ...publicHttpsEnvApiBases];
+      return [...new Set([RELEASE_FALLBACK_API_BASE, ...publicHttpsSettingsApiBases])];
     }
-    if (publicHttpsEnvApiBases.length > 0) {
-      return publicHttpsEnvApiBases;
-    }
+    return [RELEASE_FALLBACK_API_BASE];
   }
 
   // In dev runtime keep env URL first, but still allow LAN/localhost fallback.

@@ -221,12 +221,22 @@ function setupErrorHandler(app: express.Application) {
       status?: number;
       statusCode?: number;
       message?: string;
+      code?: string;
+      type?: string;
     };
 
-    const status = error.status || error.statusCode || 500;
-    const message = error.message || "Internal Server Error";
+    const isRequestAborted =
+      error.code === "ECONNABORTED" ||
+      error.type === "request.aborted" ||
+      /request aborted/i.test(error.message || "");
+    const status = isRequestAborted ? 499 : error.status || error.statusCode || 500;
+    const message = isRequestAborted ? "Request aborted by client." : error.message || "Internal Server Error";
 
-    console.error("Internal Server Error:", err);
+    if (isRequestAborted) {
+      console.warn("Request aborted by client.");
+    } else {
+      console.error("Internal Server Error:", err);
+    }
 
     if (res.headersSent) {
       return next(err);

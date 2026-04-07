@@ -11,10 +11,11 @@ import {
   Linking,
   ScrollView,
   Modal,
+  BackHandler,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import { router } from "expo-router";
+import { router, useNavigation } from "expo-router";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
@@ -2184,6 +2185,7 @@ function ConversationCard({
 
 export default function SalesScreen() {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation();
   const { colors, isDark } = useAppTheme();
   const { user, company } = useAuth();
   const isAdminViewer = user?.role === "admin";
@@ -2216,8 +2218,8 @@ export default function SalesScreen() {
   const [saving, setSaving] = useState(false);
   const [visitActionTaskId, setVisitActionTaskId] = useState<string | null>(null);
   const [activeVisitTaskId, setActiveVisitTaskId] = useState<string | null>(null);
-  const meetingFocusMode =
-    !isAdminViewer && (isRecording || isTranscribingFile || Boolean(activeVisitTaskId));
+  const [localMeetingCaptureTaskId, setLocalMeetingCaptureTaskId] = useState<string | null>(null);
+  const meetingFocusMode = !isAdminViewer && Boolean(localMeetingCaptureTaskId);
   const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
@@ -2263,6 +2265,13 @@ export default function SalesScreen() {
   const [posProductsHasMore, setPosProductsHasMore] = useState(false);
   const [posProductsLoadingMore, setPosProductsLoadingMore] = useState(false);
   const [posLinkedVisitTaskId, setPosLinkedVisitTaskId] = useState<string | null>(null);
+
+  const showMeetingExitBlockedAlert = useCallback(() => {
+    Alert.alert(
+      "End Meeting First",
+      "Please tap Meeting End before leaving Sales Intelligence or opening another section."
+    );
+  }, []);
 
   const finalSegmentsRef = useRef<string[]>([]);
   const startedAtRef = useRef<number | null>(null);
@@ -2394,7 +2403,7 @@ export default function SalesScreen() {
       setPosSuccess(null);
     }
     try {
-      const [products, customers, orders] = await Promise.all([
+      const [productsResult, customersResult, ordersResult] = await Promise.allSettled([
         getDolibarrProducts({
           limit: POS_PAGE_SIZE,
           sortfield: "label",
@@ -2405,10 +2414,21 @@ export default function SalesScreen() {
         getDolibarrThirdParties({ limit: 200, sortfield: "nom", sortorder: "asc" }),
         getDolibarrOrders({ limit: 200, sortfield: "date_commande", sortorder: "desc" }),
       ]);
-      const productList = Array.isArray(products) ? products : [];
-      const customerList = Array.isArray(customers) ? customers : [];
+      const productList =
+        productsResult.status === "fulfilled" && Array.isArray(productsResult.value)
+          ? productsResult.value
+          : [];
+      const customerList =
+        customersResult.status === "fulfilled" && Array.isArray(customersResult.value)
+          ? customersResult.value
+          : [];
+      const ordersList =
+        ordersResult.status === "fulfilled" && Array.isArray(ordersResult.value)
+          ? ordersResult.value
+          : [];
+
       setPosProducts(productList);
-      setRecentOrders(Array.isArray(orders) ? orders : []);
+      setRecentOrders(ordersList);
       setPosProductsPage(0);
       setPosProductsHasMore(productList.length >= POS_PAGE_SIZE);
       setPosCustomers(customerList);
@@ -2425,6 +2445,17 @@ export default function SalesScreen() {
         if (firstCustomerId) {
           setPosSelectedCustomerId(String(firstCustomerId));
         }
+      }
+      const hardFailures = [productsResult, customersResult].filter(
+        (entry) => entry.status === "rejected"
+      ) as PromiseRejectedResult[];
+      if (hardFailures.length > 0) {
+        const message = hardFailures
+          .map((entry) => (entry.reason instanceof Error ? entry.reason.message : "Unable to load POS data."))
+          .join(" | ");
+        setPosError(message);
+      } else if (ordersResult.status === "rejected") {
+        setPosError(null);
       }
     } catch (error) {
       const message =
@@ -2714,6 +2745,24 @@ export default function SalesScreen() {
   useEffect(() => {
     isTranscribingStateRef.current = isTranscribingFile;
   }, [isTranscribingFile]);
+
+  useEffect(() => {
+    if (!meetingFocusMode) return;
+    const unsubscribe = navigation.addListener("beforeRemove", (event) => {
+      event.preventDefault();
+      showMeetingExitBlockedAlert();
+    });
+    return unsubscribe;
+  }, [meetingFocusMode, navigation, showMeetingExitBlockedAlert]);
+
+  useEffect(() => {
+    if (!meetingFocusMode) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      showMeetingExitBlockedAlert();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [meetingFocusMode, showMeetingExitBlockedAlert]);
 
   useEffect(() => {
     const available = isSpeechRecognitionAvailable();
@@ -4775,6 +4824,7 @@ export default function SalesScreen() {
       setVisitActionTaskId(task.id);
       try {
         const nowIso = new Date().toISOString();
+        setLocalMeetingCaptureTaskId(task.id);
         await updateTask(task.id, {
           status: "in_progress",
           arrivalAt: task.arrivalAt ?? nowIso,
@@ -4799,6 +4849,7 @@ export default function SalesScreen() {
           silent: true,
         });
         if (!started) {
+          setLocalMeetingCaptureTaskId(null);
           await updateTask(task.id, {
             autoCaptureRecordingActive: false,
             autoCaptureRecordingStartedAt: task.autoCaptureRecordingStartedAt ?? null,
@@ -4807,6 +4858,7 @@ export default function SalesScreen() {
         }
         await loadData();
       } catch (error) {
+        setLocalMeetingCaptureTaskId(null);
         Alert.alert(
           "Unable to Start Meeting",
           error instanceof Error ? error.message : "Failed to start meeting."
@@ -4819,6 +4871,7 @@ export default function SalesScreen() {
       activeVisitTaskId,
       ensureConversationRecommendationProducts,
       isAdminViewer,
+      setLocalMeetingCaptureTaskId,
       loadData,
       startRecording,
       user,
@@ -4892,6 +4945,7 @@ export default function SalesScreen() {
           timestamp: nowIso,
           module: "Sales Intelligence",
         });
+        setLocalMeetingCaptureTaskId(null);
         await loadData();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } catch (error) {
@@ -4900,6 +4954,7 @@ export default function SalesScreen() {
           error instanceof Error ? error.message : "Failed to stop meeting."
         );
       } finally {
+        setLocalMeetingCaptureTaskId(null);
         setVisitActionTaskId(null);
       }
     },
@@ -5034,6 +5089,7 @@ export default function SalesScreen() {
         timestamp: nowIso,
         module: "Sales Intelligence",
       });
+      setLocalMeetingCaptureTaskId(null);
       setActiveVisitTaskId(null);
       setDepartureNotesModalVisible(false);
       setDepartureNotesTask(null);
@@ -5898,7 +5954,10 @@ export default function SalesScreen() {
         ListHeaderComponent={
           <>
             <View style={styles.navToggleWrap}>
-              <DrawerToggleButton />
+              <DrawerToggleButton
+                disabled={meetingFocusMode}
+                onBlockedPress={showMeetingExitBlockedAlert}
+              />
             </View>
             <Animated.View entering={FadeInDown.duration(400)} style={styles.header}>
               <Text style={[styles.headerTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
@@ -6741,13 +6800,20 @@ export default function SalesScreen() {
                 </Text>
                 {!isAdminViewer ? (
                   <Pressable
-                    onPress={() => router.push("/visit-notes")}
+                    onPress={() => {
+                      if (meetingFocusMode) {
+                        showMeetingExitBlockedAlert();
+                        return;
+                      }
+                      router.push("/visit-notes");
+                    }}
+                    disabled={meetingFocusMode}
                     style={({ pressed }) => [
                       styles.reviewNotesButton,
                       {
                         backgroundColor: colors.surface,
                         borderColor: colors.border,
-                        opacity: pressed ? 0.8 : 1,
+                        opacity: meetingFocusMode ? 0.45 : pressed ? 0.8 : 1,
                       },
                     ]}
                   >

@@ -12,6 +12,8 @@ type DrawerToggleButtonProps = {
   showOnLargeScreens?: boolean;
   iconColor?: string;
   iconSize?: number;
+  disabled?: boolean;
+  onBlockedPress?: () => void;
 };
 
 export function DrawerToggleButton({
@@ -19,6 +21,8 @@ export function DrawerToggleButton({
   showOnLargeScreens = false,
   iconColor,
   iconSize = 28,
+  disabled = false,
+  onBlockedPress,
 }: DrawerToggleButtonProps) {
   const navigation = useNavigation();
   const { colors } = useAppTheme();
@@ -30,14 +34,20 @@ export function DrawerToggleButton({
 
   return (
     <Pressable
-      onPress={() => navigation.dispatch(DrawerActions.toggleDrawer())}
+      onPress={() => {
+        if (disabled) {
+          onBlockedPress?.();
+          return;
+        }
+        navigation.dispatch(DrawerActions.toggleDrawer());
+      }}
       accessibilityRole="button"
       accessibilityLabel="Toggle navigation menu"
       hitSlop={8}
       style={({ pressed }) => [
         styles.button,
         {
-          opacity: pressed ? 0.72 : 1,
+          opacity: disabled ? 0.45 : pressed ? 0.72 : 1,
         },
         style,
       ]}

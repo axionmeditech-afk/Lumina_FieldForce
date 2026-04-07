@@ -343,9 +343,34 @@ async function getRemoteStateApiCandidates(): Promise<string[]> {
     Boolean(Constants.expoConfig?.hostUri);
   const settingsApiUrl = await getLocalSettingsApiBaseUrl();
   const envUrl = BACKEND_ENV_DEFAULTS.apiBaseUrl;
-  for (const rawUrl of [settingsApiUrl, envUrl]) {
+  const publicHttpsEnvApiBases = toApiBaseUrls(envUrl).filter((apiBase) => {
+    try {
+      const parsed = new URL(apiBase);
+      return parsed.protocol === "https:" && !isPrivateOrLocalHost(parsed.hostname);
+    } catch {
+      return false;
+    }
+  });
+  const publicHttpsSettingsApiBases = toApiBaseUrls(settingsApiUrl).filter((apiBase) => {
+    try {
+      const parsed = new URL(apiBase);
+      return parsed.protocol === "https:" && !isPrivateOrLocalHost(parsed.hostname);
+    } catch {
+      return false;
+    }
+  });
+
+  if (publicHttpsEnvApiBases.length > 0) {
+    return Array.from(new Set([...publicHttpsEnvApiBases, `${RELEASE_BACKEND_FALLBACK_URL}/api`, ...publicHttpsSettingsApiBases]));
+  }
+
+  const prioritizedUrls = !isExpoDevRuntime
+    ? [envUrl, RELEASE_BACKEND_FALLBACK_URL, settingsApiUrl]
+    : [envUrl, settingsApiUrl];
+  for (const rawUrl of prioritizedUrls) {
     if (!rawUrl) continue;
     for (const apiBase of toApiBaseUrls(rawUrl)) {
+      if (!isExpoDevRuntime && isPrivateOrLocalHost(new URL(apiBase).hostname)) continue;
       candidates.add(apiBase);
     }
   }
@@ -3339,6 +3364,17 @@ async function getSettingsStore(): Promise<CompanySettingsStore> {
   return Object.fromEntries(entries) as CompanySettingsStore;
 }
 
+function isPublicHttpsBackendUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "https:" && !isPrivateOrLocalHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export async function getSettings(): Promise<Record<string, string>> {
   const companyId = (await getActiveCompanyId()) ?? DEFAULT_COMPANY_ID;
   const store = await getSettingsStore();
@@ -3349,7 +3385,13 @@ export async function getSettings(): Promise<Record<string, string>> {
     current.themeMode === "light" || current.themeMode === "dark" || current.themeMode === "system"
       ? current.themeMode
       : "light";
-  const backendApiUrl = (current.backendApiUrl || "").trim() || BACKEND_ENV_DEFAULTS.apiBaseUrl;
+  const currentBackendApiUrl = (current.backendApiUrl || "").trim();
+  const envBackendApiUrl = BACKEND_ENV_DEFAULTS.apiBaseUrl.trim();
+  const backendApiUrl =
+    isPublicHttpsBackendUrl(envBackendApiUrl) &&
+    (!currentBackendApiUrl || !isPublicHttpsBackendUrl(currentBackendApiUrl))
+      ? envBackendApiUrl
+      : currentBackendApiUrl || envBackendApiUrl;
   const dolibarrEndpoint =
     (current.dolibarrEndpoint || "").trim() || DOLIBARR_ENV_DEFAULTS.endpoint;
   const dolibarrApiKey = (current.dolibarrApiKey || "").trim() || DOLIBARR_ENV_DEFAULTS.apiKey;

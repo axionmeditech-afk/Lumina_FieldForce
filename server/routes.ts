@@ -483,6 +483,24 @@ async function forwardDolibarrRequest(
 
     const text = await response.text();
     const contentType = response.headers.get("content-type");
+    const normalizedContentType = (contentType || "").toLowerCase();
+    const looksLikeHtml =
+      normalizedContentType.includes("text/html") ||
+      /^\s*<!doctype html/i.test(text) ||
+      /^\s*<html\b/i.test(text);
+    if (looksLikeHtml) {
+      console.error("Dolibarr proxy received HTML instead of JSON", {
+        targetUrl,
+        status: response.status,
+        contentType,
+        preview: text.trim().slice(0, 220),
+      });
+      res.status(502).json({
+        message:
+          "Dolibarr endpoint returned HTML instead of JSON. Verify DOLIBARR_ENDPOINT points to the API base and that the API key is valid.",
+      });
+      return;
+    }
     if (contentType) {
       res.setHeader("Content-Type", contentType);
     }
