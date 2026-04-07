@@ -53,6 +53,7 @@ import {
 } from "@/server/services/mysql-state";
 import { analyzeConversationWithAI } from "@/lib/aiSalesAnalysis";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
+import { isSalesRole } from "@/lib/role-access";
 
 const MAX_LOCATION_ACCURACY_METERS = 120;
 const MAX_EVIDENCE_AGE_MS = 2 * 60 * 1000;
@@ -82,13 +83,13 @@ const DOLIBARR_PROXY_RULES: Array<{
   { prefix: "/users", roles: ["admin", "hr", "manager"] },
   { prefix: "/salaries", roles: ["admin", "hr", "manager"] },
   { prefix: "/salary", roles: ["admin", "hr", "manager"] },
-  { prefix: "/products", roles: ["admin", "hr", "manager", "salesperson"] },
-  { prefix: "/thirdparties", roles: ["admin", "hr", "manager", "salesperson"] },
-  { prefix: "/orders", roles: ["admin", "hr", "manager", "salesperson"] },
+  { prefix: "/products", roles: ["admin", "hr", "manager", "salesperson", "employee"] },
+  { prefix: "/thirdparties", roles: ["admin", "hr", "manager", "salesperson", "employee"] },
+  { prefix: "/orders", roles: ["admin", "hr", "manager", "salesperson", "employee"] },
   { prefix: "/warehouses", roles: ["admin", "hr", "manager"] },
   { prefix: "/stockmovements", roles: ["admin", "hr", "manager"] },
   { prefix: "/invoices", roles: ["admin", "hr", "manager"] },
-  { prefix: "/bankaccounts", roles: ["admin", "hr", "manager", "salesperson"] },
+  { prefix: "/bankaccounts", roles: ["admin", "hr", "manager", "salesperson", "employee"] },
 ];
 const PRODUCT_STOCK_TABLE = "nmy5_product_stock";
 type ProductStockSchema = {
@@ -1994,7 +1995,13 @@ function isLikelyMd5(value: string | null | undefined): boolean {
 }
 
 function normalizeRole(role: unknown): UserRole {
-  if (role === "admin" || role === "hr" || role === "manager" || role === "salesperson") {
+  if (
+    role === "admin" ||
+    role === "hr" ||
+    role === "manager" ||
+    role === "salesperson" ||
+    role === "employee"
+  ) {
     return role;
   }
   return "salesperson";
@@ -2080,7 +2087,7 @@ function mergeApprovedAccessRequestIntoUser(
       : existingCompanyIds.length > 0
         ? existingCompanyIds
         : [mergedCompanyId];
-  const isSalesperson = mergedRole === "salesperson";
+  const isSalesperson = isSalesRole(mergedRole);
 
   return {
     ...user,
@@ -4100,7 +4107,13 @@ function toSqlBoolean(value: unknown, defaultValue = true): number {
 
 function normalizeNotificationAudience(value: unknown): NotificationAudience {
   if (value === "all") return "all";
-  if (value === "admin" || value === "hr" || value === "manager" || value === "salesperson") {
+  if (
+    value === "admin" ||
+    value === "hr" ||
+    value === "manager" ||
+    value === "salesperson" ||
+    value === "employee"
+  ) {
     return value;
   }
   return "all";
@@ -5321,15 +5334,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           ? normalizeRole(body?.role || currentRequest.requestedRole)
           : null;
       const finalRole = approvedRole || currentRequest.requestedRole;
-      const isSalespersonApproval = action === "approved" && finalRole === "salesperson";
+      const isSalespersonApproval = action === "approved" && isSalesRole(finalRole);
       const assignedCompanyIds =
         action === "approved" ? normalizeCompanyIds(body?.companyIds) : [];
       const assignedManagerId =
-        action === "approved" && finalRole !== "salesperson"
+        action === "approved" && !isSalesRole(finalRole)
           ? normalizeWhitespace(typeof body?.managerId === "string" ? body.managerId : "") || null
           : null;
       const assignedManagerName =
-        action === "approved" && finalRole !== "salesperson"
+        action === "approved" && !isSalesRole(finalRole)
           ? normalizeWhitespace(typeof body?.managerName === "string" ? body.managerName : "") ||
             null
           : null;
@@ -5475,7 +5488,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (reviewedSalespersonId) {
           await syncStockistSalespersonAssignmentInMySql(
             reviewedSalespersonId,
-            action === "approved" && finalRole === "salesperson" ? assignedStockistId : null
+            action === "approved" && isSalesRole(finalRole) ? assignedStockistId : null
           );
         }
         await insertAccessRequestInMySql(reviewedRequest);
@@ -5949,7 +5962,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const companyId = await resolveRequestCompanyId(req);
       const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salespersonId) || "");
       const salespersonId =
-        req.auth?.role === "salesperson"
+        isSalesRole(req.auth?.role)
           ? normalizeWhitespace(req.auth.sub || "")
           : requestedSalespersonId || null;
       const limit =
@@ -5984,7 +5997,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({ message: "Conversation id is required." });
       return;
     }
-    if (req.auth?.role === "salesperson" && req.auth.sub) {
+    if (isSalesRole(req.auth?.role) && req.auth.sub) {
       normalizedConversation = {
         ...normalizedConversation,
         salespersonId: normalizeWhitespace(req.auth.sub || ""),
@@ -6058,7 +6071,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await migrateLegacyConversationsStateToMySql();
       const companyId = await resolveRequestCompanyId(req);
       const salespersonId =
-        req.auth?.role === "salesperson" ? normalizeWhitespace(req.auth.sub || "") : null;
+        isSalesRole(req.auth?.role) ? normalizeWhitespace(req.auth.sub || "") : null;
       const current = await getConversationByIdFromMySql(conversationId, {
         companyId,
         salespersonId,
@@ -6111,7 +6124,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         filters.push("company_id = ?");
         params.push(companyId);
       }
-      if (req.auth?.role === "salesperson") {
+      if (isSalesRole(req.auth?.role)) {
         filters.push("assigned_to_id = ?");
         params.push(req.auth.sub);
       }
@@ -6182,7 +6195,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const limit = Math.max(1, Math.min(24, parseOptionalInteger(req.query.limit) ?? 8));
     const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salesperson_id) || "");
     const salespersonId =
-      req.auth?.role === "salesperson"
+      isSalesRole(req.auth?.role)
         ? normalizeWhitespace(req.auth.sub || "")
         : requestedSalespersonId;
 
@@ -6286,7 +6299,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({ message: "Only field visit tasks can be synced as visit notes." });
       return;
     }
-    if (req.auth?.role === "salesperson" && req.auth.sub) {
+    if (isSalesRole(req.auth?.role) && req.auth.sub) {
       normalizedTask = {
         ...normalizedTask,
         assignedTo: req.auth.sub,

@@ -16,7 +16,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
-import { canAccessAdminControls } from "@/lib/role-access";
+import { canAccessAdminControls, isSalesRole } from "@/lib/role-access";
 import { getCurrentUserCompanyProfiles, switchCurrentUserCompany } from "@/lib/storage";
 import type { CompanyProfile } from "@/lib/types";
 
@@ -53,7 +53,7 @@ export default function MoreScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
   const isPrivileged = user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
-  const isSalesperson = user?.role === "salesperson";
+  const isSalesperson = isSalesRole(user?.role);
   const canSeeAdminControls = canAccessAdminControls(user?.role);
   const [companyOptions, setCompanyOptions] = useState<CompanyProfile[]>([]);
   const [switchingCompanyId, setSwitchingCompanyId] = useState<string | null>(null);

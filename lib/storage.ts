@@ -37,6 +37,7 @@ import {
   PENDING_COMPANY_NAME,
 } from "./seedData";
 import { sendDeviceLocalNotification } from "./device-notifications";
+import { isSalesRole } from "./role-access";
 
 const KEYS = {
   USER: "@trackforce_user",
@@ -906,7 +907,13 @@ function normalizePincode(value?: string): string | undefined {
 }
 
 function normalizeRole(role?: UserRole): UserRole {
-  if (role === "admin" || role === "hr" || role === "manager" || role === "salesperson") {
+  if (
+    role === "admin" ||
+    role === "hr" ||
+    role === "manager" ||
+    role === "salesperson" ||
+    role === "employee"
+  ) {
     return role;
   }
   return "salesperson";
@@ -916,6 +923,7 @@ function roleToDepartment(role: UserRole): string {
   if (role === "admin") return "Management";
   if (role === "hr") return "Human Resources";
   if (role === "manager") return "Operations";
+  if (role === "employee") return "Sales";
   return "Sales";
 }
 
@@ -1199,7 +1207,7 @@ async function setItem<T>(key: string, value: T): Promise<void> {
         const currentUser = await getCurrentUser().catch(() => null);
         if (!currentUser) {
           remoteValue = (await fetchStateRemote<T>(key)) ?? value;
-        } else if (currentUser.role === "salesperson") {
+        } else if (isSalesRole(currentUser.role)) {
           const remoteEmployees = (await fetchStateRemote<Employee[]>(key)) || [];
           remoteValue = mergeEmployeeWriteForSalesperson(
             remoteEmployees,
@@ -1985,8 +1993,8 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
   const role = normalizeRole(input.role);
   const now = new Date().toISOString();
   const adminAlreadyExists = hasAnyApprovedAdmin(authUsers);
-  if (role === "salesperson" && (!requestedBranch || !requestedPincode)) {
-    return { ok: false, message: "Location and pincode are required for salesperson signup" };
+  if (isSalesRole(role) && (!requestedBranch || !requestedPincode)) {
+    return { ok: false, message: "Location and pincode are required for sales role signup" };
   }
   if (role === "admin" && !adminAlreadyExists) {
     const adminCompany = await ensurePendingCompanyProfile();
@@ -2124,8 +2132,8 @@ export async function reviewUserAccessRequest(
       ? normalizeRole(options?.role || currentRequest.requestedRole)
       : null;
   const finalApprovedRole = approvedRole || currentRequest.requestedRole;
-  const isSalesperson = action === "approved" && finalApprovedRole === "salesperson";
-  const shouldAssignManager = action === "approved" && finalApprovedRole !== "salesperson";
+  const isSalesperson = action === "approved" && isSalesRole(finalApprovedRole);
+  const shouldAssignManager = action === "approved" && !isSalesRole(finalApprovedRole);
   const normalizedManagerId = shouldAssignManager ? normalizeWhitespace(options?.managerId ?? "") : "";
   const normalizedManagerName = shouldAssignManager
     ? normalizeWhitespace(options?.managerName ?? "")
@@ -3618,6 +3626,7 @@ function canModerateSupport(role?: UserRole | null): boolean {
 
 function canReceiveNotification(audience: NotificationAudience, role?: UserRole | null): boolean {
   if (audience === "all") return true;
+  if (isSalesRole(audience) && isSalesRole(role)) return true;
   return audience === role;
 }
 

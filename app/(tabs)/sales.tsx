@@ -76,6 +76,7 @@ import { buildRouteTimeline } from "@/lib/route-analytics";
 import { formatMumbaiDateTime, formatMumbaiTime, isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { maybeSendLocationReminder, syncLocationReminderCatalog } from "@/lib/location-reminders";
 import { getLastKnownLocationSafe } from "@/lib/location-service";
+import { isSalesRole } from "@/lib/role-access";
 import { haversineDistanceMeters } from "@/lib/geofence";
 import type {
   AttendanceRecord,
@@ -2206,7 +2207,7 @@ export default function SalesScreen() {
     setQuickSaleLocationLogs(quickSaleLogs);
     setAttendanceRecords(dedupeById([...remoteAttendance, ...attendance]));
 
-    const salesEmployees = employeeData.filter((entry) => entry.role === "salesperson");
+    const salesEmployees = employeeData.filter((entry) => isSalesRole(entry.role));
     if (isAdminViewer) {
       setSelectedSalespersonId((current) =>
         salesEmployees.some((entry) => entry.id === current) ? current : salesEmployees[0]?.id ?? ""
@@ -2891,7 +2892,7 @@ export default function SalesScreen() {
   const selectableSalespeople = useMemo(() => {
     if (!user) return [] as Employee[];
     if (isAdminViewer) {
-      return employees.filter((entry) => entry.role === "salesperson");
+      return employees.filter((entry) => isSalesRole(entry.role));
     }
     const selfEmployee =
       employees.find((entry) => entry.id === selectedSalespersonId) ||

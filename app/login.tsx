@@ -21,11 +21,13 @@ import Animated, { FadeInDown, FadeInUp } from "react-native-reanimated";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
+import { isSalesRole } from "@/lib/role-access";
 import type { UserRole } from "@/lib/types";
 
 const SIGNUP_ROLES: { label: string; value: UserRole }[] = [
   { label: "Admin", value: "admin" },
   { label: "Sales", value: "salesperson" },
+  { label: "Employee", value: "employee" },
   { label: "Manager", value: "manager" },
   { label: "HR", value: "hr" },
 ];
@@ -71,7 +73,7 @@ export default function LoginScreen() {
         Alert.alert("Missing Fields", "Please enter full name and company name");
         return;
       }
-      if (role === "salesperson" && (!branch.trim() || !pincode.trim())) {
+      if (isSalesRole(role) && (!branch.trim() || !pincode.trim())) {
         Alert.alert("Missing Fields", "Please enter location and pincode for sales staff");
         return;
       }

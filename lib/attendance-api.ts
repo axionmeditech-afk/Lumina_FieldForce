@@ -780,7 +780,7 @@ export async function registerApiUser(payload: {
   email: string;
   password: string;
   companyName: string;
-  role?: "admin" | "hr" | "manager" | "salesperson";
+  role?: "admin" | "hr" | "manager" | "salesperson" | "employee";
   department?: string;
   branch?: string;
   phone?: string;

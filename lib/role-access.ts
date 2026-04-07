@@ -1,7 +1,11 @@
 import type { UserRole } from "@/lib/types";
 
+export function isSalesRole(role?: UserRole | null): boolean {
+  return role === "salesperson" || role === "employee";
+}
+
 export function canAccessSalesModule(role?: UserRole | null): boolean {
-  return role === "admin" || role === "salesperson";
+  return role === "admin" || isSalesRole(role);
 }
 
 export function canReviewAttendanceSignIns(role?: UserRole | null): boolean {

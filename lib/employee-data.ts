@@ -16,6 +16,7 @@ import {
   saveSalaryRecordRemote,
   updateSalaryStatusRemote,
 } from "@/lib/attendance-api";
+import { isSalesRole } from "@/lib/role-access";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
 function normalizeText(value: string | null | undefined): string {
@@ -154,7 +155,7 @@ function mapDolibarrUsersToEmployees(
         companyId,
         name,
         role,
-        department: role === "admin" ? "Management" : "Sales",
+        department: role === "admin" ? "Management" : isSalesRole(role) ? "Sales" : "Sales",
         status: "active",
         email: email || `${idValue}@dolibarr.local`,
         phone: "",

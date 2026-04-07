@@ -17,7 +17,7 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
-import { canAccessAdminControls } from "@/lib/role-access";
+import { canAccessAdminControls, isSalesRole } from "@/lib/role-access";
 import {
   addAuditLog,
   addStockist,
@@ -325,7 +325,7 @@ export default function AdminStockScreen() {
       ]);
       setStockists(stockistResult);
       setTransfers(transferResult);
-      setEmployees(employeeResult.filter((entry) => entry.role === "salesperson"));
+      setEmployees(employeeResult.filter((entry) => isSalesRole(entry.role)));
     } finally {
       setLoading(false);
     }

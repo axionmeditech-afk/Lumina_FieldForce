@@ -25,6 +25,7 @@ import {
   upsertTeam,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
+import { isSalesRole } from "@/lib/role-access";
 import type { Employee, Task, Team, UserRole } from "@/lib/types";
 
 const LEAD_ROLES: UserRole[] = ["admin", "hr", "manager"];
@@ -177,7 +178,7 @@ export default function TeamScreen() {
   }, [loadData]);
 
   const salespersonPool = useMemo(() => {
-    return employees.filter((employee) => employee.role === "salesperson");
+    return employees.filter((employee) => isSalesRole(employee.role));
   }, [employees]);
 
   const linkedEmployeeIds = useMemo(() => {

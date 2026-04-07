@@ -42,14 +42,14 @@ import type {
   UserRole,
   UserAccessRequest,
 } from "@/lib/types";
-import { canAccessAdminControls } from "@/lib/role-access";
+import { canAccessAdminControls, isSalesRole } from "@/lib/role-access";
 import {
   getAdminAccessRequests,
   reviewAdminAccessRequest,
   syncApprovedEmployeeToDolibarr,
 } from "@/lib/attendance-api";
 
-const ASSIGNABLE_ACCESS_ROLES: UserRole[] = ["salesperson", "manager", "hr"];
+const ASSIGNABLE_ACCESS_ROLES: UserRole[] = ["salesperson", "employee", "manager", "hr"];
 
 function normalizeEmailKey(value: string): string {
   return value.trim().toLowerCase();
@@ -596,7 +596,7 @@ export default function AdminControlsScreen() {
       const selectedRole = selectedRoleByRequest[request.id] || request.requestedRole;
       const selectedCompanyIds = selectedCompanyIdsByRequest[request.id] || [];
       const selectedManagerId = (selectedManagerIdByRequest[request.id] || "").trim();
-      const isSalesperson = selectedRole === "salesperson";
+      const isSalesperson = isSalesRole(selectedRole);
       const selectedStockistId = (selectedStockistIdByRequest[request.id] || "").trim();
       const eligibleManagers = getManagersForRequest(request.id);
       const eligibleStockists = getStockistsForRequest(request.id);
@@ -1020,7 +1020,7 @@ export default function AdminControlsScreen() {
                     })}
                   </View>
 
-                  {selectedRole === "salesperson" ? (
+                  {isSalesRole(selectedRole) ? (
                     <>
                       <Text style={[styles.assignLabel, { color: colors.textSecondary }]}>
                         Assign channel partner (optional)
@@ -1194,7 +1194,7 @@ export default function AdminControlsScreen() {
             ]}
           />
           <View style={styles.audienceRow}>
-            {(["all", "salesperson", "manager", "hr"] as const).map((role) => (
+            {(["all", "salesperson", "employee", "manager", "hr"] as const).map((role) => (
               <Pressable
                 key={role}
                 onPress={() => setAudience(role)}

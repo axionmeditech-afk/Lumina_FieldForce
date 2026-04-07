@@ -42,6 +42,7 @@ import {
   getLocationPermissionSnapshot,
   getVerifiedLocationEvidence,
 } from "@/lib/location-service";
+import { isSalesRole } from "@/lib/role-access";
 import { buildRouteTimeline } from "@/lib/route-analytics";
 import { addLocationLog, getAttendance, getLocationLogs, getTasks } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
@@ -421,7 +422,7 @@ export default function RouteTrackingScreen() {
   const visibleEmployees = useMemo(() => {
     if (!user) return [];
     if (isPrivilegedViewer) {
-      return employees.filter((entry) => entry.role === "salesperson");
+      return employees.filter((entry) => isSalesRole(entry.role));
     }
 
     const selfById = employees.find((entry) => entry.id === user.id);

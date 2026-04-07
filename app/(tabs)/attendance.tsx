@@ -61,7 +61,7 @@ import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
 import { getBatteryLevelPercent } from "@/lib/battery";
 import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
-import { canReviewAttendanceSignIns } from "@/lib/role-access";
+import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 
 const LOCATION_REFRESH_MS = 15 * 1000;
 const STRICT_LOCATION_ACCURACY_METERS = 180;
@@ -216,7 +216,7 @@ export default function AttendanceScreen() {
   }));
 
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
-  const isSalespersonFieldCheckIn = user?.role === "salesperson";
+  const isSalespersonFieldCheckIn = isSalesRole(user?.role);
   const todayHeading = "Today's Log";
 
   const openAppSettings = useCallback(() => {

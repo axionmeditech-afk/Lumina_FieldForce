@@ -56,7 +56,7 @@ import type {
   Team,
   UserRole,
 } from "@/lib/types";
-import { canAccessSalesModule } from "@/lib/role-access";
+import { canAccessSalesModule, isSalesRole } from "@/lib/role-access";
 
 type ActivityEntry = {
   id: string;
@@ -289,7 +289,7 @@ function buildQuickLinks(
   userRole: UserRole | undefined,
   colors: ReturnType<typeof useAppTheme>["colors"]
 ): QuickLink[] {
-  const isSalesperson = userRole === "salesperson";
+  const isSalesperson = isSalesRole(userRole);
   const links: QuickLink[] = [];
 
   if (canAccessSalesModule(userRole)) {
@@ -663,7 +663,7 @@ export default function DashboardScreen() {
     };
   }, [attendance, clockNow, conversations, employees, expenses, notifications, supportThreads, tasks, user]);
 
-  const isSalesperson = user?.role === "salesperson";
+  const isSalesperson = isSalesRole(user?.role);
   const todayKey = useMemo(() => toLocalDateKey(clockNow), [clockNow]);
   const userTasks = useMemo(() => {
     if (!user) return [] as Task[];

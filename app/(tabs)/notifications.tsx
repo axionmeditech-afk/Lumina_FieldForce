@@ -230,7 +230,7 @@ export default function NotificationsScreen() {
               ]}
             />
             <View style={styles.audienceRow}>
-              {(["all", "salesperson", "manager", "hr"] as const).map((value) => (
+              {(["all", "salesperson", "employee", "manager", "hr"] as const).map((value) => (
                 <Pressable
                   key={value}
                   onPress={() => setComposeAudience(value)}

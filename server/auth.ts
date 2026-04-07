@@ -1,9 +1,10 @@
+import { isSalesRole } from "@/lib/role-access";
 import { createHmac, timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 
 type JwtPayload = {
   sub: string;
-  role: "admin" | "hr" | "manager" | "salesperson";
+  role: "admin" | "hr" | "manager" | "salesperson" | "employee";
   email: string;
   iat: number;
   exp: number;
@@ -91,7 +92,10 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 export function requireRoles(...roles: Array<JwtPayload["role"]>) {
   return (req: Request, res: Response, next: NextFunction) => {
     const role = req.auth?.role;
-    if (!role || !roles.includes(role)) {
+    const isAllowed =
+      Boolean(role && roles.includes(role)) ||
+      Boolean(role && isSalesRole(role) && roles.includes("salesperson"));
+    if (!role || !isAllowed) {
       res.status(403).json({ message: "Insufficient permissions" });
       return;
     }
