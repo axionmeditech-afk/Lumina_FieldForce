@@ -37,7 +37,7 @@ const DEFAULT_FALLBACK_MODEL =
   process.env.HF_STT_FALLBACK_MODEL?.trim() || "openai/whisper-large-v3";
 const DEFAULT_PROVIDER_ORDER = (
   process.env.SPEECH_TO_TEXT_PROVIDER_ORDER?.trim() ||
-  "groq"
+  "gemini"
 ).toLowerCase();
 const LOCAL_STT_ENABLED =
   (process.env.LOCAL_STT_ENABLED?.trim() || "true").toLowerCase() !== "false";
@@ -166,6 +166,16 @@ function getGroqApiKeyPool(explicitKey?: string | null): string[] {
   return keys;
 }
 
+function getGeminiApiKeyPool(): string[] {
+  const keys: string[] = [];
+  appendKeyList(keys, process.env.GEMINI_API_KEYS);
+  appendKeyList(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEYS);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY);
+  appendUniqueKey(keys, process.env.GEMINI_API_KEY_2);
+  appendUniqueKey(keys, process.env.EXPO_PUBLIC_GEMINI_API_KEY);
+  return keys;
+}
+
 function resolveLocalModel(value: string | null | undefined): string {
   const candidate = value?.trim() || "";
   if (!candidate) return LOCAL_STT_MODEL;
@@ -180,6 +190,10 @@ function parseProviderOrder(input: string): SpeechProvider[] {
     .filter(Boolean);
   const providers: SpeechProvider[] = [];
   for (const chunk of chunks) {
+    if (chunk === "gemini" && !providers.includes("gemini")) {
+      providers.push("gemini");
+      continue;
+    }
     if (
       (chunk === "groq" || chunk === "groq_whisper" || chunk === "whisper") &&
       !providers.includes("groq")
@@ -187,38 +201,15 @@ function parseProviderOrder(input: string): SpeechProvider[] {
       providers.push("groq");
       continue;
     }
-    if (
-      (chunk === "revup" ||
-        chunk === "reverie" ||
-        chunk === "reverieinc" ||
-        chunk === "revup_asr" ||
-        chunk === "reverie_asr") &&
-      !providers.includes("revup")
-    ) {
-      providers.push("revup");
-      continue;
-    }
-    if (
-      (chunk === "local" || chunk === "python" || chunk === "local_python") &&
-      !providers.includes("local_python")
-    ) {
-      providers.push("local_python");
-    }
-    if (
-      (chunk === "hf" || chunk === "huggingface") &&
-      !providers.includes("huggingface")
-    ) {
-      providers.push("huggingface");
-    }
   }
   if (!providers.length) {
-    providers.push("groq", "revup", "local_python", "huggingface");
+    providers.push("gemini");
+  }
+  if (providers.includes("gemini")) {
+    return ["gemini", ...providers.filter((provider) => provider !== "gemini")];
   }
   if (providers.includes("groq")) {
     return ["groq", ...providers.filter((provider) => provider !== "groq")];
-  }
-  if (providers.includes("revup")) {
-    return ["revup", ...providers.filter((provider) => provider !== "revup")];
   }
   return providers;
 }
@@ -1192,6 +1183,7 @@ export async function transcribeSpeechWithFairseqS2T(
   const rawMimeType = request.mimeType?.trim().toLowerCase() || "audio/webm";
   const mimeType = rawMimeType === "audio/mp4" ? "audio/m4a" : rawMimeType;
   const groqApiKeys = getGroqApiKeyPool(request.groqApiKey);
+  const geminiApiKeys = getGeminiApiKeyPool();
   const revupApiKey =
     request.revupApiKey?.trim() ||
     process.env.REVUP_API_KEY?.trim() ||
@@ -1212,8 +1204,11 @@ export async function transcribeSpeechWithFairseqS2T(
   const groqModel = isLikelyGroqTranscriptionModel(requestedModel)
     ? requestedModel
     : DEFAULT_GROQ_STT_MODEL;
-  const geminiApiKeys: string[] = [];
-  const geminiModel = requestedModel;
+  const geminiModel =
+    requestedModel ||
+    process.env.GEMINI_MODEL?.trim() ||
+    process.env.EXPO_PUBLIC_GEMINI_MODEL?.trim() ||
+    "gemini-2.5-flash-lite";
   const localModel = resolveLocalModel(requestedModel);
   const hfPrimaryModel =
     requestedModel && isLikelyHuggingFaceModel(requestedModel)

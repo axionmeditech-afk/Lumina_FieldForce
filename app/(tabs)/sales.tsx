@@ -11,6 +11,7 @@ import {
   Linking,
   ScrollView,
   Modal,
+  AppState,
   BackHandler,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -1067,73 +1068,13 @@ const useSpeechRecognitionEvent: SpeechRecognitionHook =
   speechPackage?.useSpeechRecognitionEvent ?? (() => {});
 const DEFAULT_S2T_MODEL =
   (
-    process.env.EXPO_PUBLIC_GROQ_STT_MODEL ||
-    process.env.EXPO_PUBLIC_GROQ_MODEL ||
-    "whisper-large-v3-turbo"
+    process.env.EXPO_PUBLIC_GEMINI_MODEL ||
+    process.env.GEMINI_MODEL ||
+    "gemini-2.5-flash-lite"
   ).trim();
-const DEFAULT_S2T_FALLBACK_MODEL =
-  (process.env.EXPO_PUBLIC_GROQ_STT_FALLBACK_MODEL || "whisper-large-v3").trim();
-const HF_INFERENCE_BASE_URL = (
-  process.env.EXPO_PUBLIC_HF_INFERENCE_BASE_URL ||
-  "https://router.huggingface.co/hf-inference/models"
-).trim().replace(/\/+$/, "");
-const ALLOW_HF_STT_FALLBACK = false;
 let preferredSpeechApiBase: string | null = null;
-
-function normalizeProviderOrder(input: string): string {
-  const chunks = input
-    .split(",")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
-  const mapped: string[] = [];
-  for (const chunk of chunks) {
-    if (
-      (chunk === "groq" || chunk === "groq_whisper" || chunk === "whisper") &&
-      !mapped.includes("groq")
-    ) {
-      mapped.push("groq");
-      continue;
-    }
-    if (
-      (chunk === "revup" ||
-        chunk === "reverie" ||
-        chunk === "reverieinc" ||
-        chunk === "revup_asr" ||
-        chunk === "reverie_asr") &&
-      !mapped.includes("revup")
-    ) {
-      mapped.push("revup");
-      continue;
-    }
-    if (
-      (chunk === "local" || chunk === "python" || chunk === "local_python") &&
-      !mapped.includes("local_python")
-    ) {
-      mapped.push("local_python");
-      continue;
-    }
-    if ((chunk === "hf" || chunk === "huggingface") && !mapped.includes("huggingface")) {
-      mapped.push("huggingface");
-    }
-  }
-  if (!mapped.length) {
-    return "groq";
-  }
-  const reordered = mapped.includes("groq")
-    ? ["groq", ...mapped.filter((provider) => provider !== "groq")]
-    : mapped.includes("revup")
-      ? ["revup", ...mapped.filter((provider) => provider !== "revup")]
-      : mapped;
-  return reordered.join(",");
-}
-
-const DEFAULT_STT_PROVIDER_ORDER = normalizeProviderOrder(
-  (
-    process.env.EXPO_PUBLIC_STT_PROVIDER_ORDER ||
-    "groq"
-  ).trim()
-);
-const FORCE_GROQ_TRANSCRIPTION = true;
+const DEFAULT_STT_PROVIDER_ORDER = "gemini";
+const FORCE_SERVER_TRANSCRIPTION = true;
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
 const SPEECH_API_HEALTH_CACHE_TTL_MS = 45_000;
 const speechApiHealthCache = new Map<string, { ok: boolean; checkedAt: number }>();
@@ -1272,34 +1213,6 @@ async function uploadSpeechAudioWithHeaders(
   };
 }
 
-function extractTranscriptFromPayload(payload: any): string {
-  if (typeof payload?.transcript === "string" && payload.transcript.trim()) {
-    return payload.transcript.trim();
-  }
-  if (typeof payload?.text === "string" && payload.text.trim()) {
-    return payload.text.trim();
-  }
-  if (Array.isArray(payload) && typeof payload[0]?.generated_text === "string") {
-    return String(payload[0].generated_text).trim();
-  }
-  if (Array.isArray(payload?.candidates)) {
-    const combined = payload.candidates
-      .map((candidate: any) => {
-        const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
-        return parts
-          .map((part: any) => (typeof part?.text === "string" ? part.text.trim() : ""))
-          .filter(Boolean)
-          .join("\n")
-          .trim();
-      })
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-    if (combined) return combined;
-  }
-  return "";
-}
-
 type DiarizedEntry = {
   transcript: string;
   speakerId?: string | null;
@@ -1359,51 +1272,8 @@ function formatDiarizedTranscript(entries: DiarizedEntry[]): string {
     .join("\n");
 }
 
-function getHuggingFaceEnvToken(): string {
-  return (
-    process.env.EXPO_PUBLIC_HUGGINGFACE_API_KEY ||
-    process.env.EXPO_PUBLIC_HF_API_KEY ||
-    process.env.EXPO_PUBLIC_HF_TOKEN ||
-    ""
-  ).trim();
-}
-
-function uniqModels(...models: string[]): string[] {
-  const items = models.map((value) => value.trim()).filter(Boolean);
-  return Array.from(new Set(items));
-}
-
 function getClientSpeechCredentialHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const groqKeys = [
-    process.env.EXPO_PUBLIC_GROQ_API_KEYS,
-    process.env.EXPO_PUBLIC_GROQ_API_KEY,
-    process.env.GROQ_API_KEYS,
-    process.env.GROQ_API_KEY,
-  ]
-    .map((value) => (value || "").trim())
-    .filter(Boolean);
-  if (groqKeys.length) {
-    headers["X-Groq-Api-Key"] = groqKeys[0];
-  }
-
-  const revupApiKey = (
-    process.env.EXPO_PUBLIC_REVUP_API_KEY ||
-    process.env.REVUP_API_KEY ||
-    ""
-  ).trim();
-  const revupAppId = (
-    process.env.EXPO_PUBLIC_REVUP_APP_ID ||
-    process.env.REVUP_APP_ID ||
-    ""
-  ).trim();
-  const hfToken = getHuggingFaceEnvToken();
-
-  if (revupApiKey) headers["X-Revup-Api-Key"] = revupApiKey;
-  if (revupAppId) headers["X-Revup-App-Id"] = revupAppId;
-  if (hfToken) headers["X-HF-Token"] = hfToken;
-
-  return headers;
+  return {};
 }
 
 async function isSpeechApiBaseReachable(apiBase: string): Promise<boolean> {
@@ -1430,55 +1300,6 @@ async function isSpeechApiBaseReachable(apiBase: string): Promise<boolean> {
   }
 }
 
-async function transcribeAudioWithDirectHuggingFace(audioUri: string, token: string): Promise<string> {
-  const models = uniqModels(DEFAULT_S2T_MODEL, DEFAULT_S2T_FALLBACK_MODEL);
-  let lastError = "";
-
-  for (const model of models) {
-    const endpoint = `${HF_INFERENCE_BASE_URL}/${encodeURIComponent(model)}`;
-    try {
-      let { status, payload } = await uploadSpeechAudioWithHeaders(endpoint, audioUri, {
-        Authorization: `Bearer ${token}`,
-      });
-
-      if (
-        (status < 200 || status >= 300) &&
-        typeof payload?.error === "string" &&
-        /loading|currently loading|cold start/i.test(payload.error)
-      ) {
-        await wait(TRANSCRIBE_LOADING_RETRY_DELAY_MS);
-        ({ status, payload } = await uploadSpeechAudioWithHeaders(endpoint, audioUri, {
-          Authorization: `Bearer ${token}`,
-        }));
-      }
-
-      if (status < 200 || status >= 300) {
-        const message =
-          typeof payload?.error === "string"
-            ? payload.error
-            : typeof payload?.message === "string"
-              ? payload.message
-              : `HuggingFace request failed (${status})`;
-        if (status === 401 || status === 403) {
-          throw new Error("HuggingFace token invalid or unauthorized.");
-        }
-        if (status === 429) {
-          throw new Error(`HuggingFace rate/quota limit hit: ${message}`);
-        }
-        throw new Error(message);
-      }
-
-      const transcript = extractTranscriptFromPayload(payload);
-      if (transcript) return transcript;
-      lastError = "HuggingFace direct response returned an empty transcript.";
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : "HuggingFace direct transcription failed.";
-    }
-  }
-
-  throw new Error(lastError || "HuggingFace direct transcription failed.");
-}
-
 async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
   const query = new URLSearchParams({
     model: DEFAULT_S2T_MODEL,
@@ -1487,9 +1308,6 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
     with_timestamps: "0",
     mode: "fast",
   });
-  if (DEFAULT_S2T_FALLBACK_MODEL) {
-    query.set("fallback_model", DEFAULT_S2T_FALLBACK_MODEL);
-  }
 
   const apiBaseCandidates = await getApiBaseUrlCandidates();
   const orderedApiBaseCandidates = preferredSpeechApiBase
@@ -1584,33 +1402,9 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
   }
 
   if (lastNonNetworkError) {
-    const hfToken = getHuggingFaceEnvToken();
-    if (ALLOW_HF_STT_FALLBACK && hfToken) {
-      try {
-        return await transcribeAudioWithDirectHuggingFace(audioUri, hfToken);
-      } catch (directError) {
-        const message =
-          directError instanceof Error ? directError.message : "Direct fallback failed.";
-        throw new Error(`${lastNonNetworkError} | Direct HF fallback failed: ${message}`);
-      }
-    }
     throw new Error(lastNonNetworkError);
   }
   if (networkErrors.length) {
-    const hfToken = getHuggingFaceEnvToken();
-    if (ALLOW_HF_STT_FALLBACK && hfToken) {
-      try {
-        return await transcribeAudioWithDirectHuggingFace(audioUri, hfToken);
-      } catch (directError) {
-        const message =
-          directError instanceof Error ? directError.message : "Direct fallback failed.";
-        throw new Error(
-          `Server is not reachable. Tried: ${networkErrors.join(
-            " | "
-          )}. Direct HF fallback failed: ${message}`
-        );
-      }
-    }
     throw new Error(
       `Server is not reachable. Check API URL. Tried: ${networkErrors.join(" | ")}`
     );
@@ -2219,7 +2013,23 @@ export default function SalesScreen() {
   const [visitActionTaskId, setVisitActionTaskId] = useState<string | null>(null);
   const [activeVisitTaskId, setActiveVisitTaskId] = useState<string | null>(null);
   const [localMeetingCaptureTaskId, setLocalMeetingCaptureTaskId] = useState<string | null>(null);
-  const meetingFocusMode = !isAdminViewer && Boolean(localMeetingCaptureTaskId);
+  const persistedMeetingCaptureTaskId = useMemo(() => {
+    if (isAdminViewer || !user) return null;
+    const normalizedUserName = normalizeIdentity(user.name);
+    return (
+      tasks.find((task) => {
+        if (task.taskType !== "field_visit") return false;
+        if ((task.visitPlanDate || task.dueDate) !== todayDateKey) return false;
+        if (getVisitStatus(task) !== "in_progress") return false;
+        if (!task.autoCaptureRecordingActive) return false;
+        if (task.autoCaptureRecordingStoppedAt) return false;
+        const assignedName = normalizeIdentity(task.assignedToName);
+        return task.assignedTo === user.id || (assignedName.length > 0 && assignedName === normalizedUserName);
+      })?.id ?? null
+    );
+  }, [isAdminViewer, tasks, todayDateKey, user]);
+  const meetingCaptureTaskId = localMeetingCaptureTaskId || persistedMeetingCaptureTaskId;
+  const meetingFocusMode = !isAdminViewer && Boolean(meetingCaptureTaskId);
   const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
@@ -2250,6 +2060,7 @@ export default function SalesScreen() {
   const [meetingRecommendationItems, setMeetingRecommendationItems] = useState<
     MeetingConversationProductRecommendation[]
   >([]);
+  const [isConversationReloading, setIsConversationReloading] = useState(false);
   const [posCustomers, setPosCustomers] = useState<DolibarrThirdParty[]>([]);
   const [posProductQuery, setPosProductQuery] = useState("");
   const [posCustomerQuery, setPosCustomerQuery] = useState("");
@@ -2269,7 +2080,7 @@ export default function SalesScreen() {
   const showMeetingExitBlockedAlert = useCallback(() => {
     Alert.alert(
       "End Meeting First",
-      "Please tap Meeting End before leaving Sales Intelligence or opening another section."
+      "Please tap Meeting End before leaving Sales Intelligence, switching sections, or sending the app to the background."
     );
   }, []);
 
@@ -2295,6 +2106,9 @@ export default function SalesScreen() {
   const isRecordingStateRef = useRef(false);
   const latestRoutePointRef = useRef<LocationLog | null>(null);
   const isTranscribingStateRef = useRef(false);
+  const appStateRef = useRef(AppState.currentState);
+  const meetingWasBackgroundedRef = useRef(false);
+  const meetingResumeAlertShownRef = useRef(false);
 
   const markVoiceDetected = useCallback(() => {
     voiceDetectedUntilRef.current = Date.now() + 1400;
@@ -2318,21 +2132,33 @@ export default function SalesScreen() {
     [markVoiceDetected]
   );
 
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (options?: { preserveExistingOnEmpty?: boolean; showBusy?: boolean }) => {
+    const preserveExistingOnEmpty = options?.preserveExistingOnEmpty ?? true;
+    const showBusy = options?.showBusy ?? false;
     if (!user) {
       setConversations([]);
+      if (showBusy) {
+        setIsConversationReloading(false);
+      }
       return;
+    }
+    if (showBusy) {
+      setIsConversationReloading(true);
     }
     try {
       const convos = await getConversations();
       setConversations((current) => {
-        if (convos.length === 0 && current.length > 0) {
+        if (preserveExistingOnEmpty && convos.length === 0 && current.length > 0) {
           return current;
         }
         return convos;
       });
     } catch {
       // Keep the current list on transient failures so the admin feed stays visually stable.
+    } finally {
+      if (showBusy) {
+        setIsConversationReloading(false);
+      }
     }
   }, [user]);
 
@@ -2687,6 +2513,30 @@ export default function SalesScreen() {
     void loadSalesTrendRecommendations();
   }, [loadSalesTrendRecommendations, meetingFocusMode]);
 
+  useEffect(() => {
+    if (isAdminViewer || !persistedMeetingCaptureTaskId) return;
+    setLocalMeetingCaptureTaskId((current) =>
+      current === persistedMeetingCaptureTaskId ? current : persistedMeetingCaptureTaskId
+    );
+  }, [isAdminViewer, persistedMeetingCaptureTaskId]);
+
+  useEffect(() => {
+    if (!localMeetingCaptureTaskId) return;
+    if (visitActionTaskId === localMeetingCaptureTaskId) return;
+    const hasActiveMeetingTask = tasks.some((task) => {
+      if (task.id !== localMeetingCaptureTaskId) return false;
+      if (task.taskType !== "field_visit") return false;
+      if ((task.visitPlanDate || task.dueDate) !== todayDateKey) return false;
+      if (getVisitStatus(task) !== "in_progress") return false;
+      if (!task.autoCaptureRecordingActive) return false;
+      if (task.autoCaptureRecordingStoppedAt) return false;
+      return true;
+    });
+    if (!hasActiveMeetingTask) {
+      setLocalMeetingCaptureTaskId(null);
+    }
+  }, [localMeetingCaptureTaskId, tasks, todayDateKey, visitActionTaskId]);
+
   const resolveVisitArrivalSnapshot = useCallback(async () => {
     const lastKnownLocation = await getLastKnownLocationSafe({
       requiredAccuracy: 180,
@@ -2763,6 +2613,44 @@ export default function SalesScreen() {
     });
     return () => subscription.remove();
   }, [meetingFocusMode, showMeetingExitBlockedAlert]);
+
+  useEffect(() => {
+    if (meetingFocusMode) return;
+    meetingWasBackgroundedRef.current = false;
+    meetingResumeAlertShownRef.current = false;
+  }, [meetingFocusMode]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const previousState = appStateRef.current;
+      appStateRef.current = nextState;
+
+      if (!meetingFocusMode) {
+        meetingWasBackgroundedRef.current = false;
+        meetingResumeAlertShownRef.current = false;
+        return;
+      }
+
+      if (nextState === "inactive" || nextState === "background") {
+        meetingWasBackgroundedRef.current = true;
+        meetingResumeAlertShownRef.current = false;
+        return;
+      }
+
+      if (nextState === "active" && previousState !== "active" && meetingWasBackgroundedRef.current) {
+        meetingWasBackgroundedRef.current = false;
+        router.replace("/(tabs)/sales");
+        if (!meetingResumeAlertShownRef.current) {
+          meetingResumeAlertShownRef.current = true;
+          Alert.alert(
+            "Meeting Still Running",
+            "Meeting start ho chuki hai. Ab isi screen par raho aur bahar nikalne se pehle Meeting End tap karo."
+          );
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, [meetingFocusMode]);
 
   useEffect(() => {
     const available = isSpeechRecognitionAvailable();
@@ -4463,7 +4351,7 @@ export default function SalesScreen() {
         setCustomerName(options.customerNameOverride.trim());
       }
 
-      if (FORCE_GROQ_TRANSCRIPTION) {
+      if (FORCE_SERVER_TRANSCRIPTION) {
         setRequestBusy(true);
         try {
           finalSegmentsRef.current = [];
@@ -4663,7 +4551,7 @@ export default function SalesScreen() {
 
   const retranscribeAudio = useCallback(() => {
     if (!audioUri) return;
-    if (FORCE_GROQ_TRANSCRIPTION || !ExpoSpeechRecognitionModule || !recognitionAvailable) {
+    if (FORCE_SERVER_TRANSCRIPTION || !ExpoSpeechRecognitionModule || !recognitionAvailable) {
       void transcribeWithFallbackApi(audioUri);
       return;
     }
@@ -4884,6 +4772,7 @@ export default function SalesScreen() {
       if (!user || isAdminViewer) return;
       if (visitActionTaskId) return;
       setVisitActionTaskId(task.id);
+      let meetingEndedSuccessfully = false;
       try {
         await stopRecordingAndWait();
         const conversation = await saveConversation({
@@ -4945,7 +4834,7 @@ export default function SalesScreen() {
           timestamp: nowIso,
           module: "Sales Intelligence",
         });
-        setLocalMeetingCaptureTaskId(null);
+        meetingEndedSuccessfully = true;
         await loadData();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } catch (error) {
@@ -4954,7 +4843,9 @@ export default function SalesScreen() {
           error instanceof Error ? error.message : "Failed to stop meeting."
         );
       } finally {
-        setLocalMeetingCaptureTaskId(null);
+        if (meetingEndedSuccessfully) {
+          setLocalMeetingCaptureTaskId(null);
+        }
         setVisitActionTaskId(null);
       }
     },
@@ -7746,12 +7637,44 @@ export default function SalesScreen() {
             ) : null}
 
             {isAdminViewer ? (
-              <View style={styles.sectionHeader}>
-                <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+              <View style={styles.sectionHeaderRow}>
+                <Text
+                  style={[
+                    styles.sectionTitle,
+                    styles.sectionTitleFlexible,
+                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                  ]}
+                >
                   {selectedSalesperson
                     ? `Recent Conversations - ${selectedSalesperson.name}`
                     : "Recent Conversations"}
                 </Text>
+                <Pressable
+                  onPress={() => void loadConversations({ preserveExistingOnEmpty: false, showBusy: true })}
+                  disabled={isConversationReloading}
+                  style={({ pressed }) => [
+                    styles.reviewNotesButton,
+                    {
+                      backgroundColor: colors.surface,
+                      borderColor: colors.border,
+                      opacity: isConversationReloading ? 0.65 : pressed ? 0.82 : 1,
+                    },
+                  ]}
+                >
+                  {isConversationReloading ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <Ionicons name="refresh-outline" size={14} color={colors.primary} />
+                  )}
+                  <Text
+                    style={[
+                      styles.reviewNotesButtonText,
+                      { color: colors.primary, fontFamily: "Inter_600SemiBold" },
+                    ]}
+                  >
+                    {isConversationReloading ? "Reloading" : "Reload"}
+                  </Text>
+                </Pressable>
               </View>
             ) : null}
           </>
@@ -9477,6 +9400,11 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   sectionHeader: { marginBottom: 12 },
+  sectionTitleFlexible: {
+    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
+  },
   sectionMetaText: {
     marginTop: 4,
     fontSize: 12.5,

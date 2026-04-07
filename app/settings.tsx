@@ -77,23 +77,6 @@ export default function SettingsScreen() {
       (process.env.GROQ_API_KEY || "").trim() ||
       aiKeyFromEnv
   );
-  const hasHuggingFaceEnvKey = Boolean(
-    (process.env.EXPO_PUBLIC_HUGGINGFACE_API_KEY || "").trim() ||
-      (process.env.EXPO_PUBLIC_HF_API_KEY || "").trim() ||
-      (process.env.EXPO_PUBLIC_HF_TOKEN || "").trim()
-  );
-  const hasRevupEnvKey = Boolean(
-    (process.env.REVUP_API_KEY || "").trim() ||
-      (process.env.EXPO_PUBLIC_REVUP_API_KEY || "").trim()
-  );
-  const hasRevupAppId = Boolean(
-    (process.env.REVUP_APP_ID || "").trim() ||
-      (process.env.EXPO_PUBLIC_REVUP_APP_ID || "").trim()
-  );
-  const hasAssemblyAiEnvKey = Boolean(
-    (process.env.ASSEMBLYAI_API_KEY || "").trim() ||
-      (process.env.EXPO_PUBLIC_ASSEMBLYAI_API_KEY || "").trim()
-  );
 
   useEffect(() => {
     setCompanyName(company?.name || "");
@@ -911,38 +894,6 @@ export default function SettingsScreen() {
                   iconColor="#3B82F6"
                   label="AI Model"
                   value={configuredAiModel}
-                  colors={colors}
-                />
-                <View style={[styles.divider, { backgroundColor: colors.borderLight }]} />
-                <InfoRow
-                  icon="mic-outline"
-                  iconColor={hasRevupEnvKey ? "#22C55E" : "#F59E0B"}
-                  label="Revup API Key"
-                  value={hasRevupEnvKey ? "Configured" : "Missing"}
-                  colors={colors}
-                />
-                <View style={[styles.divider, { backgroundColor: colors.borderLight }]} />
-                <InfoRow
-                  icon="id-card-outline"
-                  iconColor={hasRevupAppId ? "#22C55E" : "#F59E0B"}
-                  label="Revup App ID"
-                  value={hasRevupAppId ? "Configured" : "Missing"}
-                  colors={colors}
-                />
-                <View style={[styles.divider, { backgroundColor: colors.borderLight }]} />
-                <InfoRow
-                  icon="mic-circle-outline"
-                  iconColor={hasAssemblyAiEnvKey ? "#22C55E" : "#94A3B8"}
-                  label="AssemblyAI Backup"
-                  value={hasAssemblyAiEnvKey ? "Configured" : "Optional"}
-                  colors={colors}
-                />
-                <View style={[styles.divider, { backgroundColor: colors.borderLight }]} />
-                <InfoRow
-                  icon="albums-outline"
-                  iconColor={hasHuggingFaceEnvKey ? "#22C55E" : "#94A3B8"}
-                  label="HF Fallback Token"
-                  value={hasHuggingFaceEnvKey ? "Configured" : "Optional"}
                   colors={colors}
                 />
                 <View style={[styles.divider, { backgroundColor: colors.borderLight }]} />

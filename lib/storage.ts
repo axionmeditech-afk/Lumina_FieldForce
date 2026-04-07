@@ -125,15 +125,6 @@ const AI_ENV_DEFAULTS = {
   projectId: readTrimmedEnv("EXPO_PUBLIC_GROQ_PROJECT_ID"),
 };
 
-const HUGGINGFACE_ENV_DEFAULTS = {
-  apiKey:
-    readTrimmedEnv("EXPO_PUBLIC_HUGGINGFACE_API_KEY") ||
-    readTrimmedEnv("EXPO_PUBLIC_HF_API_KEY") ||
-    readTrimmedEnv("EXPO_PUBLIC_HF_TOKEN") ||
-    readTrimmedEnv("HUGGINGFACE_API_KEY") ||
-    readTrimmedEnv("HUGGINGFACE_TOKEN"),
-};
-
 const RELEASE_BACKEND_FALLBACK_URL = "https://api.axionmeditech.com";
 
 const BACKEND_ENV_DEFAULTS = {
@@ -3415,7 +3406,6 @@ export async function getSettings(): Promise<Record<string, string>> {
     aiApiKey,
     aiModel,
     aiProjectId,
-    huggingFaceApiKey: HUGGINGFACE_ENV_DEFAULTS.apiKey,
   };
 }
 

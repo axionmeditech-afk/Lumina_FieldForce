@@ -4922,9 +4922,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const withTimestampsRaw = firstString(req.query.with_timestamps) || null;
       const numSpeakersRaw = firstString(req.query.num_speakers) || null;
       const groqApiKeyHeader = firstString(req.header("x-groq-api-key"));
-      const revupApiKeyHeader = firstString(req.header("x-revup-api-key"));
-      const revupAppIdHeader = firstString(req.header("x-revup-app-id"));
-      const hfTokenHeader = firstString(req.header("x-hf-token"));
       const withDiarization =
         withDiarizationRaw === null
           ? null
@@ -4953,15 +4950,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           groqApiKey:
             groqApiKeyHeader ||
             firstString(req.query.groq_api_key) ||
-            null,
-          revupApiKey:
-            revupApiKeyHeader || firstString(req.query.revup_api_key) || null,
-          revupAppId:
-            revupAppIdHeader || firstString(req.query.revup_app_id) || null,
-          huggingFaceToken:
-            hfTokenHeader ||
-            firstString(req.query.hf_token) ||
-            firstString(req.query.huggingface_token) ||
             null,
         });
         res.json(result);
