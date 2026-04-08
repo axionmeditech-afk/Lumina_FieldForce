@@ -45,7 +45,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { canAccessAdminControls, canAccessSalesModule } from "@/lib/role-access";
-import { getUnreadNotificationsCount } from "@/lib/storage";
+import {
+  getUnreadNotificationsCount,
+  STORAGE_KEYS,
+  subscribeStorageUpdates,
+} from "@/lib/storage";
+
+const NOTIFICATION_SYNC_POLL_MS = 7000;
 
 type DrawerIconProps = {
   icon: keyof typeof Ionicons.glyphMap;
@@ -593,22 +599,39 @@ export default function SidebarLayout() {
   const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
 
   useEffect(() => {
+    if (!user?.id) {
+      setUnreadNotificationsCount(0);
+      return;
+    }
+
     let active = true;
+    let inFlight = false;
 
     const loadUnreadCount = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const count = await getUnreadNotificationsCount();
         if (active) setUnreadNotificationsCount(count);
       } catch {
         if (active) setUnreadNotificationsCount((current) => current);
+      } finally {
+        inFlight = false;
       }
     };
 
     void loadUnreadCount();
-    const interval = setInterval(loadUnreadCount, 20000);
+    const interval = setInterval(() => {
+      void loadUnreadCount();
+    }, NOTIFICATION_SYNC_POLL_MS);
+    const unsubscribe = subscribeStorageUpdates((event) => {
+      if (event.key !== STORAGE_KEYS.NOTIFICATIONS) return;
+      void loadUnreadCount();
+    });
     return () => {
       active = false;
       clearInterval(interval);
+      unsubscribe();
     };
   }, [user?.id]);
 

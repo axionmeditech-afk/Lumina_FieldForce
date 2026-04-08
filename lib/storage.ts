@@ -109,42 +109,55 @@ function notifyStorageUpdated(key: string): void {
   }
 }
 
-function readTrimmedEnv(name: string): string {
-  // eslint-disable-next-line expo/no-dynamic-env-var -- central helper intentionally resolves env keys by name
-  const raw = process.env[name];
-  return typeof raw === "string" ? raw.trim() : "";
+function trimEnv(value: string | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
-const GROQ_KEY_FROM_ENV =
-  readTrimmedEnv("EXPO_PUBLIC_GROQ_API_KEY") ||
-  readTrimmedEnv("GROQ_API_KEY");
-const GROQ_MODEL_FROM_ENV =
-  readTrimmedEnv("EXPO_PUBLIC_GROQ_MODEL") || readTrimmedEnv("GROQ_MODEL");
+const EXPO_PUBLIC_GROQ_API_KEY = trimEnv(process.env.EXPO_PUBLIC_GROQ_API_KEY);
+const GROQ_API_KEY = trimEnv(process.env.GROQ_API_KEY);
+const EXPO_PUBLIC_GROQ_MODEL = trimEnv(process.env.EXPO_PUBLIC_GROQ_MODEL);
+const GROQ_MODEL = trimEnv(process.env.GROQ_MODEL);
+const EXPO_PUBLIC_GROQ_PROJECT_ID = trimEnv(process.env.EXPO_PUBLIC_GROQ_PROJECT_ID);
+const EXPO_PUBLIC_API_URL = trimEnv(process.env.EXPO_PUBLIC_API_URL);
+const EXPO_PUBLIC_BACKEND_URL = trimEnv(process.env.EXPO_PUBLIC_BACKEND_URL);
+const EXPO_PUBLIC_DOMAIN = trimEnv(process.env.EXPO_PUBLIC_DOMAIN);
+const EXPO_PUBLIC_DOLIBARR_ENDPOINT = trimEnv(process.env.EXPO_PUBLIC_DOLIBARR_ENDPOINT);
+const DOLIBARR_ENDPOINT = trimEnv(process.env.DOLIBARR_ENDPOINT);
+const EXPO_PUBLIC_DOLIBARR_API_KEY = trimEnv(process.env.EXPO_PUBLIC_DOLIBARR_API_KEY);
+const DOLIBARR_API_KEY = trimEnv(process.env.DOLIBARR_API_KEY);
+const EXPO_PUBLIC_REMOTE_STATE_SYNC = trimEnv(process.env.EXPO_PUBLIC_REMOTE_STATE_SYNC);
+
+const GROQ_KEY_FROM_ENV = EXPO_PUBLIC_GROQ_API_KEY || GROQ_API_KEY;
+const GROQ_MODEL_FROM_ENV = EXPO_PUBLIC_GROQ_MODEL || GROQ_MODEL;
 const AI_ENV_DEFAULTS = {
   apiKey: GROQ_KEY_FROM_ENV,
   model: GROQ_MODEL_FROM_ENV || "openai/gpt-oss-20b",
-  projectId: readTrimmedEnv("EXPO_PUBLIC_GROQ_PROJECT_ID"),
+  projectId: EXPO_PUBLIC_GROQ_PROJECT_ID,
 };
 
 const RELEASE_BACKEND_FALLBACK_URL = "https://api.axionmeditech.com";
 
 const BACKEND_ENV_DEFAULTS = {
   apiBaseUrl:
-    readTrimmedEnv("EXPO_PUBLIC_API_URL") ||
-    readTrimmedEnv("EXPO_PUBLIC_BACKEND_URL") ||
-    readTrimmedEnv("EXPO_PUBLIC_DOMAIN") ||
+    EXPO_PUBLIC_API_URL ||
+    EXPO_PUBLIC_BACKEND_URL ||
+    EXPO_PUBLIC_DOMAIN ||
     RELEASE_BACKEND_FALLBACK_URL,
 };
 
 const DOLIBARR_ENV_DEFAULTS = {
   endpoint:
-    readTrimmedEnv("EXPO_PUBLIC_DOLIBARR_ENDPOINT") || readTrimmedEnv("DOLIBARR_ENDPOINT"),
+    EXPO_PUBLIC_DOLIBARR_ENDPOINT || DOLIBARR_ENDPOINT,
   apiKey:
-    readTrimmedEnv("EXPO_PUBLIC_DOLIBARR_API_KEY") || readTrimmedEnv("DOLIBARR_API_KEY"),
+    EXPO_PUBLIC_DOLIBARR_API_KEY || DOLIBARR_API_KEY,
 };
 
-const REMOTE_STATE_SYNC_DISABLED = readTrimmedEnv("EXPO_PUBLIC_REMOTE_STATE_SYNC") === "false";
-const REMOTE_STATE_TIMEOUT_MS = 3200;
+const REMOTE_STATE_SYNC_DISABLED = EXPO_PUBLIC_REMOTE_STATE_SYNC === "false";
+const IS_STANDALONE_RUNTIME =
+  !__DEV__ && Constants.appOwnership !== "expo" && !Constants.expoConfig?.hostUri;
+const REMOTE_STATE_TIMEOUT_MS = IS_STANDALONE_RUNTIME ? 9000 : 3200;
+const REMOTE_NOTIFICATION_ALERT_WINDOW_MS = 20 * 60 * 1000;
+const REMOTE_NOTIFICATION_ALERT_LIMIT_PER_SYNC = 3;
 const REMOTE_STATE_PENDING_WRITES_KEY = "@trackforce_remote_state_pending_writes";
 const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
   KEYS.COMPANIES,
@@ -2692,8 +2705,26 @@ export async function getTasks(): Promise<Task[]> {
 export async function addTask(task: Task): Promise<void> {
   const companyId = await getActiveCompanyId();
   const tasks = await getRawList<Task>(KEYS.TASKS);
-  tasks.unshift(withCompanyId(task, companyId));
+  const candidate = withCompanyId(task, companyId);
+  tasks.unshift(candidate);
   await setItem(KEYS.TASKS, tasks);
+
+  const currentUser = await getCurrentUser();
+  if (!currentUser) return;
+  const now = new Date().toISOString();
+  await addNotification(
+    {
+      id: `notif_task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: "New Task Assigned",
+      body: `${candidate.title} assigned to ${candidate.assignedToName}.`,
+      kind: "alert",
+      audience: "all",
+      createdById: currentUser.id,
+      createdByName: currentUser.name,
+      createdAt: now,
+    },
+    { companyId: candidate.companyId ?? companyId }
+  );
 }
 
 export async function updateTaskStatus(
@@ -2704,8 +2735,30 @@ export async function updateTaskStatus(
   const tasks = await getRawList<Task>(KEYS.TASKS);
   const idx = tasks.findIndex((task) => task.id === taskId && matchesCompany(task, companyId));
   if (idx !== -1) {
+    const previousStatus = tasks[idx].status;
     tasks[idx].status = status;
     await setItem(KEYS.TASKS, tasks);
+    if (previousStatus !== status) {
+      const currentUser = await getCurrentUser();
+      if (currentUser) {
+        const now = new Date().toISOString();
+        const statusLabel =
+          status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Pending";
+        await addNotification(
+          {
+            id: `notif_task_status_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            title: `Task ${statusLabel}`,
+            body: `${currentUser.name} updated ${tasks[idx].title} to ${statusLabel}.`,
+            kind: "alert",
+            audience: "all",
+            createdById: currentUser.id,
+            createdByName: currentUser.name,
+            createdAt: now,
+          },
+          { companyId: tasks[idx].companyId ?? companyId }
+        );
+      }
+    }
   }
 }
 
@@ -3327,6 +3380,24 @@ export async function addConversation(conversation: Conversation): Promise<void>
   await createRemoteConversationInternal(candidate);
   await AsyncStorage.removeItem(KEYS.CONVERSATIONS).catch(() => undefined);
   notifyStorageUpdated(KEYS.CONVERSATIONS);
+
+  const currentUser = await getCurrentUser();
+  if (!currentUser) return;
+  const customerLabel = normalizeWhitespace(candidate.customerName || "customer");
+  const now = new Date().toISOString();
+  await addNotification(
+    {
+      id: `notif_conversation_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: "New Conversation Logged",
+      body: `${currentUser.name} logged a conversation with ${customerLabel}.`,
+      kind: "announcement",
+      audience: "all",
+      createdById: currentUser.id,
+      createdByName: currentUser.name,
+      createdAt: now,
+    },
+    { companyId: candidate.companyId ?? companyId }
+  );
 }
 
 export async function updateConversation(
@@ -3759,13 +3830,51 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
   try {
     const remote = await fetchRemoteNotifications();
     if (!Array.isArray(remote)) return null;
+    const currentUser = await getCurrentUser();
     const companyId = await getActiveCompanyId();
     const existing = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
     const preserved = existing.filter((item) => !matchesCompany(item, companyId));
+    const existingIds = new Set(
+      existing
+        .filter((item) => matchesCompany(item, companyId))
+        .map((item) => item.id)
+    );
     const normalized = remote.map((item) => ({
       ...item,
       readByIds: Array.isArray(item.readByIds) ? item.readByIds : [],
     }));
+
+    if (currentUser) {
+      const settings = await getSettings();
+      if (settings.notifications !== "false") {
+        const nowMs = Date.now();
+        const freshUnseen = normalized
+          .filter((item) => !existingIds.has(item.id))
+          .filter((item) => canReceiveNotification(item.audience, currentUser.role))
+          .filter((item) => item.createdById !== currentUser.id)
+          .filter((item) => !(item.readByIds || []).includes(currentUser.id))
+          .filter((item) => {
+            const ts = new Date(item.createdAt).getTime();
+            if (!Number.isFinite(ts)) return false;
+            return nowMs - ts <= REMOTE_NOTIFICATION_ALERT_WINDOW_MS;
+          })
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+          .slice(-REMOTE_NOTIFICATION_ALERT_LIMIT_PER_SYNC);
+        for (const item of freshUnseen) {
+          await sendDeviceLocalNotification({
+            title: item.title,
+            body: item.body,
+            channelId: item.kind === "alert" ? "alerts" : "default",
+            data: {
+              notificationId: item.id,
+              kind: item.kind,
+              audience: item.audience,
+            },
+          });
+        }
+      }
+    }
+
     await setItem(KEYS.NOTIFICATIONS, [...normalized, ...preserved]);
     return normalized;
   } catch {

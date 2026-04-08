@@ -28,6 +28,8 @@ import {
 } from "@/lib/storage";
 import { canBroadcastAnnouncements } from "@/lib/role-access";
 
+const NOTIFICATIONS_LIVE_POLL_MS = 7000;
+
 function notificationKindColor(kind: AppNotification["kind"]): string {
   if (kind === "alert") return "#EF4444";
   if (kind === "policy") return "#0284C7";
@@ -66,6 +68,9 @@ export default function NotificationsScreen() {
   useFocusEffect(
     useCallback(() => {
       let active = true;
+      const pollId = setInterval(() => {
+        void loadData();
+      }, NOTIFICATIONS_LIVE_POLL_MS);
       void (async () => {
         await loadData();
         await markAllNotificationsRead();
@@ -75,6 +80,7 @@ export default function NotificationsScreen() {
       })();
       return () => {
         active = false;
+        clearInterval(pollId);
       };
     }, [loadData])
   );

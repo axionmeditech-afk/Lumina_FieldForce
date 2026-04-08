@@ -4741,54 +4741,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post(
-    "/api/notifications",
-    requireAuth,
-    requireRoles("admin", "manager"),
-    async (req, res) => {
-      const { title, body, kind, audience } = req.body as {
-        title?: string;
-        body?: string;
-        kind?: AppNotification["kind"];
-        audience?: NotificationAudience;
-      };
-      if (!title || !body) {
-        res.status(400).json({ message: "Notification title and body are required." });
-        return;
-      }
-
-      await initAuthUsersStore();
-      const authRecord = req.auth?.email
-        ? getAuthUserByIdentifier(req.auth.email)
-        : null;
-      const companyId = authRecord?.user.companyId ?? null;
-      const createdAt = new Date().toISOString();
-      const notification: AppNotification = {
-        id: `notif_${randomUUID()}`,
-        companyId: companyId || undefined,
-        title: normalizeWhitespace(title),
-        body: normalizeWhitespace(body),
-        kind: normalizeNotificationKind(kind),
-        audience: normalizeNotificationAudience(audience),
-        createdById: req.auth?.sub || "system",
-        createdByName: req.auth?.email || "System",
-        createdAt,
-        readByIds: [],
-      };
-
-      try {
-        await insertNotificationInMySql(notification);
-        res.status(201).json(notification);
-      } catch (error) {
-        res.status(500).json({
-          message:
-            error instanceof Error
-              ? `Unable to save notification: ${error.message}`
-              : "Unable to save notification.",
-        });
-      }
+  app.post("/api/notifications", requireAuth, async (req, res) => {
+    const { title, body, kind, audience } = req.body as {
+      title?: string;
+      body?: string;
+      kind?: AppNotification["kind"];
+      audience?: NotificationAudience;
+    };
+    if (!title || !body) {
+      res.status(400).json({ message: "Notification title and body are required." });
+      return;
     }
-  );
+
+    await initAuthUsersStore();
+    const authRecord = req.auth?.email
+      ? getAuthUserByIdentifier(req.auth.email)
+      : null;
+    const companyId = authRecord?.user.companyId ?? null;
+    const createdAt = new Date().toISOString();
+    const notification: AppNotification = {
+      id: `notif_${randomUUID()}`,
+      companyId: companyId || undefined,
+      title: normalizeWhitespace(title),
+      body: normalizeWhitespace(body),
+      kind: normalizeNotificationKind(kind),
+      audience: normalizeNotificationAudience(audience),
+      createdById: req.auth?.sub || "system",
+      createdByName: req.auth?.email || "System",
+      createdAt,
+      readByIds: [],
+    };
+
+    try {
+      await insertNotificationInMySql(notification);
+      res.status(201).json(notification);
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to save notification: ${error.message}`
+            : "Unable to save notification.",
+      });
+    }
+  });
 
   app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
     const notificationId = firstString(req.params.id);

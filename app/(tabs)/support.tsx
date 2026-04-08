@@ -26,6 +26,8 @@ import {
 } from "@/lib/storage";
 import { canModerateSupport } from "@/lib/role-access";
 
+const SUPPORT_LIVE_POLL_MS = 7000;
+
 export default function SupportScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
@@ -46,10 +48,8 @@ export default function SupportScreen() {
     const data = await getSupportThreadsForCurrentUser();
     setThreads(data);
     setLoading(false);
-    if (!activeThreadId && data.length) {
-      setActiveThreadId(data[0].id);
-    }
-  }, [activeThreadId]);
+    setActiveThreadId((current) => current || data[0]?.id || null);
+  }, []);
 
   useEffect(() => {
     void loadData();
@@ -57,7 +57,13 @@ export default function SupportScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      const pollId = setInterval(() => {
+        void loadData();
+      }, SUPPORT_LIVE_POLL_MS);
       void loadData();
+      return () => {
+        clearInterval(pollId);
+      };
     }, [loadData])
   );
 
