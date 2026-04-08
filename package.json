@@ -1,12 +1,14 @@
 {
   "name": "expo-app",
-  "main": "expo-router/entry",
+  "main": "server.js",
   "version": "1.0.0",
   "scripts": {
     "postinstall": "patch-package",
+    "build": "npm run server:build",
     "expo:dev": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start --android",
     "android": "node ./node_modules/expo/bin/cli run:android",
     "ios": "node ./node_modules/expo/bin/cli run:ios",
+    "start:expo": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start",
     "start:lan": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start --host lan --port 8081",
     "start:tunnel": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start --tunnel",
     "start:web": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start --web",
@@ -18,7 +20,7 @@
     "server:build": "esbuild server/index.ts --platform=node --packages=external --bundle --format=cjs --outdir=server_dist",
     "server:prod": "node --env-file=.env server_dist/index.js",
     "db:push": "drizzle-kit push",
-    "start": "set EXPO_NO_DOCTOR=1&& node ./node_modules/expo/bin/cli start",
+    "start": "node server.js",
     "lint": "expo lint",
     "lint:fix": "expo lint --fix"
   },
@@ -56,6 +58,7 @@
     "expo-status-bar": "~3.0.9",
     "expo-task-manager": "~14.0.9",
     "expo-web-browser": "~15.0.10",
+    "esbuild": "^0.25.11",
     "express": "^5.0.1",
     "fs-extra": "^11.3.4",
     "lenis": "^1.3.17",

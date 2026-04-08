@@ -1,5 +1,5 @@
 import { isSalesRole } from "@/lib/role-access";
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 
 type JwtPayload = {
@@ -26,7 +26,17 @@ function base64UrlDecode(input: string): Buffer {
 }
 
 function getJwtSecret(): string {
-  return process.env.JWT_SECRET || "trackforce_dev_secret_change_me";
+  const fromEnv = (process.env.JWT_SECRET || "").trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  if (!process.env.__LUMINA_RUNTIME_JWT_SECRET__) {
+    process.env.__LUMINA_RUNTIME_JWT_SECRET__ = randomBytes(48).toString("hex");
+    console.warn(
+      "[auth] JWT_SECRET is not set. Using a generated runtime secret. Set JWT_SECRET in hosting env for stable sessions."
+    );
+  }
+  return process.env.__LUMINA_RUNTIME_JWT_SECRET__;
 }
 
 export function signJwt(payload: Omit<JwtPayload, "iat" | "exp">, expiresInSec = 60 * 60 * 24 * 7): string {

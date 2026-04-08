@@ -1,0 +1,13 @@
+node_modules/
+.git/
+.expo/
+.expo-export-check/
+.local/
+dist/
+static-build/
+server_dist/
+android/
+ios/
+*.log
+*.tmp
+.env
