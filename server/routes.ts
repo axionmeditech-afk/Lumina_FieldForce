@@ -134,6 +134,15 @@ const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_incentive_payouts",
   "@trackforce_salaries",
 ]);
+const REMOTE_LOCATION_LOG_READ_LIMIT = 2500;
+const REMOTE_LOCATION_LOG_WRITE_LIMIT = 500;
+const LEGACY_LOCATION_LOG_STATE_MAX_BYTES = 1_500_000;
+const ENABLE_LEGACY_LOCATION_LOG_HYDRATION =
+  String(process.env.ENABLE_LEGACY_LOCATION_LOG_HYDRATION || "false").toLowerCase() === "true";
+
+function isLocationLogStateKey(key: string): boolean {
+  return key === "@trackforce_location_logs";
+}
 
 function firstString(value: unknown): string {
   if (Array.isArray(value)) {
@@ -3296,8 +3305,20 @@ async function mergeLocationLogsInMySql(entries: unknown[]): Promise<void> {
 async function hydrateLocationLogsFromLegacyStateIfNeeded(): Promise<void> {
   if (locationLogLegacyStateHydrated || !isMySqlStateEnabled()) return;
   locationLogLegacyStateHydrated = true;
+  if (!ENABLE_LEGACY_LOCATION_LOG_HYDRATION) {
+    console.warn(
+      "Skipping legacy location log hydration. Enable ENABLE_LEGACY_LOCATION_LOG_HYDRATION=true only for controlled one-time migration."
+    );
+    return;
+  }
   const raw = await getMySqlStateValue("@trackforce_location_logs").catch(() => null);
   if (!raw) return;
+  if (raw.length > LEGACY_LOCATION_LOG_STATE_MAX_BYTES) {
+    console.warn(
+      `Skipping legacy location log hydration because payload is too large (${raw.length} bytes).`
+    );
+    return;
+  }
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length) {
@@ -3914,7 +3935,9 @@ function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown
 async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
   if (!isNormalizedStateKey(key)) return undefined;
   if (key === "@trackforce_attendance") return listAttendanceFromMySql();
-  if (key === "@trackforce_location_logs") return listLocationLogsFromMySql();
+  if (key === "@trackforce_location_logs") {
+    return listLocationLogsFromMySql(REMOTE_LOCATION_LOG_READ_LIMIT);
+  }
   if (key === "@trackforce_stockists") return listStockistsFromMySql();
   if (key === "@trackforce_stock_transfers") return listStockTransfersFromMySql();
   if (key === "@trackforce_incentive_goal_plans") return listIncentiveGoalPlansFromMySql();
@@ -3938,6 +3961,11 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
     return true;
   }
   if (key === "@trackforce_location_logs") {
+    if (entries.length > REMOTE_LOCATION_LOG_WRITE_LIMIT) {
+      throw new Error(
+        `Location log state payload is too large (${entries.length} entries). Use /api/location/batch for log sync.`
+      );
+    }
     await mergeLocationLogsInMySql(entries);
     return true;
   }
@@ -5920,6 +5948,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     try {
+      if (isLocationLogStateKey(key)) {
+        const value = await listLocationLogsFromMySql(REMOTE_LOCATION_LOG_READ_LIMIT);
+        res.json({
+          key,
+          value,
+          updatedAt: new Date().toISOString(),
+          source: isMySqlStateEnabled() ? "mysql" : "memory",
+          truncated: true,
+          limit: REMOTE_LOCATION_LOG_READ_LIMIT,
+        });
+        return;
+      }
+
       const rawValue = await readRemoteState(key);
       if (!rawValue) {
         res.json({
@@ -6489,6 +6530,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     try {
+      if (isLocationLogStateKey(key)) {
+        const candidateValue = body.value;
+        const entries = Array.isArray(candidateValue) ? candidateValue : [];
+        if (entries.length > REMOTE_LOCATION_LOG_WRITE_LIMIT) {
+          res.status(413).json({
+            message:
+              "Location log state payload is too large for remote state sync. Use /api/location/batch instead.",
+            limit: REMOTE_LOCATION_LOG_WRITE_LIMIT,
+            received: entries.length,
+          });
+          return;
+        }
+      }
+
       const serialized = JSON.stringify(body.value ?? null);
       await writeRemoteState(key, serialized);
       res.json({

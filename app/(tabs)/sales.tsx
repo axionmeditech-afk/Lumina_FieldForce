@@ -2175,7 +2175,6 @@ export default function SalesScreen() {
       logs,
       quickSaleLogs,
       attendance,
-      remoteLogsState,
       remoteAttendanceState,
     ] = await Promise.all([
       getTasks(),
@@ -2183,9 +2182,6 @@ export default function SalesScreen() {
       getLocationLogs(),
       getQuickSaleLocationLogs(),
       getAttendance(),
-      isAdminViewer
-        ? getRemoteState<LocationLog[]>("@trackforce_location_logs").catch(() => ({ value: null }))
-        : Promise.resolve({ value: null }),
       isAdminViewer
         ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance").catch(() => ({ value: null }))
         : Promise.resolve({ value: null }),
@@ -2202,13 +2198,10 @@ export default function SalesScreen() {
 
     setTasks(taskData);
     setEmployees(employeeData);
-    const remoteLogs = Array.isArray(remoteLogsState.value)
-      ? filterCompanyScoped(remoteLogsState.value, user.companyId)
-      : [];
     const remoteAttendance = Array.isArray(remoteAttendanceState.value)
       ? filterCompanyScoped(remoteAttendanceState.value, user.companyId)
       : [];
-    setLocationLogs(dedupeById([...remoteLogs, ...logs]));
+    setLocationLogs(dedupeById(logs));
     setQuickSaleLocationLogs(quickSaleLogs);
     setAttendanceRecords(dedupeById([...remoteAttendance, ...attendance]));
 

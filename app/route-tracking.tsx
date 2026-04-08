@@ -673,25 +673,18 @@ export default function RouteTrackingScreen() {
       const [
         logsSnapshot,
         attendanceSnapshot,
-        remoteLogsState,
         remoteAttendanceState,
       ] = await Promise.all([
         getLocationLogs(),
         getAttendance(),
         isPrivilegedViewer
-          ? getRemoteState<LocationLog[]>("@trackforce_location_logs").catch(() => ({ value: null }))
-          : Promise.resolve({ value: null }),
-        isPrivilegedViewer
           ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance").catch(() => ({ value: null }))
           : Promise.resolve({ value: null }),
       ]);
-      const remoteLogs = Array.isArray(remoteLogsState.value)
-        ? filterCompanyScoped(remoteLogsState.value, user?.companyId)
-        : [];
       const remoteAttendance = Array.isArray(remoteAttendanceState.value)
         ? filterCompanyScoped(remoteAttendanceState.value, user?.companyId)
         : [];
-      const mergedLogsSnapshot = dedupeById([...remoteLogs, ...logsSnapshot]);
+      const mergedLogsSnapshot = dedupeById(logsSnapshot);
       const mergedAttendanceSnapshot = dedupeById([...remoteAttendance, ...attendanceSnapshot]);
       const aliases = buildSelectedUserAliases(
         selectedEmployee,

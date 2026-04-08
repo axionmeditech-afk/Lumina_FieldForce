@@ -13,6 +13,40 @@ declare module "http" {
   }
 }
 
+const MAX_LOGGED_JSON_PREVIEW = 240;
+
+function summarizeJsonForLogs(value: unknown): string {
+  try {
+    const json = JSON.stringify(value);
+    if (!json) return "";
+    if (json.length <= MAX_LOGGED_JSON_PREVIEW) {
+      return json;
+    }
+
+    if (Array.isArray(value)) {
+      return JSON.stringify({
+        type: "array",
+        length: value.length,
+        preview: value.slice(0, 2),
+      });
+    }
+
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value as Record<string, unknown>);
+      const preview = Object.fromEntries(entries.slice(0, 6));
+      return JSON.stringify({
+        type: "object",
+        keys: entries.length,
+        preview,
+      });
+    }
+
+    return `${json.slice(0, MAX_LOGGED_JSON_PREVIEW - 1)}…`;
+  } catch {
+    return "[unserializable-json]";
+  }
+}
+
 function setupCors(app: express.Application) {
   app.use((req, res, next) => {
     const origins = new Set<string>();
@@ -84,7 +118,7 @@ function setupRequestLogging(app: express.Application) {
 
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        logLine += ` :: ${summarizeJsonForLogs(capturedJsonResponse)}`;
       }
 
       if (logLine.length > 80) {
