@@ -13,6 +13,8 @@ import {
   Modal,
   AppState,
   BackHandler,
+  Keyboard,
+  Platform,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
@@ -2069,6 +2071,7 @@ export default function SalesScreen() {
   const [posCart, setPosCart] = useState<
     Record<string, { product: DolibarrProduct; qty: number; discountPercent: number }>
   >({});
+  const [posQtyDrafts, setPosQtyDrafts] = useState<Record<string, string>>({});
   const [posLoading, setPosLoading] = useState(false);
   const [posSubmitting, setPosSubmitting] = useState(false);
   const [posError, setPosError] = useState<string | null>(null);
@@ -2077,6 +2080,7 @@ export default function SalesScreen() {
   const [posProductsHasMore, setPosProductsHasMore] = useState(false);
   const [posProductsLoadingMore, setPosProductsLoadingMore] = useState(false);
   const [posLinkedVisitTaskId, setPosLinkedVisitTaskId] = useState<string | null>(null);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const showMeetingExitBlockedAlert = useCallback(() => {
     Alert.alert(
@@ -2086,6 +2090,7 @@ export default function SalesScreen() {
   }, []);
 
   const finalSegmentsRef = useRef<string[]>([]);
+  const rootListRef = useRef<FlatList<Conversation> | null>(null);
   const startedAtRef = useRef<number | null>(null);
   const sessionModeRef = useRef<"idle" | "recording" | "file" | "audio-fallback">("idle");
   const recordingModeRef = useRef<RecordingMode | null>(null);
@@ -2587,6 +2592,21 @@ export default function SalesScreen() {
       setMumbaiNowLabel(formatMumbaiDateTime(new Date(), { withSeconds: true }));
     }, 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const showSubscription = Keyboard.addListener(showEvent, (event) => {
+      setKeyboardHeight(event.endCoordinates?.height || 0);
+    });
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -5189,6 +5209,23 @@ export default function SalesScreen() {
     }, 0);
   }, [cartItems]);
 
+  useEffect(() => {
+    setPosQtyDrafts((current) => {
+      const nextEntries = Object.entries(posCart)
+        .filter(([, entry]) => entry && typeof entry.qty === "number" && entry.qty > 0)
+        .map(([key, entry]) => [key, String(entry.qty)] as const);
+      const next = Object.fromEntries(nextEntries);
+      const currentKeys = Object.keys(current);
+      if (
+        currentKeys.length === nextEntries.length &&
+        currentKeys.every((key) => current[key] === next[key])
+      ) {
+        return current;
+      }
+      return next;
+    });
+  }, [posCart]);
+
   const formatPrice = useCallback((value: number) => {
     return `INR ${value.toFixed(2)}`;
   }, []);
@@ -5243,6 +5280,44 @@ export default function SalesScreen() {
         },
       };
     });
+  }, []);
+
+  const handleQtyDraftChange = useCallback((productId: number, value: string) => {
+    const key = String(productId);
+    const sanitized = value.replace(/[^0-9]/g, "");
+    setPosQtyDrafts((current) => ({
+      ...current,
+      [key]: sanitized,
+    }));
+    if (!sanitized) return;
+    const parsed = Number(sanitized);
+    if (Number.isFinite(parsed)) {
+      handleSetCartQty(productId, parsed);
+    }
+  }, [handleSetCartQty]);
+
+  const handleQtyDraftCommit = useCallback((productId: number) => {
+    const key = String(productId);
+    const rawValue = (posQtyDrafts[key] || "").trim();
+    const parsed = Number(rawValue);
+    const nextQty = rawValue && Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+    handleSetCartQty(productId, nextQty);
+    setPosQtyDrafts((current) => {
+      if (nextQty <= 0) {
+        const { [key]: _removed, ...rest } = current;
+        return rest;
+      }
+      return {
+        ...current,
+        [key]: String(nextQty),
+      };
+    });
+  }, [handleSetCartQty, posQtyDrafts]);
+
+  const handleQtyInputFocus = useCallback(() => {
+    setTimeout(() => {
+      rootListRef.current?.scrollToEnd({ animated: true });
+    }, Platform.OS === "ios" ? 120 : 80);
   }, []);
 
   const handleSetCartDiscount = useCallback((productId: number, discountPercent: number) => {
@@ -5838,11 +5913,19 @@ export default function SalesScreen() {
   return (
     <AppCanvas>
       <FlatList
+        ref={rootListRef}
         data={isAdminViewer ? visibleConversations : []}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={[styles.listContent, { paddingTop: insets.top + 16 }]}
+        contentContainerStyle={[
+          styles.listContent,
+          {
+            paddingTop: insets.top + 16,
+            paddingBottom: Math.max(40, keyboardHeight + 24),
+          },
+        ]}
         showsVerticalScrollIndicator={false}
         contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
         ListHeaderComponent={
           <>
             <View style={styles.navToggleWrap}>
@@ -7293,9 +7376,24 @@ export default function SalesScreen() {
                               >
                                 <Ionicons name="remove" size={14} color={colors.textSecondary} />
                               </Pressable>
-                              <Text style={[styles.posQtyValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                                {entry.qty}
-                              </Text>
+                              <TextInput
+                                keyboardType="number-pad"
+                                value={posQtyDrafts[String(id)] ?? String(entry.qty)}
+                                onChangeText={(value) => handleQtyDraftChange(id, value)}
+                                onFocus={handleQtyInputFocus}
+                                onBlur={() => handleQtyDraftCommit(id)}
+                                onSubmitEditing={() => handleQtyDraftCommit(id)}
+                                returnKeyType="done"
+                                selectTextOnFocus
+                                style={[
+                                  styles.posQtyInput,
+                                  {
+                                    borderColor: colors.border,
+                                    color: colors.text,
+                                    backgroundColor: colors.surface,
+                                  },
+                                ]}
+                              />
                               <Pressable
                                 onPress={() => handleSetCartQty(id, entry.qty + 1)}
                                 style={({ pressed }) => [
@@ -9820,7 +9918,15 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 6,
   },
-  posQtyValue: { fontSize: 12, minWidth: 18, textAlign: "center" },
+  posQtyInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    minWidth: 52,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    fontSize: 12,
+    textAlign: "center",
+  },
   posFooterRow: {
     flexDirection: "row",
     alignItems: "center",
