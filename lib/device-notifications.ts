@@ -5,6 +5,27 @@ import Constants from "expo-constants";
 let notificationsInitialized = false;
 let pushTokenRequested = false;
 
+function normalizeNotificationText(value: string | undefined): string {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+}
+
+function buildVisibleNotificationContent(input: { title: string; body: string }): {
+  title: string;
+  body: string;
+} {
+  const rawTitle = normalizeNotificationText(input.title);
+  const rawBody = normalizeNotificationText(input.body);
+  const isGenericTitle =
+    rawTitle.length === 0 || rawTitle.toLowerCase() === "notification";
+
+  const title = isGenericTitle
+    ? (rawBody ? rawBody.slice(0, 90) : "New Update")
+    : rawTitle;
+  const body = rawBody || (rawTitle && !isGenericTitle ? rawTitle : "You have a new update.");
+
+  return { title, body };
+}
+
 function isNativeRuntime(): boolean {
   return Platform.OS === "android" || Platform.OS === "ios";
 }
@@ -122,12 +143,16 @@ export async function sendDeviceLocalNotification(input: {
   const granted =
     (await areDeviceNotificationsGranted()) || (await requestDeviceNotificationPermissionIfNeeded());
   if (!granted) return;
+  const content = buildVisibleNotificationContent({
+    title: input.title,
+    body: input.body,
+  });
 
   try {
     await Notifications.scheduleNotificationAsync({
       content: {
-        title: input.title,
-        body: input.body,
+        title: content.title,
+        body: content.body,
         sound: "default",
         data: input.data || {},
         ...(Platform.OS === "android" && input.channelId ? { channelId: input.channelId } : {}),
@@ -139,8 +164,8 @@ export async function sendDeviceLocalNotification(input: {
       await ensureAndroidNotificationChannels();
       await Notifications.scheduleNotificationAsync({
         content: {
-          title: input.title,
-          body: input.body,
+          title: content.title,
+          body: content.body,
           sound: "default",
           data: input.data || {},
           ...(Platform.OS === "android" && input.channelId ? { channelId: input.channelId } : {}),

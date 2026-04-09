@@ -2695,15 +2695,17 @@ export async function deleteSalaryRecordLocal(salaryId: string): Promise<void> {
   await setItem(KEYS.SALARIES, filtered);
 }
 
-export async function getTasks(): Promise<Task[]> {
+export async function getTasks(options?: { refreshRemote?: boolean }): Promise<Task[]> {
   const companyId = await getActiveCompanyId();
-  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const tasks = options?.refreshRemote
+    ? await getLatestRemoteSyncedList<Task>(KEYS.TASKS)
+    : await getRawList<Task>(KEYS.TASKS);
   return tasks.filter((task) => matchesCompany(task, companyId));
 }
 
 export async function addTask(task: Task): Promise<void> {
   const companyId = await getActiveCompanyId();
-  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const tasks = await getLatestRemoteSyncedList<Task>(KEYS.TASKS);
   const candidate = withCompanyId(task, companyId);
   tasks.unshift(candidate);
   await setItem(KEYS.TASKS, tasks);
@@ -2735,7 +2737,7 @@ export async function updateTaskStatus(
   status: Task["status"]
 ): Promise<void> {
   const companyId = await getActiveCompanyId();
-  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const tasks = await getLatestRemoteSyncedList<Task>(KEYS.TASKS);
   const idx = tasks.findIndex((task) => task.id === taskId && matchesCompany(task, companyId));
   if (idx !== -1) {
     const previousStatus = tasks[idx].status;
@@ -2771,7 +2773,7 @@ export async function updateTaskStatus(
 
 export async function updateTask(taskId: string, updates: Partial<Task>): Promise<Task | null> {
   const companyId = await getActiveCompanyId();
-  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const tasks = await getLatestRemoteSyncedList<Task>(KEYS.TASKS);
   const idx = tasks.findIndex((task) => task.id === taskId && matchesCompany(task, companyId));
   if (idx === -1) return null;
   const updatedTask: Task = {
@@ -2785,7 +2787,7 @@ export async function updateTask(taskId: string, updates: Partial<Task>): Promis
 
 export async function removeTask(taskId: string): Promise<boolean> {
   const companyId = await getActiveCompanyId();
-  const tasks = await getRawList<Task>(KEYS.TASKS);
+  const tasks = await getLatestRemoteSyncedList<Task>(KEYS.TASKS);
   const existingTask =
     tasks.find((task) => task.id === taskId && matchesCompany(task, companyId)) ?? null;
   if (!existingTask) return false;

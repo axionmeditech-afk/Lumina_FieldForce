@@ -13,7 +13,9 @@ import {
 } from "@/lib/storage";
 import {
   getAuthenticatedApiUser,
+  isDeviceSessionLockedError,
   issueApiToken,
+  logoutApiSession,
   registerApiUser,
   submitAccessRequestToBackend,
 } from "@/lib/attendance-api";
@@ -129,16 +131,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const tokenTimeoutMs = isStandaloneRuntime ? 9000 : 4200;
     const remoteUserTimeoutMs = isStandaloneRuntime ? 7000 : 3200;
+    let blockedByActiveDeviceSession = false;
     const attemptToken = async (value: string): Promise<string | null> => {
       if (!value) return null;
-      let issued = await issueApiToken(value, password, { timeoutMs: tokenTimeoutMs });
+      if (blockedByActiveDeviceSession) return null;
+
+      const requestToken = async (): Promise<string | null> => {
+        try {
+          return await issueApiToken(value, password, {
+            timeoutMs: tokenTimeoutMs,
+            throwOnDeviceLock: true,
+          });
+        } catch (error) {
+          if (isDeviceSessionLockedError(error)) {
+            blockedByActiveDeviceSession = true;
+            return null;
+          }
+          return null;
+        }
+      };
+
+      let issued = await requestToken();
+      if (blockedByActiveDeviceSession) {
+        return null;
+      }
       if (!issued) {
         await delay(isStandaloneRuntime ? 650 : 350);
-        issued = await issueApiToken(value, password, { timeoutMs: tokenTimeoutMs });
+        issued = await requestToken();
       }
       if (!issued && isStandaloneRuntime) {
         await delay(900);
-        issued = await issueApiToken(value, password, { timeoutMs: tokenTimeoutMs });
+        issued = await requestToken();
       }
       return issued;
     };
@@ -149,6 +172,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     if (!token && rawIdentifier && !rawIdentifier.includes("@")) {
       token = await attemptToken(rawIdentifier.toLowerCase());
+    }
+    if (blockedByActiveDeviceSession) {
+      return false;
     }
     if (token) {
       let remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });
@@ -239,7 +265,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    await logoutUser();
+    try {
+      await logoutApiSession({ timeoutMs: isStandaloneRuntime ? 6000 : 1600 });
+    } finally {
+      await logoutUser();
+    }
     setUser(null);
     setCompany(null);
   };

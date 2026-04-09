@@ -3039,6 +3039,11 @@ export default function SalesScreen() {
     user?.name,
   ]);
 
+  const activeAssignedVisitTask = useMemo(
+    () => salespersonVisitTasks.find((task) => getVisitStatus(task) === "in_progress") ?? null,
+    [salespersonVisitTasks]
+  );
+
   useEffect(() => {
     if (isAdminViewer || !user?.id || meetingFocusMode) return;
     void syncLocationReminderCatalog({
@@ -3627,14 +3632,21 @@ export default function SalesScreen() {
   }, [nextNavigationStop, routePreview, routePreviewBusy, routePreviewError]);
 
   useEffect(() => {
-    const inProgressTask = todaysVisitTasks.find((task) => getVisitStatus(task) === "in_progress");
     setActiveVisitTaskId((current) => {
-      if (current && todaysVisitTasks.some((task) => task.id === current)) {
+      if (current && salespersonVisitTasks.some((task) => task.id === current)) {
         return current;
       }
-      return inProgressTask?.id ?? null;
+      return activeAssignedVisitTask?.id ?? null;
     });
-  }, [todaysVisitTasks]);
+  }, [activeAssignedVisitTask, salespersonVisitTasks]);
+
+  const getBlockingVisitTask = useCallback(
+    (taskId: string): Task | null =>
+      salespersonVisitTasks.find(
+        (task) => task.id !== taskId && getVisitStatus(task) === "in_progress"
+      ) ?? null,
+    [salespersonVisitTasks]
+  );
 
   useEffect(() => {
     if (!isAdminViewer) return;
@@ -4670,6 +4682,14 @@ export default function SalesScreen() {
     async (task: Task) => {
       if (!user || isAdminViewer) return;
       if (visitActionTaskId) return;
+      const blockingTask = getBlockingVisitTask(task.id);
+      if (blockingTask) {
+        Alert.alert(
+          "Visit In Progress",
+          `Please complete departure at ${getVisitLabel(blockingTask)} before arriving at another location.`
+        );
+        return;
+      }
       if (isRecordingStateRef.current && activeVisitTaskId && activeVisitTaskId !== task.id) {
         Alert.alert("Visit In Progress", "Please complete current active visit before starting another.");
         return;
@@ -4712,13 +4732,29 @@ export default function SalesScreen() {
         setVisitActionTaskId(null);
       }
     },
-    [activeVisitTaskId, isAdminViewer, loadData, resolveVisitArrivalSnapshot, user, visitActionTaskId]
+    [
+      activeVisitTaskId,
+      getBlockingVisitTask,
+      isAdminViewer,
+      loadData,
+      resolveVisitArrivalSnapshot,
+      user,
+      visitActionTaskId,
+    ]
   );
 
   const handleMeetingStart = useCallback(
     async (task: Task) => {
       if (!user || isAdminViewer) return;
       if (visitActionTaskId) return;
+      const blockingTask = getBlockingVisitTask(task.id);
+      if (blockingTask) {
+        Alert.alert(
+          "Visit In Progress",
+          `Please complete departure at ${getVisitLabel(blockingTask)} before starting another visit.`
+        );
+        return;
+      }
       if (isRecordingStateRef.current && activeVisitTaskId && activeVisitTaskId !== task.id) {
         Alert.alert("Visit In Progress", "Please complete current active visit before starting another.");
         return;
@@ -4772,6 +4808,7 @@ export default function SalesScreen() {
     [
       activeVisitTaskId,
       ensureConversationRecommendationProducts,
+      getBlockingVisitTask,
       isAdminViewer,
       setLocalMeetingCaptureTaskId,
       loadData,
@@ -6803,10 +6840,17 @@ export default function SalesScreen() {
                     const status = getVisitStatus(task);
                     const statusColor = getVisitStatusColor(status, colors);
                     const isBusy = visitActionTaskId === task.id;
-                    const canArrive = !isAdminViewer && status === "pending";
+                    const isBlockedByAnotherVisit =
+                      !isAdminViewer &&
+                      Boolean(activeAssignedVisitTask?.id && activeAssignedVisitTask.id !== task.id);
+                    const canArrive = !isAdminViewer && status === "pending" && !isBlockedByAnotherVisit;
                     const recordingActive = Boolean(task.autoCaptureRecordingActive) && status !== "completed";
                     const canMeetingStart =
-                      !isAdminViewer && status === "in_progress" && !recordingActive && !task.autoCaptureConversationId;
+                      !isAdminViewer &&
+                      status === "in_progress" &&
+                      !recordingActive &&
+                      !task.autoCaptureConversationId &&
+                      !isBlockedByAnotherVisit;
                     const canMeetingEnd = !isAdminViewer && status === "in_progress" && recordingActive;
                     const canDepart =
                       !isAdminViewer && status === "in_progress" && !recordingActive && Boolean(task.autoCaptureConversationId);
@@ -6907,6 +6951,16 @@ export default function SalesScreen() {
                               {task.visitDepartureNotes.trim()}
                               </Text>
                             </View>
+                          ) : null}
+                          {!isAdminViewer && status === "pending" && isBlockedByAnotherVisit ? (
+                            <Text
+                              style={[
+                                styles.rowText,
+                                { color: colors.warning, fontFamily: "Inter_500Medium" },
+                              ]}
+                            >
+                              Complete departure at {getVisitLabel(activeAssignedVisitTask || task)} first.
+                            </Text>
                           ) : null}
                           {isAdminViewer && recordingHint ? (
                             <Text

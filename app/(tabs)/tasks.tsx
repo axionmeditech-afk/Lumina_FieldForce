@@ -14,12 +14,15 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as Crypto from "expo-crypto";
 import * as Location from "expo-location";
+import { useFocusEffect } from "expo-router";
 import Colors from "@/constants/colors";
 import {
+  STORAGE_KEYS,
   addAuditLog,
   addTask,
   getTasks,
   getTeams,
+  subscribeStorageUpdates,
   updateTaskStatus,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
@@ -35,9 +38,14 @@ import {
 } from "@/lib/attendance-api";
 
 const LEAD_ROLES: UserRole[] = ["admin", "hr", "manager"];
+const TASK_SYNC_POLL_MS = 7000;
 
 function isLeadRole(role?: UserRole | null): boolean {
   return Boolean(role && LEAD_ROLES.includes(role));
+}
+
+function normalizeIdentity(value?: string | null): string {
+  return (value || "").trim().toLowerCase();
 }
 
 function getThirdPartyId(customer: DolibarrThirdParty): string {
@@ -193,16 +201,59 @@ export default function TasksScreen() {
 
   const canManage = isLeadRole(user?.role);
 
-  const loadData = useCallback(async () => {
-    const [taskData, employeeData, teamData] = await Promise.all([getTasks(), getEmployees(), getTeams()]);
+  const loadData = useCallback(async (options?: { refreshRemote?: boolean }) => {
+    const refreshRemote = options?.refreshRemote === true;
+    const [taskData, employeeData, teamData] = await Promise.all([
+      getTasks({ refreshRemote }),
+      getEmployees(),
+      getTeams(),
+    ]);
     setTasks(taskData);
     setEmployees(employeeData);
     setTeams(teamData);
   }, []);
 
   useEffect(() => {
-    void loadData();
+    void loadData({ refreshRemote: true });
   }, [loadData]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeStorageUpdates((event) => {
+      if (event.key !== STORAGE_KEYS.TASKS) return;
+      void loadData();
+    });
+    return unsubscribe;
+  }, [loadData]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      let inFlight = false;
+
+      const syncTasks = async () => {
+        if (inFlight) return;
+        inFlight = true;
+        try {
+          const taskData = await getTasks({ refreshRemote: true });
+          if (active) {
+            setTasks(taskData);
+          }
+        } finally {
+          inFlight = false;
+        }
+      };
+
+      void syncTasks();
+      const interval = setInterval(() => {
+        void syncTasks();
+      }, TASK_SYNC_POLL_MS);
+
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }, [])
+  );
 
   const actorIds = useMemo(() => {
     if (!user) return new Set<string>();
@@ -211,6 +262,32 @@ export default function TasksScreen() {
       .map((employee) => employee.id);
     return new Set<string>([user.id, ...linkedEmployeeIds]);
   }, [employees, user]);
+
+  const actorNames = useMemo(() => {
+    const names = new Set<string>();
+    if (user?.name) {
+      names.add(normalizeIdentity(user.name));
+    }
+    const normalizedUserEmail = normalizeIdentity(user?.email);
+    for (const employee of employees) {
+      if (
+        normalizeIdentity(employee.email) === normalizedUserEmail ||
+        normalizeIdentity(employee.name) === normalizeIdentity(user?.name)
+      ) {
+        names.add(normalizeIdentity(employee.name));
+      }
+    }
+    return names;
+  }, [employees, user?.email, user?.name]);
+
+  const isTaskAssignedToActor = useCallback(
+    (task: Task): boolean => {
+      if (actorIds.has(task.assignedTo)) return true;
+      const assignedName = normalizeIdentity(task.assignedToName);
+      return assignedName.length > 0 && actorNames.has(assignedName);
+    },
+    [actorIds, actorNames]
+  );
 
   const assignerId = useMemo(() => {
     const firstEmployeeId = [...actorIds].find((id) => id.startsWith("e"));
@@ -322,22 +399,24 @@ export default function TasksScreen() {
     const filteredByStatus = tasks.filter((task) => filter === "all" || task.status === filter);
     if (canManage) {
       return filteredByStatus.filter((task) =>
-        actorIds.has(task.assignedBy) || manageableMemberIds.has(task.assignedTo)
+        actorIds.has(task.assignedBy) ||
+        manageableMemberIds.has(task.assignedTo) ||
+        isTaskAssignedToActor(task)
       );
     }
-    return filteredByStatus.filter((task) => actorIds.has(task.assignedTo));
-  }, [actorIds, canManage, filter, manageableMemberIds, tasks]);
+    return filteredByStatus.filter((task) => isTaskAssignedToActor(task));
+  }, [actorIds, canManage, filter, isTaskAssignedToActor, manageableMemberIds, tasks]);
 
   const canUpdateTask = useCallback((task: Task) => {
-    const isAssignee = actorIds.has(task.assignedTo);
+    const isAssignee = isTaskAssignedToActor(task);
     if (isAssignee) return true;
     if (!canManage) return false;
     return actorIds.has(task.assignedBy) || manageableMemberIds.has(task.assignedTo);
-  }, [actorIds, canManage, manageableMemberIds]);
+  }, [actorIds, canManage, isTaskAssignedToActor, manageableMemberIds]);
 
   const handleAdvanceStatus = useCallback(async (task: Task) => {
     if (!canUpdateTask(task)) return;
-    const isAssignee = actorIds.has(task.assignedTo);
+    const isAssignee = isTaskAssignedToActor(task);
 
     let nextStatus: Task["status"] = task.status;
     if (isAssignee) {
@@ -353,7 +432,7 @@ export default function TasksScreen() {
     await updateTaskStatus(task.id, nextStatus);
     await loadData();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  }, [actorIds, canUpdateTask, loadData]);
+  }, [canUpdateTask, isTaskAssignedToActor, loadData]);
 
   const handleAddTask = useCallback(async () => {
     if (!user || !canManage) return;

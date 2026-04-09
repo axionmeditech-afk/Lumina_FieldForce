@@ -6,6 +6,7 @@ type JwtPayload = {
   sub: string;
   role: "admin" | "hr" | "manager" | "salesperson" | "employee";
   email: string;
+  deviceId?: string;
   iat: number;
   exp: number;
 };

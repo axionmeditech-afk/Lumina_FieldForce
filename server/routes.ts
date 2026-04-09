@@ -4174,11 +4174,20 @@ function parseReadByIds(value: unknown): string[] {
 
 function buildNotificationFromRow(row: any): AppNotification {
   const nowIso = new Date().toISOString();
+  const rawTitle = normalizeWhitespace(String(row?.title || ""));
+  const rawBody = normalizeWhitespace(String(row?.body || row?.message || ""));
+  const hasGenericTitle = rawTitle.toLowerCase() === "notification";
+  const resolvedTitle =
+    !rawTitle || hasGenericTitle
+      ? rawBody.slice(0, 90) || "New update"
+      : rawTitle;
+  const resolvedBody =
+    rawBody || (!hasGenericTitle && rawTitle ? rawTitle : "You have a new notification.");
   return {
     id: String(row?.id || randomUUID()),
     companyId: row?.company_id ? String(row.company_id) : undefined,
-    title: normalizeWhitespace(String(row?.title || "Notification")),
-    body: normalizeWhitespace(String(row?.body || "")),
+    title: resolvedTitle,
+    body: resolvedBody,
     kind: normalizeNotificationKind(row?.kind),
     audience: normalizeNotificationAudience(row?.audience),
     createdById: String(row?.created_by_id || "system"),
@@ -4495,12 +4504,190 @@ async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord 
   }
 }
 
-function createAuthToken(user: AppUser): string {
+type ActiveAuthSessionRecord = {
+  userId: string;
+  email: string;
+  deviceId: string;
+};
+
+let authSessionsTableEnsured = false;
+const inMemoryActiveAuthSessions = new Map<string, ActiveAuthSessionRecord>();
+const SINGLE_DEVICE_SESSION_LOCK_MESSAGE =
+  "This account is already active on another device. Please logout from that device first.";
+
+function normalizeDeviceIdInput(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "";
+  return raw.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 120);
+}
+
+function resolveDeviceIdFromRequest(req: Request): string {
+  const body = (req.body || {}) as { deviceId?: unknown };
+  return (
+    normalizeDeviceIdInput(body.deviceId) ||
+    normalizeDeviceIdInput(req.header("x-device-id")) ||
+    "unknown-device"
+  );
+}
+
+function hashSessionToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+async function ensureAuthSessionsTableInMySql(): Promise<void> {
+  if (authSessionsTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `CREATE TABLE IF NOT EXISTS lff_auth_sessions (
+      user_id VARCHAR(64) NOT NULL,
+      email VARCHAR(191) NOT NULL,
+      device_id VARCHAR(191) NOT NULL,
+      token_hash VARCHAR(128) NULL,
+      logged_in_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      last_logout_at DATETIME NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      PRIMARY KEY (user_id),
+      KEY idx_lff_auth_sessions_device (device_id),
+      KEY idx_lff_auth_sessions_active (is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+  );
+  authSessionsTableEnsured = true;
+}
+
+async function readActiveAuthSession(userId: string): Promise<ActiveAuthSessionRecord | null> {
+  if (!userId) return null;
+  if (!isMySqlStateEnabled()) {
+    return inMemoryActiveAuthSessions.get(userId) ?? null;
+  }
+  await ensureAuthSessionsTableInMySql();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT user_id, email, device_id
+     FROM lff_auth_sessions
+     WHERE user_id = ? AND is_active = 1
+     LIMIT 1`,
+    [userId]
+  );
+  if (!rows || rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    userId: String(row.user_id || ""),
+    email: String(row.email || ""),
+    deviceId: String(row.device_id || ""),
+  };
+}
+
+async function ensureSingleDeviceSessionAllowed(user: AppUser, deviceId: string): Promise<void> {
+  const active = await readActiveAuthSession(user.id);
+  if (!active) return;
+  if (active.deviceId === deviceId) return;
+  throw new Error(SINGLE_DEVICE_SESSION_LOCK_MESSAGE);
+}
+
+async function upsertActiveAuthSession(
+  user: AppUser,
+  deviceId: string,
+  token: string
+): Promise<void> {
+  if (!isMySqlStateEnabled()) {
+    inMemoryActiveAuthSessions.set(user.id, {
+      userId: user.id,
+      email: user.email,
+      deviceId,
+    });
+    return;
+  }
+  await ensureAuthSessionsTableInMySql();
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_auth_sessions
+      (user_id, email, device_id, token_hash, logged_in_at, updated_at, last_logout_at, is_active)
+     VALUES (?, ?, ?, ?, NOW(), NOW(), NULL, 1)
+     ON DUPLICATE KEY UPDATE
+       email = VALUES(email),
+       device_id = VALUES(device_id),
+       token_hash = VALUES(token_hash),
+       logged_in_at = IF(is_active = 1, logged_in_at, NOW()),
+       updated_at = NOW(),
+       last_logout_at = NULL,
+       is_active = 1`,
+    [user.id, user.email, deviceId, hashSessionToken(token)]
+  );
+}
+
+async function deactivateAuthSession(
+  userId: string,
+  options?: { deviceId?: string | null; token?: string | null }
+): Promise<void> {
+  if (!userId) return;
+  const normalizedDeviceId = normalizeDeviceIdInput(options?.deviceId);
+  const normalizedTokenHash =
+    typeof options?.token === "string" && options.token.trim()
+      ? hashSessionToken(options.token.trim())
+      : "";
+
+  if (!isMySqlStateEnabled()) {
+    const active = inMemoryActiveAuthSessions.get(userId);
+    if (!active) return;
+    if (normalizedDeviceId && active.deviceId !== normalizedDeviceId) return;
+    inMemoryActiveAuthSessions.delete(userId);
+    return;
+  }
+
+  await ensureAuthSessionsTableInMySql();
+  const conn = await getMySqlPool();
+  if (normalizedDeviceId) {
+    await conn.execute(
+      `UPDATE lff_auth_sessions
+       SET is_active = 0, last_logout_at = NOW(), updated_at = NOW()
+       WHERE user_id = ? AND device_id = ? AND is_active = 1`,
+      [userId, normalizedDeviceId]
+    );
+    return;
+  }
+  if (normalizedTokenHash) {
+    await conn.execute(
+      `UPDATE lff_auth_sessions
+       SET is_active = 0, last_logout_at = NOW(), updated_at = NOW()
+       WHERE user_id = ? AND token_hash = ? AND is_active = 1`,
+      [userId, normalizedTokenHash]
+    );
+    return;
+  }
+  await conn.execute(
+    `UPDATE lff_auth_sessions
+     SET is_active = 0, last_logout_at = NOW(), updated_at = NOW()
+     WHERE user_id = ? AND is_active = 1`,
+    [userId]
+  );
+}
+
+function extractBearerTokenFromRequest(req: Request): string {
+  const authHeader = req.header("authorization") || "";
+  if (!authHeader.toLowerCase().startsWith("bearer ")) return "";
+  return authHeader.slice(7).trim();
+}
+
+function isSingleDeviceSessionLockError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /already active on another device/i.test(error.message || "");
+}
+
+function createAuthToken(user: AppUser, deviceId: string): string {
   return signJwt({
     sub: user.id,
     role: user.role,
     email: user.email,
+    deviceId,
   });
+}
+
+async function issueDeviceScopedAuthToken(user: AppUser, deviceId: string): Promise<string> {
+  await ensureSingleDeviceSessionAllowed(user, deviceId);
+  const token = createAuthToken(user, deviceId);
+  await upsertActiveAuthSession(user, deviceId, token);
+  return token;
 }
 
 function buildLoginFromEmailAndName(email: string, name: string): string {
@@ -5136,8 +5323,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const token = createAuthToken(user);
-    res.status(201).json({ token, user });
+    const deviceId = resolveDeviceIdFromRequest(req);
+    try {
+      const token = await issueDeviceScopedAuthToken(user, deviceId);
+      res.status(201).json({ token, user });
+    } catch (error) {
+      if (isSingleDeviceSessionLockError(error)) {
+        res.status(409).json({
+          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
+          code: "session_active_on_another_device",
+        });
+        return;
+      }
+      console.error("Failed to issue auth token during registration", error);
+      res.status(500).json({ message: "Unable to create login session right now." });
+    }
   });
 
   app.post("/api/auth/access-request", async (req, res) => {
@@ -5219,15 +5419,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         return;
       }
-      const token = createAuthToken(bootstrapAdmin);
-      res.status(201).json({
-        ok: true,
-        autoApproved: true,
-        message: "First admin account created and approved for this company.",
-        token,
-        user: bootstrapAdmin,
-      });
-      return;
+      const deviceId = resolveDeviceIdFromRequest(req);
+      try {
+        const token = await issueDeviceScopedAuthToken(bootstrapAdmin, deviceId);
+        res.status(201).json({
+          ok: true,
+          autoApproved: true,
+          message: "First admin account created and approved for this company.",
+          token,
+          user: bootstrapAdmin,
+        });
+        return;
+      } catch (error) {
+        if (isSingleDeviceSessionLockError(error)) {
+          res.status(409).json({
+            message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
+            code: "session_active_on_another_device",
+          });
+          return;
+        }
+        console.error("Failed to issue bootstrap admin session", error);
+        res.status(500).json({ message: "Admin created, but session could not be started." });
+        return;
+      }
     }
 
     let existingPendingRequest = getLatestPendingAccessRequestByEmail(normalizedEmail);
@@ -5632,8 +5846,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const token = createAuthToken(user);
-    res.json({ token, user });
+    const deviceId = resolveDeviceIdFromRequest(req);
+    try {
+      const token = await issueDeviceScopedAuthToken(user, deviceId);
+      res.json({ token, user });
+    } catch (error) {
+      if (isSingleDeviceSessionLockError(error)) {
+        res.status(409).json({
+          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
+          code: "session_active_on_another_device",
+        });
+        return;
+      }
+      console.error("Failed to issue login token", error);
+      res.status(500).json({ message: "Unable to issue login token right now." });
+    }
   });
 
   app.post("/api/auth/token", async (req, res) => {
@@ -5687,8 +5914,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(401).json({ message: "Invalid credentials" });
       return;
     }
-    const token = createAuthToken(user);
-    res.json({ token });
+    const deviceId = resolveDeviceIdFromRequest(req);
+    try {
+      const token = await issueDeviceScopedAuthToken(user, deviceId);
+      res.json({ token });
+    } catch (error) {
+      if (isSingleDeviceSessionLockError(error)) {
+        res.status(409).json({
+          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
+          code: "session_active_on_another_device",
+        });
+        return;
+      }
+      console.error("Failed to issue API token", error);
+      res.status(500).json({ message: "Unable to issue API token right now." });
+    }
+  });
+
+  app.post("/api/auth/logout", requireAuth, async (req, res) => {
+    const userId = req.auth?.sub || "";
+    if (!userId) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+
+    const bodyDeviceId = normalizeDeviceIdInput((req.body as { deviceId?: unknown } | undefined)?.deviceId);
+    const headerDeviceId = normalizeDeviceIdInput(req.header("x-device-id"));
+    const tokenDeviceId = normalizeDeviceIdInput(req.auth?.deviceId);
+    const deviceId = bodyDeviceId || headerDeviceId || tokenDeviceId || null;
+    const token = extractBearerTokenFromRequest(req);
+    try {
+      await deactivateAuthSession(userId, {
+        deviceId,
+        token: token || null,
+      });
+      res.json({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to logout right now.";
+      res.status(500).json({ message });
+    }
   });
 
   app.get("/api/auth/me", requireAuth, async (req, res) => {

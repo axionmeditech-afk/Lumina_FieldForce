@@ -20,6 +20,7 @@ import Constants from "expo-constants";
 import {
   getApiToken,
   getAttendanceQueue,
+  getOrCreateDeviceId,
   getSettings,
   setApiToken,
   setAttendanceQueue,
@@ -287,6 +288,29 @@ export function isApiAuthRequiredError(error: unknown): error is ApiAuthRequired
         (typeof (error as { code?: unknown }).code === "string" &&
           (error as { code?: string }).code === "api_auth_required")))
   );
+}
+
+export class DeviceSessionLockedError extends Error {
+  readonly code = "device_session_locked" as const;
+
+  constructor(message = "This account is already active on another device. Please logout there first.") {
+    super(message);
+    this.name = "DeviceSessionLockedError";
+  }
+}
+
+export function isDeviceSessionLockedError(error: unknown): error is DeviceSessionLockedError {
+  return (
+    error instanceof DeviceSessionLockedError ||
+    (error instanceof Error &&
+      (error.name === "DeviceSessionLockedError" ||
+        (typeof (error as { code?: unknown }).code === "string" &&
+          (error as { code?: string }).code === "device_session_locked")))
+  );
+}
+
+function isDeviceSessionLockedMessage(message: string): boolean {
+  return /already active on another device|logout from that device first/i.test(message);
 }
 
 function isPublicApiPath(path: string): boolean {
@@ -612,6 +636,7 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 interface AuthRequestOptions {
   timeoutMs?: number;
+  throwOnDeviceLock?: boolean;
 }
 
 export interface AccessRequestPayload {
@@ -735,13 +760,15 @@ export async function issueApiToken(
   if (!cleanIdentifier) {
     return null;
   }
+  const deviceId = await getOrCreateDeviceId();
   const payload = cleanIdentifier.includes("@")
-    ? { email: cleanIdentifier, password }
+    ? { email: cleanIdentifier, password, deviceId }
     : {
         email: cleanIdentifier,
         login: cleanIdentifier,
         username: cleanIdentifier,
         password,
+        deviceId,
       };
   try {
     const result = await fetchJsonWithTimeout<{ token: string }>(
@@ -754,7 +781,11 @@ export async function issueApiToken(
     );
     await setApiToken(result.token);
     return result.token;
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (options?.throwOnDeviceLock && isDeviceSessionLockedMessage(message)) {
+      throw new DeviceSessionLockedError(message);
+    }
     return null;
   }
 }
@@ -788,11 +819,15 @@ export async function registerApiUser(payload: {
 }, options?: AuthRequestOptions): Promise<string | null> {
   const timeoutMs = Math.max(300, options?.timeoutMs ?? 2200);
   try {
+    const deviceId = await getOrCreateDeviceId();
     const result = await fetchJsonWithTimeout<{ token?: string }>(
       "/auth/register",
       {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ...payload,
+          deviceId,
+        }),
       },
       timeoutMs
     );
@@ -803,6 +838,23 @@ export async function registerApiUser(payload: {
     return null;
   } catch {
     return null;
+  }
+}
+
+export async function logoutApiSession(options?: AuthRequestOptions): Promise<void> {
+  const timeoutMs = Math.max(300, options?.timeoutMs ?? 1800);
+  try {
+    const deviceId = await getOrCreateDeviceId();
+    await fetchJsonWithTimeout<{ ok: boolean }>(
+      "/auth/logout",
+      {
+        method: "POST",
+        body: JSON.stringify({ deviceId }),
+      },
+      timeoutMs
+    );
+  } catch {
+    // Local logout should continue even when backend is unreachable.
   }
 }
 
