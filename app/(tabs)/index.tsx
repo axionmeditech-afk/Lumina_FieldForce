@@ -69,6 +69,9 @@ type ActivityEntry = {
 };
 
 type DashboardSnapshot = DashboardStats & {
+  openTasks: number;
+  assignedTasks: number;
+  completedTasks: number;
   taskCompletionRate: number;
   inProgressTasks: number;
   pendingSignIns: number;
@@ -372,6 +375,27 @@ function buildQuickLinks(
   return links;
 }
 
+function getMetricCardRoute(cardId: string): string | null {
+  switch (cardId) {
+    case "present":
+      return "/(tabs)/attendance";
+    case "tasks":
+      return "/(tabs)/tasks";
+    case "support":
+      return "/(tabs)/support";
+    case "sales":
+      return "/sales-ai";
+    case "alerts":
+      return "/(tabs)/notifications";
+    case "visits":
+      return "/(tabs)/tasks";
+    case "expenses":
+      return "/expenses";
+    default:
+      return null;
+  }
+}
+
 function buildActivityFeed(
   userId: string,
   colors: ReturnType<typeof useAppTheme>["colors"],
@@ -625,9 +649,15 @@ export default function DashboardScreen() {
         record.type === "checkin" &&
         record.approvalStatus === "pending"
     ).length;
+    const assignedTasks = tasks.filter(
+      (task) =>
+        normalizeIdentity(task.assignedTo).length > 0 ||
+        normalizeIdentity(task.assignedToName).length > 0
+    ).length;
     const pendingTasks = tasks.filter((task) => task.status === "pending").length;
     const inProgressTasks = tasks.filter((task) => task.status === "in_progress").length;
     const completedTasks = tasks.filter((task) => task.status === "completed").length;
+    const openTasks = pendingTasks + inProgressTasks;
     const pendingExpenses = expenses.filter((expense) => expense.status === "pending").length;
     const avgInterestScore =
       conversations.length === 0
@@ -648,10 +678,13 @@ export default function DashboardScreen() {
       idleNow: employeeRoster.filter((employee) => employee.status === "idle").length,
       offlineNow: employeeRoster.filter((employee) => employee.status === "offline").length,
       pendingTasks,
+      openTasks,
+      assignedTasks,
+      completedTasks,
       pendingExpenses,
       totalConversations: conversations.length,
       avgInterestScore,
-      taskCompletionRate: tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0,
+      taskCompletionRate: assignedTasks ? Math.round((completedTasks / assignedTasks) * 100) : 0,
       inProgressTasks,
       pendingSignIns,
       openSupportThreads: supportThreads.filter((thread) => thread.status === "open").length,
@@ -766,8 +799,8 @@ export default function DashboardScreen() {
             {
               id: "tasks",
               label: "Task Completion",
-              value: `${snapshot.taskCompletionRate}%`,
-              hint: `${snapshot.pendingTasks} pending · ${snapshot.inProgressTasks} running`,
+              value: `${snapshot.openTasks}/${snapshot.assignedTasks}`,
+              hint: `${snapshot.completedTasks} completed · ${snapshot.taskCompletionRate}% done`,
               icon: "checkbox-outline",
               tone: colors.primary,
             },
@@ -1257,39 +1290,51 @@ export default function DashboardScreen() {
             </View>
           </View>
           <View style={styles.metricGrid}>
-            {metricCards.map((card, index) => (
-              <Animated.View
-                key={card.id}
-                entering={FadeInDown.duration(340).delay(metricsSection.delay + 40 + index * 30)}
-                style={[
-                  styles.metricCard,
-                  {
-                    borderColor: isDark ? `${card.tone}24` : "transparent",
-                    backgroundColor:
-                      isDark
-                        ? colors.backgroundElevated
-                        : ["#EEEDFF", "#FFF2E7", "#E7F6FF", "#ECFAEF"][index % 4],
-                  },
-                ]}
-              >
-                <View style={[styles.metricCardGlow, { backgroundColor: isDark ? `${card.tone}14` : `${card.tone}10` }]} />
-                <View style={styles.metricHeader}>
-                  <Text style={[styles.metricLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                    {card.label}
-                  </Text>
-                  <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
-                </View>
-                <Text style={[styles.metricValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
-                  {card.value}
-                </Text>
-                <Text style={[styles.metricHint, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-                  {card.hint}
-                </Text>
-                <View style={[styles.metricAccentTrack, { backgroundColor: "transparent" }]}>
-                  <View style={[styles.metricAccentFill, { backgroundColor: `${card.tone}22` }]} />
-                </View>
-              </Animated.View>
-            ))}
+            {metricCards.map((card, index) => {
+              const metricRoute = getMetricCardRoute(card.id);
+              return (
+                <Animated.View
+                  key={card.id}
+                  entering={FadeInDown.duration(340).delay(metricsSection.delay + 40 + index * 30)}
+                  style={[
+                    styles.metricCard,
+                    {
+                      borderColor: isDark ? `${card.tone}24` : "transparent",
+                      backgroundColor:
+                        isDark
+                          ? colors.backgroundElevated
+                          : ["#EEEDFF", "#FFF2E7", "#E7F6FF", "#ECFAEF"][index % 4],
+                    },
+                  ]}
+                >
+                  <Pressable
+                    style={styles.metricCardPressable}
+                    onPress={() => {
+                      if (!metricRoute) return;
+                      router.push(metricRoute as never);
+                    }}
+                    disabled={!metricRoute}
+                  >
+                    <View style={[styles.metricCardGlow, { backgroundColor: isDark ? `${card.tone}14` : `${card.tone}10` }]} />
+                    <View style={styles.metricHeader}>
+                      <Text style={[styles.metricLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                        {card.label}
+                      </Text>
+                      <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
+                    </View>
+                    <Text style={[styles.metricValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+                      {card.value}
+                    </Text>
+                    <Text style={[styles.metricHint, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                      {card.hint}
+                    </Text>
+                    <View style={[styles.metricAccentTrack, { backgroundColor: "transparent" }]}>
+                      <View style={[styles.metricAccentFill, { backgroundColor: `${card.tone}22` }]} />
+                    </View>
+                  </Pressable>
+                </Animated.View>
+              );
+            })}
           </View>
         </Animated.View>
         ) : null}
@@ -2057,6 +2102,9 @@ const styles = StyleSheet.create({
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 10 },
     elevation: 3,
+  },
+  metricCardPressable: {
+    flex: 1,
   },
   metricCardGlow: {
     position: "absolute",
