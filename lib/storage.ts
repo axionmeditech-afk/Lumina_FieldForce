@@ -156,6 +156,8 @@ const REMOTE_STATE_SYNC_DISABLED = EXPO_PUBLIC_REMOTE_STATE_SYNC === "false";
 const IS_STANDALONE_RUNTIME =
   !__DEV__ && Constants.appOwnership !== "expo" && !Constants.expoConfig?.hostUri;
 const REMOTE_STATE_TIMEOUT_MS = IS_STANDALONE_RUNTIME ? 9000 : 3200;
+const REMOTE_STATE_API_CANDIDATES_TTL_MS = 10_000;
+const REMOTE_STATE_FETCH_CACHE_TTL_MS = 3_000;
 const REMOTE_NOTIFICATION_ALERT_WINDOW_MS = 20 * 60 * 1000;
 const REMOTE_NOTIFICATION_ALERT_LIMIT_PER_SYNC = 3;
 const REMOTE_STATE_PENDING_WRITES_KEY = "@trackforce_remote_state_pending_writes";
@@ -188,6 +190,39 @@ interface PendingRemoteStateWrite {
   key: string;
   value: unknown;
   updatedAt: string;
+}
+
+type RemoteStateApiCandidatesCacheEntry = {
+  values: string[];
+  expiresAt: number;
+};
+
+type RemoteStateReadCacheEntry = {
+  value: unknown;
+  expiresAt: number;
+};
+
+let remoteStateApiCandidatesCache: RemoteStateApiCandidatesCacheEntry | null = null;
+const remoteStateReadCache = new Map<string, RemoteStateReadCacheEntry>();
+const remoteStateReadInFlight = new Map<string, Promise<unknown | null | undefined>>();
+
+function makeRemoteStateReadCacheKey(stateKey: string, token: string): string {
+  return `${token}::${stateKey}`;
+}
+
+function invalidateRemoteStateReadCacheForKey(stateKey: string): void {
+  const suffix = `::${stateKey}`;
+  for (const cacheKey of remoteStateReadCache.keys()) {
+    if (cacheKey.endsWith(suffix)) {
+      remoteStateReadCache.delete(cacheKey);
+    }
+  }
+}
+
+function resetRemoteStateRuntimeCaches(): void {
+  remoteStateApiCandidatesCache = null;
+  remoteStateReadCache.clear();
+  remoteStateReadInFlight.clear();
 }
 
 function isPrivateOrLocalHost(hostname: string): boolean {
@@ -340,6 +375,11 @@ async function getLocalSettingsApiBaseUrl(): Promise<string> {
 }
 
 async function getRemoteStateApiCandidates(): Promise<string[]> {
+  const now = Date.now();
+  if (remoteStateApiCandidatesCache && remoteStateApiCandidatesCache.expiresAt > now) {
+    return [...remoteStateApiCandidatesCache.values];
+  }
+
   const candidates = new Set<string>();
   const isExpoDevRuntime =
     __DEV__ ||
@@ -365,7 +405,18 @@ async function getRemoteStateApiCandidates(): Promise<string[]> {
   });
 
   if (publicHttpsEnvApiBases.length > 0) {
-    return Array.from(new Set([...publicHttpsEnvApiBases, `${RELEASE_BACKEND_FALLBACK_URL}/api`, ...publicHttpsSettingsApiBases]));
+    const resolved = Array.from(
+      new Set([
+        ...publicHttpsEnvApiBases,
+        `${RELEASE_BACKEND_FALLBACK_URL}/api`,
+        ...publicHttpsSettingsApiBases,
+      ])
+    );
+    remoteStateApiCandidatesCache = {
+      values: resolved,
+      expiresAt: Date.now() + REMOTE_STATE_API_CANDIDATES_TTL_MS,
+    };
+    return [...resolved];
   }
 
   const prioritizedUrls = !isExpoDevRuntime
@@ -387,7 +438,12 @@ async function getRemoteStateApiCandidates(): Promise<string[]> {
   if (isExpoDevRuntime) {
     candidates.add("http://localhost:5000/api");
   }
-  return Array.from(candidates);
+  const resolved = Array.from(candidates);
+  remoteStateApiCandidatesCache = {
+    values: resolved,
+    expiresAt: Date.now() + REMOTE_STATE_API_CANDIDATES_TTL_MS,
+  };
+  return [...resolved];
 }
 
 async function readPendingRemoteStateWrites(): Promise<PendingRemoteStateWrite[]> {
@@ -454,42 +510,75 @@ function shouldSyncRemoteStateKey(key: string): boolean {
 async function fetchStateRemote<T>(key: string): Promise<T | null | undefined> {
   const token = await getApiToken();
   if (!token) return undefined;
-  const encodedKey = encodeURIComponent(key);
-
-  const apiBases = await getRemoteStateApiCandidates();
-  for (const apiBase of apiBases) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
-    try {
-      const response = await fetch(`${apiBase}/state/${encodedKey}`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        signal: controller.signal,
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        if (response.status >= 500) continue;
-        return undefined;
-      }
-      const trimmed = text.trim();
-      if (!trimmed) return null;
-      try {
-        const payload = JSON.parse(text) as { value?: unknown };
-        return (payload?.value ?? null) as T | null;
-      } catch {
-        // invalid JSON from backend, try next candidate
-        continue;
-      }
-    } catch {
-      // try next backend candidate
-    } finally {
-      clearTimeout(timer);
-    }
+  const readCacheKey = makeRemoteStateReadCacheKey(key, token);
+  const cached = remoteStateReadCache.get(readCacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value as T | null;
   }
-  return undefined;
+  const inFlight = remoteStateReadInFlight.get(readCacheKey);
+  if (inFlight) {
+    return (await inFlight) as T | null | undefined;
+  }
+
+  const encodedKey = encodeURIComponent(key);
+  const request = (async (): Promise<T | null | undefined> => {
+    const apiBases = await getRemoteStateApiCandidates();
+    for (const apiBase of apiBases) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+      try {
+        const response = await fetch(`${apiBase}/state/${encodedKey}`, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          signal: controller.signal,
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            await setApiToken(null);
+            return undefined;
+          }
+          if (response.status >= 500) continue;
+          return undefined;
+        }
+        const trimmed = text.trim();
+        if (!trimmed) {
+          remoteStateReadCache.set(readCacheKey, {
+            value: null,
+            expiresAt: Date.now() + REMOTE_STATE_FETCH_CACHE_TTL_MS,
+          });
+          return null;
+        }
+        try {
+          const payload = JSON.parse(text) as { value?: unknown };
+          const value = (payload?.value ?? null) as T | null;
+          remoteStateReadCache.set(readCacheKey, {
+            value,
+            expiresAt: Date.now() + REMOTE_STATE_FETCH_CACHE_TTL_MS,
+          });
+          return value;
+        } catch {
+          // invalid JSON from backend, try next candidate
+          continue;
+        }
+      } catch {
+        // try next backend candidate
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return undefined;
+  })();
+
+  remoteStateReadInFlight.set(readCacheKey, request as Promise<unknown | null | undefined>);
+  try {
+    return await request;
+  } finally {
+    remoteStateReadInFlight.delete(readCacheKey);
+  }
 }
 
 async function fetchStockistsRemote(): Promise<StockistProfile[] | null | undefined> {
@@ -598,7 +687,14 @@ async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
         body,
         signal: controller.signal,
       });
-      if (response.ok) return true;
+      if (response.ok) {
+        invalidateRemoteStateReadCacheForKey(key);
+        return true;
+      }
+      if (response.status === 401 || response.status === 403) {
+        await setApiToken(null);
+        return false;
+      }
       if (response.status < 500) return false;
     } catch {
       // try next backend candidate
@@ -3572,6 +3668,8 @@ export async function updateSettings(
 
   store[companyId] = { ...current, ...patch };
   await setItem(KEYS.SETTINGS, store);
+  resetRemoteStateRuntimeCaches();
+  invalidateRemoteStateReadCacheForKey(KEYS.SETTINGS);
   const snapshot = await getSettings();
   notifySettingsListeners(snapshot);
 }
@@ -4349,6 +4447,7 @@ export async function setApiToken(token: string | null): Promise<void> {
       tokenStore[GLOBAL_API_TOKEN_KEY] = token;
     }
     await writeApiTokenStore(tokenStore);
+    resetRemoteStateRuntimeCaches();
     return;
   }
 
@@ -4372,6 +4471,7 @@ export async function setApiToken(token: string | null): Promise<void> {
     tokenStore[GLOBAL_API_TOKEN_KEY] = token;
   }
   await writeApiTokenStore(tokenStore);
+  resetRemoteStateRuntimeCaches();
   if (token) {
     void flushPendingRemoteStateWrites();
   }
