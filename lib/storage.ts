@@ -3712,10 +3712,49 @@ function canReceiveNotification(audience: NotificationAudience, role?: UserRole 
   return audience === role;
 }
 
+function compactErrorMessage(value: string, fallback: string): string {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) return fallback;
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
+}
+
+async function extractApiErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const raw = await response.text();
+    if (!raw.trim()) {
+      return fallback;
+    }
+    try {
+      const parsed = JSON.parse(raw) as { message?: unknown };
+      if (typeof parsed?.message === "string" && parsed.message.trim()) {
+        return compactErrorMessage(parsed.message, fallback);
+      }
+    } catch {
+      // fall through to plain text preview
+    }
+    return compactErrorMessage(raw, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function summarizeApiFailures(
+  action: string,
+  failures: string[],
+  fallback: string
+): string {
+  if (!failures.length) return fallback;
+  if (failures.length === 1) {
+    return `${action} failed: ${failures[0]}`;
+  }
+  return `${action} failed: ${failures[0]} (tried ${failures.length} endpoints)`;
+}
+
 async function fetchRemoteNotifications(): Promise<AppNotification[] | null> {
   const token = await getApiToken();
   if (!token) return null;
   const apiBases = await getRemoteStateApiCandidates();
+  const failures: string[] = [];
   for (const apiBase of apiBases) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
@@ -3729,16 +3768,29 @@ async function fetchRemoteNotifications(): Promise<AppNotification[] | null> {
         signal: controller.signal,
       });
       if (!response.ok) {
-        if (response.status >= 500) continue;
-        return null;
+        const message = await extractApiErrorMessage(
+          response,
+          `HTTP ${response.status} while loading notifications`
+        );
+        if (response.status === 401 || response.status === 403) {
+          await setApiToken(null);
+          return null;
+        }
+        failures.push(`${apiBase}: ${message}`);
+        continue;
       }
       const payload = (await response.json()) as AppNotification[];
       return Array.isArray(payload) ? payload : null;
-    } catch {
-      // try next backend candidate
+    } catch (error) {
+      failures.push(
+        `${apiBase}: ${error instanceof Error ? compactErrorMessage(error.message, "network error") : "network error"}`
+      );
     } finally {
       clearTimeout(timer);
     }
+  }
+  if (failures.length > 0) {
+    console.warn(summarizeApiFailures("Notifications fetch", failures, "Notifications fetch failed."));
   }
   return null;
 }
@@ -3748,11 +3800,17 @@ async function createRemoteNotificationInternal(input: {
   body: string;
   kind: AppNotification["kind"];
   audience: NotificationAudience;
-}): Promise<AppNotification | null> {
+}): Promise<AppNotification> {
   const token = await getApiToken();
-  if (!token) return null;
+  if (!token) {
+    throw new Error("API session missing. Please sign in again so notifications can sync.");
+  }
   const apiBases = await getRemoteStateApiCandidates();
+  if (!apiBases.length) {
+    throw new Error("Backend endpoint not configured. Set backend API URL in app settings.");
+  }
   const body = JSON.stringify(input);
+  const failures: string[] = [];
   for (const apiBase of apiBases) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
@@ -3767,18 +3825,40 @@ async function createRemoteNotificationInternal(input: {
         signal: controller.signal,
       });
       if (!response.ok) {
-        if (response.status >= 500) continue;
-        return null;
+        const message = await extractApiErrorMessage(
+          response,
+          `HTTP ${response.status} while saving notification`
+        );
+        if (response.status === 401 || response.status === 403) {
+          await setApiToken(null);
+          throw new Error("Session expired. Please login again and retry notification.");
+        }
+        failures.push(`${apiBase}: ${message}`);
+        continue;
       }
       const payload = (await response.json()) as AppNotification;
-      return payload ?? null;
-    } catch {
-      // try next backend candidate
+      if (payload && typeof payload === "object" && typeof payload.id === "string") {
+        return payload;
+      }
+      failures.push(`${apiBase}: Invalid notification response from backend.`);
+    } catch (error) {
+      if (error instanceof Error && /Session expired/i.test(error.message)) {
+        throw error;
+      }
+      const message =
+        error instanceof Error ? compactErrorMessage(error.message, "network error") : "network error";
+      failures.push(`${apiBase}: ${message}`);
     } finally {
       clearTimeout(timer);
     }
   }
-  return null;
+  throw new Error(
+    summarizeApiFailures(
+      "Notification sync",
+      failures,
+      "Unable to save notification to backend right now. Please try again."
+    )
+  );
 }
 
 async function markRemoteNotificationReadInternal(notificationId: string): Promise<boolean> {
@@ -3798,8 +3878,11 @@ async function markRemoteNotificationReadInternal(notificationId: string): Promi
         signal: controller.signal,
       });
       if (response.ok) return true;
-      if (response.status >= 500) continue;
-      return false;
+      if (response.status === 401 || response.status === 403) {
+        await setApiToken(null);
+        return false;
+      }
+      continue;
     } catch {
       // try next backend candidate
     } finally {
@@ -3826,8 +3909,11 @@ async function markAllRemoteNotificationsReadInternal(): Promise<boolean> {
         signal: controller.signal,
       });
       if (response.ok) return true;
-      if (response.status >= 500) continue;
-      return false;
+      if (response.status === 401 || response.status === 403) {
+        await setApiToken(null);
+        return false;
+      }
+      continue;
     } catch {
       // try next backend candidate
     } finally {
@@ -3898,7 +3984,7 @@ export async function getNotificationsForCurrentUser(): Promise<AppNotification[
   if (!currentUser) return [];
   const companyId = await getActiveCompanyId();
   const remote = await refreshRemoteNotifications();
-  const notifications = remote ?? (await getRawList<AppNotification>(KEYS.NOTIFICATIONS));
+  const notifications = remote ?? [];
   return notifications
     .filter(
       (item) =>
@@ -3910,7 +3996,7 @@ export async function getNotificationsForCurrentUser(): Promise<AppNotification[
 export async function getCompanyNotifications(): Promise<AppNotification[]> {
   const companyId = await getActiveCompanyId();
   const remote = await refreshRemoteNotifications();
-  const notifications = remote ?? (await getRawList<AppNotification>(KEYS.NOTIFICATIONS));
+  const notifications = remote ?? [];
   return notifications
     .filter((item) => matchesCompany(item, companyId))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -3929,19 +4015,12 @@ export async function addNotification(
 ): Promise<AppNotification> {
   const companyId =
     options && "companyId" in options ? options.companyId ?? null : await getActiveCompanyId();
-  const token = await getApiToken();
-  if (!token) {
-    throw new Error("API session missing. Please sign in again so notifications can sync.");
-  }
   const remoteCandidate = await createRemoteNotificationInternal({
     title: notification.title,
     body: notification.body,
     kind: notification.kind,
     audience: notification.audience,
   });
-  if (!remoteCandidate) {
-    throw new Error("Unable to save notification to backend right now. Please try again.");
-  }
 
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   const candidate: AppNotification = withCompanyId<AppNotification>(
@@ -3986,7 +4065,8 @@ export async function addNotification(
 export async function markNotificationRead(notificationId: string): Promise<void> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return;
-  await markRemoteNotificationReadInternal(notificationId);
+  const synced = await markRemoteNotificationReadInternal(notificationId);
+  if (!synced) return;
   const companyId = await getActiveCompanyId();
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   const index = notifications.findIndex(
@@ -4005,7 +4085,8 @@ export async function markNotificationRead(notificationId: string): Promise<void
 export async function markAllNotificationsRead(): Promise<void> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return;
-  await markAllRemoteNotificationsReadInternal();
+  const synced = await markAllRemoteNotificationsReadInternal();
+  if (!synced) return;
   const companyId = await getActiveCompanyId();
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   let changed = false;
