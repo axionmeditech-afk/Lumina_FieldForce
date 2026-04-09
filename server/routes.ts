@@ -4188,8 +4188,36 @@ function buildNotificationFromRow(row: any): AppNotification {
   };
 }
 
+let notificationsTableEnsured = false;
+
+async function ensureNotificationsTableInMySql(): Promise<void> {
+  if (notificationsTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `CREATE TABLE IF NOT EXISTS lff_notifications (
+      id VARCHAR(64) NOT NULL,
+      company_id VARCHAR(64) NULL,
+      title VARCHAR(191) NOT NULL,
+      body LONGTEXT NOT NULL,
+      kind VARCHAR(64) NOT NULL,
+      audience VARCHAR(32) NOT NULL,
+      created_by_id VARCHAR(64) NOT NULL,
+      created_by_name VARCHAR(191) NOT NULL,
+      created_at DATETIME NOT NULL,
+      read_by_user_ids_json LONGTEXT NULL,
+      PRIMARY KEY (id),
+      KEY idx_lff_notifications_company_time (company_id, created_at),
+      KEY idx_lff_notifications_kind (kind)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+  );
+  notificationsTableEnsured = true;
+}
+
 async function insertNotificationInMySql(notification: AppNotification): Promise<void> {
-  if (!isMySqlStateEnabled()) return;
+  if (!isMySqlStateEnabled()) {
+    throw new Error("MySQL notifications storage is not configured.");
+  }
+  await ensureNotificationsTableInMySql();
   const conn = await getMySqlPool();
   await conn.execute(
     `INSERT INTO lff_notifications (
@@ -4224,7 +4252,10 @@ async function listNotificationsFromMySql(
   role: UserRole,
   companyId?: string | null
 ): Promise<AppNotification[]> {
-  if (!isMySqlStateEnabled()) return [];
+  if (!isMySqlStateEnabled()) {
+    throw new Error("MySQL notifications storage is not configured.");
+  }
+  await ensureNotificationsTableInMySql();
   const conn = await getMySqlPool();
   const params: Array<string | null> = [role];
   let where = "WHERE (audience = 'all' OR audience = ?)";
@@ -4244,7 +4275,10 @@ async function listNotificationsFromMySql(
 }
 
 async function markNotificationReadInMySql(notificationId: string, userId: string): Promise<void> {
-  if (!isMySqlStateEnabled()) return;
+  if (!isMySqlStateEnabled()) {
+    throw new Error("MySQL notifications storage is not configured.");
+  }
+  await ensureNotificationsTableInMySql();
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT read_by_user_ids_json FROM lff_notifications WHERE id = ? LIMIT 1`,
@@ -4265,7 +4299,10 @@ async function markAllNotificationsReadInMySql(
   userId: string,
   companyId?: string | null
 ): Promise<void> {
-  if (!isMySqlStateEnabled()) return;
+  if (!isMySqlStateEnabled()) {
+    throw new Error("MySQL notifications storage is not configured.");
+  }
+  await ensureNotificationsTableInMySql();
   const notifications = await listNotificationsFromMySql(role, companyId);
   const conn = await getMySqlPool();
   await Promise.all(
@@ -4724,7 +4761,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const companyId = authRecord?.user.companyId ?? null;
 
     if (!isMySqlStateEnabled()) {
-      res.json([]);
+      res.status(503).json({
+        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
+      });
       return;
     }
 
@@ -4750,6 +4789,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
     if (!title || !body) {
       res.status(400).json({ message: "Notification title and body are required." });
+      return;
+    }
+
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({
+        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
+      });
       return;
     }
 
@@ -4792,7 +4838,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
     if (!isMySqlStateEnabled()) {
-      res.json({ ok: true });
+      res.status(503).json({
+        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
+      });
       return;
     }
     try {
@@ -4810,7 +4858,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
     if (!isMySqlStateEnabled()) {
-      res.json({ ok: true });
+      res.status(503).json({
+        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
+      });
       return;
     }
     try {

@@ -181,7 +181,6 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
   KEYS.LOCATION_LOGS,
   KEYS.QUICK_SALE_LOCATION_LOGS,
   KEYS.DOLIBARR_SYNC_LOGS,
-  KEYS.NOTIFICATIONS,
   KEYS.SUPPORT_THREADS,
 ]);
 
@@ -2712,19 +2711,23 @@ export async function addTask(task: Task): Promise<void> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return;
   const now = new Date().toISOString();
-  await addNotification(
-    {
-      id: `notif_task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      title: "New Task Assigned",
-      body: `${candidate.title} assigned to ${candidate.assignedToName}.`,
-      kind: "alert",
-      audience: "all",
-      createdById: currentUser.id,
-      createdByName: currentUser.name,
-      createdAt: now,
-    },
-    { companyId: candidate.companyId ?? companyId }
-  );
+  try {
+    await addNotification(
+      {
+        id: `notif_task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        title: "New Task Assigned",
+        body: `${candidate.title} assigned to ${candidate.assignedToName}.`,
+        kind: "alert",
+        audience: "all",
+        createdById: currentUser.id,
+        createdByName: currentUser.name,
+        createdAt: now,
+      },
+      { companyId: candidate.companyId ?? companyId }
+    );
+  } catch (error) {
+    console.warn("Unable to sync task assignment notification.", error);
+  }
 }
 
 export async function updateTaskStatus(
@@ -2744,19 +2747,23 @@ export async function updateTaskStatus(
         const now = new Date().toISOString();
         const statusLabel =
           status === "in_progress" ? "In Progress" : status === "completed" ? "Completed" : "Pending";
-        await addNotification(
-          {
-            id: `notif_task_status_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            title: `Task ${statusLabel}`,
-            body: `${currentUser.name} updated ${tasks[idx].title} to ${statusLabel}.`,
-            kind: "alert",
-            audience: "all",
-            createdById: currentUser.id,
-            createdByName: currentUser.name,
-            createdAt: now,
-          },
-          { companyId: tasks[idx].companyId ?? companyId }
-        );
+        try {
+          await addNotification(
+            {
+              id: `notif_task_status_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              title: `Task ${statusLabel}`,
+              body: `${currentUser.name} updated ${tasks[idx].title} to ${statusLabel}.`,
+              kind: "alert",
+              audience: "all",
+              createdById: currentUser.id,
+              createdByName: currentUser.name,
+              createdAt: now,
+            },
+            { companyId: tasks[idx].companyId ?? companyId }
+          );
+        } catch (error) {
+          console.warn("Unable to sync task status notification.", error);
+        }
       }
     }
   }
@@ -3385,19 +3392,23 @@ export async function addConversation(conversation: Conversation): Promise<void>
   if (!currentUser) return;
   const customerLabel = normalizeWhitespace(candidate.customerName || "customer");
   const now = new Date().toISOString();
-  await addNotification(
-    {
-      id: `notif_conversation_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      title: "New Conversation Logged",
-      body: `${currentUser.name} logged a conversation with ${customerLabel}.`,
-      kind: "announcement",
-      audience: "all",
-      createdById: currentUser.id,
-      createdByName: currentUser.name,
-      createdAt: now,
-    },
-    { companyId: candidate.companyId ?? companyId }
-  );
+  try {
+    await addNotification(
+      {
+        id: `notif_conversation_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        title: "New Conversation Logged",
+        body: `${currentUser.name} logged a conversation with ${customerLabel}.`,
+        kind: "announcement",
+        audience: "all",
+        createdById: currentUser.id,
+        createdByName: currentUser.name,
+        createdAt: now,
+      },
+      { companyId: candidate.companyId ?? companyId }
+    );
+  } catch (error) {
+    console.warn("Unable to sync conversation notification.", error);
+  }
 }
 
 export async function updateConversation(
@@ -3918,23 +3929,31 @@ export async function addNotification(
 ): Promise<AppNotification> {
   const companyId =
     options && "companyId" in options ? options.companyId ?? null : await getActiveCompanyId();
+  const token = await getApiToken();
+  if (!token) {
+    throw new Error("API session missing. Please sign in again so notifications can sync.");
+  }
   const remoteCandidate = await createRemoteNotificationInternal({
     title: notification.title,
     body: notification.body,
     kind: notification.kind,
     audience: notification.audience,
   });
+  if (!remoteCandidate) {
+    throw new Error("Unable to save notification to backend right now. Please try again.");
+  }
 
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
   const candidate: AppNotification = withCompanyId<AppNotification>(
-    remoteCandidate || {
-      ...notification,
-      readByIds: Array.from(new Set(notification.readByIds || [])),
+    {
+      ...remoteCandidate,
+      readByIds: Array.from(new Set(remoteCandidate.readByIds || [])),
     },
     companyId
   );
-  notifications.unshift(candidate);
-  await setItem(KEYS.NOTIFICATIONS, notifications.slice(0, 2000));
+  const filtered = notifications.filter((item) => item.id !== candidate.id);
+  filtered.unshift(candidate);
+  await setItem(KEYS.NOTIFICATIONS, filtered.slice(0, 2000));
 
   try {
     const currentUser = await getCurrentUser();
@@ -4068,16 +4087,20 @@ export async function createSupportThread(input: {
   threads.unshift(thread);
   await setItem(KEYS.SUPPORT_THREADS, threads.slice(0, 1000));
 
-  await addNotification({
-    id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    title: `Support: ${thread.subject}`,
-    body: `${thread.requestedByName} raised a new support request.`,
-    kind: "support",
-    audience: "admin",
-    createdById: currentUser.id,
-    createdByName: currentUser.name,
-    createdAt: now,
-  });
+  try {
+    await addNotification({
+      id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: `Support: ${thread.subject}`,
+      body: `${thread.requestedByName} raised a new support request.`,
+      kind: "support",
+      audience: "admin",
+      createdById: currentUser.id,
+      createdByName: currentUser.name,
+      createdAt: now,
+    });
+  } catch (error) {
+    console.warn("Unable to sync support creation notification.", error);
+  }
 
   return thread;
 }
@@ -4127,16 +4150,20 @@ export async function addSupportThreadMessage(
   threads[index] = updated;
   await setItem(KEYS.SUPPORT_THREADS, threads);
 
-  await addNotification({
-    id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    title: `Support Update: ${updated.subject}`,
-    body: `${currentUser.name} replied to support thread.`,
-    kind: "support",
-    audience: isModerator ? updated.requestedByRole : "admin",
-    createdById: currentUser.id,
-    createdByName: currentUser.name,
-    createdAt: now,
-  }, { companyId: updated.companyId ?? companyId });
+  try {
+    await addNotification({
+      id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: `Support Update: ${updated.subject}`,
+      body: `${currentUser.name} replied to support thread.`,
+      kind: "support",
+      audience: isModerator ? updated.requestedByRole : "admin",
+      createdById: currentUser.id,
+      createdByName: currentUser.name,
+      createdAt: now,
+    }, { companyId: updated.companyId ?? companyId });
+  } catch (error) {
+    console.warn("Unable to sync support reply notification.", error);
+  }
 
   return updated;
 }
@@ -4173,16 +4200,20 @@ export async function setSupportThreadStatus(
   threads[index] = updated;
   await setItem(KEYS.SUPPORT_THREADS, threads);
 
-  await addNotification({
-    id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    title: `Support ${status === "closed" ? "Closed" : "Reopened"}`,
-    body: `${updated.subject} is now ${status}.`,
-    kind: "support",
-    audience: isModerator ? updated.requestedByRole : "admin",
-    createdById: currentUser.id,
-    createdByName: currentUser.name,
-    createdAt: now,
-  }, { companyId: updated.companyId ?? companyId });
+  try {
+    await addNotification({
+      id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: `Support ${status === "closed" ? "Closed" : "Reopened"}`,
+      body: `${updated.subject} is now ${status}.`,
+      kind: "support",
+      audience: isModerator ? updated.requestedByRole : "admin",
+      createdById: currentUser.id,
+      createdByName: currentUser.name,
+      createdAt: now,
+    }, { companyId: updated.companyId ?? companyId });
+  } catch (error) {
+    console.warn("Unable to sync support status notification.", error);
+  }
 
   return updated;
 }

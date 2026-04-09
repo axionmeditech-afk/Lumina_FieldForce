@@ -412,6 +412,13 @@ export default function AdminControlsScreen() {
       setAudience("all");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await loadData();
+    } catch (error) {
+      Alert.alert(
+        "Announcement Failed",
+        error instanceof Error
+          ? error.message
+          : "Unable to sync announcement with backend notifications."
+      );
     } finally {
       setBusyAnnouncement(false);
     }

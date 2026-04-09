@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   View,
   Text,
   StyleSheet,
@@ -129,6 +130,13 @@ export default function NotificationsScreen() {
       setComposeAudience("all");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await loadData();
+    } catch (error) {
+      Alert.alert(
+        "Broadcast Failed",
+        error instanceof Error
+          ? error.message
+          : "Unable to sync broadcast notification with backend."
+      );
     } finally {
       setSending(false);
     }
