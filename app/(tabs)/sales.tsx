@@ -5601,7 +5601,7 @@ export default function SalesScreen() {
                 { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
               ]}
             >
-              Products will continue updating from live phrases as soon as the meeting starts.
+              Live phrases and product matches update here.
             </Text>
           </View>
         </View>
@@ -5654,16 +5654,7 @@ export default function SalesScreen() {
             </View>
           ))}
         </View>
-      ) : (
-        <Text
-          style={[
-            styles.liveSuggestionHint,
-            { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
-          ]}
-        >
-          Phrases are being captured. As soon as clear specs or product needs are detected, matching products will appear below.
-        </Text>
-      )}
+      ) : null}
 
       {liveProductSuggestions.length ? (
         <View style={styles.liveSuggestionList}>
@@ -5770,7 +5761,7 @@ export default function SalesScreen() {
               { color: colors.textSecondary, fontFamily: "Inter_500Medium" },
             ]}
           >
-            Live suggestions will update here as soon as clearer specs or product needs are detected.
+            No product suggestions yet.
           </Text>
         </View>
       ) : null}
