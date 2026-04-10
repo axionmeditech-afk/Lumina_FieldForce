@@ -133,6 +133,7 @@ const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_incentive_product_plans",
   "@trackforce_incentive_payouts",
   "@trackforce_salaries",
+  "@trackforce_support_threads",
 ]);
 const REMOTE_LOCATION_LOG_READ_LIMIT = 2500;
 const REMOTE_LOCATION_LOG_WRITE_LIMIT = 500;
@@ -3852,6 +3853,265 @@ async function replaceSalariesInMySql(entries: unknown[]): Promise<void> {
   }
 }
 
+let supportTablesEnsured = false;
+let supportLegacyStateHydrated = false;
+
+function normalizeSupportThreadStatus(value: unknown): "open" | "closed" {
+  return value === "closed" ? "closed" : "open";
+}
+
+function normalizeSupportThreadPriority(value: unknown): "normal" | "high" {
+  return value === "high" ? "high" : "normal";
+}
+
+function toDbSupportThreadPriority(value: unknown): "medium" | "high" {
+  return normalizeSupportThreadPriority(value) === "high" ? "high" : "medium";
+}
+
+function normalizeSupportCategory(value: unknown): string {
+  const normalized = toNullableText(value);
+  if (!normalized) return "general";
+  return normalized.slice(0, 80);
+}
+
+async function ensureSupportTables(): Promise<void> {
+  if (supportTablesEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_support_threads\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`subject\` VARCHAR(191) NOT NULL,
+      \`category\` VARCHAR(80) NOT NULL,
+      \`priority\` ENUM('low','medium','high') NOT NULL DEFAULT 'medium',
+      \`status\` ENUM('open','in_progress','closed') NOT NULL DEFAULT 'open',
+      \`requested_by_id\` VARCHAR(64) NOT NULL,
+      \`requested_by_name\` VARCHAR(191) NOT NULL,
+      \`requested_by_role\` ENUM('admin','hr','manager','salesperson','employee') NOT NULL,
+      \`assigned_to_id\` VARCHAR(64) NULL,
+      \`assigned_to_name\` VARCHAR(191) NULL,
+      \`assigned_to_role\` ENUM('admin','hr','manager','salesperson','employee') NULL,
+      \`last_message\` LONGTEXT NULL,
+      \`last_message_at\` DATETIME NULL,
+      \`created_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_support_threads_status\` (\`status\`),
+      KEY \`idx_lff_support_threads_company\` (\`company_id\`),
+      KEY \`idx_lff_support_threads_requested_by\` (\`requested_by_id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_support_messages\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`thread_id\` VARCHAR(64) NOT NULL,
+      \`sender_id\` VARCHAR(64) NOT NULL,
+      \`sender_name\` VARCHAR(191) NOT NULL,
+      \`sender_role\` ENUM('admin','hr','manager','salesperson','employee') NOT NULL,
+      \`body\` LONGTEXT NOT NULL,
+      \`created_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_support_messages_thread_time\` (\`thread_id\`, \`created_at\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  supportTablesEnsured = true;
+}
+
+async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
+  await ensureSupportTables();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_support_messages");
+    await conn.execute("DELETE FROM lff_support_threads");
+
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const item = entry as Record<string, unknown>;
+      const threadId = toStringId(item.id);
+      if (!threadId) continue;
+
+      const companyId = toNullableText(item.companyId);
+      const subject = toRequiredText(item.subject, "Support Request");
+      const category = normalizeSupportCategory(item.category);
+      const priority = toDbSupportThreadPriority(item.priority);
+      const status = normalizeSupportThreadStatus(item.status);
+      const requestedById = toRequiredText(item.requestedById, "system");
+      const requestedByName = toRequiredText(item.requestedByName, "User");
+      const requestedByRole = normalizeRole(item.requestedByRole);
+      const assignedToId = toNullableText(item.assignedToId);
+      const assignedToName = toNullableText(item.assignedToName);
+      const assignedToRole = assignedToId ? normalizeRole(item.assignedToRole) : null;
+      const createdAt = toSqlTimestamp(item.createdAt);
+      const updatedAt = toSqlTimestamp(item.updatedAt ?? item.createdAt);
+
+      const sourceMessages = Array.isArray(item.messages) ? item.messages : [];
+      const normalizedMessages: Array<{
+        id: string;
+        senderId: string;
+        senderName: string;
+        senderRole: UserRole;
+        body: string;
+        createdAt: string;
+      }> = [];
+
+      for (const rawMessage of sourceMessages) {
+        if (!rawMessage || typeof rawMessage !== "object") continue;
+        const message = rawMessage as Record<string, unknown>;
+        const body = toNullableText(message.message ?? message.body);
+        if (!body) continue;
+        normalizedMessages.push({
+          id: toStringId(message.id) || `support_msg_${randomUUID()}`,
+          senderId: toRequiredText(message.senderId, requestedById),
+          senderName: toRequiredText(message.senderName, requestedByName),
+          senderRole: normalizeRole(message.senderRole ?? requestedByRole),
+          body,
+          createdAt: toSqlTimestamp(message.createdAt),
+        });
+      }
+
+      const lastMessageCandidate =
+        normalizedMessages.length > 0
+          ? normalizedMessages[normalizedMessages.length - 1]
+          : null;
+      const lastMessage = lastMessageCandidate?.body ?? toNullableText(item.lastMessage);
+      const lastMessageAt = lastMessageCandidate
+        ? lastMessageCandidate.createdAt
+        : toNullableText(item.lastMessageAt)
+          ? toSqlTimestamp(item.lastMessageAt)
+          : null;
+
+      await conn.execute(
+        `INSERT INTO lff_support_threads
+          (id, company_id, subject, category, priority, status, requested_by_id, requested_by_name,
+           requested_by_role, assigned_to_id, assigned_to_name, assigned_to_role,
+           last_message, last_message_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          threadId,
+          companyId,
+          subject,
+          category,
+          priority,
+          status,
+          requestedById,
+          requestedByName,
+          requestedByRole,
+          assignedToId,
+          assignedToName,
+          assignedToRole,
+          lastMessage,
+          lastMessageAt,
+          createdAt,
+          updatedAt,
+        ]
+      );
+
+      for (const message of normalizedMessages) {
+        await conn.execute(
+          `INSERT INTO lff_support_messages
+            (id, thread_id, sender_id, sender_name, sender_role, body, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            message.id,
+            threadId,
+            message.senderId,
+            message.senderName,
+            message.senderRole,
+            message.body,
+            message.createdAt,
+          ]
+        );
+      }
+    }
+
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function hydrateSupportThreadsFromLegacyStateIfNeeded(): Promise<void> {
+  if (supportLegacyStateHydrated || !isMySqlStateEnabled()) return;
+  supportLegacyStateHydrated = true;
+  await ensureSupportTables();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>("SELECT COUNT(*) AS total FROM lff_support_threads");
+  const currentCount = Number(rows?.[0]?.total);
+  if (Number.isFinite(currentCount) && currentCount > 0) return;
+
+  const raw = await getMySqlStateValue("@trackforce_support_threads").catch(() => null);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return;
+    await replaceSupportThreadsInMySql(parsed);
+  } catch {
+    // ignore malformed legacy support payload
+  }
+}
+
+async function listSupportThreadsFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureSupportTables();
+  await hydrateSupportThreadsFromLegacyStateIfNeeded();
+  const conn = await getMySqlPool();
+
+  const [threadRows] = await conn.query<any[]>(`
+    SELECT id, company_id, subject, category, priority, status, requested_by_id, requested_by_name,
+           requested_by_role, assigned_to_id, assigned_to_name, assigned_to_role,
+           last_message, last_message_at, created_at, updated_at
+    FROM lff_support_threads
+    ORDER BY updated_at DESC, created_at DESC
+  `);
+  if (!threadRows?.length) return [];
+
+  const [messageRows] = await conn.query<any[]>(`
+    SELECT id, thread_id, sender_id, sender_name, sender_role, body, created_at
+    FROM lff_support_messages
+    ORDER BY thread_id ASC, created_at ASC
+  `);
+
+  const nowIso = new Date().toISOString();
+  const messagesByThread = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of messageRows || []) {
+    const threadId = row?.thread_id ? String(row.thread_id) : "";
+    if (!threadId) continue;
+    const nextMessage: Record<string, unknown> = {
+      id: row?.id ? String(row.id) : `support_msg_${randomUUID()}`,
+      senderId: row?.sender_id ? String(row.sender_id) : "system",
+      senderName: toRequiredText(row?.sender_name, "User"),
+      senderRole: normalizeRole(row?.sender_role),
+      message: toRequiredText(row?.body, ""),
+      createdAt: toIsoTimestamp(row?.created_at, nowIso),
+    };
+    const current = messagesByThread.get(threadId) || [];
+    current.push(nextMessage);
+    messagesByThread.set(threadId, current);
+  }
+
+  return threadRows.map((row) => {
+    const threadId = String(row.id);
+    return {
+      id: threadId,
+      companyId: row.company_id ? String(row.company_id) : undefined,
+      subject: toRequiredText(row.subject, "Support Request"),
+      requestedById: toRequiredText(row.requested_by_id, "system"),
+      requestedByName: toRequiredText(row.requested_by_name, "User"),
+      requestedByRole: normalizeRole(row.requested_by_role),
+      status: normalizeSupportThreadStatus(row.status),
+      priority: normalizeSupportThreadPriority(row.priority),
+      createdAt: toIsoTimestamp(row.created_at, nowIso),
+      updatedAt: toIsoTimestamp(row.updated_at, nowIso),
+      messages: messagesByThread.get(threadId) || [],
+    };
+  });
+}
+
 let bankAccountsTableEnsured = false;
 async function ensureBankAccountsTable(): Promise<void> {
   if (bankAccountsTableEnsured || !isMySqlStateEnabled()) return;
@@ -3944,6 +4204,7 @@ async function readNormalizedState(key: string): Promise<unknown[] | undefined> 
   if (key === "@trackforce_incentive_product_plans") return listIncentiveProductPlansFromMySql();
   if (key === "@trackforce_incentive_payouts") return listIncentivePayoutsFromMySql();
   if (key === "@trackforce_salaries") return listSalariesFromMySql();
+  if (key === "@trackforce_support_threads") return listSupportThreadsFromMySql();
   return undefined;
 }
 
@@ -3991,6 +4252,10 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
   }
   if (key === "@trackforce_salaries") {
     await replaceSalariesInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_support_threads") {
+    await replaceSupportThreadsInMySql(entries);
     return true;
   }
   return false;

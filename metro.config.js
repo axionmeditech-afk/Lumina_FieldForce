@@ -13,6 +13,17 @@ config.resolver.extraNodeModules = {
 
 const defaultResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (
+    platform === "web" &&
+    (moduleName === "@/components/RouteMapNative" ||
+      moduleName === "@/components/RouteMapNative.tsx")
+  ) {
+    return context.resolveRequest(
+      context,
+      path.join(__dirname, "components/RouteMapNative.web"),
+      platform
+    );
+  }
   if (moduleName.startsWith("@/")) {
     return context.resolveRequest(context, path.join(__dirname, moduleName.slice(2)), platform);
   }
