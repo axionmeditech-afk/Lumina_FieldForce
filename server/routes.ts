@@ -8,6 +8,7 @@ import type {
   AttendanceCheckPayload,
   AttendanceRecord,
   Conversation,
+  Expense,
   Geofence,
   LocationLog,
   NotificationAudience,
@@ -126,6 +127,7 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
 ]);
 const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_attendance",
+  "@trackforce_expenses",
   "@trackforce_location_logs",
   "@trackforce_stockists",
   "@trackforce_stock_transfers",
@@ -3853,6 +3855,141 @@ async function replaceSalariesInMySql(entries: unknown[]): Promise<void> {
   }
 }
 
+let expensesTableEnsured = false;
+let expensesLegacyStateHydrated = false;
+
+function normalizeExpenseStatus(value: unknown): Expense["status"] {
+  if (value === "approved" || value === "rejected") return value;
+  return "pending";
+}
+
+function normalizeExpenseInput(entry: unknown): Expense | null {
+  if (!entry || typeof entry !== "object") return null;
+  const item = entry as Record<string, unknown>;
+  const id = toStringId(item.id);
+  if (!id) return null;
+  return {
+    id,
+    companyId: toNullableText(item.companyId) ?? undefined,
+    userId: toRequiredText(item.userId, "unknown"),
+    userName: toRequiredText(item.userName, "Unknown User"),
+    category: toRequiredText(item.category, "General"),
+    amount: toSqlNumber(item.amount),
+    description: toRequiredText(item.description, ""),
+    status: normalizeExpenseStatus(item.status),
+    date: toSqlDateOnly(item.date),
+    receipt: toNullableText(item.receipt) ?? undefined,
+  };
+}
+
+async function ensureExpensesTable(): Promise<void> {
+  if (expensesTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_expenses\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`user_id\` VARCHAR(64) NOT NULL,
+      \`user_name\` VARCHAR(191) NOT NULL,
+      \`category\` VARCHAR(80) NOT NULL,
+      \`amount\` DECIMAL(12,2) NOT NULL,
+      \`description\` LONGTEXT NOT NULL,
+      \`status\` ENUM('pending','approved','rejected') NOT NULL,
+      \`date\` DATE NOT NULL,
+      \`receipt\` LONGTEXT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_expenses_user_date\` (\`user_id\`, \`date\`),
+      KEY \`idx_lff_expenses_status\` (\`status\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
+    ALTER TABLE \`lff_expenses\`
+      ADD COLUMN IF NOT EXISTS \`receipt\` LONGTEXT NULL AFTER \`date\`
+  `);
+  expensesTableEnsured = true;
+}
+
+async function replaceExpensesInMySql(entries: unknown[]): Promise<void> {
+  await ensureExpensesTable();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_expenses");
+    for (const entry of entries) {
+      const expense = normalizeExpenseInput(entry);
+      if (!expense) continue;
+      await conn.execute(
+        `INSERT INTO lff_expenses
+          (id, company_id, user_id, user_name, category, amount, description, status, date, receipt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          expense.id,
+          expense.companyId ?? null,
+          expense.userId,
+          expense.userName,
+          expense.category,
+          expense.amount,
+          expense.description,
+          expense.status,
+          toSqlDateOnly(expense.date),
+          expense.receipt ?? null,
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function hydrateExpensesFromLegacyStateIfNeeded(): Promise<void> {
+  if (expensesLegacyStateHydrated || !isMySqlStateEnabled()) return;
+  expensesLegacyStateHydrated = true;
+  await ensureExpensesTable();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>("SELECT COUNT(*) AS total FROM lff_expenses");
+  const currentCount = Number(rows?.[0]?.total);
+  if (Number.isFinite(currentCount) && currentCount > 0) return;
+
+  const raw = await getMySqlStateValue("@trackforce_expenses").catch(() => null);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return;
+    await replaceExpensesInMySql(parsed);
+  } catch {
+    // ignore malformed legacy expenses payload
+  }
+}
+
+async function listExpensesFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureExpensesTable();
+  await hydrateExpensesFromLegacyStateIfNeeded();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(`
+    SELECT id, company_id, user_id, user_name, category, amount, description, status, date, receipt
+    FROM lff_expenses
+    ORDER BY date DESC, id DESC
+  `);
+  return (rows || []).map((row) => ({
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    userId: toRequiredText(row.user_id, "unknown"),
+    userName: toRequiredText(row.user_name, "Unknown User"),
+    category: toRequiredText(row.category, "General"),
+    amount: toSqlNumber(row.amount),
+    description: toRequiredText(row.description, ""),
+    status: normalizeExpenseStatus(row.status),
+    date: toSqlDateOnly(row.date),
+    receipt: row.receipt ? String(row.receipt) : undefined,
+  }));
+}
+
 let supportTablesEnsured = false;
 let supportLegacyStateHydrated = false;
 
@@ -4195,6 +4332,7 @@ function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown
 async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
   if (!isNormalizedStateKey(key)) return undefined;
   if (key === "@trackforce_attendance") return listAttendanceFromMySql();
+  if (key === "@trackforce_expenses") return listExpensesFromMySql();
   if (key === "@trackforce_location_logs") {
     return listLocationLogsFromMySql(REMOTE_LOCATION_LOG_READ_LIMIT);
   }
@@ -4252,6 +4390,10 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
   }
   if (key === "@trackforce_salaries") {
     await replaceSalariesInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_expenses") {
+    await replaceExpensesInMySql(entries);
     return true;
   }
   if (key === "@trackforce_support_threads") {
