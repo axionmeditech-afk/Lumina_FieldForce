@@ -378,6 +378,11 @@ CREATE TABLE IF NOT EXISTS `lff_support_messages` (
   `sender_name` VARCHAR(191) NOT NULL,
   `sender_role` ENUM('admin','hr','manager','salesperson','employee') NOT NULL,
   `body` LONGTEXT NOT NULL,
+  `delivery_status` ENUM('sent','delivered','seen') NOT NULL DEFAULT 'delivered',
+  `read_state` ENUM('unread','read') NOT NULL DEFAULT 'unread',
+  `delivered_at` DATETIME NULL,
+  `seen_at` DATETIME NULL,
+  `seen_by_user_ids_json` LONGTEXT NULL,
   `created_at` DATETIME NOT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_lff_support_messages_thread_time` (`thread_id`, `created_at`)

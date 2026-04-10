@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -12,17 +12,16 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
-import { useFocusEffect } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
 import type { SupportThread } from "@/lib/types";
 import {
-  addSupportThreadMessage,
   createSupportThread,
   getSupportThreadsForCurrentUser,
-  setSupportThreadStatus,
+  markSupportThreadMessagesSeen,
 } from "@/lib/storage";
 import { canModerateSupport } from "@/lib/role-access";
 
@@ -37,10 +36,7 @@ export default function SupportScreen() {
   const [subject, setSubject] = useState("");
   const [message, setMessage] = useState("");
   const [priority, setPriority] = useState<"normal" | "high">("normal");
-  const [replyText, setReplyText] = useState("");
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [actingThreadId, setActingThreadId] = useState<string | null>(null);
 
   const isModerator = canModerateSupport(user?.role);
 
@@ -48,8 +44,58 @@ export default function SupportScreen() {
     const data = await getSupportThreadsForCurrentUser();
     setThreads(data);
     setLoading(false);
-    setActiveThreadId((current) => current || data[0]?.id || null);
   }, []);
+
+  const markThreadMessagesSeenLocally = useCallback(
+    (threadId: string) => {
+      const currentUserId = (user?.id || "").trim();
+      if (!currentUserId) return;
+      const now = new Date().toISOString();
+      setThreads((previous) =>
+        previous.map((thread) => {
+          if (thread.id !== threadId) return thread;
+          const nextMessages = (thread.messages || []).map((entry) => {
+            const senderId = (entry.senderId || "").trim();
+            if (!senderId || senderId === currentUserId) return entry;
+            const seenByIds = Array.isArray(entry.seenByIds)
+              ? entry.seenByIds
+                  .filter((id): id is string => typeof id === "string")
+                  .map((id) => id.trim())
+                  .filter(Boolean)
+              : [];
+            if (seenByIds.includes(currentUserId)) return entry;
+            return {
+              ...entry,
+              deliveryStatus: "seen" as const,
+              deliveredAt: entry.deliveredAt || entry.createdAt,
+              seenAt: entry.seenAt || now,
+              seenByIds: Array.from(new Set([...seenByIds, currentUserId])),
+            };
+          });
+          return { ...thread, messages: nextMessages };
+        })
+      );
+    },
+    [user?.id]
+  );
+
+  const handleOpenThread = useCallback(
+    (threadId: string) => {
+      markThreadMessagesSeenLocally(threadId);
+      void (async () => {
+        try {
+          await markSupportThreadMessagesSeen(threadId);
+          await loadData();
+        } finally {
+          router.push({
+            pathname: "/support-thread/[id]",
+            params: { id: threadId },
+          });
+        }
+      })();
+    },
+    [loadData, markThreadMessagesSeenLocally]
+  );
 
   useEffect(() => {
     void loadData();
@@ -67,17 +113,12 @@ export default function SupportScreen() {
     }, [loadData])
   );
 
-  const activeThread = useMemo(
-    () => threads.find((thread) => thread.id === activeThreadId) || null,
-    [activeThreadId, threads]
-  );
-
   const handleCreate = useCallback(async () => {
     if (submitting) return;
     setSubmitting(true);
     try {
       await createSupportThread({ subject, message, priority });
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setSubject("");
       setMessage("");
       setPriority("normal");
@@ -86,34 +127,6 @@ export default function SupportScreen() {
       setSubmitting(false);
     }
   }, [loadData, message, priority, subject, submitting]);
-
-  const handleReply = useCallback(async () => {
-    if (!activeThread || !replyText.trim() || submitting) return;
-    setSubmitting(true);
-    try {
-      await addSupportThreadMessage(activeThread.id, replyText);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      setReplyText("");
-      await loadData();
-    } finally {
-      setSubmitting(false);
-    }
-  }, [activeThread, loadData, replyText, submitting]);
-
-  const handleToggleStatus = useCallback(
-    async (thread: SupportThread) => {
-      const nextStatus = thread.status === "open" ? "closed" : "open";
-      setActingThreadId(thread.id);
-      try {
-        await setSupportThreadStatus(thread.id, nextStatus);
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        await loadData();
-      } finally {
-        setActingThreadId(null);
-      }
-    },
-    [loadData]
-  );
 
   return (
     <AppCanvas>
@@ -126,17 +139,27 @@ export default function SupportScreen() {
         </View>
 
         <Animated.View entering={FadeInDown.duration(400)} style={styles.headerWrap}>
-          <Text style={[styles.title, { color: colors.text, fontFamily: "Inter_700Bold" }]}>Support Desk</Text>
-          <Text style={[styles.subtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+          <Text style={[styles.title, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+            Support Desk
+          </Text>
+          <Text
+            style={[
+              styles.subtitle,
+              { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+            ]}
+          >
             {isModerator
-              ? "Assist employees, reply to requests, and close resolved threads."
-              : "Raise issues, ask help, and track responses from leadership."}
+              ? "Assist employees and track every live issue in one queue."
+              : "Raise issues and chat with support in dedicated threads."}
           </Text>
         </Animated.View>
 
         <Animated.View
           entering={FadeInDown.duration(400).delay(70)}
-          style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+          style={[
+            styles.card,
+            { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+          ]}
         >
           <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
             New Request
@@ -170,11 +193,16 @@ export default function SupportScreen() {
                 styles.priorityButton,
                 {
                   borderColor: priority === "normal" ? colors.primary : colors.border,
-                  backgroundColor: priority === "normal" ? colors.primary + "16" : colors.background,
+                  backgroundColor: priority === "normal" ? `${colors.primary}16` : colors.background,
                 },
               ]}
             >
-              <Text style={{ color: priority === "normal" ? colors.primary : colors.textSecondary, fontFamily: "Inter_500Medium" }}>
+              <Text
+                style={{
+                  color: priority === "normal" ? colors.primary : colors.textSecondary,
+                  fontFamily: "Inter_500Medium",
+                }}
+              >
                 Normal
               </Text>
             </Pressable>
@@ -184,11 +212,16 @@ export default function SupportScreen() {
                 styles.priorityButton,
                 {
                   borderColor: priority === "high" ? colors.danger : colors.border,
-                  backgroundColor: priority === "high" ? colors.danger + "16" : colors.background,
+                  backgroundColor: priority === "high" ? `${colors.danger}16` : colors.background,
                 },
               ]}
             >
-              <Text style={{ color: priority === "high" ? colors.danger : colors.textSecondary, fontFamily: "Inter_500Medium" }}>
+              <Text
+                style={{
+                  color: priority === "high" ? colors.danger : colors.textSecondary,
+                  fontFamily: "Inter_500Medium",
+                }}
+              >
                 High
               </Text>
             </Pressable>
@@ -215,172 +248,135 @@ export default function SupportScreen() {
           </View>
         </Animated.View>
 
-        <Animated.View entering={FadeInDown.duration(400).delay(120)} style={styles.columnsWrap}>
-          <View style={[styles.card, styles.leftCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-              Threads
-            </Text>
-            {loading ? (
-              <View style={styles.emptyWrap}>
-                <ActivityIndicator size="small" color={colors.primary} />
-              </View>
-            ) : threads.length === 0 ? (
-              <View style={styles.emptyWrap}>
-                <Ionicons name="chatbox-ellipses-outline" size={20} color={colors.textTertiary} />
-                <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                  No support threads yet.
-                </Text>
-              </View>
-            ) : (
-              threads.map((thread, index) => (
+        <Animated.View
+          entering={FadeInDown.duration(400).delay(120)}
+          style={[
+            styles.card,
+            styles.threadCard,
+            { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+          ]}
+        >
+          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+            Threads
+          </Text>
+          {loading ? (
+            <View style={styles.emptyWrap}>
+              <ActivityIndicator size="small" color={colors.primary} />
+            </View>
+          ) : threads.length === 0 ? (
+            <View style={styles.emptyWrap}>
+              <Ionicons name="chatbox-ellipses-outline" size={20} color={colors.textTertiary} />
+              <Text
+                style={[
+                  styles.emptyText,
+                  { color: colors.textSecondary, fontFamily: "Inter_400Regular" },
+                ]}
+              >
+                No support threads yet.
+              </Text>
+            </View>
+          ) : (
+            threads.map((thread, index) => {
+              const currentUserId = (user?.id || "").trim();
+              const messages = Array.isArray(thread.messages) ? thread.messages : [];
+              const lastEntry = messages[messages.length - 1];
+              const lastMessage = lastEntry?.message?.trim() || "";
+              const unreadCount = messages.reduce((count, entry) => {
+                const senderId = (entry.senderId || "").trim();
+                if (!currentUserId || senderId === currentUserId) return count;
+                if (entry.deliveryStatus === "seen") return count;
+                const seenByIds = Array.isArray(entry.seenByIds)
+                  ? entry.seenByIds
+                      .filter((id): id is string => typeof id === "string")
+                      .map((id) => id.trim())
+                      .filter(Boolean)
+                  : [];
+                return seenByIds.includes(currentUserId) ? count : count + 1;
+              }, 0);
+              const previewText = lastEntry
+                ? `${(lastEntry.senderId || "").trim() === currentUserId ? "You" : lastEntry.senderName}: ${lastMessage}`
+                : "Open this thread to chat.";
+              return (
                 <Pressable
                   key={thread.id}
-                  onPress={() => setActiveThreadId(thread.id)}
+                  onPress={() => handleOpenThread(thread.id)}
                   style={({ pressed }) => [
                     styles.threadRow,
-                    index < threads.length - 1 && { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
+                    index < threads.length - 1 && {
+                      borderBottomWidth: 1,
+                      borderBottomColor: colors.borderLight,
+                    },
                     {
-                      opacity: pressed ? 0.85 : 1,
-                      backgroundColor: activeThreadId === thread.id ? colors.primary + "10" : "transparent",
+                      opacity: pressed ? 0.86 : 1,
                     },
                   ]}
                 >
-                  <View style={{ flex: 1, gap: 3 }}>
-                    <Text style={[styles.threadTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                      {thread.subject}
-                    </Text>
-                    <Text style={[styles.threadMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  <View style={styles.threadIconWrap}>
+                    <Ionicons name="chatbubble-ellipses-outline" size={17} color={colors.primary} />
+                  </View>
+                  <View style={styles.threadBody}>
+                    <View style={styles.threadTopLine}>
+                      <Text
+                        numberOfLines={1}
+                        style={[styles.threadTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}
+                      >
+                        {thread.subject}
+                      </Text>
+                      <View style={styles.threadHeaderRight}>
+                        {unreadCount > 0 ? (
+                          <View style={styles.unreadBadge}>
+                            <Text style={styles.unreadBadgeText}>
+                              {unreadCount > 99 ? "99+" : unreadCount}
+                            </Text>
+                          </View>
+                        ) : null}
+                        <View
+                          style={[
+                            styles.statusChip,
+                            {
+                              backgroundColor:
+                                thread.status === "open"
+                                  ? `${colors.warning}15`
+                                  : `${colors.success}15`,
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={{
+                              color: thread.status === "open" ? colors.warning : colors.success,
+                              fontFamily: "Inter_600SemiBold",
+                              fontSize: 10,
+                            }}
+                          >
+                            {thread.status.toUpperCase()}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                    <Text
+                      style={[styles.threadMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}
+                      numberOfLines={1}
+                    >
                       {thread.requestedByName} - {thread.priority.toUpperCase()}
                     </Text>
-                    <Text style={[styles.threadMeta, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-                      {new Date(thread.updatedAt).toLocaleString()}
-                    </Text>
-                  </View>
-                  <View
-                    style={[
-                      styles.statusChip,
-                      {
-                        backgroundColor:
-                          thread.status === "open" ? colors.warning + "15" : colors.success + "15",
-                      },
-                    ]}
-                  >
                     <Text
-                      style={{
-                        color: thread.status === "open" ? colors.warning : colors.success,
-                        fontFamily: "Inter_600SemiBold",
-                        fontSize: 10,
-                      }}
+                      numberOfLines={1}
+                      style={[
+                        styles.threadPreview,
+                        {
+                          color: unreadCount > 0 ? colors.text : colors.textTertiary,
+                          fontFamily: unreadCount > 0 ? "Inter_500Medium" : "Inter_400Regular",
+                        },
+                      ]}
                     >
-                      {thread.status.toUpperCase()}
+                      {previewText}
                     </Text>
                   </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.textTertiary} />
                 </Pressable>
-              ))
-            )}
-          </View>
-
-          <View style={[styles.card, styles.rightCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                Conversation
-              </Text>
-              {activeThread ? (
-                <Pressable
-                  onPress={() => void handleToggleStatus(activeThread)}
-                  disabled={actingThreadId === activeThread.id}
-                  style={[
-                    styles.statusToggleButton,
-                    {
-                      borderColor: colors.border,
-                      opacity: actingThreadId === activeThread.id ? 0.6 : 1,
-                    },
-                  ]}
-                >
-                  {actingThreadId === activeThread.id ? (
-                    <ActivityIndicator size="small" color={colors.textSecondary} />
-                  ) : (
-                    <Text style={{ color: colors.textSecondary, fontFamily: "Inter_500Medium", fontSize: 11 }}>
-                      {activeThread.status === "open" ? "Close" : "Reopen"}
-                    </Text>
-                  )}
-                </Pressable>
-              ) : null}
-            </View>
-
-            {!activeThread ? (
-              <View style={styles.emptyWrap}>
-                <Ionicons name="arrow-back-outline" size={18} color={colors.textTertiary} />
-                <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                  Select a thread to view messages.
-                </Text>
-              </View>
-            ) : (
-              <>
-                <ScrollView style={styles.messagesList} showsVerticalScrollIndicator={false}>
-                  {activeThread.messages.map((entry) => {
-                    const isOwn = entry.senderId === user?.id;
-                    return (
-                      <View
-                        key={entry.id}
-                        style={[
-                          styles.messageBubble,
-                          {
-                            alignSelf: isOwn ? "flex-end" : "flex-start",
-                            backgroundColor: isOwn ? colors.primary + "15" : colors.background,
-                            borderColor: colors.border,
-                          },
-                        ]}
-                      >
-                        <Text style={[styles.messageSender, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-                          {entry.senderName}
-                        </Text>
-                        <Text style={[styles.messageText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                          {entry.message}
-                        </Text>
-                        <Text style={[styles.messageTime, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-                          {new Date(entry.createdAt).toLocaleString()}
-                        </Text>
-                      </View>
-                    );
-                  })}
-                </ScrollView>
-                <View style={styles.replyRow}>
-                  <TextInput
-                    value={replyText}
-                    onChangeText={setReplyText}
-                    placeholder="Write a reply..."
-                    placeholderTextColor={colors.textTertiary}
-                    style={[
-                      styles.replyInput,
-                      {
-                        color: colors.text,
-                        borderColor: colors.border,
-                        backgroundColor: colors.background,
-                      },
-                    ]}
-                  />
-                  <Pressable
-                    onPress={() => void handleReply()}
-                    disabled={!replyText.trim() || submitting || activeThread.status === "closed"}
-                    style={[
-                      styles.replyButton,
-                      {
-                        backgroundColor: colors.primary,
-                        opacity: !replyText.trim() || submitting || activeThread.status === "closed" ? 0.6 : 1,
-                      },
-                    ]}
-                  >
-                    {submitting ? (
-                      <ActivityIndicator size="small" color="#fff" />
-                    ) : (
-                      <Ionicons name="paper-plane" size={14} color="#fff" />
-                    )}
-                  </Pressable>
-                </View>
-              </>
-            )}
-          </View>
+              );
+            })
+          )}
         </Animated.View>
       </ScrollView>
     </AppCanvas>
@@ -459,18 +455,12 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_600SemiBold",
     fontSize: 12,
   },
-  columnsWrap: {
+  threadCard: {
     marginTop: 12,
-    gap: 12,
-  },
-  leftCard: {
-    minHeight: 160,
-  },
-  rightCard: {
-    minHeight: 280,
+    minHeight: 240,
   },
   emptyWrap: {
-    minHeight: 100,
+    minHeight: 120,
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
@@ -479,82 +469,65 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
   },
   threadRow: {
+    minHeight: 74,
     paddingVertical: 10,
-    paddingHorizontal: 2,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
   },
-  threadTitle: {
-    fontSize: 13.5,
-  },
-  threadMeta: {
-    fontSize: 11,
-  },
-  statusChip: {
-    minWidth: 72,
-    minHeight: 24,
-    paddingHorizontal: 8,
-    borderRadius: 12,
+  threadIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(20, 184, 166, 0.12)",
   },
-  sectionHeaderRow: {
+  threadBody: {
+    flex: 1,
+    gap: 2,
+  },
+  threadTopLine: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 8,
   },
-  statusToggleButton: {
-    minHeight: 30,
-    minWidth: 74,
-    borderWidth: 1,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 10,
-  },
-  messagesList: {
-    maxHeight: 280,
-    marginTop: 8,
-  },
-  messageBubble: {
-    maxWidth: "94%",
-    borderRadius: 10,
-    borderWidth: 1,
-    padding: 8,
-    marginBottom: 8,
-    gap: 3,
-  },
-  messageSender: {
-    fontSize: 11.5,
-  },
-  messageText: {
-    fontSize: 12.5,
-    lineHeight: 18,
-  },
-  messageTime: {
-    fontSize: 10,
-  },
-  replyRow: {
-    marginTop: 8,
+  threadHeaderRight: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
   },
-  replyInput: {
+  threadTitle: {
     flex: 1,
-    minHeight: 42,
-    borderRadius: 10,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    fontFamily: "Inter_400Regular",
+    fontSize: 13.5,
   },
-  replyButton: {
-    width: 42,
-    height: 42,
+  unreadBadge: {
+    minWidth: 20,
+    height: 20,
+    paddingHorizontal: 6,
     borderRadius: 10,
+    backgroundColor: "#EF4444",
     alignItems: "center",
     justifyContent: "center",
+  },
+  unreadBadgeText: {
+    color: "#fff",
+    fontFamily: "Inter_700Bold",
+    fontSize: 10,
+  },
+  statusChip: {
+    minWidth: 66,
+    minHeight: 22,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  threadMeta: {
+    fontSize: 11,
+  },
+  threadPreview: {
+    fontSize: 11.5,
   },
 });

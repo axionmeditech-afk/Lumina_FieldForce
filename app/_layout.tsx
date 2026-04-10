@@ -81,6 +81,7 @@ function RootLayoutNav() {
       <Stack.Screen name="route-tracking" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="employee/[id]" options={{ presentation: "card", animation: "slide_from_right" }} />
       <Stack.Screen name="conversation/[id]" options={{ presentation: "card", animation: "slide_from_right" }} />
+      <Stack.Screen name="support-thread/[id]" options={{ presentation: "card", animation: "slide_from_right" }} />
     </Stack>
   );
 }

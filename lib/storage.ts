@@ -4205,15 +4205,94 @@ export async function markAllNotificationsRead(): Promise<void> {
   await setItem(KEYS.NOTIFICATIONS, next);
 }
 
+function normalizeSeenByIds(value: unknown, senderId: string): string[] {
+  const source = Array.isArray(value) ? value : [];
+  const normalized = source
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => normalizeWhitespace(entry))
+    .filter((entry) => Boolean(entry));
+  if (senderId && !normalized.includes(senderId)) {
+    normalized.push(senderId);
+  }
+  return Array.from(new Set(normalized));
+}
+
+function normalizeSupportMessageDelivery(
+  message: SupportMessage,
+  options: { allowPromoteToDelivered: boolean }
+): { message: SupportMessage; changed: boolean } {
+  const senderId = normalizeWhitespace(message.senderId);
+  const seenByIds = normalizeSeenByIds(message.seenByIds, senderId);
+  const hasSeenByRecipient = seenByIds.some((id) => id !== senderId);
+  const hasSeenAt = Boolean(message.seenAt);
+  let deliveryStatus = message.deliveryStatus;
+
+  if (hasSeenByRecipient || hasSeenAt) {
+    deliveryStatus = "seen";
+  } else if (deliveryStatus === "sent") {
+    if (options.allowPromoteToDelivered) {
+      deliveryStatus = "delivered";
+    }
+  } else if (!deliveryStatus) {
+    deliveryStatus = options.allowPromoteToDelivered ? "delivered" : "sent";
+  }
+
+  const deliveredAt =
+    deliveryStatus === "delivered" || deliveryStatus === "seen"
+      ? message.deliveredAt || message.createdAt
+      : null;
+  const seenAt = deliveryStatus === "seen" ? message.seenAt || message.createdAt : null;
+
+  const nextMessage: SupportMessage = {
+    ...message,
+    deliveryStatus,
+    deliveredAt,
+    seenAt,
+    seenByIds,
+  };
+
+  const changed =
+    nextMessage.deliveryStatus !== message.deliveryStatus ||
+    (nextMessage.deliveredAt || null) !== (message.deliveredAt || null) ||
+    (nextMessage.seenAt || null) !== (message.seenAt || null) ||
+    JSON.stringify(nextMessage.seenByIds || []) !== JSON.stringify(message.seenByIds || []);
+
+  return { message: nextMessage, changed };
+}
+
+async function normalizeSupportThreadsForSync(
+  threads: SupportThread[],
+  options: { allowPromoteToDelivered: boolean }
+): Promise<SupportThread[]> {
+  let changedAny = false;
+  const normalized = threads.map((thread) => {
+    const nextMessages = thread.messages.map((message) => {
+      const normalizedMessage = normalizeSupportMessageDelivery(message, options);
+      if (normalizedMessage.changed) changedAny = true;
+      return normalizedMessage.message;
+    });
+    return { ...thread, messages: nextMessages };
+  });
+
+  if (changedAny) {
+    await setLocalOnlyItem(KEYS.SUPPORT_THREADS, normalized);
+  }
+  return normalized;
+}
+
 export async function getSupportThreadsForCurrentUser(): Promise<SupportThread[]> {
   const currentUser = await getCurrentUser();
   if (!currentUser) return [];
   const threads = await getRawList<SupportThread>(KEYS.SUPPORT_THREADS);
+  const hasPendingWrite = await hasPendingRemoteStateWrite(KEYS.SUPPORT_THREADS);
+  const normalizedThreads = await normalizeSupportThreadsForSync(threads, {
+    allowPromoteToDelivered: !hasPendingWrite,
+  });
   if (currentUser.role === "admin") {
-    return threads.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return normalizedThreads.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
   const companyId = await getActiveCompanyId();
-  const scoped = threads.filter((thread) => matchesCompany(thread, companyId));
+  const scoped = normalizedThreads.filter((thread) => matchesCompany(thread, companyId));
   if (canModerateSupport(currentUser.role)) {
     return scoped.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
@@ -4259,6 +4338,10 @@ export async function createSupportThread(input: {
           senderRole: currentUser.role,
           message,
           createdAt: now,
+          deliveryStatus: "sent",
+          deliveredAt: null,
+          seenAt: null,
+          seenByIds: [currentUser.id],
         },
       ],
     },
@@ -4321,6 +4404,10 @@ export async function addSupportThreadMessage(
     senderRole: currentUser.role,
     message: text,
     createdAt: now,
+    deliveryStatus: "sent",
+    deliveredAt: null,
+    seenAt: null,
+    seenByIds: [currentUser.id],
   };
   const updated: SupportThread = {
     ...current,
@@ -4332,10 +4419,11 @@ export async function addSupportThreadMessage(
   await setItem(KEYS.SUPPORT_THREADS, threads);
 
   try {
+    const messagePreview = text.length > 84 ? `${text.slice(0, 84).trim()}...` : text;
     await addNotification({
       id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       title: `Support Update: ${updated.subject}`,
-      body: `${currentUser.name} replied to support thread.`,
+      body: `${currentUser.name}: ${messagePreview}`,
       kind: "support",
       audience: isModerator ? updated.requestedByRole : "admin",
       createdById: currentUser.id,
@@ -4347,6 +4435,48 @@ export async function addSupportThreadMessage(
   }
 
   return updated;
+}
+
+export async function markSupportThreadMessagesSeen(threadId: string): Promise<boolean> {
+  const currentUser = await getCurrentUser();
+  if (!currentUser) return false;
+  const companyId = await getActiveCompanyId();
+  const threads = await getRawList<SupportThread>(KEYS.SUPPORT_THREADS);
+  const isAdmin = currentUser.role === "admin";
+  const index = threads.findIndex(
+    (thread) => thread.id === threadId && (isAdmin || matchesCompany(thread, companyId))
+  );
+  if (index < 0) return false;
+
+  const target = threads[index];
+  let changed = false;
+  const now = new Date().toISOString();
+  const nextMessages = target.messages.map((message) => {
+    const normalized = normalizeSupportMessageDelivery(message, { allowPromoteToDelivered: true }).message;
+    if (normalized.senderId === currentUser.id) {
+      return normalized;
+    }
+    const seenByIds = normalizeSeenByIds(normalized.seenByIds, normalized.senderId);
+    if (seenByIds.includes(currentUser.id) && normalized.deliveryStatus === "seen") {
+      return normalized;
+    }
+    changed = true;
+    return {
+      ...normalized,
+      deliveryStatus: "seen" as const,
+      deliveredAt: normalized.deliveredAt || normalized.createdAt,
+      seenAt: now,
+      seenByIds: Array.from(new Set([...seenByIds, currentUser.id])),
+    };
+  });
+
+  if (!changed) return false;
+  threads[index] = {
+    ...target,
+    messages: nextMessages,
+  };
+  await setItem(KEYS.SUPPORT_THREADS, threads);
+  return true;
 }
 
 export async function setSupportThreadStatus(

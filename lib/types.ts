@@ -345,6 +345,10 @@ export interface SupportMessage {
   senderRole: UserRole;
   message: string;
   createdAt: string;
+  deliveryStatus?: "sent" | "delivered" | "seen";
+  deliveredAt?: string | null;
+  seenAt?: string | null;
+  seenByIds?: string[];
 }
 
 export interface SupportThread {

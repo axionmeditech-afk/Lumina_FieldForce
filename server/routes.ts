@@ -4046,10 +4046,28 @@ async function ensureSupportTables(): Promise<void> {
       \`sender_name\` VARCHAR(191) NOT NULL,
       \`sender_role\` ENUM('admin','hr','manager','salesperson','employee') NOT NULL,
       \`body\` LONGTEXT NOT NULL,
+      \`delivery_status\` ENUM('sent','delivered','seen') NOT NULL DEFAULT 'delivered',
+      \`read_state\` ENUM('unread','read') NOT NULL DEFAULT 'unread',
+      \`delivered_at\` DATETIME NULL,
+      \`seen_at\` DATETIME NULL,
+      \`seen_by_user_ids_json\` LONGTEXT NULL,
       \`created_at\` DATETIME NOT NULL,
       PRIMARY KEY (\`id\`),
       KEY \`idx_lff_support_messages_thread_time\` (\`thread_id\`, \`created_at\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
+    ALTER TABLE \`lff_support_messages\`
+      ADD COLUMN IF NOT EXISTS \`delivery_status\` ENUM('sent','delivered','seen') NOT NULL DEFAULT 'delivered' AFTER \`body\`,
+      ADD COLUMN IF NOT EXISTS \`read_state\` ENUM('unread','read') NOT NULL DEFAULT 'unread' AFTER \`delivery_status\`,
+      ADD COLUMN IF NOT EXISTS \`delivered_at\` DATETIME NULL AFTER \`delivery_status\`,
+      ADD COLUMN IF NOT EXISTS \`seen_at\` DATETIME NULL AFTER \`delivered_at\`,
+      ADD COLUMN IF NOT EXISTS \`seen_by_user_ids_json\` LONGTEXT NULL AFTER \`seen_at\`
+  `);
+  await conn.execute(`
+    UPDATE \`lff_support_messages\`
+    SET \`read_state\` = 'read'
+    WHERE \`delivery_status\` = 'seen' OR \`seen_at\` IS NOT NULL
   `);
   supportTablesEnsured = true;
 }
@@ -4090,6 +4108,11 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
         senderName: string;
         senderRole: UserRole;
         body: string;
+        deliveryStatus: "sent" | "delivered" | "seen";
+        readState: "unread" | "read";
+        deliveredAt: string | null;
+        seenAt: string | null;
+        seenByUserIdsJson: string | null;
         createdAt: string;
       }> = [];
 
@@ -4098,12 +4121,30 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
         const message = rawMessage as Record<string, unknown>;
         const body = toNullableText(message.message ?? message.body);
         if (!body) continue;
+        const senderId = toRequiredText(message.senderId, requestedById);
+        const seenByUserIds = parseStringArrayJson(message.seenByIds);
+        const hasRecipientSeen = seenByUserIds.some((entry) => entry !== senderId);
+        const normalizedSeenAt = toNullableText(message.seenAt) ? toSqlTimestamp(message.seenAt) : null;
+        const readState: "unread" | "read" =
+          message.deliveryStatus === "seen" || Boolean(normalizedSeenAt) || hasRecipientSeen
+            ? "read"
+            : "unread";
         normalizedMessages.push({
           id: toStringId(message.id) || `support_msg_${randomUUID()}`,
-          senderId: toRequiredText(message.senderId, requestedById),
+          senderId,
           senderName: toRequiredText(message.senderName, requestedByName),
           senderRole: normalizeRole(message.senderRole ?? requestedByRole),
           body,
+          deliveryStatus:
+            message.deliveryStatus === "sent" || message.deliveryStatus === "seen"
+              ? message.deliveryStatus
+              : "delivered",
+          readState,
+          deliveredAt: toNullableText(message.deliveredAt)
+            ? toSqlTimestamp(message.deliveredAt)
+            : null,
+          seenAt: normalizedSeenAt,
+          seenByUserIdsJson: JSON.stringify(seenByUserIds),
           createdAt: toSqlTimestamp(message.createdAt),
         });
       }
@@ -4148,8 +4189,8 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
       for (const message of normalizedMessages) {
         await conn.execute(
           `INSERT INTO lff_support_messages
-            (id, thread_id, sender_id, sender_name, sender_role, body, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            (id, thread_id, sender_id, sender_name, sender_role, body, delivery_status, read_state, delivered_at, seen_at, seen_by_user_ids_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             message.id,
             threadId,
@@ -4157,6 +4198,11 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
             message.senderName,
             message.senderRole,
             message.body,
+            message.deliveryStatus,
+            message.readState,
+            message.deliveredAt,
+            message.seenAt,
+            message.seenByUserIdsJson,
             message.createdAt,
           ]
         );
@@ -4208,7 +4254,8 @@ async function listSupportThreadsFromMySql(): Promise<unknown[]> {
   if (!threadRows?.length) return [];
 
   const [messageRows] = await conn.query<any[]>(`
-    SELECT id, thread_id, sender_id, sender_name, sender_role, body, created_at
+    SELECT id, thread_id, sender_id, sender_name, sender_role, body,
+           delivery_status, read_state, delivered_at, seen_at, seen_by_user_ids_json, created_at
     FROM lff_support_messages
     ORDER BY thread_id ASC, created_at ASC
   `);
@@ -4218,12 +4265,24 @@ async function listSupportThreadsFromMySql(): Promise<unknown[]> {
   for (const row of messageRows || []) {
     const threadId = row?.thread_id ? String(row.thread_id) : "";
     if (!threadId) continue;
+    const normalizedReadState: "unread" | "read" = row?.read_state === "read" ? "read" : "unread";
+    const normalizedSeenAt = row?.seen_at ? toIsoTimestamp(row.seen_at, nowIso) : null;
     const nextMessage: Record<string, unknown> = {
       id: row?.id ? String(row.id) : `support_msg_${randomUUID()}`,
       senderId: row?.sender_id ? String(row.sender_id) : "system",
       senderName: toRequiredText(row?.sender_name, "User"),
       senderRole: normalizeRole(row?.sender_role),
       message: toRequiredText(row?.body, ""),
+      deliveryStatus:
+        normalizedReadState === "read"
+          ? "seen"
+          : row?.delivery_status === "sent" || row?.delivery_status === "seen"
+            ? row.delivery_status
+            : "delivered",
+      readState: normalizedReadState,
+      deliveredAt: row?.delivered_at ? toIsoTimestamp(row.delivered_at, nowIso) : null,
+      seenAt: normalizedReadState === "read" ? normalizedSeenAt || nowIso : normalizedSeenAt,
+      seenByIds: parseStringArrayJson(row?.seen_by_user_ids_json),
       createdAt: toIsoTimestamp(row?.created_at, nowIso),
     };
     const current = messagesByThread.get(threadId) || [];
