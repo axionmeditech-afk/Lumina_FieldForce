@@ -782,6 +782,10 @@ let taskVisitNotesColumnsEnsured = false;
 let visitHistoryTableEnsured = false;
 let conversationsTableEnsured = false;
 let legacyConversationsMigrated = false;
+const ENV_DOLIBARR_SUPERUSER_EMAILS = String(process.env.DOLIBARR_SUPERUSER_EMAILS || "")
+  .split(",")
+  .map((entry) => normalizeEmailKey(entry))
+  .filter(Boolean);
 
 function setAuthUserRecord(record: AuthUserRecord): void {
   const emailKey = normalizeEmailKey(record.user.email);
@@ -2018,6 +2022,53 @@ function normalizeRole(role: unknown): UserRole {
     return role;
   }
   return "salesperson";
+}
+
+async function isDolibarrSuperuserReviewer(req: Request): Promise<boolean> {
+  if (req.auth?.role !== "admin") return false;
+  const reviewerEmail = normalizeEmailKey(req.auth?.email);
+  if (reviewerEmail && ENV_DOLIBARR_SUPERUSER_EMAILS.includes(reviewerEmail)) {
+    return true;
+  }
+  if (!isMySqlStateEnabled()) {
+    // Fallback for non-MySQL mode: only app-admin can continue.
+    return req.auth?.role === "admin";
+  }
+
+  const reviewerLogin = normalizeLoginKey(
+    reviewerEmail.includes("@") ? reviewerEmail.split("@")[0] || reviewerEmail : reviewerEmail
+  );
+  if (!reviewerEmail && !reviewerLogin) return false;
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid, login, admin
+     FROM nmy5_user
+     WHERE LOWER(TRIM(email)) = ? OR LOWER(TRIM(login)) = ?
+     LIMIT 1`,
+    [reviewerEmail, reviewerLogin]
+  );
+  if (!rows || rows.length === 0) return false;
+  const row = rows[0];
+  const isAdmin = Number(row?.admin || 0) === 1;
+  const login = normalizeLoginKey(String(row?.login || ""));
+  const rowId = Number(row?.rowid || 0);
+  // Treat true Dolibarr superuser as either primary admin row or canonical "admin" login.
+  return isAdmin && (rowId === 1 || login === "admin");
+}
+
+async function forceDolibarrAdminPrivilegesForUserIdentity(user: AppUser): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const email = normalizeEmailKey(user.email);
+  const login = normalizeLoginKey(user.login || buildLoginFromEmailAndName(email, user.name));
+  if (!email && !login) return;
+
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `UPDATE nmy5_user
+     SET admin = 1, employee = 0, statut = 1, tms = NOW()
+     WHERE LOWER(TRIM(email)) = ? OR LOWER(TRIM(login)) = ?`,
+    [email, login]
+  );
 }
 
 function parseRequestStatus(
@@ -5996,6 +6047,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     setAuthUserRecord(authRecord);
     try {
       await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
+      if (user.role === "admin") {
+        await forceDolibarrAdminPrivilegesForUserIdentity(user);
+      }
     } catch (error) {
       removeAuthUserByEmail(user.email);
       console.error("Failed to persist registered user in MySQL", error);
@@ -6093,6 +6147,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       setAuthUserRecord(authRecord);
       try {
         await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
+        await forceDolibarrAdminPrivilegesForUserIdentity(bootstrapAdmin);
       } catch (error) {
         removeAuthUserByEmail(normalizedEmail);
         console.error("Failed to persist bootstrap admin in MySQL", error);
@@ -6300,6 +6355,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
 
+      if (currentRequest.requestedRole === "admin") {
+        const canApproveAdminRequest = await isDolibarrSuperuserReviewer(req);
+        if (!canApproveAdminRequest) {
+          res.status(403).json({
+            message:
+              "Admin access requests can only be approved by Dolibarr superuser (primary admin account).",
+          });
+          return;
+        }
+      }
+
       const now = new Date().toISOString();
       const approvedRole =
         action === "approved"
@@ -6462,6 +6528,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             reviewedSalespersonId,
             action === "approved" && isSalesRole(finalRole) ? assignedStockistId : null
           );
+        }
+        if (action === "approved" && reviewedUser?.role === "admin") {
+          await forceDolibarrAdminPrivilegesForUserIdentity(reviewedUser);
         }
         await insertAccessRequestInMySql(reviewedRequest);
       } catch (error) {
