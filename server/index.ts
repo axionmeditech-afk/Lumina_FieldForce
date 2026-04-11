@@ -74,7 +74,10 @@ function setupCors(app: express.Application) {
         "Access-Control-Allow-Methods",
         "GET, POST, PUT, DELETE, OPTIONS",
       );
-      res.header("Access-Control-Allow-Headers", "Content-Type");
+      res.header(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, X-File-Name, X-Attachment-Type",
+      );
       res.header("Access-Control-Allow-Credentials", "true");
     }
 
@@ -234,6 +237,13 @@ function configureExpoAndLanding(app: express.Application) {
   });
 
   app.use("/assets", express.static(path.resolve(process.cwd(), "assets")));
+  app.use(
+    "/support-attachments",
+    express.static(path.resolve(process.cwd(), "server_uploads", "support"), {
+      maxAge: "30d",
+      etag: true,
+    })
+  );
   app.use(express.static(path.resolve(process.cwd(), "static-build/web")));
   app.use(express.static(path.resolve(process.cwd(), "static-build")));
 

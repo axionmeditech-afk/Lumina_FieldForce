@@ -345,10 +345,26 @@ export interface SupportMessage {
   senderRole: UserRole;
   message: string;
   createdAt: string;
+  attachments?: SupportAttachment[];
   deliveryStatus?: "sent" | "delivered" | "seen";
   deliveredAt?: string | null;
   seenAt?: string | null;
   seenByIds?: string[];
+}
+
+export type SupportAttachmentType = "image" | "video" | "audio" | "document" | "other";
+
+export interface SupportAttachment {
+  id: string;
+  messageId?: string;
+  threadId?: string;
+  url: string;
+  name?: string;
+  mimeType?: string;
+  sizeBytes?: number | null;
+  attachmentType: SupportAttachmentType;
+  uploadedById?: string | null;
+  createdAt: string;
 }
 
 export interface SupportThread {

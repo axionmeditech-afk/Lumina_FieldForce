@@ -33,6 +33,7 @@ import {
   syncApprovedUserToDolibarrEmployee,
   syncAttendanceWithDolibarr,
 } from "@/server/services/dolibarr-sync";
+import { storeSupportAttachmentBinary } from "@/server/services/support-attachments";
 import {
   getMapplsDirectionsForLogs,
   getMapplsDirectionsForCoordinates,
@@ -4011,6 +4012,21 @@ function normalizeSupportCategory(value: unknown): string {
   return normalized.slice(0, 80);
 }
 
+function normalizeSupportAttachmentType(
+  value: unknown
+): "image" | "video" | "audio" | "document" | "other" {
+  if (
+    value === "image" ||
+    value === "video" ||
+    value === "audio" ||
+    value === "document" ||
+    value === "other"
+  ) {
+    return value;
+  }
+  return "other";
+}
+
 async function ensureSupportTables(): Promise<void> {
   if (supportTablesEnsured || !isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
@@ -4057,12 +4073,39 @@ async function ensureSupportTables(): Promise<void> {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_support_message_attachments\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`message_id\` VARCHAR(64) NOT NULL,
+      \`thread_id\` VARCHAR(64) NOT NULL,
+      \`file_url\` LONGTEXT NOT NULL,
+      \`file_name\` VARCHAR(255) NULL,
+      \`mime_type\` VARCHAR(127) NULL,
+      \`file_size_bytes\` BIGINT NULL,
+      \`attachment_type\` ENUM('image','video','audio','document','other') NOT NULL DEFAULT 'other',
+      \`uploaded_by_id\` VARCHAR(64) NULL,
+      \`created_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_support_msg_attach_message\` (\`message_id\`),
+      KEY \`idx_lff_support_msg_attach_thread\` (\`thread_id\`),
+      KEY \`idx_lff_support_msg_attach_created\` (\`created_at\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  await conn.execute(`
     ALTER TABLE \`lff_support_messages\`
       ADD COLUMN IF NOT EXISTS \`delivery_status\` ENUM('sent','delivered','seen') NOT NULL DEFAULT 'delivered' AFTER \`body\`,
       ADD COLUMN IF NOT EXISTS \`read_state\` ENUM('unread','read') NOT NULL DEFAULT 'unread' AFTER \`delivery_status\`,
       ADD COLUMN IF NOT EXISTS \`delivered_at\` DATETIME NULL AFTER \`delivery_status\`,
       ADD COLUMN IF NOT EXISTS \`seen_at\` DATETIME NULL AFTER \`delivered_at\`,
       ADD COLUMN IF NOT EXISTS \`seen_by_user_ids_json\` LONGTEXT NULL AFTER \`seen_at\`
+  `);
+  await conn.execute(`
+    ALTER TABLE \`lff_support_message_attachments\`
+      ADD COLUMN IF NOT EXISTS \`file_name\` VARCHAR(255) NULL AFTER \`file_url\`,
+      ADD COLUMN IF NOT EXISTS \`mime_type\` VARCHAR(127) NULL AFTER \`file_name\`,
+      ADD COLUMN IF NOT EXISTS \`file_size_bytes\` BIGINT NULL AFTER \`mime_type\`,
+      ADD COLUMN IF NOT EXISTS \`attachment_type\` ENUM('image','video','audio','document','other') NOT NULL DEFAULT 'other' AFTER \`file_size_bytes\`,
+      ADD COLUMN IF NOT EXISTS \`uploaded_by_id\` VARCHAR(64) NULL AFTER \`attachment_type\`,
+      ADD COLUMN IF NOT EXISTS \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER \`uploaded_by_id\`
   `);
   await conn.execute(`
     UPDATE \`lff_support_messages\`
@@ -4078,6 +4121,7 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_support_message_attachments");
     await conn.execute("DELETE FROM lff_support_messages");
     await conn.execute("DELETE FROM lff_support_threads");
 
@@ -4108,6 +4152,16 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
         senderName: string;
         senderRole: UserRole;
         body: string;
+        attachments: Array<{
+          id: string;
+          fileUrl: string;
+          fileName: string | null;
+          mimeType: string | null;
+          fileSizeBytes: number | null;
+          attachmentType: "image" | "video" | "audio" | "document" | "other";
+          uploadedById: string | null;
+          createdAt: string;
+        }>;
         deliveryStatus: "sent" | "delivered" | "seen";
         readState: "unread" | "read";
         deliveredAt: string | null;
@@ -4119,9 +4173,42 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
       for (const rawMessage of sourceMessages) {
         if (!rawMessage || typeof rawMessage !== "object") continue;
         const message = rawMessage as Record<string, unknown>;
-        const body = toNullableText(message.message ?? message.body);
-        if (!body) continue;
+        const body = toNullableText(message.message ?? message.body) || "";
         const senderId = toRequiredText(message.senderId, requestedById);
+        const sourceAttachments = Array.isArray(message.attachments) ? message.attachments : [];
+        const normalizedAttachments: Array<{
+          id: string;
+          fileUrl: string;
+          fileName: string | null;
+          mimeType: string | null;
+          fileSizeBytes: number | null;
+          attachmentType: "image" | "video" | "audio" | "document" | "other";
+          uploadedById: string | null;
+          createdAt: string;
+        }> = [];
+        for (const rawAttachment of sourceAttachments) {
+          if (!rawAttachment || typeof rawAttachment !== "object") continue;
+          const attachment = rawAttachment as Record<string, unknown>;
+          const fileUrl = toNullableText(attachment.url ?? attachment.fileUrl);
+          if (!fileUrl) continue;
+          const parsedSize =
+            typeof attachment.sizeBytes === "number" && Number.isFinite(attachment.sizeBytes)
+              ? Math.max(0, Math.floor(attachment.sizeBytes))
+              : typeof attachment.fileSizeBytes === "number" && Number.isFinite(attachment.fileSizeBytes)
+                ? Math.max(0, Math.floor(attachment.fileSizeBytes))
+                : null;
+          normalizedAttachments.push({
+            id: toStringId(attachment.id) || `support_att_${randomUUID()}`,
+            fileUrl,
+            fileName: toNullableText(attachment.name ?? attachment.fileName),
+            mimeType: toNullableText(attachment.mimeType ?? attachment.fileMime),
+            fileSizeBytes: parsedSize,
+            attachmentType: normalizeSupportAttachmentType(attachment.attachmentType),
+            uploadedById: toNullableText(attachment.uploadedById),
+            createdAt: toSqlTimestamp(attachment.createdAt ?? message.createdAt),
+          });
+        }
+        if (!body && normalizedAttachments.length === 0) continue;
         const seenByUserIds = parseStringArrayJson(message.seenByIds);
         const hasRecipientSeen = seenByUserIds.some((entry) => entry !== senderId);
         const normalizedSeenAt = toNullableText(message.seenAt) ? toSqlTimestamp(message.seenAt) : null;
@@ -4135,6 +4222,7 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
           senderName: toRequiredText(message.senderName, requestedByName),
           senderRole: normalizeRole(message.senderRole ?? requestedByRole),
           body,
+          attachments: normalizedAttachments,
           deliveryStatus:
             message.deliveryStatus === "sent" || message.deliveryStatus === "seen"
               ? message.deliveryStatus
@@ -4153,7 +4241,15 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
         normalizedMessages.length > 0
           ? normalizedMessages[normalizedMessages.length - 1]
           : null;
-      const lastMessage = lastMessageCandidate?.body ?? toNullableText(item.lastMessage);
+      const lastMessageFromCandidate = lastMessageCandidate
+        ? lastMessageCandidate.body ||
+          (lastMessageCandidate.attachments.length === 1
+            ? "[Attachment]"
+            : lastMessageCandidate.attachments.length > 1
+              ? `[${lastMessageCandidate.attachments.length} attachments]`
+              : "")
+        : "";
+      const lastMessage = lastMessageFromCandidate || toNullableText(item.lastMessage);
       const lastMessageAt = lastMessageCandidate
         ? lastMessageCandidate.createdAt
         : toNullableText(item.lastMessageAt)
@@ -4206,6 +4302,25 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
             message.createdAt,
           ]
         );
+        for (const attachment of message.attachments) {
+          await conn.execute(
+            `INSERT INTO lff_support_message_attachments
+              (id, message_id, thread_id, file_url, file_name, mime_type, file_size_bytes, attachment_type, uploaded_by_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              attachment.id,
+              message.id,
+              threadId,
+              attachment.fileUrl,
+              attachment.fileName,
+              attachment.mimeType,
+              attachment.fileSizeBytes,
+              attachment.attachmentType,
+              attachment.uploadedById,
+              attachment.createdAt,
+            ]
+          );
+        }
       }
     }
 
@@ -4259,8 +4374,38 @@ async function listSupportThreadsFromMySql(): Promise<unknown[]> {
     FROM lff_support_messages
     ORDER BY thread_id ASC, created_at ASC
   `);
+  const [attachmentRows] = await conn.query<any[]>(`
+    SELECT id, message_id, thread_id, file_url, file_name, mime_type, file_size_bytes, attachment_type, uploaded_by_id, created_at
+    FROM lff_support_message_attachments
+    ORDER BY message_id ASC, created_at ASC
+  `);
 
   const nowIso = new Date().toISOString();
+  const attachmentsByMessage = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of attachmentRows || []) {
+    const messageId = row?.message_id ? String(row.message_id) : "";
+    if (!messageId) continue;
+    const fileUrl = toRequiredText(row?.file_url, "");
+    if (!fileUrl) continue;
+    const current = attachmentsByMessage.get(messageId) || [];
+    current.push({
+      id: row?.id ? String(row.id) : `support_att_${randomUUID()}`,
+      messageId,
+      threadId: row?.thread_id ? String(row.thread_id) : undefined,
+      url: fileUrl,
+      name: toNullableText(row?.file_name) || undefined,
+      mimeType: toNullableText(row?.mime_type) || undefined,
+      sizeBytes:
+        typeof row?.file_size_bytes === "number" && Number.isFinite(row.file_size_bytes)
+          ? Math.max(0, Math.floor(row.file_size_bytes))
+          : null,
+      attachmentType: normalizeSupportAttachmentType(row?.attachment_type),
+      uploadedById: toNullableText(row?.uploaded_by_id),
+      createdAt: toIsoTimestamp(row?.created_at, nowIso),
+    });
+    attachmentsByMessage.set(messageId, current);
+  }
+
   const messagesByThread = new Map<string, Array<Record<string, unknown>>>();
   for (const row of messageRows || []) {
     const threadId = row?.thread_id ? String(row.thread_id) : "";
@@ -4283,6 +4428,7 @@ async function listSupportThreadsFromMySql(): Promise<unknown[]> {
       deliveredAt: row?.delivered_at ? toIsoTimestamp(row.delivered_at, nowIso) : null,
       seenAt: normalizedReadState === "read" ? normalizedSeenAt || nowIso : normalizedSeenAt,
       seenByIds: parseStringArrayJson(row?.seen_by_user_ids_json),
+      attachments: attachmentsByMessage.get(row?.id ? String(row.id) : "") || [],
       createdAt: toIsoTimestamp(row?.created_at, nowIso),
     };
     const current = messagesByThread.get(threadId) || [];
@@ -5534,6 +5680,62 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     }
   });
+
+  app.post(
+    "/api/support/attachments/upload",
+    requireAuth,
+    express.raw({ type: "*/*", limit: "20mb" }),
+    async (req, res) => {
+      const uploaderId = req.auth?.sub;
+      if (!uploaderId) {
+        res.status(401).json({ message: "Not authenticated" });
+        return;
+      }
+
+      const body = req.body;
+      const fileBuffer = Buffer.isBuffer(body) ? body : null;
+      if (!fileBuffer || fileBuffer.length === 0) {
+        res.status(400).json({ message: "Attachment payload is required." });
+        return;
+      }
+
+      const rawFileName = decodeURIComponent(firstString(req.header("x-file-name")) || "attachment");
+      const mimeType = firstString(req.header("content-type")) || "application/octet-stream";
+      const attachmentType = normalizeSupportAttachmentType(firstString(req.header("x-attachment-type")));
+
+      try {
+        const stored = await storeSupportAttachmentBinary({
+          content: fileBuffer,
+          originalFileName: rawFileName,
+          mimeType,
+          attachmentType,
+          uploadedById: uploaderId,
+        });
+        const forwardedProto = firstString(req.header("x-forwarded-proto")) || req.protocol || "https";
+        const forwardedHost = firstString(req.header("x-forwarded-host")) || req.get("host") || "";
+        const absoluteUrl = forwardedHost
+          ? `${forwardedProto}://${forwardedHost}${stored.urlPath}`
+          : stored.urlPath;
+        res.status(201).json({
+          id: stored.id,
+          url: absoluteUrl,
+          name: stored.fileName,
+          mimeType: stored.mimeType,
+          sizeBytes: stored.fileSizeBytes,
+          attachmentType: stored.attachmentType,
+          uploadedById: stored.uploadedById,
+          createdAt: stored.createdAt,
+        });
+      } catch (error) {
+        res.status(500).json({
+          message:
+            error instanceof Error
+              ? `Unable to store support attachment: ${error.message}`
+              : "Unable to store support attachment.",
+        });
+      }
+    }
+  );
 
   app.all(/^\/api\/dolibarr\/proxy(\/.*)?$/, requireAuth, async (req, res) => {
     const userId = req.auth?.sub;

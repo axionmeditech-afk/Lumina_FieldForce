@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
 import Constants from "expo-constants";
+import * as FileSystem from "expo-file-system/legacy";
 import type {
   AppUser,
   AppNotification,
@@ -27,6 +28,8 @@ import type {
   UserRole,
   SupportThread,
   SupportMessage,
+  SupportAttachment,
+  SupportAttachmentType,
   NotificationAudience,
   UserAccessRequest,
 } from "./types";
@@ -88,6 +91,14 @@ type StorageUpdateEvent = {
   updatedAt: string;
 };
 type StorageUpdateListener = (event: StorageUpdateEvent) => void;
+
+export interface LocalSupportAttachmentInput {
+  uri: string;
+  name?: string;
+  mimeType?: string;
+  sizeBytes?: number | null;
+  attachmentType?: SupportAttachmentType;
+}
 
 const settingsListeners = new Set<SettingsListener>();
 const storageUpdateListeners = new Set<StorageUpdateListener>();
@@ -4205,6 +4216,181 @@ export async function markAllNotificationsRead(): Promise<void> {
   await setItem(KEYS.NOTIFICATIONS, next);
 }
 
+function inferSupportAttachmentType(
+  mimeType: string | null | undefined,
+  fileName: string | null | undefined
+): SupportAttachmentType {
+  const mime = (mimeType || "").toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  const name = (fileName || "").toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|bmp|heic|heif)$/.test(name)) return "image";
+  if (/\.(mp4|mov|m4v|webm|avi|mkv)$/.test(name)) return "video";
+  if (/\.(mp3|wav|ogg|m4a|aac|flac)$/.test(name)) return "audio";
+  if (/\.(pdf|docx?|xlsx?|pptx?|txt|zip|rar|7z|csv)$/.test(name)) return "document";
+  return mime ? "document" : "other";
+}
+
+function normalizeSupportAttachment(
+  entry: unknown,
+  fallbackCreatedAt: string
+): SupportAttachment | null {
+  if (!entry || typeof entry !== "object") return null;
+  const source = entry as Record<string, unknown>;
+  const id = normalizeWhitespace(typeof source.id === "string" ? source.id : "");
+  const url = normalizeWhitespace(
+    typeof source.url === "string"
+      ? source.url
+      : typeof source.fileUrl === "string"
+        ? source.fileUrl
+        : ""
+  );
+  if (!url) return null;
+  const name = normalizeWhitespace(
+    typeof source.name === "string"
+      ? source.name
+      : typeof source.fileName === "string"
+        ? source.fileName
+        : ""
+  );
+  const mimeType = normalizeWhitespace(
+    typeof source.mimeType === "string"
+      ? source.mimeType
+      : typeof source.fileMime === "string"
+        ? source.fileMime
+        : ""
+  );
+  const rawAttachmentType = normalizeWhitespace(
+    typeof source.attachmentType === "string" ? source.attachmentType : ""
+  );
+  const attachmentType: SupportAttachmentType =
+    rawAttachmentType === "image" ||
+    rawAttachmentType === "video" ||
+    rawAttachmentType === "audio" ||
+    rawAttachmentType === "document" ||
+    rawAttachmentType === "other"
+      ? rawAttachmentType
+      : inferSupportAttachmentType(mimeType || null, name || null);
+  const sizeBytes =
+    typeof source.sizeBytes === "number" && Number.isFinite(source.sizeBytes)
+      ? Math.max(0, Math.floor(source.sizeBytes))
+      : typeof source.fileSizeBytes === "number" && Number.isFinite(source.fileSizeBytes)
+        ? Math.max(0, Math.floor(source.fileSizeBytes))
+        : null;
+  const createdAt = normalizeWhitespace(
+    typeof source.createdAt === "string" ? source.createdAt : ""
+  );
+  return {
+    id: id || `support_att_${Math.random().toString(36).slice(2, 10)}`,
+    messageId:
+      typeof source.messageId === "string" ? normalizeWhitespace(source.messageId) || undefined : undefined,
+    threadId:
+      typeof source.threadId === "string" ? normalizeWhitespace(source.threadId) || undefined : undefined,
+    url,
+    name: name || undefined,
+    mimeType: mimeType || undefined,
+    sizeBytes,
+    attachmentType,
+    uploadedById:
+      typeof source.uploadedById === "string"
+        ? normalizeWhitespace(source.uploadedById) || null
+        : null,
+    createdAt: createdAt || fallbackCreatedAt,
+  };
+}
+
+function normalizeSupportAttachments(
+  value: unknown,
+  fallbackCreatedAt: string
+): SupportAttachment[] {
+  const source = Array.isArray(value) ? value : [];
+  const normalized = source
+    .map((entry) => normalizeSupportAttachment(entry, fallbackCreatedAt))
+    .filter((entry): entry is SupportAttachment => Boolean(entry));
+  const unique = new Map<string, SupportAttachment>();
+  for (const item of normalized) {
+    unique.set(item.id, item);
+  }
+  return Array.from(unique.values());
+}
+
+function buildSupportAttachmentFileName(local: LocalSupportAttachmentInput): string {
+  const raw = normalizeWhitespace(local.name || "");
+  if (raw) {
+    return raw.replace(/[^\w.\-() ]+/g, "_").slice(0, 120) || `support_${Date.now()}`;
+  }
+  const uri = normalizeWhitespace(local.uri);
+  const derived = uri.split("/").pop() || "";
+  if (derived) {
+    return derived.replace(/[^\w.\-() ]+/g, "_").slice(0, 120) || `support_${Date.now()}`;
+  }
+  return `support_${Date.now()}`;
+}
+
+async function uploadSupportAttachmentToRemote(
+  apiBase: string,
+  token: string,
+  local: LocalSupportAttachmentInput
+): Promise<SupportAttachment | null> {
+  const uri = normalizeWhitespace(local.uri);
+  if (!uri) return null;
+  const fileName = buildSupportAttachmentFileName(local);
+  const mimeType = normalizeWhitespace(local.mimeType || "") || "application/octet-stream";
+  const attachmentType = local.attachmentType || inferSupportAttachmentType(mimeType, fileName);
+
+  try {
+    const uploadResult = await FileSystem.uploadAsync(`${apiBase}/support/attachments/upload`, uri, {
+      httpMethod: "POST",
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": mimeType,
+        "X-File-Name": encodeURIComponent(fileName),
+        "X-Attachment-Type": attachmentType,
+      },
+    });
+
+    if (uploadResult.status < 200 || uploadResult.status >= 300) {
+      return null;
+    }
+
+    const payload = JSON.parse(uploadResult.body || "{}") as Record<string, unknown>;
+    return normalizeSupportAttachment(payload, new Date().toISOString());
+  } catch {
+    return null;
+  }
+}
+
+export async function uploadSupportAttachments(
+  attachments: LocalSupportAttachmentInput[]
+): Promise<SupportAttachment[]> {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+  const token = await getApiToken();
+  if (!token) {
+    throw new Error("Session expired. Please login again and retry attachment upload.");
+  }
+  const apiBases = await getRemoteStateApiCandidates();
+  if (!apiBases.length) {
+    throw new Error("Unable to resolve backend endpoint for attachment upload.");
+  }
+
+  const uploaded: SupportAttachment[] = [];
+  for (const local of attachments) {
+    let success: SupportAttachment | null = null;
+    for (const apiBase of apiBases) {
+      success = await uploadSupportAttachmentToRemote(apiBase, token, local);
+      if (success) break;
+    }
+    if (!success) {
+      const fileLabel = buildSupportAttachmentFileName(local);
+      throw new Error(`Unable to upload attachment: ${fileLabel}`);
+    }
+    uploaded.push(success);
+  }
+  return uploaded;
+}
+
 function normalizeSeenByIds(value: unknown, senderId: string): string[] {
   const source = Array.isArray(value) ? value : [];
   const normalized = source
@@ -4221,6 +4407,7 @@ function normalizeSupportMessageDelivery(
   message: SupportMessage,
   options: { allowPromoteToDelivered: boolean }
 ): { message: SupportMessage; changed: boolean } {
+  const attachments = normalizeSupportAttachments(message.attachments, message.createdAt);
   const senderId = normalizeWhitespace(message.senderId);
   const seenByIds = normalizeSeenByIds(message.seenByIds, senderId);
   const hasSeenByRecipient = seenByIds.some((id) => id !== senderId);
@@ -4245,6 +4432,7 @@ function normalizeSupportMessageDelivery(
 
   const nextMessage: SupportMessage = {
     ...message,
+    attachments,
     deliveryStatus,
     deliveredAt,
     seenAt,
@@ -4255,6 +4443,7 @@ function normalizeSupportMessageDelivery(
     nextMessage.deliveryStatus !== message.deliveryStatus ||
     (nextMessage.deliveredAt || null) !== (message.deliveredAt || null) ||
     (nextMessage.seenAt || null) !== (message.seenAt || null) ||
+    JSON.stringify(nextMessage.attachments || []) !== JSON.stringify(message.attachments || []) ||
     JSON.stringify(nextMessage.seenByIds || []) !== JSON.stringify(message.seenByIds || []);
 
   return { message: nextMessage, changed };
@@ -4338,6 +4527,7 @@ export async function createSupportThread(input: {
           senderRole: currentUser.role,
           message,
           createdAt: now,
+          attachments: [],
           deliveryStatus: "sent",
           deliveredAt: null,
           seenAt: null,
@@ -4371,14 +4561,17 @@ export async function createSupportThread(input: {
 
 export async function addSupportThreadMessage(
   threadId: string,
-  message: string
+  message: string,
+  options?: { attachments?: LocalSupportAttachmentInput[] }
 ): Promise<SupportThread | null> {
   const currentUser = await getCurrentUser();
   if (!currentUser) {
     throw new Error("User session not found.");
   }
   const text = message.trim();
-  if (!text) {
+  const localAttachments = Array.isArray(options?.attachments) ? options.attachments : [];
+  const uploadedAttachments = await uploadSupportAttachments(localAttachments);
+  if (!text && uploadedAttachments.length === 0) {
     throw new Error("Message cannot be empty.");
   }
   const companyId = await getActiveCompanyId();
@@ -4404,6 +4597,7 @@ export async function addSupportThreadMessage(
     senderRole: currentUser.role,
     message: text,
     createdAt: now,
+    attachments: uploadedAttachments,
     deliveryStatus: "sent",
     deliveredAt: null,
     seenAt: null,
@@ -4419,7 +4613,14 @@ export async function addSupportThreadMessage(
   await setItem(KEYS.SUPPORT_THREADS, threads);
 
   try {
-    const messagePreview = text.length > 84 ? `${text.slice(0, 84).trim()}...` : text;
+    const attachmentLabel =
+      uploadedAttachments.length === 1
+        ? "sent an attachment"
+        : uploadedAttachments.length > 1
+          ? `sent ${uploadedAttachments.length} attachments`
+          : "";
+    const basePreview = text || attachmentLabel;
+    const messagePreview = basePreview.length > 84 ? `${basePreview.slice(0, 84).trim()}...` : basePreview;
     await addNotification({
       id: `notif_support_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       title: `Support Update: ${updated.subject}`,

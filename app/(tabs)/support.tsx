@@ -281,6 +281,16 @@ export default function SupportScreen() {
               const messages = Array.isArray(thread.messages) ? thread.messages : [];
               const lastEntry = messages[messages.length - 1];
               const lastMessage = lastEntry?.message?.trim() || "";
+              const lastAttachmentCount = Array.isArray(lastEntry?.attachments)
+                ? lastEntry.attachments.length
+                : 0;
+              const lastSummary =
+                lastMessage ||
+                (lastAttachmentCount === 1
+                  ? "sent an attachment"
+                  : lastAttachmentCount > 1
+                    ? `sent ${lastAttachmentCount} attachments`
+                    : "");
               const unreadCount = messages.reduce((count, entry) => {
                 const senderId = (entry.senderId || "").trim();
                 if (!currentUserId || senderId === currentUserId) return count;
@@ -294,7 +304,9 @@ export default function SupportScreen() {
                 return seenByIds.includes(currentUserId) ? count : count + 1;
               }, 0);
               const previewText = lastEntry
-                ? `${(lastEntry.senderId || "").trim() === currentUserId ? "You" : lastEntry.senderName}: ${lastMessage}`
+                ? lastSummary
+                  ? `${(lastEntry.senderId || "").trim() === currentUserId ? "You" : lastEntry.senderName}: ${lastSummary}`
+                  : "Open this thread to chat."
                 : "Open this thread to chat.";
               return (
                 <Pressable

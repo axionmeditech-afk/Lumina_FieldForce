@@ -388,6 +388,23 @@ CREATE TABLE IF NOT EXISTS `lff_support_messages` (
   KEY `idx_lff_support_messages_thread_time` (`thread_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `lff_support_message_attachments` (
+  `id` VARCHAR(64) NOT NULL,
+  `message_id` VARCHAR(64) NOT NULL,
+  `thread_id` VARCHAR(64) NOT NULL,
+  `file_url` LONGTEXT NOT NULL,
+  `file_name` VARCHAR(255) NULL,
+  `mime_type` VARCHAR(127) NULL,
+  `file_size_bytes` BIGINT NULL,
+  `attachment_type` ENUM('image','video','audio','document','other') NOT NULL DEFAULT 'other',
+  `uploaded_by_id` VARCHAR(64) NULL,
+  `created_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_support_msg_attach_message` (`message_id`),
+  KEY `idx_lff_support_msg_attach_thread` (`thread_id`),
+  KEY `idx_lff_support_msg_attach_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `lff_dolibarr_sync_logs` (
   `id` VARCHAR(64) NOT NULL,
   `company_id` VARCHAR(64) NULL,
