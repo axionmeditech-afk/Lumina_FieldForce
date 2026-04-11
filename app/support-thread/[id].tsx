@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -10,8 +10,10 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
+  Modal,
   Alert,
-  Linking,
+  type NativeSyntheticEvent,
+  type NativeScrollEvent,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -19,6 +21,7 @@ import * as Haptics from "expo-haptics";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
+import { WebView } from "react-native-webview";
 import { AppCanvas } from "@/components/AppCanvas";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -38,6 +41,17 @@ type QueuedSupportAttachment = LocalSupportAttachmentInput & {
   id: string;
   previewUri: string;
   attachmentType: SupportAttachment["attachmentType"];
+};
+
+type AttachmentPreviewState = {
+  url: string;
+  name: string;
+  attachmentType: SupportAttachment["attachmentType"];
+};
+
+type ImageGalleryState = {
+  items: SupportAttachment[];
+  index: number;
 };
 
 function resolveThreadId(input: string | string[] | undefined): string {
@@ -93,8 +107,14 @@ export default function SupportThreadDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [replyText, setReplyText] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<QueuedSupportAttachment[]>([]);
+  const [activeAttachmentPreview, setActiveAttachmentPreview] = useState<AttachmentPreviewState | null>(
+    null
+  );
+  const [activeImageGallery, setActiveImageGallery] = useState<ImageGalleryState | null>(null);
+  const [imageGalleryWidth, setImageGalleryWidth] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [actingThreadId, setActingThreadId] = useState<string | null>(null);
+  const imageGalleryRef = useRef<ScrollView | null>(null);
 
   const activeThread = useMemo(
     () => threads.find((thread) => thread.id === threadId) || null,
@@ -221,20 +241,85 @@ export default function SupportThreadDetailScreen() {
     setPendingAttachments((previous) => previous.filter((entry) => entry.id !== attachmentId));
   }, []);
 
-  const handleOpenAttachment = useCallback(async (rawUrl: string) => {
-    const url = resolveAttachmentUrl(rawUrl);
-    if (!url) return;
-    try {
-      const canOpen = await Linking.canOpenURL(url);
-      if (!canOpen) {
-        Alert.alert("Open Failed", "This attachment URL is not accessible on your device.");
+  const handleOpenAttachment = useCallback((attachment: SupportAttachment) => {
+    const url = resolveAttachmentUrl(attachment.url);
+    if (!url) {
+      Alert.alert("Preview Unavailable", "Attachment URL is missing.");
+      return;
+    }
+    setActiveImageGallery(null);
+    setActiveAttachmentPreview({
+      url,
+      name: attachment.name || "Attachment",
+      attachmentType: attachment.attachmentType,
+    });
+  }, []);
+
+  const handleOpenImageGallery = useCallback(
+    (images: SupportAttachment[], index: number) => {
+      const validItems = images.filter((item) => Boolean(resolveAttachmentUrl(item.url)));
+      if (!validItems.length) {
+        Alert.alert("Preview Unavailable", "Image URL is missing.");
         return;
       }
-      await Linking.openURL(url);
-    } catch {
-      Alert.alert("Open Failed", "Unable to open this attachment right now.");
-    }
-  }, []);
+      const safeIndex = Math.max(0, Math.min(index, validItems.length - 1));
+      setActiveAttachmentPreview(null);
+      setActiveImageGallery({
+        items: validItems,
+        index: safeIndex,
+      });
+    },
+    []
+  );
+
+  const handleImageGalleryScrollEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (!activeImageGallery || imageGalleryWidth <= 0) return;
+      const nextIndex = Math.round(event.nativeEvent.contentOffset.x / imageGalleryWidth);
+      const boundedIndex = Math.max(0, Math.min(nextIndex, activeImageGallery.items.length - 1));
+      if (boundedIndex === activeImageGallery.index) return;
+      setActiveImageGallery((current) =>
+        current
+          ? {
+              ...current,
+              index: boundedIndex,
+            }
+          : current
+      );
+    },
+    [activeImageGallery, imageGalleryWidth]
+  );
+
+  const scrollGalleryToIndex = useCallback(
+    (nextIndex: number, animated: boolean) => {
+      if (!activeImageGallery || imageGalleryWidth <= 0) return;
+      const boundedIndex = Math.max(0, Math.min(nextIndex, activeImageGallery.items.length - 1));
+      imageGalleryRef.current?.scrollTo({
+        x: boundedIndex * imageGalleryWidth,
+        y: 0,
+        animated,
+      });
+      setActiveImageGallery((current) =>
+        current
+          ? {
+              ...current,
+              index: boundedIndex,
+            }
+          : current
+      );
+    },
+    [activeImageGallery, imageGalleryWidth]
+  );
+
+  const handlePrevImage = useCallback(() => {
+    if (!activeImageGallery) return;
+    scrollGalleryToIndex(activeImageGallery.index - 1, true);
+  }, [activeImageGallery, scrollGalleryToIndex]);
+
+  const handleNextImage = useCallback(() => {
+    if (!activeImageGallery) return;
+    scrollGalleryToIndex(activeImageGallery.index + 1, true);
+  }, [activeImageGallery, scrollGalleryToIndex]);
 
   useEffect(() => {
     if (!activeThread || !threadId) return;
@@ -259,6 +344,18 @@ export default function SupportThreadDetailScreen() {
       }
     })();
   }, [activeThread, loadData, threadId, user?.id]);
+
+  useEffect(() => {
+    if (!activeImageGallery || imageGalleryWidth <= 0) return;
+    const timer = setTimeout(() => {
+      imageGalleryRef.current?.scrollTo({
+        x: activeImageGallery.index * imageGalleryWidth,
+        y: 0,
+        animated: false,
+      });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [activeImageGallery, imageGalleryWidth]);
 
   return (
     <AppCanvas>
@@ -373,6 +470,14 @@ export default function SupportThreadDetailScreen() {
                   const tickIcon =
                     tickState === "single" ? "checkmark" : "checkmark-done";
                   const attachments = Array.isArray(entry.attachments) ? entry.attachments : [];
+                  const imageAttachments = attachments.filter(
+                    (attachment) => attachment.attachmentType === "image"
+                  );
+                  const otherAttachments = attachments.filter(
+                    (attachment) => attachment.attachmentType !== "image"
+                  );
+                  const visibleImageAttachments = imageAttachments.slice(0, 4);
+                  const imageOverflowCount = Math.max(0, imageAttachments.length - 4);
                   return (
                     <View
                       key={entry.id}
@@ -398,16 +503,65 @@ export default function SupportThreadDetailScreen() {
                           {entry.message}
                         </Text>
                       ) : null}
-                      {attachments.length > 0 ? (
-                        <View style={styles.attachmentsWrap}>
-                          {attachments.map((attachment) => {
+                      {imageAttachments.length === 1 ? (
+                        <Pressable
+                          onPress={() => handleOpenImageGallery(imageAttachments, 0)}
+                          style={[
+                            styles.singleImageWrap,
+                            {
+                              borderColor: colors.borderLight,
+                              backgroundColor: isOwn ? `${colors.primary}10` : colors.background,
+                            },
+                          ]}
+                        >
+                          <Image
+                            source={{ uri: resolveAttachmentUrl(imageAttachments[0].url) }}
+                            style={styles.singleImage}
+                            resizeMode="cover"
+                          />
+                        </Pressable>
+                      ) : null}
+                      {imageAttachments.length > 1 ? (
+                        <View style={styles.imageGridWrap}>
+                          {visibleImageAttachments.map((attachment, index) => {
                             const resolvedUrl = resolveAttachmentUrl(attachment.url);
-                            const label = attachment.name || attachment.attachmentType.toUpperCase();
-                            const isImage = attachment.attachmentType === "image";
+                            const showOverflowOverlay =
+                              index === 3 && imageOverflowCount > 0;
                             return (
                               <Pressable
                                 key={attachment.id}
-                                onPress={() => void handleOpenAttachment(resolvedUrl)}
+                                onPress={() => handleOpenImageGallery(imageAttachments, index)}
+                                style={[
+                                  styles.imageGridTile,
+                                  {
+                                    borderColor: colors.borderLight,
+                                    backgroundColor: isOwn ? `${colors.primary}10` : colors.background,
+                                  },
+                                ]}
+                              >
+                                <Image
+                                  source={{ uri: resolvedUrl }}
+                                  style={styles.imageGridImage}
+                                  resizeMode="cover"
+                                />
+                                {showOverflowOverlay ? (
+                                  <View style={styles.imageOverflowOverlay}>
+                                    <Text style={styles.imageOverflowText}>{`+${imageOverflowCount}`}</Text>
+                                  </View>
+                                ) : null}
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                      {otherAttachments.length > 0 ? (
+                        <View style={styles.attachmentsWrap}>
+                          {otherAttachments.map((attachment) => {
+                            const label = attachment.name || attachment.attachmentType.toUpperCase();
+                            return (
+                              <Pressable
+                                key={attachment.id}
+                                onPress={() => handleOpenAttachment(attachment)}
                                 style={[
                                   styles.attachmentCard,
                                   {
@@ -416,21 +570,13 @@ export default function SupportThreadDetailScreen() {
                                   },
                                 ]}
                               >
-                                {isImage ? (
-                                  <Image
-                                    source={{ uri: resolvedUrl }}
-                                    style={styles.attachmentImage}
-                                    resizeMode="cover"
+                                <View style={styles.attachmentIconWrap}>
+                                  <Ionicons
+                                    name="document-attach-outline"
+                                    size={16}
+                                    color={colors.textSecondary}
                                   />
-                                ) : (
-                                  <View style={styles.attachmentIconWrap}>
-                                    <Ionicons
-                                      name="document-attach-outline"
-                                      size={16}
-                                      color={colors.textSecondary}
-                                    />
-                                  </View>
-                                )}
+                                </View>
                                 <View style={styles.attachmentTextWrap}>
                                   <Text
                                     numberOfLines={1}
@@ -612,6 +758,145 @@ export default function SupportThreadDetailScreen() {
           )}
         </View>
       </KeyboardAvoidingView>
+      <Modal
+        visible={Boolean(activeImageGallery)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActiveImageGallery(null)}
+      >
+        <View style={styles.previewBackdrop}>
+          <Pressable
+            style={styles.previewBackdropPressable}
+            onPress={() => setActiveImageGallery(null)}
+          />
+          <View
+            style={[
+              styles.previewCard,
+              {
+                backgroundColor: colors.backgroundElevated,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={styles.previewHeader}>
+              <Text
+                numberOfLines={1}
+                style={[styles.previewTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}
+              >
+                {activeImageGallery
+                  ? `${activeImageGallery.index + 1}/${activeImageGallery.items.length} ${activeImageGallery.items[activeImageGallery.index]?.name || "Image"}`
+                  : "Image"}
+              </Text>
+              <Pressable onPress={() => setActiveImageGallery(null)} hitSlop={8}>
+                <Ionicons name="close" size={20} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+            <View
+              style={styles.previewCarouselWrap}
+              onLayout={(event) => {
+                const width = event.nativeEvent.layout.width;
+                if (!width || width === imageGalleryWidth) return;
+                setImageGalleryWidth(width);
+              }}
+            >
+              <ScrollView
+                ref={imageGalleryRef}
+                horizontal
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}
+                onMomentumScrollEnd={handleImageGalleryScrollEnd}
+                scrollEventThrottle={16}
+              >
+                {(activeImageGallery?.items || []).map((item) => (
+                  <View
+                    key={item.id}
+                    style={[styles.previewSlide, { width: imageGalleryWidth || 320 }]}
+                  >
+                    <Image
+                      source={{ uri: resolveAttachmentUrl(item.url) }}
+                      style={styles.previewImage}
+                      resizeMode="contain"
+                    />
+                  </View>
+                ))}
+              </ScrollView>
+              {activeImageGallery && activeImageGallery.items.length > 1 ? (
+                <>
+                  <Pressable
+                    onPress={handlePrevImage}
+                    disabled={activeImageGallery.index <= 0}
+                    style={[
+                      styles.carouselNavButton,
+                      styles.carouselNavLeft,
+                      { opacity: activeImageGallery.index <= 0 ? 0.35 : 0.95 },
+                    ]}
+                  >
+                    <Ionicons name="chevron-back" size={20} color="#fff" />
+                  </Pressable>
+                  <Pressable
+                    onPress={handleNextImage}
+                    disabled={activeImageGallery.index >= activeImageGallery.items.length - 1}
+                    style={[
+                      styles.carouselNavButton,
+                      styles.carouselNavRight,
+                      {
+                        opacity:
+                          activeImageGallery.index >= activeImageGallery.items.length - 1
+                            ? 0.35
+                            : 0.95,
+                      },
+                    ]}
+                  >
+                    <Ionicons name="chevron-forward" size={20} color="#fff" />
+                  </Pressable>
+                </>
+              ) : null}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={Boolean(activeAttachmentPreview)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActiveAttachmentPreview(null)}
+      >
+        <View style={styles.previewBackdrop}>
+          <Pressable
+            style={styles.previewBackdropPressable}
+            onPress={() => setActiveAttachmentPreview(null)}
+          />
+          <View
+            style={[
+              styles.previewCard,
+              {
+                backgroundColor: colors.backgroundElevated,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={styles.previewHeader}>
+              <Text
+                numberOfLines={1}
+                style={[styles.previewTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}
+              >
+                {activeAttachmentPreview?.name || "Attachment"}
+              </Text>
+              <Pressable onPress={() => setActiveAttachmentPreview(null)} hitSlop={8}>
+                <Ionicons name="close" size={20} color={colors.textSecondary} />
+              </Pressable>
+            </View>
+            <View style={styles.previewWebWrap}>
+              <WebView
+                source={{ uri: activeAttachmentPreview?.url || "" }}
+                startInLoadingState
+                style={styles.previewWebView}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </AppCanvas>
   );
 }
@@ -701,6 +986,47 @@ const styles = StyleSheet.create({
     marginTop: 4,
     gap: 6,
   },
+  singleImageWrap: {
+    marginTop: 4,
+    width: 188,
+    height: 188,
+    borderRadius: 10,
+    overflow: "hidden",
+    borderWidth: 1,
+  },
+  singleImage: {
+    width: "100%",
+    height: "100%",
+  },
+  imageGridWrap: {
+    marginTop: 4,
+    width: 188,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+  },
+  imageGridTile: {
+    width: 92,
+    height: 92,
+    borderRadius: 8,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  imageGridImage: {
+    width: "100%",
+    height: "100%",
+  },
+  imageOverflowOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(15, 23, 42, 0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  imageOverflowText: {
+    color: "#fff",
+    fontFamily: "Inter_700Bold",
+    fontSize: 22,
+  },
   attachmentCard: {
     minHeight: 52,
     borderRadius: 10,
@@ -709,12 +1035,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-  },
-  attachmentImage: {
-    width: 46,
-    height: 46,
-    borderRadius: 8,
-    backgroundColor: "#E5E7EB",
   },
   attachmentIconWrap: {
     width: 46,
@@ -814,5 +1134,79 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     alignItems: "center",
     justifyContent: "center",
+  },
+  previewBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(2, 6, 23, 0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  previewBackdropPressable: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  previewCard: {
+    width: "100%",
+    maxWidth: 560,
+    minHeight: 340,
+    height: "90%",
+    maxHeight: "92%",
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  previewHeader: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(148, 163, 184, 0.35)",
+  },
+  previewTitle: {
+    flex: 1,
+    marginRight: 10,
+    fontSize: 12.5,
+  },
+  previewCarouselWrap: {
+    flex: 1,
+    minHeight: 440,
+    backgroundColor: "rgba(15, 23, 42, 0.08)",
+  },
+  previewSlide: {
+    minHeight: 440,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  previewImage: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: "rgba(15, 23, 42, 0.06)",
+  },
+  carouselNavButton: {
+    position: "absolute",
+    top: "50%",
+    marginTop: -20,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(15, 23, 42, 0.7)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  carouselNavLeft: {
+    left: 10,
+  },
+  carouselNavRight: {
+    right: 10,
+  },
+  previewWebWrap: {
+    flex: 1,
+    minHeight: 320,
+  },
+  previewWebView: {
+    flex: 1,
+    backgroundColor: "transparent",
   },
 });

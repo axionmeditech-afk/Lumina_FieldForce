@@ -4,9 +4,14 @@ import Constants from "expo-constants";
 
 let notificationsInitialized = false;
 let pushTokenRequested = false;
+const localNotificationGroupLastId = new Map<string, string>();
 
 function normalizeNotificationText(value: string | undefined): string {
   return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+}
+
+function normalizeNotificationGroupKey(value: string | undefined): string {
+  return normalizeNotificationText(value).toLowerCase().slice(0, 120);
 }
 
 function buildVisibleNotificationContent(input: { title: string; body: string }): {
@@ -136,6 +141,8 @@ export async function sendDeviceLocalNotification(input: {
   body: string;
   data?: Record<string, string | number | boolean | null>;
   channelId?: string;
+  groupKey?: string;
+  replaceExistingInGroup?: boolean;
 }): Promise<void> {
   if (!isNativeRuntime()) return;
   await initializeDeviceNotifications();
@@ -146,31 +153,46 @@ export async function sendDeviceLocalNotification(input: {
     title: input.title,
     body: input.body,
   });
+  const groupKey = normalizeNotificationGroupKey(input.groupKey);
+  const shouldReplaceInGroup = input.replaceExistingInGroup !== false;
+  const previousGroupNotificationId =
+    groupKey && shouldReplaceInGroup ? localNotificationGroupLastId.get(groupKey) : undefined;
 
-  try {
-    await Notifications.scheduleNotificationAsync({
+  if (groupKey && previousGroupNotificationId) {
+    try {
+      await Notifications.dismissNotificationAsync(previousGroupNotificationId);
+    } catch {
+      // Ignore stale identifiers; we still want to deliver the latest notification.
+    } finally {
+      localNotificationGroupLastId.delete(groupKey);
+    }
+  }
+
+  const schedule = async (): Promise<string> =>
+    Notifications.scheduleNotificationAsync({
       content: {
         title: content.title,
         body: content.body,
         sound: "default",
         data: input.data || {},
         ...(Platform.OS === "android" && input.channelId ? { channelId: input.channelId } : {}),
+        ...(Platform.OS === "ios" && groupKey ? { threadIdentifier: groupKey } : {}),
       },
       trigger: null,
     });
+
+  try {
+    const localId = await schedule();
+    if (groupKey) {
+      localNotificationGroupLastId.set(groupKey, localId);
+    }
   } catch {
     if (Platform.OS === "android") {
       await ensureAndroidNotificationChannels();
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: content.title,
-          body: content.body,
-          sound: "default",
-          data: input.data || {},
-          ...(Platform.OS === "android" && input.channelId ? { channelId: input.channelId } : {}),
-        },
-        trigger: null,
-      });
+      const localId = await schedule();
+      if (groupKey) {
+        localNotificationGroupLastId.set(groupKey, localId);
+      }
     }
   }
 }

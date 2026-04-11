@@ -3823,6 +3823,31 @@ function canReceiveNotification(audience: NotificationAudience, role?: UserRole 
   return audience === role;
 }
 
+function normalizeSupportNotificationSubject(title: string): string {
+  const normalized = normalizeWhitespace(title || "");
+  if (!normalized) return "";
+  const withoutPrefix = normalizeWhitespace(
+    normalized.replace(/^support(?:\s+update)?\s*:\s*/i, "")
+  );
+  return withoutPrefix || normalized;
+}
+
+function hashGroupKey(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function resolveNotificationGroupKey(notification: AppNotification): string | undefined {
+  if (notification.kind !== "support") return undefined;
+  const subject = normalizeSupportNotificationSubject(notification.title).toLowerCase();
+  if (!subject) return "support-thread-general";
+  return `support-thread-${hashGroupKey(subject)}`;
+}
+
 function compactErrorMessage(value: string, fallback: string): string {
   const normalized = value.trim().replace(/\s+/g, " ");
   if (!normalized) return fallback;
@@ -4069,6 +4094,7 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
           .slice(-REMOTE_NOTIFICATION_ALERT_LIMIT_PER_SYNC);
         for (const item of freshUnseen) {
+          const notificationGroupKey = resolveNotificationGroupKey(item);
           await sendDeviceLocalNotification({
             title: item.title,
             body: item.body,
@@ -4077,7 +4103,10 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
               notificationId: item.id,
               kind: item.kind,
               audience: item.audience,
+              groupKey: notificationGroupKey || null,
             },
+            groupKey: notificationGroupKey,
+            replaceExistingInGroup: Boolean(notificationGroupKey),
           });
         }
       }
@@ -4155,6 +4184,7 @@ export async function addNotification(
       const isAudienceMatch = canReceiveNotification(candidate.audience, currentUser.role);
       const isSelfCreated = candidate.createdById === currentUser.id;
       if (isNotificationsEnabled && isCompanyMatch && isAudienceMatch && !isSelfCreated) {
+        const notificationGroupKey = resolveNotificationGroupKey(candidate);
         await sendDeviceLocalNotification({
           title: candidate.title,
           body: candidate.body,
@@ -4162,7 +4192,10 @@ export async function addNotification(
             notificationId: candidate.id,
             kind: candidate.kind,
             audience: candidate.audience,
+            groupKey: notificationGroupKey || null,
           },
+          groupKey: notificationGroupKey,
+          replaceExistingInGroup: Boolean(notificationGroupKey),
         });
       }
     }
