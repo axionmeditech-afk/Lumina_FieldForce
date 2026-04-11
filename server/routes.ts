@@ -5250,6 +5250,10 @@ async function readActiveAuthSession(userId: string): Promise<ActiveAuthSessionR
 }
 
 async function ensureSingleDeviceSessionAllowed(user: AppUser, deviceId: string): Promise<void> {
+  if (user.role === "admin") {
+    // Admin accounts are allowed to stay signed in across multiple devices.
+    return;
+  }
   const active = await readActiveAuthSession(user.id);
   if (!active) return;
   if (active.deviceId === deviceId) return;
