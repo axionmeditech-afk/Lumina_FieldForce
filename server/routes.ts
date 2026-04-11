@@ -4766,6 +4766,14 @@ function normalizeNotificationKind(value: unknown): AppNotification["kind"] {
   return "alert";
 }
 
+function isGenericNotificationTitle(rawTitle: string): boolean {
+  const normalized = normalizeWhitespace(rawTitle).toLowerCase();
+  if (!normalized) return true;
+  if (normalized === "notification") return true;
+  if (normalized === "new notification") return true;
+  return /^notification(?:\b|[:\-_.])/i.test(normalized);
+}
+
 function parseReadByIds(value: unknown): string[] {
   if (!value) return [];
   if (Array.isArray(value)) {
@@ -4788,7 +4796,7 @@ function buildNotificationFromRow(row: any): AppNotification {
   const nowIso = new Date().toISOString();
   const rawTitle = normalizeWhitespace(String(row?.title || ""));
   const rawBody = normalizeWhitespace(String(row?.body || row?.message || ""));
-  const hasGenericTitle = rawTitle.toLowerCase() === "notification";
+  const hasGenericTitle = isGenericNotificationTitle(rawTitle);
   const resolvedTitle =
     !rawTitle || hasGenericTitle
       ? rawBody.slice(0, 90) || "New update"
@@ -5604,11 +5612,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       : null;
     const companyId = authRecord?.user.companyId ?? null;
     const createdAt = new Date().toISOString();
+    const normalizedTitle = normalizeWhitespace(title);
+    const normalizedBody = normalizeWhitespace(body);
+    const hasGenericTitle = isGenericNotificationTitle(normalizedTitle);
+    const safeTitle =
+      hasGenericTitle
+        ? normalizedBody.slice(0, 90) || "New update"
+        : normalizedTitle;
+    const safeBody =
+      normalizedBody || (!hasGenericTitle && normalizedTitle ? normalizedTitle : "You have a new notification.");
     const notification: AppNotification = {
       id: `notif_${randomUUID()}`,
       companyId: companyId || undefined,
-      title: normalizeWhitespace(title),
-      body: normalizeWhitespace(body),
+      title: safeTitle,
+      body: safeBody,
       kind: normalizeNotificationKind(kind),
       audience: normalizeNotificationAudience(audience),
       createdById: req.auth?.sub || "system",

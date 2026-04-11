@@ -10,6 +10,14 @@ function normalizeNotificationText(value: string | undefined): string {
   return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
 }
 
+function isGenericNotificationTitle(value: string): boolean {
+  const normalized = normalizeNotificationText(value).toLowerCase();
+  if (!normalized) return true;
+  if (normalized === "notification") return true;
+  if (normalized === "new notification") return true;
+  return /^notification(?:\b|[:\-_.])/i.test(normalized);
+}
+
 function normalizeNotificationGroupKey(value: string | undefined): string {
   return normalizeNotificationText(value).toLowerCase().slice(0, 120);
 }
@@ -20,8 +28,7 @@ function buildVisibleNotificationContent(input: { title: string; body: string })
 } {
   const rawTitle = normalizeNotificationText(input.title);
   const rawBody = normalizeNotificationText(input.body);
-  const isGenericTitle =
-    rawTitle.length === 0 || rawTitle.toLowerCase() === "notification";
+  const isGenericTitle = isGenericNotificationTitle(rawTitle);
 
   const title = isGenericTitle
     ? (rawBody ? rawBody.slice(0, 90) : "New Update")
