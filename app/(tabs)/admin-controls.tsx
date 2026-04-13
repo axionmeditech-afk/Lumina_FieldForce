@@ -9,6 +9,10 @@ import {
   Switch,
   TextInput,
   ActivityIndicator,
+  Platform,
+  ToastAndroid,
+  KeyboardAvoidingView,
+  Keyboard,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -141,6 +145,7 @@ export default function AdminControlsScreen() {
   const [newAdminPhone, setNewAdminPhone] = useState("");
   const [newAdminSystemAdministrator, setNewAdminSystemAdministrator] = useState(true);
   const [busyCreateAdminUser, setBusyCreateAdminUser] = useState(false);
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
 
   const canAccess = canAccessAdminControls(user?.role);
 
@@ -252,6 +257,19 @@ export default function AdminControlsScreen() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener("keyboardDidShow", (event) => {
+      setKeyboardOffset(event.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener("keyboardDidHide", () => {
+      setKeyboardOffset(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -813,6 +831,14 @@ export default function AdminControlsScreen() {
       setNewAdminPhone("");
       setNewAdminSystemAdministrator(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      const toastMessage = newAdminSystemAdministrator
+        ? `New superuser created: ${name}`
+        : `New admin created: ${name}`;
+      if (Platform.OS === "android") {
+        ToastAndroid.show(toastMessage, ToastAndroid.SHORT);
+      } else {
+        Alert.alert("Admin Created", toastMessage);
+      }
       setActiveAdminTab("controls");
       void loadData();
       void refreshSession();
@@ -866,8 +892,21 @@ export default function AdminControlsScreen() {
 
   return (
     <AppCanvas>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? insets.top + 8 : 0}
+        style={styles.flexFill}
+      >
       <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 16 }]}
+        contentContainerStyle={[
+          styles.scrollContent,
+          {
+            paddingTop: insets.top + 16,
+            paddingBottom: insets.bottom + 40 + (keyboardOffset ? 120 : 0),
+          },
+        ]}
+        keyboardShouldPersistTaps="always"
+        keyboardDismissMode="none"
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.navToggleWrap}>
@@ -1611,6 +1650,7 @@ export default function AdminControlsScreen() {
         </>
         ) : null}
       </ScrollView>
+      </KeyboardAvoidingView>
     </AppCanvas>
   );
 }
@@ -1619,6 +1659,9 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 20,
     paddingBottom: 40,
+  },
+  flexFill: {
+    flex: 1,
   },
   navToggleWrap: {
     alignSelf: "flex-start",
