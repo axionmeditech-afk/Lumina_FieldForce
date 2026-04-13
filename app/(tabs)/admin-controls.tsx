@@ -44,6 +44,7 @@ import type {
 } from "@/lib/types";
 import { canAccessAdminControls, isSalesRole } from "@/lib/role-access";
 import {
+  createAdminUser,
   getAdminAccessRequests,
   reviewAdminAccessRequest,
   syncApprovedEmployeeToDolibarr,
@@ -130,6 +131,16 @@ export default function AdminControlsScreen() {
   const [busyDeleteCompanyId, setBusyDeleteCompanyId] = useState<string | null>(null);
   const [busyAccessRequestId, setBusyAccessRequestId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activeAdminTab, setActiveAdminTab] = useState<"controls" | "admins">("controls");
+  const [newAdminName, setNewAdminName] = useState("");
+  const [newAdminLogin, setNewAdminLogin] = useState("");
+  const [newAdminEmail, setNewAdminEmail] = useState("");
+  const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [newAdminDepartment, setNewAdminDepartment] = useState("Administration");
+  const [newAdminBranch, setNewAdminBranch] = useState("Main Branch");
+  const [newAdminPhone, setNewAdminPhone] = useState("");
+  const [newAdminSystemAdministrator, setNewAdminSystemAdministrator] = useState(true);
+  const [busyCreateAdminUser, setBusyCreateAdminUser] = useState(false);
 
   const canAccess = canAccessAdminControls(user?.role);
 
@@ -754,6 +765,72 @@ export default function AdminControlsScreen() {
     [pendingAccessRequests.length]
   );
 
+  const handleCreateAdminUser = useCallback(async () => {
+    if (!user || busyCreateAdminUser) return;
+    const name = newAdminName.trim();
+    const email = newAdminEmail.trim().toLowerCase();
+    const password = newAdminPassword;
+    if (!name || !email || !password) {
+      Alert.alert("Required Fields", "Name, email, and password are required.");
+      return;
+    }
+    if (password.length < 6) {
+      Alert.alert("Weak Password", "Password must be at least 6 characters.");
+      return;
+    }
+    setBusyCreateAdminUser(true);
+    try {
+      const primaryCompanyName = companyProfiles[0]?.name || user.companyName || "Default Company";
+      await createAdminUser({
+        name,
+        email,
+        password,
+        login: newAdminLogin.trim() || undefined,
+        companyName: primaryCompanyName,
+        department: newAdminDepartment.trim() || "Administration",
+        branch: newAdminBranch.trim() || "Main Branch",
+        phone: newAdminPhone.trim() || undefined,
+        systemAdministrator: newAdminSystemAdministrator,
+      });
+      await addAuditLog({
+        id: `audit_admin_create_admin_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        userId: user.id,
+        userName: user.name,
+        action: "Admin User Created",
+        details: `${name} (${email}) · system_admin=${newAdminSystemAdministrator}`,
+        timestamp: new Date().toISOString(),
+        module: "Admin Controls",
+      });
+      setNewAdminName("");
+      setNewAdminLogin("");
+      setNewAdminEmail("");
+      setNewAdminPassword("");
+      setNewAdminDepartment("Administration");
+      setNewAdminBranch("Main Branch");
+      setNewAdminPhone("");
+      setNewAdminSystemAdministrator(true);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert("Admin Created", "New admin account has been created successfully.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to create admin user.";
+      Alert.alert("Create Admin Failed", message);
+    } finally {
+      setBusyCreateAdminUser(false);
+    }
+  }, [
+    busyCreateAdminUser,
+    companyProfiles,
+    newAdminBranch,
+    newAdminDepartment,
+    newAdminEmail,
+    newAdminLogin,
+    newAdminName,
+    newAdminPassword,
+    newAdminPhone,
+    newAdminSystemAdministrator,
+    user,
+  ]);
+
   if (!canAccess) {
     return (
       <AppCanvas>
@@ -798,7 +875,173 @@ export default function AdminControlsScreen() {
             Manage company environments, approvals, announcements, and policy controls.
           </Text>
         </Animated.View>
+        <View style={styles.adminTabRow}>
+          <Pressable
+            onPress={() => setActiveAdminTab("controls")}
+            style={[
+              styles.adminTabButton,
+              {
+                borderColor: activeAdminTab === "controls" ? colors.primary : colors.border,
+                backgroundColor:
+                  activeAdminTab === "controls" ? colors.primary + "16" : colors.backgroundElevated,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.adminTabText,
+                { color: activeAdminTab === "controls" ? colors.primary : colors.textSecondary },
+              ]}
+            >
+              Controls
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setActiveAdminTab("admins")}
+            style={[
+              styles.adminTabButton,
+              {
+                borderColor: activeAdminTab === "admins" ? colors.primary : colors.border,
+                backgroundColor:
+                  activeAdminTab === "admins" ? colors.primary + "16" : colors.backgroundElevated,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.adminTabText,
+                { color: activeAdminTab === "admins" ? colors.primary : colors.textSecondary },
+              ]}
+            >
+              Create Admin
+            </Text>
+          </Pressable>
+        </View>
 
+        {activeAdminTab === "admins" ? (
+          <Animated.View
+            entering={FadeInDown.duration(400).delay(40)}
+            style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+          >
+            <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+              New Dolibarr Admin User
+            </Text>
+            <Text style={[styles.requestMeta, { color: colors.textSecondary, marginBottom: 8 }]}>
+              Create admin with login, email, password, and System Administrator toggle.
+            </Text>
+            <TextInput
+              value={newAdminName}
+              onChangeText={setNewAdminName}
+              placeholder="Full name"
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <TextInput
+              value={newAdminLogin}
+              onChangeText={setNewAdminLogin}
+              placeholder="Login / User ID (optional)"
+              autoCapitalize="none"
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <TextInput
+              value={newAdminEmail}
+              onChangeText={setNewAdminEmail}
+              placeholder="Email"
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <TextInput
+              value={newAdminPassword}
+              onChangeText={setNewAdminPassword}
+              placeholder="Password"
+              secureTextEntry
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <TextInput
+              value={newAdminDepartment}
+              onChangeText={setNewAdminDepartment}
+              placeholder="Department"
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <TextInput
+              value={newAdminBranch}
+              onChangeText={setNewAdminBranch}
+              placeholder="Branch"
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <TextInput
+              value={newAdminPhone}
+              onChangeText={setNewAdminPhone}
+              placeholder="Phone (optional)"
+              keyboardType="phone-pad"
+              placeholderTextColor={colors.textTertiary}
+              style={[
+                styles.input,
+                { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+              ]}
+            />
+            <View style={styles.policyRow}>
+              <Text style={[styles.policyLabel, { color: colors.textSecondary }]}>System administrator</Text>
+              <Switch
+                value={newAdminSystemAdministrator}
+                onValueChange={setNewAdminSystemAdministrator}
+                trackColor={{ false: colors.border, true: colors.primary + "70" }}
+                thumbColor={newAdminSystemAdministrator ? colors.primary : "#f4f3f4"}
+              />
+            </View>
+            <Pressable
+              onPress={() => void handleCreateAdminUser()}
+              disabled={busyCreateAdminUser || !newAdminName.trim() || !newAdminEmail.trim() || !newAdminPassword}
+              style={[
+                styles.primaryButton,
+                {
+                  marginTop: 10,
+                  backgroundColor: colors.success,
+                  opacity:
+                    busyCreateAdminUser || !newAdminName.trim() || !newAdminEmail.trim() || !newAdminPassword
+                      ? 0.6
+                      : 1,
+                },
+              ]}
+            >
+              {busyCreateAdminUser ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="person-add-outline" size={16} color="#fff" />
+                  <Text style={styles.primaryButtonText}>Create Admin User</Text>
+                </>
+              )}
+            </Pressable>
+          </Animated.View>
+        ) : null}
+
+        {activeAdminTab === "controls" ? (
+        <>
         <Animated.View
           entering={FadeInDown.duration(400).delay(40)}
           style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
@@ -1358,6 +1601,8 @@ export default function AdminControlsScreen() {
             ))
           )}
         </Animated.View>
+        </>
+        ) : null}
       </ScrollView>
     </AppCanvas>
   );
@@ -1374,6 +1619,23 @@ const styles = StyleSheet.create({
   },
   headerWrap: {
     marginBottom: 12,
+  },
+  adminTabRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12,
+  },
+  adminTabButton: {
+    minHeight: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  adminTabText: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 12,
   },
   title: {
     fontSize: 24,

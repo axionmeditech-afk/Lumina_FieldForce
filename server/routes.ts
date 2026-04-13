@@ -851,7 +851,11 @@ async function ensureCompanyExistsInMySql(companyId: string, companyName: string
   );
 }
 
-async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyName?: string | null): Promise<void> {
+async function upsertAuthUserInMySql(
+  record: AuthUserRecord,
+  requestedCompanyName?: string | null,
+  options?: { systemAdministrator?: boolean }
+): Promise<void> {
   if (!isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
   const user = record.user;
@@ -863,8 +867,24 @@ async function upsertAuthUserInMySql(record: AuthUserRecord, requestedCompanyNam
   const nameParts = cleanedName.split(" ").filter(Boolean);
   const firstName = nameParts.shift() || login || "Employee";
   const lastName = nameParts.join(" ") || "User";
-  const adminFlag = user.role === "admin" ? 1 : 0;
-  const employeeFlag = user.role === "admin" ? 0 : 1;
+  const systemAdministratorOverride =
+    typeof options?.systemAdministrator === "boolean" ? options.systemAdministrator : null;
+  const adminFlag =
+    systemAdministratorOverride === null
+      ? user.role === "admin"
+        ? 1
+        : 0
+      : systemAdministratorOverride
+        ? 1
+        : 0;
+  const employeeFlag =
+    systemAdministratorOverride === null
+      ? user.role === "admin"
+        ? 0
+        : 1
+      : systemAdministratorOverride
+        ? 0
+        : 1;
   const phone = normalizeWhitespace(user.phone || "");
   const passwordHash = isLikelyMd5(record.passwordHash) ? record.passwordHash.trim().toLowerCase() : "";
   const approvalStatus = resolveApprovalStatus(record);
@@ -5250,10 +5270,6 @@ async function readActiveAuthSession(userId: string): Promise<ActiveAuthSessionR
 }
 
 async function ensureSingleDeviceSessionAllowed(user: AppUser, deviceId: string): Promise<void> {
-  if (user.role === "admin") {
-    // Admin accounts are allowed to stay signed in across multiple devices.
-    return;
-  }
   const active = await readActiveAuthSession(user.id);
   if (!active) return;
   if (active.deviceId === deviceId) return;
@@ -6548,6 +6564,124 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
       res.json(toPublicAccessRequest(reviewedRequest));
+    }
+  );
+
+  app.post(
+    "/api/admin/create-admin",
+    requireAuth,
+    requireRoles("admin"),
+    async (req, res) => {
+      const body = req.body as {
+        name?: string;
+        email?: string;
+        password?: string;
+        login?: string;
+        companyName?: string;
+        department?: string;
+        branch?: string;
+        phone?: string;
+        systemAdministrator?: unknown;
+      };
+
+      const name = normalizeWhitespace(typeof body?.name === "string" ? body.name : "");
+      const normalizedEmail = normalizeEmail(
+        typeof body?.email === "string" ? body.email : ""
+      );
+      const password = typeof body?.password === "string" ? body.password : "";
+      const loginInput = normalizeLoginKey(typeof body?.login === "string" ? body.login : "");
+      const companyName = normalizeCompanyName(
+        typeof body?.companyName === "string" && body.companyName.trim()
+          ? body.companyName
+          : DEFAULT_COMPANY_NAME
+      );
+      const department = normalizeWhitespace(
+        typeof body?.department === "string" && body.department.trim()
+          ? body.department
+          : "Administration"
+      );
+      const branch = normalizeWhitespace(
+        typeof body?.branch === "string" && body.branch.trim() ? body.branch : "Main Branch"
+      );
+      const phone = normalizeWhitespace(
+        typeof body?.phone === "string" && body.phone.trim() ? body.phone : "+91 00000 00000"
+      );
+      const systemAdministrator = Boolean(body?.systemAdministrator);
+
+      if (!name || !normalizedEmail || !password) {
+        res.status(400).json({ message: "Name, email, and password are required." });
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        res.status(400).json({ message: "Invalid email format." });
+        return;
+      }
+      if (password.length < 6) {
+        res.status(400).json({ message: "Password must be at least 6 characters." });
+        return;
+      }
+
+      const existingRecord = await syncAuthUserCacheForEmail(normalizedEmail);
+      if (existingRecord) {
+        const existingStatus = resolveApprovalStatus(existingRecord);
+        if (existingStatus === "approved") {
+          res.status(409).json({ message: "User already exists for this email." });
+          return;
+        }
+      }
+
+      const now = new Date().toISOString();
+      const createdUser = buildUserFromRegistration({
+        name,
+        email: normalizedEmail,
+        companyName,
+        role: "admin",
+        department,
+        branch,
+        phone,
+      });
+
+      const finalLogin = loginInput || buildLoginFromEmailAndName(normalizedEmail, name);
+      const userToPersist: AppUser = {
+        ...createdUser,
+        login: finalLogin,
+        companyName,
+        companyId: getCompanyIdFromName(companyName),
+        companyIds: [getCompanyIdFromName(companyName)],
+        approvalStatus: "approved",
+      };
+      const authRecord: AuthUserRecord = {
+        user: userToPersist,
+        passwordHash: hashPassword(password),
+        createdAt: now,
+        updatedAt: now,
+        approvalStatus: "approved",
+      };
+
+      setAuthUserRecord(authRecord);
+      try {
+        await upsertAuthUserInMySql(authRecord, companyName, {
+          systemAdministrator,
+        });
+        if (systemAdministrator) {
+          await forceDolibarrAdminPrivilegesForUserIdentity(userToPersist);
+        }
+      } catch (error) {
+        removeAuthUserByEmail(normalizedEmail);
+        res.status(500).json({
+          message:
+            error instanceof Error
+              ? `Unable to create admin account: ${error.message}`
+              : "Unable to create admin account.",
+        });
+        return;
+      }
+
+      res.status(201).json({
+        ok: true,
+        user: userToPersist,
+        systemAdministrator,
+      });
     }
   );
 
