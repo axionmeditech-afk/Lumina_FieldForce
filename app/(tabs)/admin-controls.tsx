@@ -781,17 +781,20 @@ export default function AdminControlsScreen() {
     setBusyCreateAdminUser(true);
     try {
       const primaryCompanyName = companyProfiles[0]?.name || user.companyName || "Default Company";
-      await createAdminUser({
-        name,
-        email,
-        password,
-        login: newAdminLogin.trim() || undefined,
-        companyName: primaryCompanyName,
-        department: newAdminDepartment.trim() || "Administration",
-        branch: newAdminBranch.trim() || "Main Branch",
-        phone: newAdminPhone.trim() || undefined,
-        systemAdministrator: newAdminSystemAdministrator,
-      });
+      await createAdminUser(
+        {
+          name,
+          email,
+          password,
+          login: newAdminLogin.trim() || undefined,
+          companyName: primaryCompanyName,
+          department: newAdminDepartment.trim() || "Administration",
+          branch: newAdminBranch.trim() || "Main Branch",
+          phone: newAdminPhone.trim() || undefined,
+          systemAdministrator: newAdminSystemAdministrator,
+        },
+        { timeoutMs: 3500 }
+      );
       await addAuditLog({
         id: `audit_admin_create_admin_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         userId: user.id,
@@ -810,7 +813,9 @@ export default function AdminControlsScreen() {
       setNewAdminPhone("");
       setNewAdminSystemAdministrator(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert("Admin Created", "New admin account has been created successfully.");
+      setActiveAdminTab("controls");
+      void loadData();
+      void refreshSession();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to create admin user.";
       Alert.alert("Create Admin Failed", message);
@@ -820,6 +825,7 @@ export default function AdminControlsScreen() {
   }, [
     busyCreateAdminUser,
     companyProfiles,
+    loadData,
     newAdminBranch,
     newAdminDepartment,
     newAdminEmail,
@@ -828,6 +834,7 @@ export default function AdminControlsScreen() {
     newAdminPassword,
     newAdminPhone,
     newAdminSystemAdministrator,
+    refreshSession,
     user,
   ]);
 

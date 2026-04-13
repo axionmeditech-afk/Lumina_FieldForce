@@ -915,23 +915,28 @@ export async function reviewAdminAccessRequest(payload: {
   );
 }
 
-export async function createAdminUser(payload: {
-  name: string;
-  email: string;
-  password: string;
-  login?: string;
-  companyName?: string;
-  department?: string;
-  branch?: string;
-  phone?: string;
-  systemAdministrator: boolean;
-}): Promise<{ ok: boolean; user: AppUser; systemAdministrator: boolean }> {
-  return fetchJson<{ ok: boolean; user: AppUser; systemAdministrator: boolean }>(
+export async function createAdminUser(
+  payload: {
+    name: string;
+    email: string;
+    password: string;
+    login?: string;
+    companyName?: string;
+    department?: string;
+    branch?: string;
+    phone?: string;
+    systemAdministrator: boolean;
+  },
+  options?: { timeoutMs?: number }
+): Promise<{ ok: boolean; user: AppUser; systemAdministrator: boolean }> {
+  const timeoutMs = Math.max(400, options?.timeoutMs ?? 3500);
+  return fetchJsonWithTimeout<{ ok: boolean; user: AppUser; systemAdministrator: boolean }>(
     "/admin/create-admin",
     {
       method: "POST",
       body: JSON.stringify(payload),
-    }
+    },
+    timeoutMs
   );
 }
 

@@ -2089,6 +2089,42 @@ async function forceDolibarrAdminPrivilegesForUserIdentity(user: AppUser): Promi
      WHERE LOWER(TRIM(email)) = ? OR LOWER(TRIM(login)) = ?`,
     [email, login]
   );
+
+  try {
+    await grantDolibarrAllPermissions(user);
+  } catch (error) {
+    console.warn("Dolibarr admin rights grant failed", error);
+  }
+}
+
+async function grantDolibarrAllPermissions(user: AppUser): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const email = normalizeEmailKey(user.email);
+  const login = normalizeLoginKey(user.login || buildLoginFromEmailAndName(email, user.name));
+  if (!email && !login) return;
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid, entity
+     FROM nmy5_user
+     WHERE LOWER(TRIM(email)) = ? OR LOWER(TRIM(login)) = ?
+     LIMIT 1`,
+    [email, login]
+  );
+  if (!rows || rows.length === 0) return;
+  const row = rows[0];
+  const userId = Number(row?.rowid || 0);
+  if (!userId) return;
+  const entity = Number.isFinite(Number(row?.entity))
+    ? Number(row?.entity)
+    : 1;
+
+  await conn.execute(
+    `INSERT IGNORE INTO nmy5_user_rights (entity, fk_user, fk_id)
+     SELECT rd.entity, ?, rd.id
+     FROM nmy5_rights_def rd
+     WHERE rd.entity IN (0, ?)`,
+    [userId, entity]
+  );
 }
 
 function parseRequestStatus(
