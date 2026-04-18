@@ -40,6 +40,7 @@ import {
   PENDING_COMPANY_NAME,
 } from "./seedData";
 import { sendDeviceLocalNotification } from "./device-notifications";
+import { getMumbaiDateEndIso, toMumbaiDateKey } from "./ist-time";
 import { isSalesRole } from "./role-access";
 
 const KEYS = {
@@ -2802,12 +2803,75 @@ export async function deleteSalaryRecordLocal(salaryId: string): Promise<void> {
   await setItem(KEYS.SALARIES, filtered);
 }
 
+function getFieldVisitTaskStatus(task: Task): Task["status"] {
+  if (task.departureAt || task.status === "completed") return "completed";
+  if (task.arrivalAt || task.status === "in_progress") return "in_progress";
+  return "pending";
+}
+
+function resolveFieldVisitActiveDateKey(task: Task): string {
+  const candidates = [
+    task.arrivalAt,
+    task.autoCaptureRecordingStartedAt,
+    task.visitPlanDate,
+    task.dueDate,
+    task.createdAt,
+  ];
+  for (const candidate of candidates) {
+    const dateKey = toMumbaiDateKey(candidate);
+    if (dateKey) return dateKey;
+  }
+  return "";
+}
+
+async function autoCloseStaleFieldVisitTasks(
+  tasks: Task[],
+  companyId: string | null
+): Promise<Task[]> {
+  const todayDateKey = toMumbaiDateKey(new Date());
+  const autoClosedTasks: Task[] = [];
+  const nextTasks = tasks.map((task) => {
+    if (task.taskType !== "field_visit") return task;
+    if (!matchesCompany(task, companyId)) return task;
+    if (getFieldVisitTaskStatus(task) !== "in_progress") return task;
+    const activeDateKey = resolveFieldVisitActiveDateKey(task);
+    if (!activeDateKey || activeDateKey >= todayDateKey) return task;
+    const departureAt = getMumbaiDateEndIso(activeDateKey);
+    if (!departureAt) return task;
+
+    const updatedTask: Task = {
+      ...task,
+      status: "completed",
+      departureAt,
+      autoCaptureRecordingActive: false,
+      autoCaptureRecordingStoppedAt: task.autoCaptureRecordingStoppedAt ?? departureAt,
+    };
+    autoClosedTasks.push(updatedTask);
+    return updatedTask;
+  });
+
+  if (!autoClosedTasks.length) {
+    return tasks;
+  }
+
+  await setItem(KEYS.TASKS, nextTasks);
+  for (const task of autoClosedTasks) {
+    try {
+      await syncVisitNoteTaskRemote(task);
+    } catch {
+      // Best-effort MySQL visit history sync should never block stale visit cleanup.
+    }
+  }
+  return nextTasks;
+}
+
 export async function getTasks(options?: { refreshRemote?: boolean }): Promise<Task[]> {
   const companyId = await getActiveCompanyId();
   const tasks = options?.refreshRemote
     ? await getLatestRemoteSyncedList<Task>(KEYS.TASKS)
     : await getRawList<Task>(KEYS.TASKS);
-  return tasks.filter((task) => matchesCompany(task, companyId));
+  const reconciledTasks = await autoCloseStaleFieldVisitTasks(tasks, companyId);
+  return reconciledTasks.filter((task) => matchesCompany(task, companyId));
 }
 
 export async function addTask(task: Task): Promise<void> {

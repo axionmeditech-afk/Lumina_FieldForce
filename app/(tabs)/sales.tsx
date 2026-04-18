@@ -2016,6 +2016,11 @@ export default function SalesScreen() {
   const [visitActionTaskId, setVisitActionTaskId] = useState<string | null>(null);
   const [activeVisitTaskId, setActiveVisitTaskId] = useState<string | null>(null);
   const [localMeetingCaptureTaskId, setLocalMeetingCaptureTaskId] = useState<string | null>(null);
+  const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
+    formatMumbaiDateTime(new Date(), { withSeconds: true })
+  );
+  const todayDateKey = useMemo(() => toMumbaiDateKey(new Date()), [mumbaiNowLabel]);
+  const previousTodayDateKeyRef = useRef<string>(todayDateKey);
   const persistedMeetingCaptureTaskId = useMemo(() => {
     if (isAdminViewer || !user) return null;
     const normalizedUserName = normalizeIdentity(user.name);
@@ -2033,10 +2038,6 @@ export default function SalesScreen() {
   }, [isAdminViewer, tasks, todayDateKey, user]);
   const meetingCaptureTaskId = localMeetingCaptureTaskId || persistedMeetingCaptureTaskId;
   const meetingFocusMode = !isAdminViewer && Boolean(meetingCaptureTaskId);
-  const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
-    formatMumbaiDateTime(new Date(), { withSeconds: true })
-  );
-  const todayDateKey = useMemo(() => toMumbaiDateKey(new Date()), [mumbaiNowLabel]);
   const [routePlanDate, setRoutePlanDate] = useState(() => toMumbaiDateKey(new Date()));
   const [routeStopInputMode, setRouteStopInputMode] = useState<"location" | "customer">("location");
   const [routeSearchQuery, setRouteSearchQuery] = useState("");
@@ -4565,6 +4566,20 @@ export default function SalesScreen() {
     }
     return waitForRecorderIdle();
   }, [stopFallbackRecordingAndTranscribe, waitForRecorderIdle]);
+
+  useEffect(() => {
+    if (previousTodayDateKeyRef.current === todayDateKey) return;
+    previousTodayDateKeyRef.current = todayDateKey;
+
+    void (async () => {
+      if (isRecordingStateRef.current || isTranscribingStateRef.current) {
+        await stopRecordingAndWait().catch(() => false);
+      }
+      setLocalMeetingCaptureTaskId(null);
+      setActiveVisitTaskId(null);
+      await loadData();
+    })();
+  }, [loadData, stopRecordingAndWait, todayDateKey]);
 
   const stopRecording = useCallback(() => {
     if (!isRecording) return;

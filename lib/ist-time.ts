@@ -73,6 +73,27 @@ export function getMumbaiDateKeyByOffset(dayOffset: number): string {
   return toMumbaiDateKey(new Date(Date.now() + numericOffset * DAY_MS));
 }
 
+export function getMumbaiDateUtcRange(
+  dateKey: string
+): { startAt: string; endAt: string } | null {
+  const parsed = parseDateKey(dateKey);
+  if (!parsed) return null;
+  const startUtc = new Date(
+    Date.UTC(parsed.year, parsed.month - 1, parsed.day, 0, 0, 0, 0) - IST_OFFSET_MS
+  );
+  const endUtc = new Date(
+    Date.UTC(parsed.year, parsed.month - 1, parsed.day, 23, 59, 59, 999) - IST_OFFSET_MS
+  );
+  return {
+    startAt: startUtc.toISOString(),
+    endAt: endUtc.toISOString(),
+  };
+}
+
+export function getMumbaiDateEndIso(dateKey: string): string | null {
+  return getMumbaiDateUtcRange(dateKey)?.endAt ?? null;
+}
+
 export function formatMumbaiDate(value: DateInput): string {
   const parts = toMumbaiParts(value);
   if (!parts) return "--";

@@ -1,0 +1,39 @@
+LANE: Market / Customer Demand
+Marketing: Run Campaigns / Referrals / Field Outreach
+System: Capture Inquiry / Lead
+Sales: Qualify Lead and Capture Requirement
+Sales: Create Quotation / Proposal
+Customer: Review Proposal and Confirm Order Intent
+
+LANE: Sales and Order Management
+Sales: Convert Prospect to Customer
+Sales: Create Sales Order
+Accounts: Check Credit / Payment Terms if Required
+Planning: Check Stock and Delivery Commitment
+Gateway (Exclusive): Make to Stock Available?
+If Yes -> Reserve Finished Goods for Dispatch
+If No -> Trigger Procurement / Manufacturing Planning
+
+LANE: Procurement and Production
+Procurement: Raise Raw Material Requirement
+Procurement: Create Purchase Order to Vendor
+Vendor: Supply Raw Material
+Store: Receive Material and Create GRN
+QC: Perform Incoming Material Inspection
+Manufacturing: Execute Production Plan
+QC: Perform In-Process and Final Quality Check
+
+LANE: Dispatch and Commercial Closure
+Warehouse: Pack and Prepare Shipment
+Logistics: Dispatch Goods / Service Delivery
+Customer: Accept Delivery
+Accounts: Create Sales Invoice
+Accounts: Receive and Reconcile Payment
+Support: Handle Complaint / Service if Needed
+Management: Review Order Closure and Margin
+
+LANE: Supporting Functions
+Admin: Configure Masters, Roles, Branches and Controls
+HR: Onboard Employees and Maintain Workforce Records
+Accounts: Post Ledger, Tax, Payable and Receivable Entries
+Management: Review Dashboards, Audit Logs and KPIs

@@ -1,0 +1,309 @@
+LANE: Admin / Super Admin
+Admin: Open Admin Controls
+Admin: Review Company Profile and Branch Structure
+Admin: Create / Update Branches
+Admin: Create / Update Attendance Zones
+Admin: Create / Update Geo-Fences
+Admin: Configure Attendance Policy
+Admin: Configure Face / Selfie Verification Policy
+Admin: Configure Location Tracking Policy
+Admin: Configure Auto Sync / Offline Policy
+Admin: Configure Notification Policy
+Admin: Create Employees / Managers / HR / Sales Users
+Admin: Assign Role, Branch and Reporting Manager
+Gateway (Exclusive): New Access Request Pending?
+If Yes -> Review User Access Request
+Admin: Assign Final Role
+Admin: Assign Stockist / Branch / Manager Mapping
+Gateway (Exclusive): Access Request Approved?
+If No -> Reject Request with Reason
+If Yes -> Activate User Access
+Gateway (Exclusive): Announcement / Policy Broadcast Required?
+If Yes -> Create Announcement Notification
+Admin: Publish Announcement to Selected Audience
+If No -> Continue
+Admin: Configure Incentive Goal Plans
+Admin: Configure Incentive Product Plans
+Admin: Configure Expense Categories and Limits
+Admin: Configure Admin Stock / Stockist Master
+Admin: Configure Sales POS Controls
+Admin: Configure Support / Approval Rules
+Gateway (Exclusive): More Admin Setup Required?
+If Yes -> Continue Admin Setup
+If No -> Release App for Daily Operations
+
+LANE: Employee Authentication
+Employee: Open Lumina FieldForce App
+Employee: Enter Login Credentials
+System: Validate User Credentials
+Gateway (Exclusive): Credentials Valid?
+If No -> Show Login Error and Retry
+If Yes -> Load User Role, Branch and Permissions
+System: Check Device Permissions
+Gateway (Exclusive): Location Permission Granted?
+If No -> Request Foreground / Background Location Permission
+If Yes -> Continue
+Gateway (Exclusive): Camera Permission Granted?
+If No -> Request Camera Permission for Selfie Attendance
+If Yes -> Continue
+Gateway (Exclusive): Microphone Permission Granted?
+If No -> Request Microphone Permission for Sales Conversation Recording
+If Yes -> Continue
+Gateway (Exclusive): Notification Permission Granted?
+If No -> Request Notification Permission
+If Yes -> Open Dashboard
+
+LANE: Employee Attendance
+Employee: Open Attendance Tab
+System: Load Current Attendance Status
+System: Load Branch Geo-Fences
+Gateway (Exclusive): User Already Checked In?
+If No -> Start Check-In Flow
+If Yes -> Show Active Session and Allow Checkout
+Employee: Tap Check-In
+System: Capture Live GPS Location
+System: Evaluate Geo-Fence Status
+Gateway (Exclusive): Inside Geo-Fence?
+If No -> Mark Outside / Boundary Risk
+If Yes -> Continue
+System: Start Biometric / Device Credential Verification
+Gateway (Exclusive): Biometric / Device Verification Passed?
+If No -> Reject Check-In Attempt
+If Yes -> Capture Attendance Selfie
+System: Run Face Detection / Face Count Validation
+Gateway (Exclusive): Face Validation Passed?
+If No -> Flag Face Validation Failure
+If Yes -> Build Attendance Check-In Payload
+System: Save Attendance Check-In Record
+System: Save Attendance Photo Metadata
+System: Save Geo-Fence Evaluation
+System: Save Attendance Audit Log
+System: Start Background Route Tracking
+System: Push Check-In Notification
+Gateway (Exclusive): Check-In Approved Automatically?
+If No -> Mark Attendance as Pending Approval
+If Yes -> Mark Attendance as Approved
+
+LANE: Manager / HR
+Manager: Open Team / Attendance View
+System: Load Team Attendance Entries
+Gateway (Exclusive): Pending Attendance Approval Exists?
+If No -> Continue Team Monitoring
+If Yes -> Review Attendance Entry, Location and Photo
+Gateway (Exclusive): Attendance Approved?
+If No -> Reject Attendance with Comment
+If Yes -> Approve Attendance
+System: Update Attendance Approval Status
+
+LANE: System
+System: Track Location Points During Active Session
+System: Build Route Timeline
+System: Detect Route Halts and Segments
+System: Detect Attendance Anomalies
+System: Detect Mock Location / Duplicate Check-In / Outside Geo-Fence
+Gateway (Exclusive): Critical Attendance Anomaly Found?
+If Yes -> Create Audit Event and Notify Admin / Manager
+If No -> Continue Background Tracking
+
+LANE: Employee Tasks / Field Visits
+Employee: Open Tasks Tab
+System: Load Assigned Tasks and Visit Plan
+Gateway (Exclusive): Task Available for Today?
+If No -> Show Empty Task Queue
+If Yes -> Select Task / Visit
+Gateway (Exclusive): Task Type = Field Visit?
+If No -> Open General Task Details
+Employee: Update Task Progress
+Employee: Mark Task Complete
+If Yes -> Open Field Visit Details
+System: Load Visit Sequence, Location and Customer Label
+Gateway (Exclusive): Visit Reached?
+If No -> Show Route Guidance / Distance to Visit
+If Yes -> Start Visit
+Employee: Add Visit Notes
+Employee: Add Departure Notes
+Employee: Mark Visit Progress
+Gateway (Exclusive): More Actions Needed in This Visit?
+If Yes -> Continue Visit Execution
+If No -> Complete Visit and Return to Task Queue
+
+LANE: Sales / Field Rep
+Employee: Open Sales Module
+System: Load Products, Customers and Recent Orders
+Employee: Select Salesperson Context
+Employee: Select Customer / Create Customer Context
+Gateway (Exclusive): Start Sales Conversation Recording?
+If No -> Continue Direct Sales Entry
+If Yes -> Enter Customer Name
+Employee: Start Conversation Recording
+Gateway (Exclusive): Preferred Recorder Available?
+If Yes -> Use Speech Recorder
+If No -> Switch to Fallback Audio Recorder
+Employee: Record Customer Conversation
+Employee: Stop Recording
+System: Persist Audio File
+System: Start Speech-to-Text Transcription
+Gateway (Exclusive): Transcript Created Successfully?
+If No -> Mark Transcription Failed / Allow Retry
+If Yes -> Save Transcript Draft
+Employee: Review Transcript
+Employee: Save Conversation
+System: Build Conversation Record
+System: Store Transcript, Audio and Summary
+Gateway (Exclusive): AI Analysis Requested?
+If No -> Save Conversation Without AI Insight
+If Yes -> Send Transcript for AI Analysis
+Gateway (Exclusive): AI Backend Available?
+If No -> Apply Rules-Based Fallback Analysis
+If Yes -> Generate AI Insight
+System: Extract Key Phrases
+System: Detect Objections and Improvements
+System: Detect Buying Intent / Sentiment
+System: Generate Product Recommendations
+Employee: Review AI Recommendations
+Gateway (Exclusive): Quick Sale / POS Order Required?
+If No -> Continue Customer Engagement
+If Yes -> Open Sales POS
+Employee: Search Customer
+Employee: Select Products and Quantities
+System: Validate Order Draft
+Gateway (Exclusive): Customer Selected?
+If No -> Ask Employee to Select / Create Customer
+If Yes -> Continue
+Gateway (Exclusive): Cart Has Valid Products?
+If No -> Ask Employee to Add Products
+If Yes -> Create Sales Order
+System: Link Order with Visit / Route / Customer / Employee
+System: Save Quick Sale Location Log
+Gateway (Exclusive): More Customers to Cover Today?
+If Yes -> Return to Sales / Visit Queue
+If No -> Continue to Daily Wrap-Up
+
+LANE: Route Tracking / Admin Monitoring
+Employee: Open Route Tracking Screen
+System: Load Current Route Path
+System: Show Route Timeline and Halt Summary
+Gateway (Exclusive): Admin Monitoring Team Routes?
+If No -> Continue Personal Route View
+If Yes -> Open Route Tracking Admin View
+Admin: Select Team Member / Salesperson
+System: Load Selected User Route Timeline
+Admin: Review Stops, Halts and Route Deviations
+Gateway (Exclusive): Route Deviation Requires Action?
+If No -> Continue Monitoring
+If Yes -> Contact Employee / Escalate Follow-Up
+
+LANE: Expenses
+Employee: Open Expenses Module
+Employee: Create Expense Entry
+Employee: Select Expense Category
+Employee: Enter Amount, Notes and Date
+Employee: Upload Receipt / Supporting Proof
+System: Validate Expense Policy and Limit
+Gateway (Exclusive): Expense Within Allowed Policy?
+If No -> Mark for Manager Review
+If Yes -> Submit Expense Claim
+Manager: Review Expense Claim
+Gateway (Exclusive): Expense Approved?
+If No -> Reject Expense with Reason
+If Yes -> Approve Expense
+System: Update Expense Status
+
+LANE: Salary / Incentives / Accounts
+Employee: Open Bank Details / Bank Accounts
+Employee: Add or Update Bank Information
+System: Validate Bank Data
+Employee: Open Salary Screen
+System: Load Attendance Summary
+System: Load Approved Expenses
+System: Load Incentive Plans and Performance
+System: Calculate Salary Record
+System: Calculate Incentive Payout
+Gateway (Exclusive): Salary / Incentive Final Approval Required?
+If No -> Publish Salary Record
+If Yes -> Send to Admin / HR Review
+HR / Admin: Review Salary and Incentive Calculation
+Gateway (Exclusive): Salary Approved?
+If No -> Return for Correction
+If Yes -> Finalize Salary Record
+
+LANE: Team / Manager Operations
+Manager: Open Team Dashboard
+System: Load Team Attendance Summary
+System: Load Team Sales Summary
+System: Load Team Task Completion Summary
+System: Load Team Route Coverage Summary
+Manager: Review Individual Employee Performance
+Gateway (Exclusive): Task Reassignment Required?
+If No -> Continue Monitoring
+If Yes -> Reassign Task / Visit
+Manager: Review Visit Notes and Departure Notes
+Manager: Review Conversation Outcomes
+Gateway (Exclusive): Coaching / Action Required?
+If No -> Continue
+If Yes -> Follow Up with Employee
+
+LANE: Notifications and Support
+User: Open Notifications Tab
+System: Load Notifications for Current User
+User: Read Notification
+System: Mark Notification as Read
+Gateway (Exclusive): Support Issue Raised?
+If No -> Continue App Workflow
+If Yes -> Open Support Module
+User: Create Support Thread
+User: Add Support Message
+User: Attach File / Proof if Required
+System: Notify Support Team
+Support: Review Support Thread
+Support: Reply to User
+Support: Update Support Status
+System: Push Support Status Notification
+Gateway (Exclusive): Issue Resolved?
+If No -> Continue Support Conversation
+If Yes -> Close Support Thread
+
+LANE: Admin Reports / Audit
+Admin: Open Admin Reports
+System: Load Attendance Reports
+System: Load Sales Reports
+System: Load Expense Reports
+System: Load Incentive Reports
+System: Load Route Tracking Reports
+System: Load Performance Reports
+Gateway (Exclusive): Audit Review Needed?
+If No -> Continue Reporting
+If Yes -> Open Audit Log
+System: Show Login, Attendance, Approval, Order, Notification and Admin Change Events
+Gateway (Exclusive): Export Required?
+If No -> Continue Dashboard Review
+If Yes -> Generate Report / Export File
+
+LANE: Day Closure
+Employee: Return to Attendance Tab
+Employee: Tap Check-Out
+System: Capture Checkout Location
+System: Evaluate Checkout Geo-Fence
+System: Run Device / Biometric Validation if Required
+System: Capture Checkout Selfie / Photo
+Gateway (Exclusive): Checkout Validation Passed?
+If No -> Mark Checkout Exception
+If Yes -> Save Checkout Record
+System: Stop Attendance Session
+System: Stop Background Route Tracking
+System: Finalize Route Timeline
+System: Sync Attendance, Tasks, Visits, Sales and Expenses
+Gateway (Exclusive): Unsynced Records Pending?
+If No -> Mark Day Closed
+If Yes -> Retry Sync Queue
+Gateway (Exclusive): Day Successfully Closed?
+If No -> Show Pending Sync Warning
+If Yes -> Show Completion Summary
+
+LANE: Management Summary
+Management: Open Dashboard Summary
+System: Aggregate Attendance, Sales, Visits, Expenses, Incentives, Support and Route KPIs
+Management: Review Daily / Weekly / Monthly Metrics
+Gateway (Exclusive): Further Operational Action Required?
+If No -> Process Complete
+If Yes -> Send Follow-Up Instructions to Admin / Manager / Field Team

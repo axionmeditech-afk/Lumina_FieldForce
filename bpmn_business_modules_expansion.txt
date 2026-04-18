@@ -1,0 +1,158 @@
+LANE: Marketing / Lead Generation
+Marketing: Launch Campaign / Referral / Outreach Activity
+System: Capture Website / Call / Walk-In / Field Lead
+System: Validate and De-Duplicate Lead
+Gateway (Exclusive): Lead Valid?
+If No -> Mark Duplicate / Junk Lead
+If Yes -> Assign Lead to Sales User
+Sales: Review Lead Profile
+Sales: Contact Lead by Call / Email / Visit
+System: Log Communication Activity
+Gateway (Exclusive): Lead Interested?
+If No -> Move Lead to Nurture / Lost
+If Yes -> Qualify Budget, Need, Authority and Timeline
+Gateway (Exclusive): Lead Qualified?
+If No -> Continue Follow-Up Campaign
+If Yes -> Convert Lead to Prospect / Opportunity
+
+LANE: Customer / Requirement Capture
+Sales: Create Prospect Account
+Sales: Capture Customer Company, Contact, GST and Address Details
+Sales: Capture Product / Service Requirement
+System: Attach Notes, Drawings, Samples and Documents
+Gateway (Exclusive): Requirement Complete?
+If No -> Request Missing Details from Customer
+If Yes -> Start Commercial and Technical Review
+Pre-Sales / Technical: Review Feasibility and Scope
+Gateway (Exclusive): Feasible to Quote?
+If No -> Reject Opportunity with Reason
+If Yes -> Send Costing Input for Proposal
+
+LANE: Quotation / Proposal Management
+Sales: Prepare Quotation / Proposal
+System: Calculate Price, Tax, Discount, Delivery Terms and Validity
+Gateway (Exclusive): Special Discount / Credit Approval Needed?
+If No -> Send Quotation to Customer
+If Yes -> Manager / Accounts Review Commercial Terms
+Gateway (Exclusive): Commercial Approval Granted?
+If No -> Revise Quotation
+If Yes -> Send Quotation to Customer
+Customer: Review Quotation
+Gateway (Exclusive): Customer Accepted Quotation?
+If No -> Negotiate / Revise / Close Opportunity
+If Yes -> Share PO / Email Confirmation / Advance Payment
+
+LANE: Sales Order Processing
+Sales: Convert Accepted Quotation to Sales Order
+System: Validate Customer Master, Price, Tax and Item Details
+System: Check Customer Credit Limit and Payment Terms
+Gateway (Exclusive): Credit Limit Available?
+If Yes -> Continue Order Release
+If No -> Accounts Review Order Release
+Accounts: Approve Hold / Reject Based on Exposure
+Gateway (Exclusive): Credit Approved?
+If No -> Put Sales Order on Hold
+If Yes -> Continue Order Release
+Planning: Check Ready Stock and Delivery Date
+Gateway (Exclusive): Stock Available for Full Order?
+If Yes -> Reserve Stock for Customer
+If No -> Create Production / Procurement Requirement
+System: Link Sales Order to MRP / Production / Purchase Plan
+Sales: Confirm Order Acceptance and Delivery Date to Customer
+
+LANE: Production / Fulfillment Coordination
+Planning: Generate Work Order / Production Plan
+Store: Issue Raw Material Against Work Order
+Manufacturing: Produce Ordered Material
+QC: Perform In-Process Inspection
+Gateway (Exclusive): In-Process QC Passed?
+If No -> Rework / Scrap / Correct Process
+If Yes -> Continue Production
+QC: Perform Final Inspection
+Gateway (Exclusive): Final QC Passed?
+If No -> Hold Dispatch and Correct Product
+If Yes -> Transfer Finished Goods to Dispatch Stock
+
+LANE: Dispatch / Delivery
+Warehouse: Pick, Pack and Label Material
+System: Prepare Delivery Challan / Shipment Reference
+Logistics: Dispatch Material to Customer
+System: Update Order Status as Partially / Fully Dispatched
+Customer: Receive Material
+Gateway (Exclusive): Delivery Accepted by Customer?
+If No -> Raise Delivery Issue / Return / Replacement Case
+If Yes -> Confirm Delivery Completion
+
+LANE: Billing / Accounts Receivable
+Accounts: Generate Sales Invoice
+System: Post Tax and Revenue Entries
+Accounts: Send Invoice to Customer
+Gateway (Exclusive): Payment Received?
+If No -> Track Receivable and Send Reminder
+If Yes -> Record Receipt Entry
+System: Reconcile Payment Against Invoice
+Gateway (Exclusive): Outstanding Balance Pending?
+If No -> Close Sales Order and Invoice
+If Yes -> Continue Collection Follow-Up
+
+LANE: After-Sales / Order Closure
+Sales: Collect Customer Feedback
+Support: Register Service Request / Complaint if Needed
+Gateway (Exclusive): After-Sales Issue Exists?
+If No -> Mark Lead to Order Cycle Complete
+If Yes -> Start Support / Service Resolution Flow
+
+LANE: Vendor / Raw Material Procurement
+Planning: Review Material Shortage and Reorder Level
+System: Check Available Stock and Open Purchase Orders
+Gateway (Exclusive): Material Already Available?
+If Yes -> Reserve Material for Production
+If No -> Create Purchase Requisition
+Purchase: Request Quotations from Vendors
+Vendor: Submit Quotations
+Purchase: Compare Price, Lead Time and Quality Terms
+Gateway (Exclusive): Vendor Finalized?
+If No -> Re-Negotiate / Re-Invite Quotes
+If Yes -> Create Purchase Order
+Vendor: Confirm Purchase Order and Delivery Schedule
+Store: Receive Raw Material
+QC: Perform Incoming Quality Check
+Gateway (Exclusive): Incoming QC Passed?
+If No -> Reject / Return Material to Vendor
+If Yes -> Create GRN and Update Inventory
+Accounts: Receive Vendor Invoice
+System: Match PO, GRN and Vendor Bill
+Gateway (Exclusive): Three-Way Match Successful?
+If No -> Hold Bill and Resolve Discrepancy
+If Yes -> Approve Payable
+Accounts: Schedule and Process Vendor Payment
+System: Close Purchase Order
+
+LANE: Accounting / Finance
+Accounts: Maintain Chart of Accounts, Tax Setup and Fiscal Rules
+System: Post Sales, Purchase, Expense, Payroll and Bank Entries
+Accounts: Review Daily Receivables and Payables
+Accounts: Reconcile Cash, Bank and UPI Transactions
+Accounts: Review GST / Tax / TDS Related Entries
+Gateway (Exclusive): Period Closing Due?
+If No -> Continue Daily Accounting
+If Yes -> Review Journal, Ledger, Trial Balance, P and L and Balance Sheet
+Accounts: Close Accounting Period
+
+LANE: HR / Employee Lifecycle
+HR: Create Job Requisition / Manpower Need
+HR: Source Candidate and Schedule Interview
+Gateway (Exclusive): Candidate Selected?
+If No -> Continue Hiring Pipeline
+If Yes -> Release Offer and Complete Joining Formalities
+HR: Create Employee Master and Upload Documents
+Admin / HR: Assign Role, Department, Manager, Shift and Branch
+Employee: Complete Induction and Policy Acknowledgement
+Employee: Submit Leave / Attendance Correction / Expense Claims
+Manager: Review and Approve Team Requests
+HR: Process Payroll Inputs, Leave Balance and Compliance Data
+System: Calculate Salary, Incentive, Deductions and Net Pay
+HR / Accounts: Approve Payroll and Release Payslip
+Gateway (Exclusive): Employee Exit Initiated?
+If No -> Continue Active Employment Cycle
+If Yes -> Complete Exit Clearance, Final Settlement and Access Deactivation
