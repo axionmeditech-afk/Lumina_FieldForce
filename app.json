@@ -23,13 +23,14 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.luminafieldforce",
-      "buildNumber": "9",
+      "buildNumber": "10",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.luminafieldforce",
+      "versionCode": 2,
       "permissions": [
         "POST_NOTIFICATIONS",
         "VIBRATE"
