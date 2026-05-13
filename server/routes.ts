@@ -480,14 +480,18 @@ async function forwardDolibarrRequest(
             connect: { rejectUnauthorized: false },
           })
         : undefined;
+    const isGetOrHead = method === "GET" || method === "HEAD";
+    const headers: Record<string, string> = {
+      DOLAPIKEY: apiKey,
+      "X-Dolibarr-API-Key": apiKey,
+    };
+    if (!isGetOrHead) {
+      headers["Content-Type"] = "application/json";
+    }
     const requestInit: RequestInit & { dispatcher?: unknown } = {
       method,
-      headers: {
-        "Content-Type": "application/json",
-        DOLAPIKEY: apiKey,
-        "X-Dolibarr-API-Key": apiKey,
-      },
-      body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(normalizedBody),
+      headers,
+      body: isGetOrHead ? undefined : JSON.stringify(normalizedBody),
       signal: controller.signal,
     };
     if (dispatcher) {
