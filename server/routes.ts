@@ -409,6 +409,8 @@ async function forwardDolibarrRequest(
   const path = options.forwardPath.startsWith("/") ? options.forwardPath : `/${options.forwardPath}`;
   const targetUrl = `${base}${path}${query}`;
 
+  console.log(`[Dolibarr Proxy] Target URL: ${targetUrl}, Method: ${method}, Source: ${config.source}`);
+
   const controller = new AbortController();
   const requestTimeoutMs = path.startsWith("/bankaccounts") ? 30_000 : 15_000;
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -484,6 +486,7 @@ async function forwardDolibarrRequest(
     const headers: Record<string, string> = {
       DOLAPIKEY: apiKey,
       "X-Dolibarr-API-Key": apiKey,
+      Accept: "application/json",
     };
     if (!isGetOrHead) {
       headers["Content-Type"] = "application/json";
