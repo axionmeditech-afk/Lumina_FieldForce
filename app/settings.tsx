@@ -791,7 +791,7 @@ export default function SettingsScreen() {
                     ]}
                     value={dolibarrEndpoint}
                     onChangeText={setDolibarrEndpoint}
-                    placeholder="https://dolibarr.example.com/api/index.php/..."
+                    placeholder="https://dolibarr.example.com/api/index.php"
                     placeholderTextColor={colors.textTertiary}
                     autoCapitalize="none"
                     autoCorrect={false}

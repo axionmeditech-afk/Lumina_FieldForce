@@ -339,24 +339,46 @@ function maskApiKey(value: string | null | undefined): string | null {
   return `${cleaned.slice(0, 4)}***${cleaned.slice(-3)}`;
 }
 
-function normalizeDolibarrEndpoint(value: string | null | undefined): string | null {
+function buildDolibarrEndpointCandidates(value: string | null | undefined): string[] {
   const raw = (value || "").trim().replace(/\/+$/, "");
-  if (!raw) return null;
+  if (!raw) return [];
   try {
     const url = new URL(raw);
+    const candidates = new Set<string>();
     const pathname = url.pathname.replace(/\/+$/, "");
-    if (/\/api\/index\.php$/i.test(pathname)) {
-      return url.toString().replace(/\/+$/, "");
+
+    const addCandidate = (nextPath: string) => {
+      const next = new URL(url.toString());
+      next.pathname = nextPath || "/";
+      next.search = "";
+      next.hash = "";
+      candidates.add(next.toString().replace(/\/+$/, ""));
+    };
+
+    if (/\/api\/index\.php(\/.*)?$/i.test(pathname)) {
+      addCandidate(pathname.replace(/(\/api\/index\.php).*/i, "$1"));
+    } else if (/\/api$/i.test(pathname)) {
+      addCandidate(`${pathname}/index.php`);
+      addCandidate(pathname);
+    } else {
+      if (pathname) {
+        addCandidate(`${pathname}/api/index.php`);
+        addCandidate(`${pathname}/api`);
+      }
+      addCandidate("/api/index.php");
+      addCandidate("/api");
+      if (pathname && !/\/$/i.test(pathname)) {
+        addCandidate(pathname);
+      }
     }
-    if (/\/api$/i.test(pathname)) {
-      url.pathname = `${pathname}/index.php`;
-      return url.toString().replace(/\/+$/, "");
-    }
-    url.pathname = `${pathname}/api/index.php`;
-    return url.toString().replace(/\/+$/, "");
+    return Array.from(candidates);
   } catch {
-    return null;
+    return [];
   }
+}
+
+function normalizeDolibarrEndpoint(value: string | null | undefined): string | null {
+  return buildDolibarrEndpointCandidates(value)[0] ?? null;
 }
 
 function resolveDolibarrProxyRule(pathname: string, role: UserRole | undefined): string | null {
@@ -369,18 +391,44 @@ function resolveDolibarrProxyRule(pathname: string, role: UserRole | undefined):
 
 async function resolveDolibarrProxyConfig(userId: string): Promise<{
   endpoint: string | null;
+  endpoints: string[];
   apiKey: string | null;
   source: "env" | "settings";
 }> {
-  const envEndpoint = normalizeDolibarrEndpoint(DOLIBARR_ENV_ENDPOINT);
-  const envApiKey = normalizeApiSecret(DOLIBARR_ENV_API_KEY);
-  if (envEndpoint && envApiKey) {
-    return { endpoint: envEndpoint, apiKey: envApiKey, source: "env" };
+  const stored = await storage.getDolibarrConfigForUser(userId);
+  const latestStored = stored ? null : await storage.getLatestDolibarrConfig();
+  const settingsEndpointValue = stored?.endpoint ?? latestStored?.endpoint ?? "";
+  const settingsApiKey = normalizeApiSecret(stored?.apiKey ?? latestStored?.apiKey ?? "");
+  const settingsEndpoints = buildDolibarrEndpointCandidates(settingsEndpointValue);
+  if (settingsEndpoints.length > 0 && settingsApiKey) {
+    return {
+      endpoint: settingsEndpoints[0],
+      endpoints: settingsEndpoints,
+      apiKey: settingsApiKey,
+      source: "settings",
+    };
   }
+
+  const envEndpoints = buildDolibarrEndpointCandidates(DOLIBARR_ENV_ENDPOINT);
+  const envApiKey = normalizeApiSecret(DOLIBARR_ENV_API_KEY);
+  if (envEndpoints.length > 0 && envApiKey) {
+    return {
+      endpoint: envEndpoints[0],
+      endpoints: envEndpoints,
+      apiKey: envApiKey,
+      source: "env",
+    };
+  }
+
   const userConfig = await resolveDolibarrConfigForUser(userId);
-  const endpoint = normalizeDolibarrEndpoint(userConfig.endpoint);
+  const endpoints = buildDolibarrEndpointCandidates(userConfig.endpoint);
   const apiKey = normalizeApiSecret(userConfig.apiKey);
-  return { endpoint, apiKey, source: "settings" };
+  return {
+    endpoint: endpoints[0] ?? null,
+    endpoints,
+    apiKey,
+    source: userConfig.source,
+  };
 }
 
 async function forwardDolibarrRequest(
@@ -405,15 +453,14 @@ async function forwardDolibarrRequest(
   const method = req.method.toUpperCase();
   const queryIndex = req.url.indexOf("?");
   const query = queryIndex >= 0 ? req.url.slice(queryIndex) : "";
-  const base = endpoint.replace(/\/+$/, "");
+  const endpoints = config.endpoints.length ? config.endpoints : [endpoint];
   const path = options.forwardPath.startsWith("/") ? options.forwardPath : `/${options.forwardPath}`;
-  const targetUrl = `${base}${path}${query}`;
-
-  console.log(`[Dolibarr Proxy] Target URL: ${targetUrl}, Method: ${method}, Source: ${config.source}`);
 
   const controller = new AbortController();
   const requestTimeoutMs = path.startsWith("/bankaccounts") ? 30_000 : 15_000;
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+  let lastTargetUrl = "";
+  const endpointFailures: string[] = [];
   try {
     const normalizedBody =
       method === "GET" || method === "HEAD"
@@ -477,7 +524,7 @@ async function forwardDolibarrRequest(
             return body;
           })();
     const dispatcher =
-      DOLIBARR_INSECURE_TLS && endpoint.startsWith("https:")
+      DOLIBARR_INSECURE_TLS && endpoints.some((candidate) => candidate.startsWith("https:"))
         ? new (await import("undici")).Agent({
             connect: { rejectUnauthorized: false },
           })
@@ -500,32 +547,72 @@ async function forwardDolibarrRequest(
     if (dispatcher) {
       requestInit.dispatcher = dispatcher;
     }
-    const response = await fetch(targetUrl, requestInit);
 
-    const text = await response.text();
-    const contentType = response.headers.get("content-type");
-    const normalizedContentType = (contentType || "").toLowerCase();
-    const looksLikeHtml =
-      normalizedContentType.includes("text/html") ||
-      /^\s*<!doctype html/i.test(text) ||
-      /^\s*<html\b/i.test(text);
-    if (looksLikeHtml) {
-      console.error("Dolibarr proxy received HTML instead of JSON", {
-        targetUrl,
-        status: response.status,
-        contentType,
-        preview: text.trim().slice(0, 220),
-      });
-      res.status(502).json({
-        message:
-          "Dolibarr endpoint returned HTML instead of JSON. Verify DOLIBARR_ENDPOINT points to the API base and that the API key is valid.",
-      });
-      return;
+    for (const candidateEndpoint of endpoints) {
+      const base = candidateEndpoint.replace(/\/+$/, "");
+      const targetUrl = `${base}${path}${query}`;
+      lastTargetUrl = targetUrl;
+
+      console.log(`[Dolibarr Proxy] Target URL: ${targetUrl}, Method: ${method}, Source: ${config.source}`);
+
+      try {
+        const response = await fetch(targetUrl, requestInit);
+        const text = await response.text();
+        const contentType = response.headers.get("content-type");
+        const normalizedContentType = (contentType || "").toLowerCase();
+        const looksLikeHtml =
+          normalizedContentType.includes("text/html") ||
+          /^\s*<!doctype html/i.test(text) ||
+          /^\s*<html\b/i.test(text);
+        if (looksLikeHtml) {
+          endpointFailures.push(
+            `${candidateEndpoint} -> HTTP ${response.status}: returned HTML instead of JSON`
+          );
+          console.error("Dolibarr proxy received HTML instead of JSON", {
+            targetUrl,
+            status: response.status,
+            contentType,
+            preview: text.trim().slice(0, 220),
+          });
+          continue;
+        }
+
+        if (!response.ok && [404, 502, 503, 504].includes(response.status)) {
+          const preview = text.trim().replace(/\s+/g, " ").slice(0, 160);
+          endpointFailures.push(
+            `${candidateEndpoint} -> HTTP ${response.status}${preview ? `: ${preview}` : ""}`
+          );
+          continue;
+        }
+
+        if (contentType) {
+          res.setHeader("Content-Type", contentType);
+        }
+        res.status(response.status).send(text);
+        return;
+      } catch (error) {
+        const err = error as { message?: string; cause?: unknown };
+        const cause = err?.cause as { code?: string; errno?: string; syscall?: string; hostname?: string } | undefined;
+        const extra =
+          cause && (cause.code || cause.errno || cause.syscall || cause.hostname)
+            ? ` (${[cause.code, cause.errno, cause.syscall, cause.hostname].filter(Boolean).join(" ")})`
+            : "";
+        const message =
+          (err?.message || "Unable to reach Dolibarr endpoint.") + extra;
+        endpointFailures.push(`${candidateEndpoint} -> ${message}`);
+        console.error("Dolibarr proxy failed for candidate", {
+          targetUrl,
+          message,
+          cause,
+        });
+      }
     }
-    if (contentType) {
-      res.setHeader("Content-Type", contentType);
-    }
-    res.status(response.status).send(text);
+
+    res.status(502).json({
+      message:
+        "Dolibarr endpoint returned HTML or an API error for all known URL shapes. Set Dolibarr Endpoint to the REST API base, usually https://your-dolibarr-domain/api/index.php.",
+      attempts: endpointFailures,
+    });
   } catch (error) {
     const err = error as { message?: string; cause?: unknown };
     const cause = err?.cause as { code?: string; errno?: string; syscall?: string; hostname?: string } | undefined;
@@ -536,7 +623,7 @@ async function forwardDolibarrRequest(
     const message =
       (err?.message || "Unable to reach Dolibarr endpoint.") + extra;
     console.error("Dolibarr proxy failed", {
-      targetUrl,
+      targetUrl: lastTargetUrl,
       message,
       cause,
     });
@@ -5627,7 +5714,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
     });
 
-      if (!config.endpoint || !config.apiKey) {
+    const endpointCandidates = buildDolibarrEndpointCandidates(config.endpoint);
+
+    if (!endpointCandidates.length || !config.apiKey) {
       res.json({
         ok: false,
         status: null,
@@ -5639,27 +5728,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch(config.endpoint, {
-        method: "GET",
-        headers: {
-          "X-Dolibarr-API-Key": config.apiKey,
-        },
-        signal: controller.signal,
-      });
-
-      if (response.ok) {
-        res.json({
-          ok: true,
-          status: response.status,
-          message: "Dolibarr endpoint reachable.",
+      const failures: string[] = [];
+      for (const endpointCandidate of endpointCandidates) {
+        const response = await fetch(endpointCandidate, {
+          method: "GET",
+          headers: {
+            DOLAPIKEY: config.apiKey,
+            "X-Dolibarr-API-Key": config.apiKey,
+            Accept: "application/json",
+          },
+          signal: controller.signal,
         });
-        return;
+        const text = await response.text();
+        const contentType = response.headers.get("content-type") || "";
+        const looksLikeHtml =
+          contentType.toLowerCase().includes("text/html") ||
+          /^\s*<!doctype html/i.test(text) ||
+          /^\s*<html\b/i.test(text);
+
+        if (response.ok && !looksLikeHtml) {
+          res.json({
+            ok: true,
+            status: response.status,
+            message: `Dolibarr endpoint reachable: ${endpointCandidate}`,
+          });
+          return;
+        }
+
+        failures.push(
+          `${endpointCandidate} -> HTTP ${response.status}${looksLikeHtml ? ": returned HTML" : ""}`
+        );
       }
 
       res.json({
         ok: false,
-        status: response.status,
-        message: `Dolibarr endpoint responded with HTTP ${response.status}. Verify endpoint and API key.`,
+        status: null,
+        message: `Dolibarr endpoint test failed. Tried: ${failures.join(" | ")}`,
       });
     } catch (error) {
       res.json({
