@@ -131,7 +131,7 @@ function mapDolibarrBankAccount(entry: DolibarrBankAccount): BankAccountListItem
     bankAddress: pickFirstText(entry.address),
     accountNumber: accountNumber && !accountNumber.includes("@") ? accountNumber : undefined,
     upiId: accountNumber && accountNumber.includes("@") ? accountNumber : undefined,
-    ifscCode: pickFirstText(entry.bic),
+    ifscCode: pickFirstText(entry.iban_prefix),
     holderName,
     website: pickFirstText(entry.url),
     comment: pickFirstText(entry.comment),
@@ -740,16 +740,18 @@ export default function BankAccountsScreen() {
       )}
 
       <View style={styles.footerRow}>
-        <View>
+        <View style={styles.footerHolderBlock}>
           <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Holder Name</Text>
-          <Text style={[styles.detailValue, { color: colors.text }]}>{item.holderName || item.employeeName || "N/A"}</Text>
+          <Text style={[styles.detailValue, styles.wrappingDetailValue, { color: colors.text }]}>
+            {item.holderName || item.employeeName || "N/A"}
+          </Text>
         </View>
         {canManageAllAccounts ? (
-          <View style={{ alignItems: "flex-end" }}>
+          <View style={styles.footerSourceBlock}>
             <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>
               {item.source === "dolibarr" ? "Source" : "Employee"}
             </Text>
-            <Text style={[styles.detailValue, { color: colors.primary, fontSize: 12 }]}>
+            <Text style={[styles.detailValue, styles.footerSourceText, { color: colors.primary }]}>
               {item.source === "dolibarr" ? "Dolibarr Bank Page" : item.employeeName}
             </Text>
           </View>
@@ -1360,13 +1362,35 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_600SemiBold",
   },
+  wrappingDetailValue: {
+    flexShrink: 1,
+    lineHeight: 19,
+  },
   footerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "flex-end",
+    alignItems: "flex-start",
+    flexWrap: "wrap",
+    gap: 12,
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: "rgba(0,0,0,0.05)",
+  },
+  footerHolderBlock: {
+    flex: 1,
+    minWidth: 190,
+    maxWidth: "100%",
+  },
+  footerSourceBlock: {
+    flexShrink: 1,
+    minWidth: 150,
+    maxWidth: "100%",
+    alignItems: "flex-start",
+  },
+  footerSourceText: {
+    fontSize: 12,
+    lineHeight: 17,
+    flexShrink: 1,
   },
   accountActionRow: {
     marginTop: 12,

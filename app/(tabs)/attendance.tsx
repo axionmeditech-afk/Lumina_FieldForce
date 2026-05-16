@@ -59,6 +59,10 @@ import {
 } from "@/lib/location-service";
 import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
 import { getBatteryLevelPercent } from "@/lib/battery";
+import {
+  recordGpsDisabledDuringCheckIn,
+  recordGpsRestoredDuringCheckIn,
+} from "@/lib/gps-tracking-alerts";
 import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
@@ -397,6 +401,11 @@ export default function AttendanceScreen() {
     async (strict = false, options?: { skipRoutePersistence?: boolean }) => {
       const enabled = await ensureLocationServicesEnabled();
       if (!enabled) {
+        if (checkedInState && user?.id) {
+          void recordGpsDisabledDuringCheckIn(user, "Device location services are off.").catch(() => {
+            // GPS-off audit/notification must not block attendance UI recovery.
+          });
+        }
         latestEvidenceRef.current = null;
         latestLocationRef.current = null;
         latestLocationCapturedAtMsRef.current = 0;
@@ -427,6 +436,11 @@ export default function AttendanceScreen() {
           ...evidence,
           location: effectiveLocation,
         };
+        if (checkedInState && user?.id) {
+          void recordGpsRestoredDuringCheckIn(user).catch(() => {
+            // GPS restore audit is best-effort.
+          });
+        }
         latestEvidenceRef.current = {
           sampleCount: effectiveEvidence.sampleCount,
           sampleWindowMs: effectiveEvidence.sampleWindowMs,
@@ -464,6 +478,11 @@ export default function AttendanceScreen() {
 
         if (fallbackLocation) {
           const effectiveFallbackLocation = applyAhmedabadOfficeLocationLock(fallbackLocation);
+          if (checkedInState && user?.id) {
+            void recordGpsRestoredDuringCheckIn(user).catch(() => {
+              // GPS restore audit is best-effort.
+            });
+          }
           const fallbackAccuracy =
             typeof effectiveFallbackLocation.coords.accuracy === "number" &&
             Number.isFinite(effectiveFallbackLocation.coords.accuracy)
@@ -509,7 +528,7 @@ export default function AttendanceScreen() {
         return null;
       }
     },
-    [applyAhmedabadOfficeLocationLock, handleLocationUpdate]
+    [applyAhmedabadOfficeLocationLock, checkedInState, handleLocationUpdate, user]
   );
 
   const beginTracking = useCallback(async () => {

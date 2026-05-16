@@ -115,6 +115,7 @@ export interface DolibarrBankAccount {
   number?: string;
   account_number?: string;
   numcompte?: string;
+  iban_prefix?: string;
   bic?: string;
   iban?: string;
   proprio?: string;
@@ -2596,7 +2597,7 @@ export async function syncBankAccountToDolibarr(
     country_id: countryId,
     bank: account.bankName || dolibarrLabel,
     number: account.accountNumber || account.upiId || "",
-    bic: (account.ifscCode || "").trim().toUpperCase(),
+    iban_prefix: (account.ifscCode || "").trim().toUpperCase(),
     proprio: account.holderName || account.employeeName,
     owner_name: account.holderName || account.employeeName,
     address: (account.bankAddress || "").trim() || undefined,

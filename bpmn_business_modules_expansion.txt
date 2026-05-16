@@ -1,25 +1,19 @@
-LANE: Marketing / Lead Generation
-Marketing: Launch Campaign / Referral / Outreach Activity
-System: Capture Website / Call / Walk-In / Field Lead
-System: Validate and De-Duplicate Lead
-Gateway (Exclusive): Lead Valid?
-If No -> Mark Duplicate / Junk Lead
-If Yes -> Assign Lead to Sales User
-Sales: Review Lead Profile
-Sales: Contact Lead by Call / Email / Visit
-System: Log Communication Activity
-Gateway (Exclusive): Lead Interested?
-If No -> Move Lead to Nurture / Lost
-If Yes -> Qualify Budget, Need, Authority and Timeline
-Gateway (Exclusive): Lead Qualified?
-If No -> Continue Follow-Up Campaign
-If Yes -> Convert Lead to Prospect / Opportunity
+LANE: Marketing / Lead Generation / Sales Outreach
+Marketing: Receive Lead from Reference / Website / Direct Inquiry
+Sales: Identify Target Market / Customer and Plan Visit or Outreach
+Sales: Visit Prospect / Contact Customer and Generate Lead / Inquiry
+System: Capture Lead Source, Visit Notes and Basic Inquiry Details
+Sales: Understand Basic Requirement and Qualify Interest Level
+Gateway (Exclusive): Lead Genuine and Interested?
+If No -> Mark Lead Closed / Not Relevant or Keep for Future Follow-Up
+If Yes -> Create Prospect / Opportunity
 
 LANE: Customer / Requirement Capture
 Sales: Create Prospect Account
 Sales: Capture Customer Company, Contact, GST and Address Details
-Sales: Capture Product / Service Requirement
-System: Attach Notes, Drawings, Samples and Documents
+Customer: Share Inquiry / RFQ with Required Products, Quantity and Delivery Need
+Sales: Capture Product / Service Requirement in Detail
+System: Attach Inquiry Mail, Notes, Drawings, Samples and Documents
 Gateway (Exclusive): Requirement Complete?
 If No -> Request Missing Details from Customer
 If Yes -> Start Commercial and Technical Review
@@ -29,7 +23,7 @@ If No -> Reject Opportunity with Reason
 If Yes -> Send Costing Input for Proposal
 
 LANE: Quotation / Proposal Management
-Sales: Prepare Quotation / Proposal
+Sales: Prepare Quotation / Proposal as per Customer Requirement
 System: Calculate Price, Tax, Discount, Delivery Terms and Validity
 Gateway (Exclusive): Special Discount / Credit Approval Needed?
 If No -> Send Quotation to Customer

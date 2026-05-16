@@ -1,16 +1,21 @@
-﻿import AsyncStorage from "@react-native-async-storage/async-storage";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { Platform } from "react-native";
 import { postLocationBatch } from "@/lib/attendance-api";
 import { getBatteryLevelPercent } from "@/lib/battery";
 import { maybeSendLocationReminder } from "@/lib/location-reminders";
-import { getCurrentUser, getSettings } from "@/lib/storage";
+import { addLocationLog, getCurrentUser, getSettings } from "@/lib/storage";
+import {
+  recordGpsDisabledDuringCheckIn,
+  recordGpsRestoredDuringCheckIn,
+} from "@/lib/gps-tracking-alerts";
 
 const BACKGROUND_LOCATION_TASK = "trackforce-background-location-task-v1";
 const BACKGROUND_QUEUE_KEY = "@trackforce_background_location_queue";
 const MAX_BATCH_SIZE = 25;
-const BACKGROUND_LOCATION_INTERVAL_MS = 20 * 1000;
+const BACKGROUND_LOCATION_INTERVAL_MS = 2 * 60 * 1000;
+const BACKGROUND_LOCATION_DISTANCE_METERS = 0;
 
 interface QueuedLocationPoint {
   userId: string;
@@ -144,6 +149,23 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
   );
   await enqueueBackgroundLocationPoints(queuePoints);
 
+  for (const point of queuePoints) {
+    await addLocationLog({
+      id: `bg_loc_${new Date(point.capturedAt).getTime()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId: point.userId,
+      latitude: point.latitude,
+      longitude: point.longitude,
+      accuracy: point.accuracy ?? null,
+      speed: point.speed ?? null,
+      heading: point.heading ?? null,
+      batteryLevel: point.batteryLevel ?? null,
+      geofenceId: null,
+      geofenceName: null,
+      isInsideGeofence: false,
+      capturedAt: point.capturedAt,
+    });
+  }
+
   if (settings.notifications !== "false") {
     const latestPoint = queuePoints[queuePoints.length - 1];
     if (latestPoint) {
@@ -210,25 +232,32 @@ export async function ensureBackgroundLocationTracking(): Promise<{
     return { started: false, reason: "Background location permission denied." };
   }
 
+  const servicesEnabled = await Location.hasServicesEnabledAsync();
+  if (!servicesEnabled) {
+    await recordGpsDisabledDuringCheckIn(currentUser, "Device location services are off.");
+    return { started: false, reason: "Location services disabled." };
+  }
+
   const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
   if (!alreadyStarted) {
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.Balanced,
       timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
-      distanceInterval: 0,
+      distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
       deferredUpdatesInterval: BACKGROUND_LOCATION_INTERVAL_MS,
-      deferredUpdatesDistance: 0,
-      pausesUpdatesAutomatically: true,
+      deferredUpdatesDistance: BACKGROUND_LOCATION_DISTANCE_METERS,
+      pausesUpdatesAutomatically: false,
       showsBackgroundLocationIndicator: false,
       activityType: Location.ActivityType.OtherNavigation,
       foregroundService: {
         notificationTitle: "Lumina FieldForce route tracking active",
-        notificationBody: "Background GPS is running during your shift.",
+        notificationBody: "GPS is saved every 2 minutes until checkout.",
         killServiceOnDestroy: false,
       },
     });
   }
 
+  await recordGpsRestoredDuringCheckIn(currentUser);
   await flushBackgroundLocationQueue();
   return { started: true };
 }

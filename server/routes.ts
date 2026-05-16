@@ -78,6 +78,10 @@ const DOLIBARR_ENV_ENDPOINT = (
 const DOLIBARR_INSECURE_TLS =
   String(process.env.DOLIBARR_INSECURE_TLS || "false").toLowerCase() === "true";
 const DOLIBARR_ENV_API_KEY = (process.env.DOLIBARR_API_KEY || "").trim();
+const DOLIBARR_USER_AGENT = (
+  process.env.DOLIBARR_USER_AGENT ||
+  "LuminaFieldForce/1.0 (+https://api.axionmeditech.com)"
+).trim();
 const DOLIBARR_PROXY_RULES: Array<{
   prefix: string;
   roles: UserRole[];
@@ -158,6 +162,141 @@ function firstString(value: unknown): string {
 function normalizeApiSecret(value: string | undefined | null): string {
   if (!value) return "";
   return value.trim().replace(/^['"]+|['"]+$/g, "");
+}
+
+function parseJsonText(text: string): unknown | null {
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function firstMessageFromBody(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const body = payload as Record<string, unknown>;
+  const message = body.message;
+  if (typeof message === "string") return message.trim();
+  const error = body.error;
+  if (error && typeof error === "object") {
+    const errorMessage = (error as Record<string, unknown>).message;
+    if (typeof errorMessage === "string") return errorMessage.trim();
+  }
+  return "";
+}
+
+function getDolibarrProtectionBlockMessage(text: string, payload: unknown): string | null {
+  const message = firstMessageFromBody(payload) || text.trim().replace(/\s+/g, " ").slice(0, 240);
+  if (/imunify360|bot-protection|access denied/i.test(message)) {
+    return message;
+  }
+  return null;
+}
+
+function buildDolibarrProxyHeaders(apiKey: string, includeContentType: boolean): Record<string, string> {
+  const headers: Record<string, string> = {
+    DOLAPIKEY: apiKey,
+    "X-Dolibarr-API-Key": apiKey,
+    Accept: "application/json",
+    "User-Agent": DOLIBARR_USER_AGENT,
+  };
+  if (includeContentType) {
+    headers["Content-Type"] = "application/json";
+  }
+  return headers;
+}
+
+function readDolibarrBankAccountIbanPrefix(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "";
+  const record = body as Record<string, unknown>;
+  const rawValue = record.iban_prefix ?? record.ifscCode ?? record.bic;
+  if (typeof rawValue === "string") return rawValue.trim().toUpperCase();
+  if (typeof rawValue === "number" && Number.isFinite(rawValue)) return String(rawValue);
+  return "";
+}
+
+function parseDolibarrProxyEntityId(payload: unknown): number | null {
+  if (typeof payload === "number" && Number.isFinite(payload)) {
+    return Math.trunc(payload);
+  }
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const body = payload as Record<string, unknown>;
+  const candidates = [body.id, body.rowid, body.ref];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return Math.trunc(candidate);
+    }
+    if (typeof candidate === "string" && /^\d+$/.test(candidate.trim())) {
+      return Number(candidate.trim());
+    }
+  }
+  return null;
+}
+
+async function updateDolibarrBankAccountIbanPrefix(rowId: number, ibanPrefix: string): Promise<void> {
+  const value = ibanPrefix.trim().toUpperCase();
+  if (!value || !isMySqlStateEnabled()) return;
+
+  const conn = await getMySqlPool();
+  await conn.execute(
+    "UPDATE `nmy5_bank_account` SET `iban_prefix` = ? WHERE `rowid` = ?",
+    [value, rowId]
+  );
+}
+
+async function enrichDolibarrBankAccountsWithIbanPrefix(payload: unknown): Promise<unknown> {
+  if (!Array.isArray(payload) || !isMySqlStateEnabled()) return payload;
+
+  const rowIds = Array.from(
+    new Set(
+      payload
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") return null;
+          const account = entry as Record<string, unknown>;
+          const rawId = account.rowid ?? account.id;
+          const parsed = typeof rawId === "number" ? rawId : Number(String(rawId || ""));
+          return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null;
+        })
+        .filter((id): id is number => id !== null)
+    )
+  );
+  if (rowIds.length === 0) return payload;
+
+  try {
+    const conn = await getMySqlPool();
+    const placeholders = rowIds.map(() => "?").join(", ");
+    const [rows] = await conn.query<any[]>(
+      `SELECT \`rowid\`, \`iban_prefix\`
+         FROM \`nmy5_bank_account\`
+        WHERE \`rowid\` IN (${placeholders})`,
+      rowIds
+    );
+    const ifscByRowId = new Map<string, string>();
+    for (const row of rows || []) {
+      const rowId = row.rowid ? String(row.rowid) : "";
+      const ifsc = row.iban_prefix ? String(row.iban_prefix).trim() : "";
+      if (rowId && ifsc) {
+        ifscByRowId.set(rowId, ifsc);
+      }
+    }
+    if (ifscByRowId.size === 0) return payload;
+
+    return payload.map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      const account = entry as Record<string, unknown>;
+      const rowId = String(account.rowid ?? account.id ?? "");
+      const ibanPrefix = ifscByRowId.get(rowId);
+      return ibanPrefix ? { ...account, iban_prefix: ibanPrefix } : account;
+    });
+  } catch (error) {
+    console.error("Unable to enrich Dolibarr bank accounts with iban_prefix", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return payload;
+  }
 }
 
 function pickProductStockColumn(
@@ -521,6 +660,13 @@ async function forwardDolibarrRequest(
                 body.country_id = 117;
               }
             }
+            if (path === "/bankaccounts" && method === "POST") {
+              const ibanPrefix = readDolibarrBankAccountIbanPrefix(body);
+              if (ibanPrefix) {
+                body.iban_prefix = ibanPrefix;
+                delete body.bic;
+              }
+            }
             return body;
           })();
     const dispatcher =
@@ -530,14 +676,7 @@ async function forwardDolibarrRequest(
           })
         : undefined;
     const isGetOrHead = method === "GET" || method === "HEAD";
-    const headers: Record<string, string> = {
-      DOLAPIKEY: apiKey,
-      "X-Dolibarr-API-Key": apiKey,
-      Accept: "application/json",
-    };
-    if (!isGetOrHead) {
-      headers["Content-Type"] = "application/json";
-    }
+    const headers = buildDolibarrProxyHeaders(apiKey, !isGetOrHead);
     const requestInit: RequestInit & { dispatcher?: unknown } = {
       method,
       headers,
@@ -559,11 +698,30 @@ async function forwardDolibarrRequest(
         const response = await fetch(targetUrl, requestInit);
         const text = await response.text();
         const contentType = response.headers.get("content-type");
+        const parsedBody = parseJsonText(text);
+        const protectionBlockMessage = getDolibarrProtectionBlockMessage(text, parsedBody);
+        if (protectionBlockMessage) {
+          endpointFailures.push(`${candidateEndpoint} -> blocked by Dolibarr host protection: ${protectionBlockMessage}`);
+          console.error("Dolibarr host protection blocked proxy request", {
+            targetUrl,
+            status: response.status,
+            contentType,
+            message: protectionBlockMessage,
+          });
+          res.status(502).json({
+            message:
+              "Dolibarr host protection blocked the backend server IP. Whitelist this backend server's outbound IP in Imunify360/cPanel, or disable bot protection for /api/index.php.",
+            upstreamMessage: protectionBlockMessage,
+            attempts: endpointFailures,
+          });
+          return;
+        }
         const normalizedContentType = (contentType || "").toLowerCase();
         const looksLikeHtml =
-          normalizedContentType.includes("text/html") ||
-          /^\s*<!doctype html/i.test(text) ||
-          /^\s*<html\b/i.test(text);
+          !parsedBody &&
+          (normalizedContentType.includes("text/html") ||
+            /^\s*<!doctype html/i.test(text) ||
+            /^\s*<html\b/i.test(text));
         if (looksLikeHtml) {
           endpointFailures.push(
             `${candidateEndpoint} -> HTTP ${response.status}: returned HTML instead of JSON`
@@ -585,10 +743,31 @@ async function forwardDolibarrRequest(
           continue;
         }
 
-        if (contentType) {
+        let responseText = text;
+        if (path === "/bankaccounts" && method === "GET" && response.ok && parsedBody) {
+          const enrichedBody = await enrichDolibarrBankAccountsWithIbanPrefix(parsedBody);
+          responseText = JSON.stringify(enrichedBody);
+          res.setHeader("Content-Type", "application/json");
+        } else if (path === "/bankaccounts" && method === "POST" && response.ok && parsedBody) {
+          const bankAccountId = parseDolibarrProxyEntityId(parsedBody);
+          const ibanPrefix = readDolibarrBankAccountIbanPrefix(normalizedBody);
+          if (bankAccountId && ibanPrefix) {
+            try {
+              await updateDolibarrBankAccountIbanPrefix(bankAccountId, ibanPrefix);
+            } catch (error) {
+              console.error("Unable to store IFSC in nmy5_bank_account.iban_prefix", {
+                bankAccountId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+          if (contentType) {
+            res.setHeader("Content-Type", contentType);
+          }
+        } else if (contentType) {
           res.setHeader("Content-Type", contentType);
         }
-        res.status(response.status).send(text);
+        res.status(response.status).send(responseText);
         return;
       } catch (error) {
         const err = error as { message?: string; cause?: unknown };
@@ -5732,19 +5911,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       for (const endpointCandidate of endpointCandidates) {
         const response = await fetch(endpointCandidate, {
           method: "GET",
-          headers: {
-            DOLAPIKEY: config.apiKey,
-            "X-Dolibarr-API-Key": config.apiKey,
-            Accept: "application/json",
-          },
+          headers: buildDolibarrProxyHeaders(config.apiKey, false),
           signal: controller.signal,
         });
         const text = await response.text();
         const contentType = response.headers.get("content-type") || "";
+        const parsedBody = parseJsonText(text);
+        const protectionBlockMessage = getDolibarrProtectionBlockMessage(text, parsedBody);
+        if (protectionBlockMessage) {
+          failures.push(`${endpointCandidate} -> blocked by Dolibarr host protection: ${protectionBlockMessage}`);
+          continue;
+        }
         const looksLikeHtml =
-          contentType.toLowerCase().includes("text/html") ||
-          /^\s*<!doctype html/i.test(text) ||
-          /^\s*<html\b/i.test(text);
+          !parsedBody &&
+          (contentType.toLowerCase().includes("text/html") ||
+            /^\s*<!doctype html/i.test(text) ||
+            /^\s*<html\b/i.test(text));
 
         if (response.ok && !looksLikeHtml) {
           res.json({

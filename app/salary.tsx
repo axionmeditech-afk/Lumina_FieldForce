@@ -123,7 +123,7 @@ function mapDolibarrBankAccount(entry: DolibarrBankAccount): BankAccount {
     bankAddress: pickFirstText(entry.address),
     accountNumber: accountNumber && !accountNumber.includes("@") ? accountNumber : undefined,
     upiId: accountNumber && accountNumber.includes("@") ? accountNumber : undefined,
-    ifscCode: pickFirstText(entry.bic),
+    ifscCode: pickFirstText(entry.iban_prefix),
     holderName,
     website: pickFirstText(entry.url),
     comment: pickFirstText(entry.comment),

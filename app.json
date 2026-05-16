@@ -25,14 +25,23 @@
       "bundleIdentifier": "com.luminafieldforce",
       "buildNumber": "10",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "location"
+        ]
       }
     },
     "android": {
       "package": "com.luminafieldforce",
       "versionCode": 2,
       "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
         "POST_NOTIFICATIONS",
+        "WAKE_LOCK",
         "VIBRATE"
       ],
       "adaptiveIcon": {
@@ -59,6 +68,7 @@
         {
           "locationWhenInUsePermission": "Lumina FieldForce uses your location to verify geo-fenced attendance at your assigned branch.",
           "locationAlwaysAndWhenInUsePermission": "Lumina FieldForce uses your location in background to prevent attendance spoofing and keep secure logs.",
+          "isIosBackgroundLocationEnabled": true,
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true
         }

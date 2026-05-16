@@ -44,9 +44,15 @@ import {
 } from "@/lib/location-service";
 import { isSalesRole } from "@/lib/role-access";
 import { buildRouteTimeline } from "@/lib/route-analytics";
-import { addLocationLog, getAttendance, getLocationLogs, getTasks } from "@/lib/storage";
+import {
+  addLocationLog,
+  getAttendance,
+  getAttendanceAnomalies,
+  getLocationLogs,
+  getTasks,
+} from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import type { AttendanceRecord, Employee, LocationLog, Task } from "@/lib/types";
+import type { AttendanceAnomaly, AttendanceRecord, Employee, LocationLog, Task } from "@/lib/types";
 
 function toShortDate(dateKey: string): string {
   return formatMumbaiDateKey(dateKey);
@@ -307,6 +313,38 @@ function normalizeTimelineForInterval(
 
 type RouteAttendanceStatusEvent = AdminRouteTimelineResponse["attendanceEvents"][number];
 
+interface GpsDisabledWindow {
+  id: string;
+  startAt: string;
+  endAt: string | null;
+  details: string;
+}
+
+function resolveRouteEventSessionWindow(events: RouteAttendanceStatusEvent[]): RouteSessionWindow {
+  const ordered = [...events].sort((a, b) => a.at.localeCompare(b.at));
+  let activeStartAt: string | null = null;
+  let lastCompletedWindow: RouteSessionWindow = { startAt: null, endAt: null };
+
+  for (const entry of ordered) {
+    if (entry.type === "checkin") {
+      activeStartAt = entry.at;
+      continue;
+    }
+    if (entry.type === "checkout" && activeStartAt) {
+      lastCompletedWindow = {
+        startAt: activeStartAt,
+        endAt: entry.at,
+      };
+      activeStartAt = null;
+    }
+  }
+
+  if (activeStartAt) {
+    return { startAt: activeStartAt, endAt: null };
+  }
+  return lastCompletedWindow;
+}
+
 function mergeRouteAttendanceEvents(
   ...lists: RouteAttendanceStatusEvent[][]
 ): RouteAttendanceStatusEvent[] {
@@ -323,12 +361,6 @@ function mergeRouteAttendanceEvents(
   return Array.from(merged.values()).sort((a, b) => a.at.localeCompare(b.at));
 }
 
-function getLatestRouteAttendanceEvent(
-  events: RouteAttendanceStatusEvent[]
-): RouteAttendanceStatusEvent | null {
-  return events.length ? [...events].sort((a, b) => a.at.localeCompare(b.at)).at(-1) ?? null : null;
-}
-
 function getTimelineLatestActivityAt(timeline: AdminRouteTimelineResponse | null | undefined): string {
   if (!timeline) return "";
   const latestPointAt = [...(timeline.points || [])]
@@ -341,6 +373,54 @@ function getTimelineLatestActivityAt(timeline: AdminRouteTimelineResponse | null
     .filter((value): value is string => Boolean(value))
     .sort((a, b) => a.localeCompare(b))
     .at(-1) || "";
+}
+
+function buildGpsDisabledWindows(
+  anomalies: AttendanceAnomaly[],
+  selectedDate: string,
+  sessionWindow: RouteSessionWindow
+): GpsDisabledWindow[] {
+  const gpsEvents = anomalies
+    .filter((entry) => entry.type === "gps_disabled" || entry.type === "gps_restored")
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const windows: GpsDisabledWindow[] = [];
+  let openDisabled: AttendanceAnomaly | null = null;
+
+  const isInsideSession = (value: string): boolean => {
+    if (sessionWindow.startAt && value < sessionWindow.startAt) return false;
+    if (sessionWindow.endAt && value > sessionWindow.endAt) return false;
+    return true;
+  };
+
+  for (const event of gpsEvents) {
+    if (!isInsideSession(event.createdAt)) continue;
+    if (event.type === "gps_disabled") {
+      openDisabled = event;
+      continue;
+    }
+    if (event.type === "gps_restored" && openDisabled) {
+      if (isMumbaiDateKey(openDisabled.createdAt, selectedDate) || isMumbaiDateKey(event.createdAt, selectedDate)) {
+        windows.push({
+          id: `${openDisabled.id}_${event.id}`,
+          startAt: openDisabled.createdAt,
+          endAt: event.createdAt,
+          details: openDisabled.details,
+        });
+      }
+      openDisabled = null;
+    }
+  }
+
+  if (openDisabled && isMumbaiDateKey(openDisabled.createdAt, selectedDate)) {
+    windows.push({
+      id: openDisabled.id,
+      startAt: openDisabled.createdAt,
+      endAt: sessionWindow.endAt,
+      details: openDisabled.details,
+    });
+  }
+
+  return windows;
 }
 
 function mapLivePointToLocationLog(point: LiveMapPoint): LocationLog {
@@ -387,6 +467,15 @@ type TimelineRow =
       text: string;
       icon: keyof typeof Ionicons.glyphMap;
       iconColor: string;
+    }
+  | {
+      id: string;
+      type: "gps_gap";
+      startAt: string;
+      endAt: string | null;
+      text: string;
+      icon: keyof typeof Ionicons.glyphMap;
+      iconColor: string;
     };
 
 export default function RouteTrackingScreen() {
@@ -400,6 +489,7 @@ export default function RouteTrackingScreen() {
   const [loading, setLoading] = useState(false);
   const [timeline, setTimeline] = useState<AdminRouteTimelineResponse | null>(null);
   const [plannedStops, setPlannedStops] = useState<PlannedStopPoint[]>([]);
+  const [gpsDisabledWindows, setGpsDisabledWindows] = useState<GpsDisabledWindow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [authExpired, setAuthExpired] = useState(false);
   const [placeNameByLocationKey, setPlaceNameByLocationKey] = useState<Record<string, string>>({});
@@ -418,7 +508,7 @@ export default function RouteTrackingScreen() {
   const isPrivilegedViewer =
     user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
   const canViewTracking = isPrivilegedViewer;
-  const selectedDate = useMemo(() => getMumbaiDateKeyByOffset(dayOffset), [dayOffset, mumbaiNowLabel]);
+  const selectedDate = getMumbaiDateKeyByOffset(dayOffset);
   const visibleEmployees = useMemo(() => {
     if (!user) return [];
     if (isPrivilegedViewer) {
@@ -620,11 +710,13 @@ export default function RouteTrackingScreen() {
     if (!selectedUserId || !canViewTracking || authExpired) {
       if (!selectedUserId) {
         setPlannedStops([]);
+        setGpsDisabledWindows([]);
       }
       return;
     }
     setLoading(true);
     setError(null);
+    setGpsDisabledWindows([]);
     try {
       const taskSnapshot = await getTasks();
       const selectedEmployeeName = normalizeIdentity(selectedEmployee?.name);
@@ -673,19 +765,29 @@ export default function RouteTrackingScreen() {
       const [
         logsSnapshot,
         attendanceSnapshot,
+        anomalySnapshot,
         remoteAttendanceState,
+        remoteAnomalyState,
       ] = await Promise.all([
         getLocationLogs(),
         getAttendance(),
+        getAttendanceAnomalies(),
         isPrivilegedViewer
           ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance").catch(() => ({ value: null }))
+          : Promise.resolve({ value: null }),
+        isPrivilegedViewer
+          ? getRemoteState<AttendanceAnomaly[]>("@trackforce_attendance_anomalies").catch(() => ({ value: null }))
           : Promise.resolve({ value: null }),
       ]);
       const remoteAttendance = Array.isArray(remoteAttendanceState.value)
         ? filterCompanyScoped(remoteAttendanceState.value, user?.companyId)
         : [];
+      const remoteAnomalies = Array.isArray(remoteAnomalyState.value)
+        ? filterCompanyScoped(remoteAnomalyState.value, user?.companyId)
+        : [];
       const mergedLogsSnapshot = dedupeById(logsSnapshot);
       const mergedAttendanceSnapshot = dedupeById([...remoteAttendance, ...attendanceSnapshot]);
+      const mergedAnomalySnapshot = dedupeById([...remoteAnomalies, ...anomalySnapshot]);
       const aliases = buildSelectedUserAliases(
         selectedEmployee,
         user ? { id: user.id, name: user.name, email: user.email } : null,
@@ -809,17 +911,13 @@ export default function RouteTrackingScreen() {
         localAttendanceEvents,
         remoteTimeline?.attendanceEvents || []
       );
-      const latestEffectiveAttendance = getLatestRouteAttendanceEvent(mergedAttendanceEvents);
-      const isTrackingActive = latestEffectiveAttendance?.type === "checkin";
-
-      if (!isTrackingActive) {
-        setTimeline({
-          ...buildRouteTimeline(selectedUserId, selectedDate, []),
-          attendanceEvents: mergedAttendanceEvents,
-        });
-        setError(null);
-        return;
-      }
+      const mergedAttendanceSessionWindow = resolveRouteEventSessionWindow(mergedAttendanceEvents);
+      const selectedUserGpsAnomalies = mergedAnomalySnapshot.filter((entry) =>
+        aliases.has(entry.userId)
+      );
+      setGpsDisabledWindows(
+        buildGpsDisabledWindows(selectedUserGpsAnomalies, selectedDate, mergedAttendanceSessionWindow)
+      );
 
       if (remoteTimeline && (remoteTimeline.points?.length ?? 0) > 0) {
         setTimeline(
@@ -868,20 +966,22 @@ export default function RouteTrackingScreen() {
             })[0];
           if (matchingRoute && matchingRoute.points.length > 0) {
             const normalizedRoutePoints = normalizePointsForInterval(
-              matchingRoute.points,
+              filterPointsToSessionWindow(matchingRoute.points, mergedAttendanceSessionWindow),
               ROUTE_POINT_INTERVAL_MINUTES
             );
-            const fallbackTimeline = buildRouteTimeline(
-              selectedUserId,
-              selectedDate,
-              normalizedRoutePoints
-            );
-            setTimeline({
-              ...fallbackTimeline,
-              attendanceEvents: fallbackAttendanceEvents,
-            });
-            setError("Showing synced route points from admin live map feed.");
-            return;
+            if (normalizedRoutePoints.length) {
+              const fallbackTimeline = buildRouteTimeline(
+                selectedUserId,
+                selectedDate,
+                normalizedRoutePoints
+              );
+              setTimeline({
+                ...fallbackTimeline,
+                attendanceEvents: fallbackAttendanceEvents,
+              });
+              setError("Showing synced route points from admin live map feed.");
+              return;
+            }
           }
         } catch {
           // best-effort fallback, continue to latest point fallback below
@@ -1017,13 +1117,28 @@ export default function RouteTrackingScreen() {
       };
     });
 
-    const merged = [...attendanceRows, ...segmentRows];
+    const gpsRows: TimelineRow[] = gpsDisabledWindows.map((window) => {
+      const durationText = window.endAt
+        ? `${Math.max(1, Math.round((toMs(window.endAt) - toMs(window.startAt)) / 60000))} mins`
+        : "still off / not restored";
+      return {
+        id: `gps_${window.id}`,
+        type: "gps_gap",
+        startAt: window.startAt,
+        endAt: window.endAt,
+        icon: "location-outline",
+        iconColor: colors.danger,
+        text: `GPS off detected (${durationText}). ${window.details}`,
+      };
+    });
+
+    const merged = [...attendanceRows, ...segmentRows, ...gpsRows];
     return merged.sort((a, b) => {
       const aStart = a.type === "attendance" ? a.at : a.startAt;
       const bStart = b.type === "attendance" ? b.at : b.startAt;
       return aStart.localeCompare(bStart);
     });
-  }, [colors.danger, colors.primary, colors.success, colors.warning, timeline]);
+  }, [colors.danger, colors.primary, colors.success, colors.warning, gpsDisabledWindows, timeline]);
 
   const summary = useMemo(() => {
     const raw = timeline?.summary;
@@ -1130,13 +1245,15 @@ export default function RouteTrackingScreen() {
     if (!events.length) return null;
     return [...events].sort((a, b) => a.at.localeCompare(b.at))[events.length - 1];
   }, [timeline?.attendanceEvents]);
+  const hasRoutePoints = (timeline?.points?.length ?? 0) > 0;
   const isTrackingVisible = latestAttendanceEvent?.type === "checkin";
   const isCheckedOutView = latestAttendanceEvent?.type === "checkout";
+  const shouldShowMapStatusOverlay = !isTrackingVisible && !hasRoutePoints;
   const mapStatusTitle = isCheckedOutView ? "Checked Out" : "Not Checked In";
   const mapStatusText = isCheckedOutView
     ? `${selectedEmployee?.name || "This salesperson"} checked out${
         latestAttendanceEvent?.at ? ` at ${toTime(latestAttendanceEvent.at)}` : ""
-      }. Map is hidden until next check-in.`
+      }. Showing the route captured between check-in and check-out.`
     : `${selectedEmployee?.name || "This salesperson"} is not checked in for this date.`;
 
   if (!canViewTracking) {
@@ -1259,6 +1376,17 @@ export default function RouteTrackingScreen() {
           </View>
         ) : null}
 
+        {gpsDisabledWindows.length ? (
+          <View style={[styles.errorWrap, { backgroundColor: colors.danger + "14", borderColor: colors.danger + "55" }]}>
+            <Ionicons name="location-outline" size={16} color={colors.danger} />
+            <Text style={[styles.errorText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>
+              GPS off detected during check-in: {gpsDisabledWindows
+                .map((window) => `${toTime(window.startAt)} - ${window.endAt ? toTime(window.endAt) : "Open"}`)
+                .join(", ")}
+            </Text>
+          </View>
+        ) : null}
+
         {mapProvider === "osm" || mapProvider === "openstreetmap" ? (
           <View style={[styles.infoWrap, { backgroundColor: colors.primary + "16", borderColor: colors.primary + "55" }]}>
             <Ionicons name="map-outline" size={16} color={colors.primary} />
@@ -1365,7 +1493,7 @@ export default function RouteTrackingScreen() {
             colors={colors}
             height={Platform.OS === "web" ? 240 : 270}
           />
-          {!isTrackingVisible ? (
+          {shouldShowMapStatusOverlay ? (
             <View style={styles.mapOverlay}>
               <View
                 style={[
@@ -1430,15 +1558,15 @@ export default function RouteTrackingScreen() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.currentLocationTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-              {isTrackingVisible ? "Current Location" : "Attendance Status"}
+              {isTrackingVisible ? "Current Location" : hasRoutePoints ? "Last Route Point" : "Attendance Status"}
             </Text>
             <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-              {!isTrackingVisible
-                ? mapStatusText
-                : latestRoutePoint
+              {latestRoutePoint
                 ? `${latestRoutePoint.locationName || latestRoutePoint.geofenceName || "Resolving location..."} | ${toTime(
                     latestRoutePoint.at
                   )}${latestRoutePoint.battery ? ` | ${latestRoutePoint.battery}` : ""}`
+                : !isTrackingVisible
+                ? mapStatusText
                 : "Waiting for live GPS point..."}
             </Text>
           </View>
@@ -1505,7 +1633,11 @@ export default function RouteTrackingScreen() {
               >
                 {rows.map((row, idx) => {
                   const startLabel =
-                    row.type === "attendance" ? toTime(row.at) : `${toTime(row.startAt)} - ${toTime(row.endAt)}`;
+                    row.type === "attendance"
+                      ? toTime(row.at)
+                      : row.type === "gps_gap"
+                      ? `${toTime(row.startAt)} - ${row.endAt ? toTime(row.endAt) : "Open"}`
+                      : `${toTime(row.startAt)} - ${toTime(row.endAt)}`;
                   return (
                     <View
                       key={row.id}

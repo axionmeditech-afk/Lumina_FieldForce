@@ -1,8 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
-set "MOUNT=D:\Enterprise-Suite-Prozip\Enterprise-Suite-Prozip"
-set "PROJ=D:\Enterprise-Suite-Prozip\Enterprise-Suite-Prozip\Enterprise-Suite-Pro"
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "MOUNT=%%~fI"
+set "PROJ=%SCRIPT_DIR%"
 set "SHORT=R:\p"
 set "APK_SHORT=R:\p\android\app\build\outputs\apk\release\app-release.apk"
 set "APK_REAL=%PROJ%\android\app\build\outputs\apk\release\app-release.apk"

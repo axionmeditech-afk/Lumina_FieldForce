@@ -34,17 +34,30 @@ function isLeadRole(role?: UserRole | null): boolean {
   return Boolean(role && LEAD_ROLES.includes(role));
 }
 
+function normalizeIdentity(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+interface TeamMemberDisplay {
+  id: string;
+  name: string;
+  meta: string;
+  isCurrentUser: boolean;
+}
+
 function TeamCard({
   team,
-  members,
+  memberDisplays,
   colors,
   canAssignTask,
+  isCurrentUserTeam,
   onAssignTask,
 }: {
   team: Team;
-  members: Employee[];
+  memberDisplays: TeamMemberDisplay[];
   colors: typeof Colors.light;
   canAssignTask: boolean;
+  isCurrentUserTeam: boolean;
   onAssignTask: (team: Team) => void;
 }) {
   return (
@@ -74,20 +87,49 @@ function TeamCard({
         ) : null}
       </View>
       <Text style={[styles.teamMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-        Lead: {team.ownerName} | {members.length} members
+        Lead: {team.ownerName} | {team.memberIds.length} members
       </Text>
+      {isCurrentUserTeam ? (
+        <View style={[styles.myTeamBadge, { backgroundColor: colors.primary + "16", borderColor: colors.primary + "55" }]}>
+          <Ionicons name="checkmark-circle-outline" size={14} color={colors.primary} />
+          <Text style={[styles.myTeamBadgeText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+            You are in this team
+          </Text>
+        </View>
+      ) : null}
 
       <View style={styles.memberRow}>
-        {members.length > 0 ? (
-          members.map((member) => (
-            <View key={member.id} style={[styles.memberChip, { backgroundColor: colors.surfaceSecondary }]}>
+        {memberDisplays.length > 0 ? (
+          memberDisplays.map((member) => (
+            <View
+              key={member.id}
+              style={[
+                styles.memberChip,
+                {
+                  backgroundColor: member.isCurrentUser ? colors.primary + "14" : colors.surfaceSecondary,
+                  borderColor: member.isCurrentUser ? colors.primary + "55" : "transparent",
+                },
+              ]}
+            >
               <Text
                 numberOfLines={1}
                 ellipsizeMode="tail"
-                style={[styles.memberChipText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}
+                style={[
+                  styles.memberChipText,
+                  { color: member.isCurrentUser ? colors.primary : colors.textSecondary, fontFamily: "Inter_500Medium" },
+                ]}
               >
-                {member.name}
+                {member.isCurrentUser ? `${member.name} (You)` : member.name}
               </Text>
+              {member.meta ? (
+                <Text
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                  style={[styles.memberChipMeta, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}
+                >
+                  {member.meta}
+                </Text>
+              ) : null}
             </View>
           ))
         ) : (
@@ -183,9 +225,24 @@ export default function TeamScreen() {
 
   const linkedEmployeeIds = useMemo(() => {
     if (!user) return [];
-    return employees
-      .filter((employee) => employee.email === user.email || employee.name === user.name)
-      .map((employee) => employee.id);
+    const userEmail = normalizeIdentity(user.email);
+    const userName = normalizeIdentity(user.name);
+    const userPhone = normalizeIdentity(user.phone);
+    const strongMatches = employees.filter((employee) => {
+      const employeeEmail = normalizeIdentity(employee.email);
+      const employeePhone = normalizeIdentity(employee.phone);
+      return (
+        employee.id === user.id ||
+        (userEmail && employeeEmail === userEmail) ||
+        (userPhone && employeePhone === userPhone)
+      );
+    });
+    if (strongMatches.length) {
+      return strongMatches.map((employee) => employee.id);
+    }
+
+    const nameMatches = employees.filter((employee) => normalizeIdentity(employee.name) === userName);
+    return nameMatches.length === 1 ? [nameMatches[0].id] : [];
   }, [employees, user]);
 
   const assignerId = linkedEmployeeIds[0] ?? user?.id ?? "";
@@ -195,8 +252,16 @@ export default function TeamScreen() {
     if (canManageTeams) return teams;
 
     const actorIds = new Set<string>([user.id, ...linkedEmployeeIds]);
-    return teams.filter((team) => team.memberIds.some((memberId) => actorIds.has(memberId)));
+    return teams.filter(
+      (team) => team.ownerId === user.id || team.memberIds.some((memberId) => actorIds.has(memberId))
+    );
   }, [canManageTeams, linkedEmployeeIds, teams, user]);
+
+  const currentUserTeamMemberIds = useMemo(() => {
+    if (!user) return new Set<string>();
+    return new Set<string>([user.id, ...linkedEmployeeIds]);
+  }, [linkedEmployeeIds, user]);
+  const shouldMarkCurrentUserInTeams = !canManageTeams;
 
   const headerTitle = canManageTeams ? "Team Management" : "My Team";
   const headerSubtitle = canManageTeams
@@ -438,9 +503,20 @@ export default function TeamScreen() {
         renderItem={({ item }) => (
           <TeamCard
             team={item}
-            members={item.memberIds.map((id) => employeesById.get(id)).filter((m): m is Employee => Boolean(m))}
+            memberDisplays={item.memberIds.map((id) => {
+              const member = employeesById.get(id);
+              return {
+                id,
+                name: member?.name || `Member ${id.slice(0, 8)}`,
+                meta: [member?.department, member?.branch].filter(Boolean).join(" | "),
+                isCurrentUser: shouldMarkCurrentUserInTeams && currentUserTeamMemberIds.has(id),
+              };
+            })}
             colors={colors}
             canAssignTask={canManageTeams}
+            isCurrentUserTeam={
+              shouldMarkCurrentUserInTeams && item.memberIds.some((id) => currentUserTeamMemberIds.has(id))
+            }
             onAssignTask={openAssignTaskModal}
           />
         )}
@@ -664,18 +740,33 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: "Inter_600SemiBold",
   },
+  myTeamBadge: {
+    alignSelf: "flex-start",
+    minHeight: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  myTeamBadgeText: {
+    fontSize: 11.5,
+  },
   memberRow: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 8,
   },
   memberChip: {
-    borderRadius: 999,
+    borderRadius: 12,
+    borderWidth: 1,
     paddingHorizontal: 9,
-    paddingVertical: 4,
+    paddingVertical: 6,
     maxWidth: "48%",
   },
   memberChipText: { fontSize: 11.5 },
+  memberChipMeta: { fontSize: 10, marginTop: 1 },
   emptyState: {
     borderRadius: 16,
     padding: 40,

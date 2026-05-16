@@ -442,6 +442,8 @@ export interface AttendanceAnomaly {
     | "device_mismatch"
     | "duplicate_checkin"
     | "gps_weak"
+    | "gps_disabled"
+    | "gps_restored"
     | "face_validation_failed"
     | "biometric_failed"
     | "checkout_outside_zone"

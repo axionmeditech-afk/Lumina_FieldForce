@@ -3,12 +3,14 @@ import { Redirect } from "expo-router";
 import { useAuth } from "@/contexts/AuthContext";
 import { StartScreen } from "@/components/StartScreen";
 
+const START_VIDEO_MAX_WAIT_MS = 4500;
+
 export default function IndexScreen() {
   const { user, isLoading } = useAuth();
   const [videoComplete, setVideoComplete] = useState(false);
 
   useEffect(() => {
-    const fallback = setTimeout(() => setVideoComplete(true), 8000);
+    const fallback = setTimeout(() => setVideoComplete(true), START_VIDEO_MAX_WAIT_MS);
     return () => clearTimeout(fallback);
   }, []);
 
