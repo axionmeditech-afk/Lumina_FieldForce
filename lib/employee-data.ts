@@ -63,7 +63,8 @@ async function readRemoteArray<T>(key: string): Promise<T[] | null> {
 function mergeEmployees(
   baseEmployees: Employee[],
   extraEmployees: Employee[],
-  fallbackCompanyId: string
+  fallbackCompanyId: string,
+  options?: { includeUnmatchedExtras?: boolean }
 ): Employee[] {
   const byEmail = new Map<string, Employee>();
   const byName = new Map<string, Employee>();
@@ -98,10 +99,12 @@ function mergeEmployees(
       if (idx >= 0) merged[idx] = next;
       continue;
     }
-    merged.push({
-      ...extra,
-      companyId: extra.companyId || fallbackCompanyId,
-    });
+    if (options?.includeUnmatchedExtras) {
+      merged.push({
+        ...extra,
+        companyId: extra.companyId || fallbackCompanyId,
+      });
+    }
   }
 
   return merged;
@@ -188,7 +191,9 @@ export async function getEmployees(): Promise<Employee[]> {
     }
   }
 
-  const merged = mergeEmployees(baseEmployees, dolibarrEmployees, companyId || "company_default");
+  const merged = mergeEmployees(baseEmployees, dolibarrEmployees, companyId || "company_default", {
+    includeUnmatchedExtras: false,
+  });
   if (!companyId) return merged;
   return merged.filter((employee) => employee.companyId === companyId);
 }
@@ -199,8 +204,15 @@ export async function getDolibarrEmployees(): Promise<Employee[]> {
     return [];
   }
   try {
+    const approvedEmployees = await getEmployeesLocal();
+    const scopedEmployees = approvedEmployees.filter(
+      (employee) => employee.companyId === currentUser.companyId
+    );
     const dolibarrUsers = await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
-    return mapDolibarrUsersToEmployees(dolibarrUsers, currentUser);
+    const dolibarrEmployees = mapDolibarrUsersToEmployees(dolibarrUsers, currentUser);
+    return mergeEmployees(scopedEmployees, dolibarrEmployees, currentUser.companyId, {
+      includeUnmatchedExtras: false,
+    });
   } catch {
     return [];
   }

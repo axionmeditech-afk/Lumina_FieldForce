@@ -112,7 +112,7 @@ async function ensureReminderCatalogReady(input: {
   const hasCurrentUserItems = current.items.some(
     (entry) =>
       entry.salespersonId === input.userId &&
-      (!entry.companyId || !input.companyId || entry.companyId === input.companyId)
+      (!input.companyId || entry.companyId === input.companyId)
   );
 
   if (current.items.length && hasCurrentUserItems && isFresh) {
@@ -229,7 +229,7 @@ export async function maybeSendLocationReminder(input: {
   const now = Date.now();
   const eligible = combinedItems
     .filter((entry) => entry.salespersonId === input.userId)
-    .filter((entry) => !entry.companyId || !input.companyId || entry.companyId === input.companyId)
+    .filter((entry) => !input.companyId || entry.companyId === input.companyId)
     .map((entry) => ({
       entry,
       distanceMeters: haversineDistanceMeters(

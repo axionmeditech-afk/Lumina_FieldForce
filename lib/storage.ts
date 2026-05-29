@@ -1315,14 +1315,13 @@ function withCompanyId<T extends CompanyScoped>(item: T, companyId: string | nul
 
 function matchesCompany(item: CompanyScoped, companyId: string | null): boolean {
   if (!companyId) return true;
-  if (!item.companyId) return true;
-  return item.companyId === companyId;
+  return normalizeWhitespace(item.companyId ?? "") === companyId;
 }
 
 function matchesCompanySet(item: CompanyScoped, companyIds: Set<string>): boolean {
   if (!companyIds.size) return true;
-  if (!item.companyId) return true;
-  return companyIds.has(item.companyId);
+  const itemCompanyId = normalizeWhitespace(item.companyId ?? "");
+  return Boolean(itemCompanyId && companyIds.has(itemCompanyId));
 }
 
 function employeeMatchesUserIdentity(employee: Employee, user: AppUser): boolean {

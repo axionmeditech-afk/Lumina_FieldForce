@@ -1528,7 +1528,7 @@ function filterCompanyScoped<T extends { companyId?: string | null }>(
   companyId: string | null | undefined
 ): T[] {
   if (!companyId) return entries;
-  return entries.filter((entry) => !entry.companyId || entry.companyId === companyId);
+  return entries.filter((entry) => entry.companyId === companyId);
 }
 
 function buildUserIdCandidates(...values: (string | null | undefined)[]): string[] {
