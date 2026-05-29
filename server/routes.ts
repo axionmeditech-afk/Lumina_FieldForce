@@ -131,6 +131,29 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_notifications",
   "@trackforce_support_threads",
 ]);
+const COMPANY_SCOPED_REMOTE_STATE_KEYS = new Set([
+  "@trackforce_employees",
+  "@trackforce_attendance",
+  "@trackforce_salaries",
+  "@trackforce_tasks",
+  "@trackforce_expenses",
+  "@trackforce_stockists",
+  "@trackforce_stock_transfers",
+  "@trackforce_incentive_goal_plans",
+  "@trackforce_incentive_product_plans",
+  "@trackforce_incentive_payouts",
+  "@trackforce_conversations",
+  "@trackforce_audit_logs",
+  "@trackforce_geofences",
+  "@trackforce_teams",
+  "@trackforce_attendance_photos",
+  "@trackforce_attendance_anomalies",
+  "@trackforce_location_logs",
+  "@trackforce_quick_sale_location_logs",
+  "@trackforce_dolibarr_sync_logs",
+  "@trackforce_notifications",
+  "@trackforce_support_threads",
+]);
 const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_companies",
   "@trackforce_attendance",
@@ -4446,6 +4469,7 @@ async function ensureSupportTables(): Promise<void> {
   await conn.execute(`
     CREATE TABLE IF NOT EXISTS \`lff_support_messages\` (
       \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
       \`thread_id\` VARCHAR(64) NOT NULL,
       \`sender_id\` VARCHAR(64) NOT NULL,
       \`sender_name\` VARCHAR(191) NOT NULL,
@@ -4464,6 +4488,7 @@ async function ensureSupportTables(): Promise<void> {
   await conn.execute(`
     CREATE TABLE IF NOT EXISTS \`lff_support_message_attachments\` (
       \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
       \`message_id\` VARCHAR(64) NOT NULL,
       \`thread_id\` VARCHAR(64) NOT NULL,
       \`file_url\` LONGTEXT NOT NULL,
@@ -4481,6 +4506,7 @@ async function ensureSupportTables(): Promise<void> {
   `);
   await conn.execute(`
     ALTER TABLE \`lff_support_messages\`
+      ADD COLUMN IF NOT EXISTS \`company_id\` VARCHAR(64) NULL AFTER \`id\`,
       ADD COLUMN IF NOT EXISTS \`delivery_status\` ENUM('sent','delivered','seen') NOT NULL DEFAULT 'delivered' AFTER \`body\`,
       ADD COLUMN IF NOT EXISTS \`read_state\` ENUM('unread','read') NOT NULL DEFAULT 'unread' AFTER \`delivery_status\`,
       ADD COLUMN IF NOT EXISTS \`delivered_at\` DATETIME NULL AFTER \`delivery_status\`,
@@ -4489,6 +4515,7 @@ async function ensureSupportTables(): Promise<void> {
   `);
   await conn.execute(`
     ALTER TABLE \`lff_support_message_attachments\`
+      ADD COLUMN IF NOT EXISTS \`company_id\` VARCHAR(64) NULL AFTER \`id\`,
       ADD COLUMN IF NOT EXISTS \`file_name\` VARCHAR(255) NULL AFTER \`file_url\`,
       ADD COLUMN IF NOT EXISTS \`mime_type\` VARCHAR(127) NULL AFTER \`file_name\`,
       ADD COLUMN IF NOT EXISTS \`file_size_bytes\` BIGINT NULL AFTER \`mime_type\`,
@@ -4674,10 +4701,11 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
       for (const message of normalizedMessages) {
         await conn.execute(
           `INSERT INTO lff_support_messages
-            (id, thread_id, sender_id, sender_name, sender_role, body, delivery_status, read_state, delivered_at, seen_at, seen_by_user_ids_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (id, company_id, thread_id, sender_id, sender_name, sender_role, body, delivery_status, read_state, delivered_at, seen_at, seen_by_user_ids_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             message.id,
+            companyId,
             threadId,
             message.senderId,
             message.senderName,
@@ -4694,10 +4722,11 @@ async function replaceSupportThreadsInMySql(entries: unknown[]): Promise<void> {
         for (const attachment of message.attachments) {
           await conn.execute(
             `INSERT INTO lff_support_message_attachments
-              (id, message_id, thread_id, file_url, file_name, mime_type, file_size_bytes, attachment_type, uploaded_by_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              (id, company_id, message_id, thread_id, file_url, file_name, mime_type, file_size_bytes, attachment_type, uploaded_by_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               attachment.id,
+              companyId,
               message.id,
               threadId,
               attachment.fileUrl,
@@ -4850,6 +4879,7 @@ async function ensureBankAccountsTable(): Promise<void> {
   await conn.execute(`
     CREATE TABLE IF NOT EXISTS \`lff_bank_accounts\` (
       \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
       \`employee_id\` VARCHAR(64) NULL,
       \`employee_name\` VARCHAR(191) NOT NULL,
       \`employee_email\` VARCHAR(191) NOT NULL,
@@ -4878,6 +4908,7 @@ async function ensureBankAccountsTable(): Promise<void> {
   `);
   await conn.execute(`
     ALTER TABLE \`lff_bank_accounts\`
+      ADD COLUMN IF NOT EXISTS \`company_id\` VARCHAR(64) NULL AFTER \`id\`,
       ADD COLUMN IF NOT EXISTS \`dolibarr_ref\` VARCHAR(32) NULL AFTER \`account_type\`,
       ADD COLUMN IF NOT EXISTS \`dolibarr_label\` VARCHAR(191) NULL AFTER \`dolibarr_ref\`,
       ADD COLUMN IF NOT EXISTS \`dolibarr_type\` ENUM('savings','current','cash') NOT NULL DEFAULT 'current' AFTER \`dolibarr_label\`,
@@ -4896,6 +4927,7 @@ function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown
   const nowIso = new Date().toISOString();
   return {
     id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
     employeeId: row.employee_id ? String(row.employee_id) : undefined,
     employeeName: row.employee_name ? String(row.employee_name) : "",
     employeeEmail: row.employee_email ? String(row.employee_email) : "",
@@ -4939,6 +4971,27 @@ async function readNormalizedState(key: string): Promise<unknown[] | undefined> 
   if (key === "@trackforce_salaries") return listSalariesFromMySql();
   if (key === "@trackforce_support_threads") return listSupportThreadsFromMySql();
   return undefined;
+}
+
+function withDefaultCompanyIdForRemoteState(
+  key: string,
+  value: unknown,
+  defaultCompanyId: string | null
+): unknown {
+  if (!defaultCompanyId || !COMPANY_SCOPED_REMOTE_STATE_KEYS.has(key) || !Array.isArray(value)) {
+    return value;
+  }
+  let changed = false;
+  const next = value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const record = entry as Record<string, unknown>;
+    const currentCompanyId =
+      typeof record.companyId === "string" ? normalizeWhitespace(record.companyId) : "";
+    if (currentCompanyId) return entry;
+    changed = true;
+    return { ...record, companyId: defaultCompanyId };
+  });
+  return changed ? next : value;
 }
 
 async function writeNormalizedState(key: string, jsonValue: string): Promise<boolean> {
@@ -5065,6 +5118,7 @@ type CompanyProfileSummary = Pick<CompanyProfile, "id" | "name" | "primaryBranch
 
 let companiesTableEnsured = false;
 let legacyCompaniesStateMigrated = false;
+let companyIdColumnsEnsured = false;
 
 function companyProfileFromRow(row: any): CompanyProfile {
   const nowIso = new Date().toISOString();
@@ -5205,7 +5259,7 @@ async function migrateLegacyCompaniesStateToMySql(): Promise<void> {
   legacyCompaniesStateMigrated = true;
 }
 
-async function listCompaniesFromMySql(): Promise<CompanyProfile[]> {
+async function listCompanyProfilesFromMySqlRaw(): Promise<CompanyProfile[]> {
   if (!isMySqlStateEnabled()) return [];
   await migrateLegacyCompaniesStateToMySql();
   await ensureCompaniesTableInMySql();
@@ -5217,6 +5271,10 @@ async function listCompaniesFromMySql(): Promise<CompanyProfile[]> {
      ORDER BY created_at DESC, name ASC`
   );
   return (rows || []).map((row) => companyProfileFromRow(row));
+}
+
+async function listCompaniesFromMySql(): Promise<CompanyProfile[]> {
+  return listCompanyProfilesFromMySqlRaw();
 }
 
 async function persistCompaniesLegacyStateFromMySql(): Promise<void> {
@@ -5262,6 +5320,147 @@ async function replaceCompaniesInMySql(entries: unknown[]): Promise<void> {
     throw error;
   } finally {
     conn.release();
+  }
+}
+
+function isLegacyCompanyIdForRehome(value: unknown, validCompanyIds: Set<string>): boolean {
+  const companyId = normalizeWhitespace(typeof value === "string" ? value : "");
+  if (!companyId) return true;
+  if (companyId === DEFAULT_COMPANY_ID || companyId === PENDING_COMPANY_ID) return true;
+  return !validCompanyIds.has(companyId);
+}
+
+async function getColumnsForTable(conn: Pool | PoolConnection, tableName: string): Promise<Set<string>> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT COLUMN_NAME AS column_name
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?`,
+    [tableName]
+  );
+  return new Set((rows || []).map((row) => String(row.column_name || "")));
+}
+
+async function ensureCompanyIdColumnsForCompanyScopedTables(conn: Pool | PoolConnection): Promise<void> {
+  if (companyIdColumnsEnsured || !isMySqlStateEnabled()) return;
+  const excludedTables = new Set(["lff_auth_sessions", "lff_companies"]);
+  const [rows] = await conn.query<any[]>(
+    `SELECT table_info.TABLE_NAME AS table_name
+     FROM INFORMATION_SCHEMA.TABLES table_info
+     LEFT JOIN INFORMATION_SCHEMA.COLUMNS company_columns
+       ON company_columns.TABLE_SCHEMA = table_info.TABLE_SCHEMA
+      AND company_columns.TABLE_NAME = table_info.TABLE_NAME
+      AND company_columns.COLUMN_NAME = 'company_id'
+     WHERE table_info.TABLE_SCHEMA = DATABASE()
+       AND table_info.TABLE_TYPE = 'BASE TABLE'
+       AND table_info.TABLE_NAME LIKE 'lff\\_%'
+       AND company_columns.COLUMN_NAME IS NULL`
+  );
+
+  for (const row of rows || []) {
+    const tableName = String(row?.table_name || "");
+    if (!/^lff_[a-zA-Z0-9_]+$/.test(tableName) || excludedTables.has(tableName)) continue;
+    const columns = await getColumnsForTable(conn, tableName);
+    const afterIdClause = columns.has("id") ? " AFTER `id`" : "";
+    await conn.execute(
+      `ALTER TABLE \`${tableName}\` ADD COLUMN IF NOT EXISTS \`company_id\` VARCHAR(64) NULL${afterIdClause}`
+    );
+  }
+  companyIdColumnsEnsured = true;
+}
+
+async function ensureCompanyScopedSchemaInMySql(): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureCompaniesTableInMySql();
+  const conn = await getMySqlPool();
+  await ensureCompanyIdColumnsForCompanyScopedTables(conn);
+}
+
+async function rehomeLegacyCompanyDataToMySql(
+  targetCompany: CompanyProfile,
+  companies: CompanyProfile[]
+): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const validCompanyIds = new Set(companies.map((company) => company.id));
+  const conn = await getMySqlPool();
+  await ensureCompanyIdColumnsForCompanyScopedTables(conn);
+  const [companyScopedRows] = await conn.query<any[]>(
+    `SELECT TABLE_NAME AS table_name
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND COLUMN_NAME = 'company_id'
+       AND TABLE_NAME LIKE 'lff\\_%'
+       AND TABLE_NAME <> 'lff_companies'`
+  );
+
+  for (const row of companyScopedRows || []) {
+    const tableName = String(row?.table_name || "");
+    if (!/^lff_[a-zA-Z0-9_]+$/.test(tableName)) continue;
+    const columns = await getColumnsForTable(conn, tableName);
+    const setParts = ["company_id = ?"];
+    const params: unknown[] = [targetCompany.id];
+    if (columns.has("company_name")) {
+      setParts.push("company_name = ?");
+      params.push(targetCompany.name);
+    }
+    if (columns.has("company_ids_json")) {
+      setParts.push("company_ids_json = ?");
+      params.push(JSON.stringify([targetCompany.id]));
+    }
+    if (columns.has("updated_at")) {
+      setParts.push("updated_at = NOW()");
+    }
+    if (columns.has("tms")) {
+      setParts.push("tms = NOW()");
+    }
+    params.push(DEFAULT_COMPANY_ID, PENDING_COMPANY_ID);
+    await conn.execute(
+      `UPDATE \`${tableName}\` scoped
+       SET ${setParts.join(", ")}
+       WHERE scoped.company_id IS NULL
+          OR scoped.company_id = ''
+          OR scoped.company_id IN (?, ?)
+          OR NOT EXISTS (
+            SELECT 1 FROM lff_companies companies WHERE companies.id = scoped.company_id
+          )`,
+      params
+    );
+  }
+
+  const [requestRows] = await conn.query<any[]>(
+    `SELECT id, assigned_company_ids_json FROM lff_access_requests`
+  ).catch(() => [[] as any[]]);
+  for (const row of requestRows || []) {
+    const requestId = String(row.id || "");
+    if (!requestId) continue;
+    const currentIds = parseStringArrayJson(row.assigned_company_ids_json);
+    const validIds = currentIds.filter((companyId) => validCompanyIds.has(companyId));
+    if (validIds.length === currentIds.length && validIds.length > 0) continue;
+    const nextIds = validIds.length ? validIds : [targetCompany.id];
+    await conn.execute(
+      `UPDATE lff_access_requests SET assigned_company_ids_json = ? WHERE id = ?`,
+      [JSON.stringify(nextIds), requestId]
+    );
+  }
+
+  const stateKeys = Array.from(REMOTE_STATE_ALLOWED_KEYS).filter(
+    (key) => key !== "@trackforce_companies"
+  );
+  for (const key of stateKeys) {
+    const raw = await getMySqlStateValue(key).catch(() => null);
+    const parsed = raw ? parseJsonText(raw) : null;
+    if (!Array.isArray(parsed)) continue;
+    let changed = false;
+    const next = parsed.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+      const record = entry as Record<string, unknown>;
+      if (!isLegacyCompanyIdForRehome(record.companyId, validCompanyIds)) return entry;
+      changed = true;
+      return { ...record, companyId: targetCompany.id };
+    });
+    if (changed) {
+      await setMySqlStateValue(key, JSON.stringify(next));
+    }
   }
 }
 
@@ -6081,6 +6280,12 @@ function buildUserFromRegistration(payload: {
 
 export async function registerRoutes(app: Express): Promise<Server> {
   await initAuthUsersStore();
+  await ensureCompanyScopedSchemaInMySql().catch((error) => {
+    console.warn(
+      "Unable to finish company-scoped schema setup during startup:",
+      error instanceof Error ? error.message : error
+    );
+  });
 
   app.get("/api/health", (_req, res) => {
     res.json({
@@ -6476,9 +6681,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const created = await upsertCompanyProfileInMySql(
         normalizeCompanyProfilePayload({
           ...body,
-          id:
-            normalizeWhitespace(body.id || "") ||
-            `${getCompanyIdFromName(requestedName)}_${randomUUID().slice(0, 8)}`,
+          id: `${getCompanyIdFromName(requestedName)}_${randomUUID().slice(0, 8)}`,
           name: requestedName,
           createdAt: nowIso,
           updatedAt: nowIso,
@@ -6492,6 +6695,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
           error instanceof Error
             ? `Unable to create company: ${error.message}`
             : "Unable to create company.",
+      });
+    }
+  });
+
+  app.post("/api/companies/:id/rehome-legacy-data", requireAuth, requireRoles("admin"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "Company database storage is not configured." });
+      return;
+    }
+    const companyId = normalizeWhitespace(firstString(req.params.id));
+    if (!companyId) {
+      res.status(400).json({ message: "Company id is required." });
+      return;
+    }
+    try {
+      const companies = await listCompanyProfilesFromMySqlRaw();
+      const targetCompany = companies.find((company) => company.id === companyId);
+      if (!targetCompany) {
+        res.status(404).json({ message: "Company not found." });
+        return;
+      }
+      await rehomeLegacyCompanyDataToMySql(targetCompany, companies);
+      await persistCompaniesLegacyStateFromMySql();
+      res.json({
+        ok: true,
+        companyId: targetCompany.id,
+        companyName: targetCompany.name,
+      });
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to assign legacy data to company: ${error.message}`
+            : "Unable to assign legacy data to company.",
       });
     }
   });
@@ -8569,7 +8806,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      const serialized = JSON.stringify(body.value ?? null);
+      const defaultCompanyId = await resolveRequestCompanyId(req);
+      const scopedValue = withDefaultCompanyIdForRemoteState(
+        key,
+        body.value ?? null,
+        defaultCompanyId
+      );
+      const serialized = JSON.stringify(scopedValue ?? null);
       await writeRemoteState(key, serialized);
       res.json({
         ok: true,
@@ -9764,6 +10007,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await ensureBankAccountsTable();
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
+      const companyId = await resolveRequestCompanyId(req);
       const employeeId = typeof req.query.employeeId === "string" ? req.query.employeeId.trim().toLowerCase() : "";
       const employeeEmail =
         typeof req.query.employeeEmail === "string" ? req.query.employeeEmail.trim().toLowerCase() : "";
@@ -9829,6 +10073,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (filterClauses.length > 0) {
         whereClauses.push(`(${filterClauses.join(" OR ")})`);
       }
+      if (companyId) {
+        whereClauses.push("company_id = ?");
+        params.push(companyId);
+      }
       if (whereClauses.length > 0) {
         query += ` WHERE ${whereClauses.join(" AND ")}`;
       }
@@ -9851,6 +10099,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
       const body = (req.body || {}) as Record<string, unknown>;
+      const companyId = toNullableText(body.companyId) || (await resolveRequestCompanyId(req));
       const id = body.id ? String(body.id).trim() : randomUUID();
       const employeeId = body.employeeId ? String(body.employeeId).trim() : "";
       const employeeName = body.employeeName ? String(body.employeeName).trim() : "";
@@ -9878,9 +10127,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const now = toSqlTimestamp(new Date());
       await conn.execute(
         `INSERT INTO \`lff_bank_accounts\`
-          (\`id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`account_type\`, \`dolibarr_ref\`, \`dolibarr_label\`, \`dolibarr_type\`, \`currency_code\`, \`country_code\`, \`country_id\`, \`status\`, \`bank_name\`, \`bank_address\`, \`account_number\`, \`ifsc_code\`, \`upi_id\`, \`holder_name\`, \`website\`, \`comment\`, \`is_default\`, \`created_at\`, \`updated_at\`)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`account_type\`, \`dolibarr_ref\`, \`dolibarr_label\`, \`dolibarr_type\`, \`currency_code\`, \`country_code\`, \`country_id\`, \`status\`, \`bank_name\`, \`bank_address\`, \`account_number\`, \`ifsc_code\`, \`upi_id\`, \`holder_name\`, \`website\`, \`comment\`, \`is_default\`, \`created_at\`, \`updated_at\`)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
+           \`company_id\` = VALUES(\`company_id\`),
            \`dolibarr_ref\` = VALUES(\`dolibarr_ref\`),
            \`dolibarr_label\` = VALUES(\`dolibarr_label\`),
            \`dolibarr_type\` = VALUES(\`dolibarr_type\`),
@@ -9901,6 +10151,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
            \`updated_at\` = VALUES(\`updated_at\`)`,
         [
           id,
+          companyId,
           employeeId,
           employeeName,
           employeeEmail,
@@ -9946,14 +10197,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await ensureBankAccountsTable();
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
+      const companyId = await resolveRequestCompanyId(req);
       // Non-admins can only delete their own accounts
       if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        const params: unknown[] = [accountId, requestUser?.email || ""];
+        let where = "`id` = ? AND `employee_email` = ?";
+        if (companyId) {
+          where += " AND `company_id` = ?";
+          params.push(companyId);
+        }
         await conn.execute(
-          "DELETE FROM `lff_bank_accounts` WHERE `id` = ? AND `employee_email` = ?",
-          [accountId, requestUser?.email || ""]
+          `DELETE FROM \`lff_bank_accounts\` WHERE ${where}`,
+          params
         );
       } else {
-        await conn.execute("DELETE FROM `lff_bank_accounts` WHERE `id` = ?", [accountId]);
+        const params: unknown[] = [accountId];
+        let where = "`id` = ?";
+        if (companyId) {
+          where += " AND `company_id` = ?";
+          params.push(companyId);
+        }
+        await conn.execute(`DELETE FROM \`lff_bank_accounts\` WHERE ${where}`, params);
       }
       res.json({ id: accountId, ok: true });
     } catch (error) {
