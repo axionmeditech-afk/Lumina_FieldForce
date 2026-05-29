@@ -3036,10 +3036,17 @@ export async function getTasks(options?: { refreshRemote?: boolean }): Promise<T
     : await getRawList<Task>(KEYS.TASKS);
   const reconciledTasks = await autoCloseStaleFieldVisitTasks(tasks, companyId);
   return reconciledTasks.filter(
-    (task) =>
-      matchesCompany(task, companyId) &&
-      !isLegacyDemoProfileName(task.assignedToName) &&
-      !isLegacyDemoProfileName(task.createdByName)
+    (task) => {
+      const createdByName =
+        typeof (task as { createdByName?: unknown }).createdByName === "string"
+          ? String((task as { createdByName?: unknown }).createdByName)
+          : "";
+      return (
+        matchesCompany(task, companyId) &&
+        !isLegacyDemoProfileName(task.assignedToName) &&
+        !isLegacyDemoProfileName(createdByName)
+      );
+    }
   );
 }
 

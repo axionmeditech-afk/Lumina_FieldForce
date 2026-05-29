@@ -60,6 +60,7 @@ import {
   addQuickSaleLocationLog,
   addStockTransfer,
   getAttendance,
+  getApiToken,
   getConversations,
   getLocationLogs,
   getQuickSaleLocationLogs,
@@ -1194,6 +1195,49 @@ async function persistConversationAudioUri(audioUri: string | null): Promise<str
   } catch {
     return audioUri;
   }
+}
+
+async function uploadConversationAudioToRemote(audioUri: string | null): Promise<string | null> {
+  if (!audioUri) return null;
+  if (/^https?:\/\//i.test(audioUri)) return audioUri;
+
+  const token = await getApiToken();
+  if (!token) return audioUri;
+
+  const info = audioUri.startsWith("file://") ? await FileSystem.getInfoAsync(audioUri).catch(() => null) : null;
+  if (info && !info.exists) return audioUri;
+
+  const extMatch = audioUri.match(/\.[a-z0-9]+(?:\?.*)?$/i);
+  const ext = extMatch ? extMatch[0].replace(/\?.*$/, "") : ".m4a";
+  const fileName = `conversation_${Date.now()}${ext}`;
+  const apiBases = await getApiBaseUrlCandidates();
+
+  for (const apiBase of apiBases) {
+    try {
+      const uploadResult = await FileSystem.uploadAsync(`${apiBase}/support/attachments/upload`, audioUri, {
+        httpMethod: "POST",
+        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": detectAudioMimeType(audioUri),
+          "X-File-Name": encodeURIComponent(fileName),
+          "X-Attachment-Type": "audio",
+        },
+      });
+      if (uploadResult.status < 200 || uploadResult.status >= 300) {
+        continue;
+      }
+      const payload = JSON.parse(uploadResult.body || "{}") as { url?: unknown };
+      if (typeof payload.url === "string" && payload.url.trim()) {
+        return payload.url.trim();
+      }
+    } catch {
+      // Try the next configured backend URL.
+    }
+  }
+
+  return audioUri;
 }
 
 async function uploadSpeechAudioWithHeaders(
@@ -4639,13 +4683,14 @@ export default function SalesScreen() {
         const salespersonName = user?.name ?? "Sales Rep";
         const salespersonId = user?.id ?? "sales_unknown";
         const persistedAudioUri = await persistConversationAudioUri(audioUri);
+        const playableAudioUri = await uploadConversationAudioToRemote(persistedAudioUri);
         const conversation = buildConversationFromTranscript({
           salespersonId,
           salespersonName,
           customerName: resolvedCustomerName,
           transcript,
           durationMs: elapsedMs,
-          audioUri: persistedAudioUri,
+          audioUri: playableAudioUri,
         });
 
         await addConversation(conversation);

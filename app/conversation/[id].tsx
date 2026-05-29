@@ -15,6 +15,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
+import * as FileSystem from "expo-file-system/legacy";
 import Colors from "@/constants/colors";
 import {
   addAuditLog,
@@ -48,6 +49,52 @@ function normalizeConversationNotes(value: string | undefined | null): string {
     .filter(Boolean)
     .join("\n")
     .trim();
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value : `${value}/`;
+}
+
+function normalizePlayableFileUri(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("file://") || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("/")) {
+    return `file://${trimmed}`;
+  }
+  return trimmed;
+}
+
+async function resolveConversationAudioPlaybackUri(audioUri: string): Promise<string> {
+  const normalizedUri = normalizePlayableFileUri(audioUri);
+  if (!normalizedUri) {
+    throw new Error("Audio file is not available for this conversation.");
+  }
+  if (!normalizedUri.startsWith("file://")) {
+    return normalizedUri;
+  }
+
+  const info = await FileSystem.getInfoAsync(normalizedUri);
+  if (!info.exists) {
+    throw new Error("Audio file is missing on this device. Please record or sync the conversation again.");
+  }
+
+  const playbackRoot = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+  if (!playbackRoot) {
+    return normalizedUri;
+  }
+
+  const playbackDir = `${ensureTrailingSlash(playbackRoot)}conversation-audio-playback`;
+  await FileSystem.makeDirectoryAsync(playbackDir, { intermediates: true }).catch(() => undefined);
+  const extMatch = normalizedUri.match(/\.[a-z0-9]+(?:\?.*)?$/i);
+  const ext = extMatch ? extMatch[0].replace(/\?.*$/, "") : ".m4a";
+  const targetUri = `${ensureTrailingSlash(playbackDir)}play_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}${ext}`;
+  await FileSystem.copyAsync({ from: normalizedUri, to: targetUri });
+  return targetUri;
 }
 
 function ScoreGauge({
@@ -1068,8 +1115,9 @@ export default function ConversationDetailScreen() {
         return;
       }
 
+      const playbackUri = await resolveConversationAudioPlaybackUri(convo.audioUri);
       const { sound, status } = await Audio.Sound.createAsync(
-        { uri: convo.audioUri },
+        { uri: playbackUri },
         {
           shouldPlay: true,
           progressUpdateIntervalMillis: 250,
