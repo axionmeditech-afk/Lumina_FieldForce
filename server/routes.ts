@@ -103,6 +103,13 @@ const DOLIBARR_PROXY_RULES: Array<{
   { prefix: "/bankaccounts", roles: ["admin", "hr", "manager", "salesperson", "employee"] },
 ];
 const PRODUCT_STOCK_TABLE = "nmy5_product_stock";
+const LEGACY_DEMO_PROFILE_NAMES = new Set([
+  "priya",
+  "priya sharma",
+  "rohit",
+  "sneha",
+  "sneha reddy",
+]);
 type ProductStockSchema = {
   productIdCol: string;
   qtyCol: string;
@@ -164,6 +171,7 @@ const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_attendance",
   "@trackforce_expenses",
   "@trackforce_location_logs",
+  "@trackforce_conversations",
   "@trackforce_stockists",
   "@trackforce_stock_transfers",
   "@trackforce_incentive_goal_plans",
@@ -1879,6 +1887,13 @@ function mapConversationRow(row: Record<string, unknown>): Conversation {
   };
 }
 
+function isLegacyDemoConversation(conversation: Conversation): boolean {
+  return (
+    isLegacyDemoProfileName(conversation.salespersonName) ||
+    isLegacyDemoProfileName(conversation.customerName)
+  );
+}
+
 async function listConversationsFromMySql(options: {
   companyId?: string | null;
   salespersonId?: string | null;
@@ -1935,7 +1950,7 @@ async function listConversationsFromMySql(options: {
     ${limitClause}`,
     params
   );
-  return (rows || []).map(mapConversationRow);
+  return (rows || []).map(mapConversationRow).filter((conversation) => !isLegacyDemoConversation(conversation));
 }
 
 async function getConversationByIdFromMySql(
@@ -2112,9 +2127,22 @@ async function migrateLegacyConversationsStateToMySql(): Promise<void> {
     if (!entry || typeof entry !== "object") continue;
     const normalized = normalizeConversationPayload(entry as Partial<Conversation>, null);
     if (!normalized.salespersonId) continue;
+    if (isLegacyDemoConversation(normalized)) continue;
     await upsertConversationInMySql(conn, normalized, normalized.companyId ?? null);
   }
   legacyConversationsMigrated = true;
+}
+
+async function mergeConversationsInMySql(entries: unknown[]): Promise<void> {
+  await ensureConversationsTable();
+  const conn = await getMySqlPool();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const normalized = normalizeConversationPayload(entry as Partial<Conversation>, null);
+    if (!normalized.id || !normalized.salespersonId) continue;
+    if (isLegacyDemoConversation(normalized)) continue;
+    await upsertConversationInMySql(conn, normalized, normalized.companyId ?? null);
+  }
 }
 
 async function insertAccessRequestInMySql(entry: AccessRequestRecord): Promise<void> {
@@ -2306,6 +2334,10 @@ function normalizeEmail(value: string): string {
 
 function normalizeWhitespace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function isLegacyDemoProfileName(value: string | null | undefined): boolean {
+  return LEGACY_DEMO_PROFILE_NAMES.has(normalizeWhitespace(value || "").toLowerCase());
 }
 
 function normalizeEmailKey(value: string | null | undefined): string {
@@ -4969,6 +5001,10 @@ async function readNormalizedState(key: string): Promise<unknown[] | undefined> 
   if (key === "@trackforce_location_logs") {
     return listLocationLogsFromMySql(REMOTE_LOCATION_LOG_READ_LIMIT);
   }
+  if (key === "@trackforce_conversations") {
+    await migrateLegacyConversationsStateToMySql();
+    return listConversationsFromMySql({ limit: 500 });
+  }
   if (key === "@trackforce_stockists") return listStockistsFromMySql();
   if (key === "@trackforce_stock_transfers") return listStockTransfersFromMySql();
   if (key === "@trackforce_incentive_goal_plans") return listIncentiveGoalPlansFromMySql();
@@ -5024,6 +5060,10 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
       );
     }
     await mergeLocationLogsInMySql(entries);
+    return true;
+  }
+  if (key === "@trackforce_conversations") {
+    await mergeConversationsInMySql(entries);
     return true;
   }
   if (key === "@trackforce_stockists") {
@@ -5339,6 +5379,7 @@ async function listEmployeesFromMySql(): Promise<unknown[]> {
     const email = normalizeEmail(String(employee.email || ""));
     const name = normalizeWhitespace(String(employee.name || ""));
     const companyId = normalizeWhitespace(String(employee.companyId || ""));
+    if (isLegacyDemoProfileName(name)) return;
     if (!companyId || (!id && !email && !name)) return;
     const key = `${companyId}:${email || id || name.toLowerCase()}`;
     byScope.set(key, {
@@ -5393,6 +5434,7 @@ async function listEmployeesFromMySql(): Promise<unknown[]> {
       normalizeWhitespace(String(dolibarrUser?.login || "")) ||
       email ||
       "Employee";
+    if (isLegacyDemoProfileName(displayName)) continue;
     const role = normalizeRole(request.approvedRole || request.requestedRole || (Number(dolibarrUser?.admin || 0) === 1 ? "admin" : "salesperson"));
     const isActive =
       dolibarrUser?.statut === undefined || dolibarrUser?.statut === null

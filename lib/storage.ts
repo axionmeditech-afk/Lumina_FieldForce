@@ -78,8 +78,15 @@ const KEYS = {
   SEED_VERSION: "@trackforce_seed_version",
 };
 
-const SEED_VERSION = "9";
+const SEED_VERSION = "11";
 const DEMO_EMAIL_SUFFIX = "@trackforce.ai";
+const LEGACY_DEMO_PROFILE_NAMES = new Set([
+  "priya",
+  "priya sharma",
+  "rohit",
+  "sneha",
+  "sneha reddy",
+]);
 
 type ThemePreference = "system" | "light" | "dark";
 type CompanyScoped = { companyId?: string | null };
@@ -1138,16 +1145,8 @@ function isLegacyDemoEmail(value: string | null | undefined): boolean {
   return normalizeEmail(value || "").endsWith(DEMO_EMAIL_SUFFIX);
 }
 
-function hasAnyLegacyDemoProfile(
-  authUsers: StoredAuthUser[],
-  employees: Employee[],
-  accessRequests: UserAccessRequest[]
-): boolean {
-  return (
-    authUsers.some((entry) => isLegacyDemoEmail(entry.user.email)) ||
-    employees.some((entry) => isLegacyDemoEmail(entry.email)) ||
-    accessRequests.some((entry) => isLegacyDemoEmail(entry.email))
-  );
+function isLegacyDemoProfileName(value: string | null | undefined): boolean {
+  return LEGACY_DEMO_PROFILE_NAMES.has(normalizeWhitespace(value || "").toLowerCase());
 }
 
 function normalizePhone(value?: string): string {
@@ -1650,15 +1649,11 @@ async function purgeLegacyDemoProfiles(): Promise<void> {
     getItem<Employee[]>(KEYS.EMPLOYEES).then((value) => value || []),
     getAccessRequestsRaw(),
   ]);
-  if (!hasAnyLegacyDemoProfile(authUsers, employees, accessRequests)) {
-    return;
-  }
-
   const removedUserIds = new Set<string>();
   const removedNames = new Set<string>();
 
   const filteredAuthUsers = authUsers.filter((entry) => {
-    const isDemo = isLegacyDemoEmail(entry.user.email);
+    const isDemo = isLegacyDemoEmail(entry.user.email) || isLegacyDemoProfileName(entry.user.name);
     if (!isDemo) return true;
     if (entry.user.id) removedUserIds.add(entry.user.id);
     if (entry.user.name) removedNames.add(normalizeWhitespace(entry.user.name).toLowerCase());
@@ -1672,6 +1667,7 @@ async function purgeLegacyDemoProfiles(): Promise<void> {
     const normalizedName = normalizeWhitespace(entry.name).toLowerCase();
     const isDemo =
       isLegacyDemoEmail(entry.email) ||
+      isLegacyDemoProfileName(entry.name) ||
       removedUserIds.has(entry.id) ||
       removedNames.has(normalizedName);
     if (!isDemo) return true;
@@ -1683,13 +1679,15 @@ async function purgeLegacyDemoProfiles(): Promise<void> {
     await setItem(KEYS.EMPLOYEES, filteredEmployees);
   }
 
-  const filteredAccessRequests = accessRequests.filter((entry) => !isLegacyDemoEmail(entry.email));
+  const filteredAccessRequests = accessRequests.filter(
+    (entry) => !isLegacyDemoEmail(entry.email) && !isLegacyDemoProfileName(entry.name)
+  );
   if (filteredAccessRequests.length !== accessRequests.length) {
     await setAccessRequestsRaw(filteredAccessRequests);
   }
 
   const currentUser = await getItem<AppUser>(KEYS.USER);
-  if (currentUser && isLegacyDemoEmail(currentUser.email)) {
+  if (currentUser && (isLegacyDemoEmail(currentUser.email) || isLegacyDemoProfileName(currentUser.name))) {
     await Promise.all([
       AsyncStorage.removeItem(KEYS.USER),
       AsyncStorage.removeItem(KEYS.API_TOKEN),
@@ -1698,7 +1696,17 @@ async function purgeLegacyDemoProfiles(): Promise<void> {
   }
 
   const idKeys = ["userId", "employeeId", "ownerId", "assignedTo", "createdById", "leadId"];
-  const nameKeys = ["userName", "employeeName", "ownerName", "assignedToName", "createdByName", "leadName"];
+  const nameKeys = [
+    "userName",
+    "employeeName",
+    "ownerName",
+    "assignedToName",
+    "createdByName",
+    "leadName",
+    "salespersonName",
+    "customerName",
+    "requestedByName",
+  ];
   const emailKeys = ["email", "ownerEmail", "assignedToEmail", "createdByEmail"];
   const arrayIdKeys = ["memberIds", "assignedEmployeeIds", "participantIds", "audienceUserIds"];
   const pruneByUserIdentity = <T extends Record<string, unknown>>(entries: T[]): T[] =>
@@ -1709,8 +1717,11 @@ async function purgeLegacyDemoProfiles(): Promise<void> {
       }
       for (const key of nameKeys) {
         const value = entry[key];
-        if (typeof value === "string" && removedNames.has(normalizeWhitespace(value).toLowerCase())) {
-          return false;
+        if (typeof value === "string") {
+          const normalizedValue = normalizeWhitespace(value).toLowerCase();
+          if (removedNames.has(normalizedValue) || isLegacyDemoProfileName(value)) {
+            return false;
+          }
         }
       }
       for (const key of emailKeys) {
@@ -2839,13 +2850,20 @@ export async function logoutUser(): Promise<void> {
 export async function getEmployees(): Promise<Employee[]> {
   const companyId = await getActiveCompanyId();
   const employees = await getRawList<Employee>(KEYS.EMPLOYEES);
-  return employees.filter((employee) => matchesCompany(employee, companyId));
+  return employees.filter(
+    (employee) =>
+      matchesCompany(employee, companyId) &&
+      !isLegacyDemoEmail(employee.email) &&
+      !isLegacyDemoProfileName(employee.name)
+  );
 }
 
 export async function getAllEmployees(): Promise<Employee[]> {
   await seedDataIfNeeded();
   const employees = await getRawList<Employee>(KEYS.EMPLOYEES);
-  return [...employees];
+  return employees.filter(
+    (employee) => !isLegacyDemoEmail(employee.email) && !isLegacyDemoProfileName(employee.name)
+  );
 }
 
 export async function getAttendance(): Promise<AttendanceRecord[]> {
@@ -3017,7 +3035,12 @@ export async function getTasks(options?: { refreshRemote?: boolean }): Promise<T
     ? await getLatestRemoteSyncedList<Task>(KEYS.TASKS)
     : await getRawList<Task>(KEYS.TASKS);
   const reconciledTasks = await autoCloseStaleFieldVisitTasks(tasks, companyId);
-  return reconciledTasks.filter((task) => matchesCompany(task, companyId));
+  return reconciledTasks.filter(
+    (task) =>
+      matchesCompany(task, companyId) &&
+      !isLegacyDemoProfileName(task.assignedToName) &&
+      !isLegacyDemoProfileName(task.createdByName)
+  );
 }
 
 export async function addTask(task: Task): Promise<void> {
