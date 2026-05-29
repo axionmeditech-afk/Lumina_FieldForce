@@ -160,6 +160,7 @@ const COMPANY_SCOPED_REMOTE_STATE_KEYS = new Set([
 ]);
 const NORMALIZED_STATE_KEYS = new Set([
   "@trackforce_companies",
+  "@trackforce_employees",
   "@trackforce_attendance",
   "@trackforce_expenses",
   "@trackforce_location_logs",
@@ -4962,6 +4963,7 @@ function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown
 async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
   if (!isNormalizedStateKey(key)) return undefined;
   if (key === "@trackforce_companies") return listCompaniesFromMySql();
+  if (key === "@trackforce_employees") return listEmployeesFromMySql();
   if (key === "@trackforce_attendance") return listAttendanceFromMySql();
   if (key === "@trackforce_expenses") return listExpensesFromMySql();
   if (key === "@trackforce_location_logs") {
@@ -5327,6 +5329,106 @@ async function replaceCompaniesInMySql(entries: unknown[]): Promise<void> {
   } finally {
     conn.release();
   }
+}
+
+async function listEmployeesFromMySql(): Promise<unknown[]> {
+  if (!isMySqlStateEnabled()) return [];
+  const byScope = new Map<string, Record<string, unknown>>();
+  const addEmployee = (employee: Record<string, unknown>) => {
+    const id = normalizeWhitespace(String(employee.id || ""));
+    const email = normalizeEmail(String(employee.email || ""));
+    const name = normalizeWhitespace(String(employee.name || ""));
+    const companyId = normalizeWhitespace(String(employee.companyId || ""));
+    if (!companyId || (!id && !email && !name)) return;
+    const key = `${companyId}:${email || id || name.toLowerCase()}`;
+    byScope.set(key, {
+      status: "active",
+      ...employee,
+      id: id || email || `${companyId}_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+      email,
+      name: name || email || "Employee",
+      companyId,
+    });
+  };
+
+  const rawEmployees = await getMySqlStateValue("@trackforce_employees").catch(() => null);
+  const parsedEmployees = rawEmployees ? parseJsonText(rawEmployees) : null;
+  if (Array.isArray(parsedEmployees)) {
+    for (const entry of parsedEmployees) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      addEmployee(entry as Record<string, unknown>);
+    }
+  }
+
+  await ensureAccessRequestAssignmentColumns();
+  const companies = await listCompanyProfilesFromMySqlRaw();
+  const companyById = new Map(companies.map((company) => [company.id, company]));
+  const conn = await getMySqlPool();
+  const [userRows] = await conn.query<any[]>(
+    `SELECT rowid, login, email, firstname, lastname, admin, statut, employee,
+            office_phone, user_mobile, datec
+     FROM nmy5_user`
+  );
+  const dolibarrUserByEmail = new Map<string, any>();
+  const dolibarrUserByLogin = new Map<string, any>();
+  for (const row of userRows || []) {
+    const email = normalizeEmail(String(row.email || ""));
+    const login = normalizeLoginKey(String(row.login || ""));
+    if (email) dolibarrUserByEmail.set(email, row);
+    if (login) dolibarrUserByLogin.set(login, row);
+  }
+
+  const requests = await listAccessRequestsFromMySql("approved");
+  for (const request of requests) {
+    const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
+    if (!assignedCompanyIds.length) continue;
+    const email = normalizeEmail(request.email || "");
+    const login = normalizeLoginKey(email.split("@")[0] || "");
+    const dolibarrUser = (email && dolibarrUserByEmail.get(email)) || (login && dolibarrUserByLogin.get(login)) || null;
+    const firstName = normalizeWhitespace(String(dolibarrUser?.firstname || ""));
+    const lastName = normalizeWhitespace(String(dolibarrUser?.lastname || ""));
+    const displayName =
+      normalizeWhitespace(request.name) ||
+      normalizeWhitespace(`${firstName} ${lastName}`) ||
+      normalizeWhitespace(String(dolibarrUser?.login || "")) ||
+      email ||
+      "Employee";
+    const role = normalizeRole(request.approvedRole || request.requestedRole || (Number(dolibarrUser?.admin || 0) === 1 ? "admin" : "salesperson"));
+    const isActive =
+      dolibarrUser?.statut === undefined || dolibarrUser?.statut === null
+        ? true
+        : Number(dolibarrUser.statut) === 1;
+    if (!isActive) continue;
+    for (const companyId of assignedCompanyIds) {
+      const company = companyById.get(companyId);
+      addEmployee({
+        id: dolibarrUser?.rowid ? String(dolibarrUser.rowid) : `access_${request.id}`,
+        companyId,
+        companyName: company?.name,
+        name: displayName,
+        role,
+        department:
+          normalizeWhitespace(request.requestedDepartment || "") ||
+          (role === "admin" ? "Management" : isSalesRole(role) ? "Sales" : roleToDepartment(role)),
+        status: "active",
+        email,
+        phone: normalizeWhitespace(String(dolibarrUser?.user_mobile || dolibarrUser?.office_phone || "")),
+        branch:
+          normalizeWhitespace(request.requestedBranch || "") ||
+          company?.primaryBranch ||
+          "Main Branch",
+        joinDate: dolibarrUser?.datec
+          ? new Date(dolibarrUser.datec).toISOString().slice(0, 10)
+          : request.reviewedAt?.slice(0, 10) || request.requestedAt.slice(0, 10),
+        stockistId: request.assignedStockistId || undefined,
+        stockistName: request.assignedStockistName || undefined,
+        managerId: request.assignedManagerId || undefined,
+        managerName: request.assignedManagerName || undefined,
+      });
+    }
+  }
+
+  return Array.from(byScope.values());
 }
 
 function isLegacyCompanyIdForRehome(value: unknown, validCompanyIds: Set<string>): boolean {
