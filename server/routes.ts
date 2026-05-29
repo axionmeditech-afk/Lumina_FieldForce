@@ -5914,6 +5914,57 @@ async function insertNotificationInMySql(notification: AppNotification): Promise
   );
 }
 
+function getAccessRequestNotificationIdentity(notification: AppNotification): string | null {
+  if (notification.kind !== "alert" || notification.audience !== "admin") return null;
+  if (!notification.id.startsWith("notif_access_") && notification.title !== "New access request") return null;
+  const sourceId = normalizeWhitespace(notification.createdById || "");
+  if (sourceId) return `id:${sourceId}`;
+  const emailMatch = notification.body.match(/\(([^()@\s]+@[^()\s]+)\)/i);
+  return emailMatch ? `email:${normalizeEmail(emailMatch[1])}` : null;
+}
+
+function dedupeNotifications(notifications: AppNotification[]): AppNotification[] {
+  const seenAccessRequests = new Set<string>();
+  const result: AppNotification[] = [];
+  for (const notification of notifications) {
+    const accessKey = getAccessRequestNotificationIdentity(notification);
+    if (accessKey) {
+      if (seenAccessRequests.has(accessKey)) continue;
+      seenAccessRequests.add(accessKey);
+    }
+    result.push(notification);
+  }
+  return result;
+}
+
+async function removeDuplicateAccessRequestNotifications(notification: AppNotification): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const accessKey = getAccessRequestNotificationIdentity(notification);
+  if (!accessKey) return;
+  await ensureNotificationsTableInMySql();
+  const conn = await getMySqlPool();
+  if (accessKey.startsWith("id:")) {
+    await conn.execute(
+      `DELETE FROM lff_notifications
+       WHERE kind = 'alert'
+         AND audience = 'admin'
+         AND created_by_id = ?
+         AND id <> ?`,
+      [notification.createdById, notification.id]
+    );
+    return;
+  }
+  const email = accessKey.slice("email:".length);
+  await conn.execute(
+    `DELETE FROM lff_notifications
+     WHERE kind = 'alert'
+       AND audience = 'admin'
+       AND id <> ?
+       AND LOWER(body) LIKE ?`,
+    [notification.id, `%(${email})%`]
+  );
+}
+
 async function listNotificationsFromMySql(
   role: UserRole,
   userId: string,
@@ -5938,9 +5989,9 @@ async function listNotificationsFromMySql(
      LIMIT 500`,
     params
   );
-  return (rows || [])
+  return dedupeNotifications((rows || [])
     .map((row) => buildNotificationFromRow(row))
-    .filter((notification) => canUserReceiveNotification(notification, role, userId));
+    .filter((notification) => canUserReceiveNotification(notification, role, userId)));
 }
 
 async function markNotificationReadInMySql(notificationId: string, userId: string): Promise<void> {
@@ -7456,6 +7507,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           name: pendingUser.name,
           email: pendingUser.email,
         });
+        await removeDuplicateAccessRequestNotifications(notification);
         await insertNotificationInMySql(notification);
       } catch (error) {
         console.error("Failed to persist access request notification", error);
