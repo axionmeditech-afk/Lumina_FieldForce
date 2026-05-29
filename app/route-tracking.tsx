@@ -987,7 +987,12 @@ export default function RouteTrackingScreen() {
           // best-effort fallback, continue to latest point fallback below
         }
 
-        if (selectedDate === toMumbaiDateKey(new Date())) {
+        const latestMergedAttendanceEvent = mergedAttendanceEvents.length
+          ? [...mergedAttendanceEvents].sort((a, b) => a.at.localeCompare(b.at))[mergedAttendanceEvents.length - 1]
+          : null;
+        const isMergedTrackingActive = latestMergedAttendanceEvent?.type === "checkin";
+
+        if (selectedDate === toMumbaiDateKey(new Date()) && isMergedTrackingActive) {
           try {
             const livePoints = await getAdminLiveMapPoints();
             const latestPoint = livePoints
@@ -1054,13 +1059,31 @@ export default function RouteTrackingScreen() {
     void loadTimeline();
   }, [loadTimeline]);
 
+  const latestAttendanceEventForRefresh = useMemo(() => {
+    const events = timeline?.attendanceEvents ?? [];
+    if (!events.length) return null;
+    return [...events].sort((a, b) => a.at.localeCompare(b.at))[events.length - 1];
+  }, [timeline?.attendanceEvents]);
+  const shouldAutoRefreshTimeline =
+    selectedDate === toMumbaiDateKey(new Date()) &&
+    latestAttendanceEventForRefresh?.type === "checkin";
+
   useEffect(() => {
-    if (!selectedUserId || !canViewTracking || authExpired) return undefined;
+    if (!selectedUserId || !canViewTracking || authExpired || !shouldAutoRefreshTimeline) {
+      return undefined;
+    }
     const timer = setInterval(() => {
       void loadTimeline();
     }, LIVE_REFRESH_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [authExpired, canViewTracking, loadTimeline, selectedUserId, LIVE_REFRESH_INTERVAL_MS]);
+  }, [
+    authExpired,
+    canViewTracking,
+    loadTimeline,
+    selectedUserId,
+    shouldAutoRefreshTimeline,
+    LIVE_REFRESH_INTERVAL_MS,
+  ]);
 
   useEffect(() => {
     if (mapMode === "tracking" && (timeline?.points?.length ?? 0) < 2) {

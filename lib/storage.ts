@@ -174,7 +174,6 @@ const REMOTE_NOTIFICATION_ALERT_WINDOW_MS = 20 * 60 * 1000;
 const REMOTE_NOTIFICATION_ALERT_LIMIT_PER_SYNC = 3;
 const REMOTE_STATE_PENDING_WRITES_KEY = "@trackforce_remote_state_pending_writes";
 const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([
-  KEYS.COMPANIES,
   KEYS.EMPLOYEES,
   KEYS.ATTENDANCE,
   KEYS.SALARIES,
@@ -715,6 +714,141 @@ async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
     }
   }
   return false;
+}
+
+async function readCompanyApiError(response: Response, fallback: string): Promise<string> {
+  try {
+    const text = await response.text();
+    if (!text.trim()) return fallback;
+    try {
+      const parsed = JSON.parse(text) as { message?: unknown };
+      if (typeof parsed.message === "string" && parsed.message.trim()) {
+        return parsed.message.trim();
+      }
+    } catch {
+      // fall through to plain text
+    }
+    return text.trim().replace(/\s+/g, " ").slice(0, 220);
+  } catch {
+    return fallback;
+  }
+}
+
+async function fetchCompaniesFromDb(): Promise<CompanyProfile[] | null> {
+  const token = await getApiToken();
+  if (!token) return null;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/companies`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          await setApiToken(null);
+          return null;
+        }
+        if (response.status >= 500) continue;
+        return null;
+      }
+      const payload = (await response.json()) as unknown;
+      if (!Array.isArray(payload)) return [];
+      return payload.map((entry) => normalizeCompanyProfile(entry as Partial<CompanyProfile>));
+    } catch {
+      // try next backend candidate
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function mutateCompanyInDb(
+  method: "POST" | "PUT",
+  path: string,
+  payload: Partial<CompanyProfile>
+): Promise<CompanyProfile | null> {
+  const token = await getApiToken();
+  if (!token) return null;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}${path}`, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          await setApiToken(null);
+          return null;
+        }
+        if (response.status >= 500) continue;
+        throw new Error(await readCompanyApiError(response, "Company database operation failed."));
+      }
+      const result = (await response.json()) as Partial<CompanyProfile>;
+      return normalizeCompanyProfile(result);
+    } catch (error) {
+      if (error instanceof Error && !/aborted|network request failed|fetch/i.test(error.message)) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function deleteCompanyFromDb(companyId: string): Promise<boolean> {
+  const token = await getApiToken();
+  if (!token) return false;
+  const apiBases = await getRemoteStateApiCandidates();
+  for (const apiBase of apiBases) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REMOTE_STATE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${apiBase}/companies/${encodeURIComponent(companyId)}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      });
+      if (response.ok || response.status === 404) return true;
+      if (response.status === 401 || response.status === 403) {
+        await setApiToken(null);
+        return false;
+      }
+      if (response.status >= 500) continue;
+      throw new Error(await readCompanyApiError(response, "Company delete failed."));
+    } catch (error) {
+      if (error instanceof Error && !/aborted|network request failed|fetch/i.test(error.message)) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return false;
+}
+
+async function writeCompanyProfilesCache(companies: CompanyProfile[]): Promise<void> {
+  await AsyncStorage.setItem(KEYS.COMPANIES, JSON.stringify(companies));
+  notifyStorageUpdated(KEYS.COMPANIES);
 }
 
 export async function getVisitNotesRemote(): Promise<Task[] | null> {
@@ -1714,6 +1848,11 @@ export async function seedDataIfNeeded(): Promise<void> {
 
 export async function getCompanyProfiles(): Promise<CompanyProfile[]> {
   await ensureCompanyProfilesSeeded();
+  const dbCompanies = await fetchCompaniesFromDb();
+  if (Array.isArray(dbCompanies)) {
+    await writeCompanyProfilesCache(dbCompanies);
+    return dbCompanies;
+  }
   return (await getItem<CompanyProfile[]>(KEYS.COMPANIES)) || [];
 }
 
@@ -1840,11 +1979,14 @@ export async function updateCompanyProfile(
     updatedAt: new Date().toISOString(),
   });
   companies[idx] = next;
-  await setItem(KEYS.COMPANIES, companies);
+  const saved = await mutateCompanyInDb("PUT", `/companies/${encodeURIComponent(companyId)}`, next);
+  if (!saved) return null;
+  companies[idx] = saved;
+  await writeCompanyProfilesCache(companies);
   if (current.name !== next.name) {
-    await propagateCompanyName(companyId, next.name);
+    await propagateCompanyName(companyId, saved.name);
   }
-  return next;
+  return saved;
 }
 
 export async function createCompanyProfile(
@@ -1860,7 +2002,7 @@ export async function createCompanyProfile(
     return existing;
   }
 
-  const created = normalizeCompanyProfile({
+  const candidate = normalizeCompanyProfile({
     ...input,
     id: makeId(`cmp_${slugify(name) || "enterprise"}`),
     name,
@@ -1876,7 +2018,10 @@ export async function createCompanyProfile(
       `${name} Attendance Zone`,
   });
 
-  await setItem(KEYS.COMPANIES, [created, ...companies]);
+  const created = await mutateCompanyInDb("POST", "/companies", candidate);
+  if (!created) return null;
+  const nextCompanies = [created, ...companies.filter((company) => company.id !== created.id)];
+  await writeCompanyProfilesCache(nextCompanies);
 
   // If current user is admin, automatically grant access to newly created company environment.
   const currentUser = await getCurrentUser();
@@ -1929,11 +2074,13 @@ export async function removeCompanyProfile(companyId: string): Promise<boolean> 
   if (!target) return false;
   const remaining = companies.filter((company) => company.id !== targetId);
   if (remaining.length === 0) return false;
+  const deleted = await deleteCompanyFromDb(targetId);
+  if (!deleted) return false;
 
   const companyById = new Map(remaining.map((company) => [company.id, company]));
   const fallbackCompany = remaining[0];
 
-  await setItem(KEYS.COMPANIES, remaining);
+  await writeCompanyProfilesCache(remaining);
 
   const settingsStore = await getSettingsStore();
   if (targetId in settingsStore) {
@@ -2891,7 +3038,8 @@ export async function addTask(task: Task): Promise<void> {
         title: "New Task Assigned",
         body: `${candidate.title} assigned to ${candidate.assignedToName}.`,
         kind: "alert",
-        audience: "all",
+        audience: "employee",
+        audienceUserIds: normalizeNotificationUserIds([candidate.assignedTo]),
         createdById: currentUser.id,
         createdByName: currentUser.name,
         createdAt: now,
@@ -2927,7 +3075,8 @@ export async function updateTaskStatus(
               title: `Task ${statusLabel}`,
               body: `${currentUser.name} updated ${tasks[idx].title} to ${statusLabel}.`,
               kind: "alert",
-              audience: "all",
+              audience: "employee",
+              audienceUserIds: normalizeNotificationUserIds([tasks[idx].assignedTo, tasks[idx].assignedBy]),
               createdById: currentUser.id,
               createdByName: currentUser.name,
               createdAt: now,
@@ -3572,7 +3721,8 @@ export async function addConversation(conversation: Conversation): Promise<void>
         title: "New Conversation Logged",
         body: `${currentUser.name} logged a conversation with ${customerLabel}.`,
         kind: "announcement",
-        audience: "all",
+        audience: "admin",
+        audienceUserIds: normalizeNotificationUserIds([currentUser.id]),
         createdById: currentUser.id,
         createdByName: currentUser.name,
         createdAt: now,
@@ -3881,10 +4031,35 @@ function canModerateSupport(role?: UserRole | null): boolean {
   return role === "admin" || role === "manager" || role === "hr";
 }
 
-function canReceiveNotification(audience: NotificationAudience, role?: UserRole | null): boolean {
-  if (audience === "all") return true;
-  if (isSalesRole(audience) && isSalesRole(role)) return true;
-  return audience === role;
+function normalizeNotificationUserIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((entry) => (typeof entry === "string" ? normalizeWhitespace(entry) : ""))
+        .filter(Boolean)
+    )
+  );
+}
+
+function isBroadcastNotification(notification: Pick<AppNotification, "audience" | "kind">): boolean {
+  return notification.audience === "all" && (notification.kind === "announcement" || notification.kind === "policy");
+}
+
+function canReceiveNotification(notification: AppNotification, user?: { id?: string; role?: UserRole | null } | null): boolean {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  const audienceUserIds = normalizeNotificationUserIds(notification.audienceUserIds);
+  if (notification.createdById === user.id) return true;
+  if (audienceUserIds.length > 0) {
+    return Boolean(user.id && audienceUserIds.includes(user.id));
+  }
+  if (isBroadcastNotification(notification)) return true;
+  if (notification.audience !== "all") {
+    if (isSalesRole(notification.audience) && isSalesRole(user.role)) return true;
+    return notification.audience === user.role;
+  }
+  return false;
 }
 
 function normalizeSupportNotificationSubject(title: string): string {
@@ -4000,6 +4175,7 @@ async function createRemoteNotificationInternal(input: {
   body: string;
   kind: AppNotification["kind"];
   audience: NotificationAudience;
+  audienceUserIds?: string[];
 }): Promise<AppNotification> {
   const token = await getApiToken();
   if (!token) {
@@ -4139,6 +4315,7 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
     const normalized = remote.map((item) => ({
       ...item,
       readByIds: Array.isArray(item.readByIds) ? item.readByIds : [],
+      audienceUserIds: normalizeNotificationUserIds(item.audienceUserIds),
     }));
 
     if (currentUser) {
@@ -4147,7 +4324,7 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
         const nowMs = Date.now();
         const freshUnseen = normalized
           .filter((item) => !existingIds.has(item.id))
-          .filter((item) => canReceiveNotification(item.audience, currentUser.role))
+          .filter((item) => canReceiveNotification(item, currentUser))
           .filter((item) => item.createdById !== currentUser.id)
           .filter((item) => !(item.readByIds || []).includes(currentUser.id))
           .filter((item) => {
@@ -4192,7 +4369,7 @@ export async function getNotificationsForCurrentUser(): Promise<AppNotification[
   return notifications
     .filter(
       (item) =>
-        matchesCompany(item, companyId) && canReceiveNotification(item.audience, currentUser.role)
+        matchesCompany(item, companyId) && canReceiveNotification(item, currentUser)
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -4224,6 +4401,7 @@ export async function addNotification(
     body: notification.body,
     kind: notification.kind,
     audience: notification.audience,
+    audienceUserIds: normalizeNotificationUserIds(notification.audienceUserIds),
   });
 
   const notifications = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
@@ -4231,6 +4409,7 @@ export async function addNotification(
     {
       ...remoteCandidate,
       readByIds: Array.from(new Set(remoteCandidate.readByIds || [])),
+      audienceUserIds: normalizeNotificationUserIds(remoteCandidate.audienceUserIds),
     },
     companyId
   );
@@ -4245,7 +4424,7 @@ export async function addNotification(
       const isNotificationsEnabled = settings.notifications !== "false";
       const activeCompanyId = currentUser.companyId || null;
       const isCompanyMatch = matchesCompany(candidate, activeCompanyId);
-      const isAudienceMatch = canReceiveNotification(candidate.audience, currentUser.role);
+      const isAudienceMatch = canReceiveNotification(candidate, currentUser);
       const isSelfCreated = candidate.createdById === currentUser.id;
       if (isNotificationsEnabled && isCompanyMatch && isAudienceMatch && !isSelfCreated) {
         const notificationGroupKey = resolveNotificationGroupKey(candidate);
@@ -4300,7 +4479,7 @@ export async function markAllNotificationsRead(): Promise<void> {
   let changed = false;
   const next = notifications.map((item) => {
     if (!matchesCompany(item, companyId)) return item;
-    if (!canReceiveNotification(item.audience, currentUser.role)) return item;
+    if (!canReceiveNotification(item, currentUser)) return item;
     const readByIds = item.readByIds || [];
     if (readByIds.includes(currentUser.id)) return item;
     changed = true;
@@ -4724,6 +4903,7 @@ export async function addSupportThreadMessage(
       body: `${currentUser.name}: ${messagePreview}`,
       kind: "support",
       audience: isModerator ? updated.requestedByRole : "admin",
+      audienceUserIds: isModerator ? normalizeNotificationUserIds([updated.requestedById]) : undefined,
       createdById: currentUser.id,
       createdByName: currentUser.name,
       createdAt: now,
@@ -4816,6 +4996,7 @@ export async function setSupportThreadStatus(
       body: `${updated.subject} is now ${status}.`,
       kind: "support",
       audience: isModerator ? updated.requestedByRole : "admin",
+      audienceUserIds: isModerator ? normalizeNotificationUserIds([updated.requestedById]) : undefined,
       createdById: currentUser.id,
       createdByName: currentUser.name,
       createdAt: now,

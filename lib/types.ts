@@ -336,6 +336,7 @@ export interface AppNotification {
   createdByName: string;
   createdAt: string;
   readByIds?: string[];
+  audienceUserIds?: string[];
 }
 
 export interface SupportMessage {

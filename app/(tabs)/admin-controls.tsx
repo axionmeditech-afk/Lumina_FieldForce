@@ -486,6 +486,11 @@ export default function AdminControlsScreen() {
       setNewCompanyHeadquarters("");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await loadData();
+    } catch (error) {
+      Alert.alert(
+        "Create Failed",
+        error instanceof Error ? error.message : "Unable to create company in database."
+      );
     } finally {
       setBusyCreateCompany(false);
     }
@@ -631,6 +636,9 @@ export default function AdminControlsScreen() {
       if (!user || busyAccessRequestId) return;
       const selectedRole = selectedRoleByRequest[request.id] || request.requestedRole;
       const selectedCompanyIds = selectedCompanyIdsByRequest[request.id] || [];
+      const selectedCompanies = companyProfiles.filter((company) =>
+        selectedCompanyIds.includes(company.id)
+      );
       const selectedManagerId = (selectedManagerIdByRequest[request.id] || "").trim();
       const isSalesperson = isSalesRole(selectedRole);
       const selectedStockistId = (selectedStockistIdByRequest[request.id] || "").trim();
@@ -667,6 +675,11 @@ export default function AdminControlsScreen() {
             action,
             role: selectedRole,
             companyIds: selectedCompanyIds,
+            companyProfiles: selectedCompanies.map((company) => ({
+              id: company.id,
+              name: company.name,
+              primaryBranch: company.primaryBranch,
+            })),
             managerId: selectedManager?.id,
             managerName: selectedManager?.name,
             stockistId: selectedStockist?.id,
@@ -766,6 +779,7 @@ export default function AdminControlsScreen() {
     },
     [
       busyAccessRequestId,
+      companyProfiles,
       getManagersForRequest,
       getStockistsForRequest,
       loadData,
@@ -1239,7 +1253,7 @@ export default function AdminControlsScreen() {
                     {selectedRole.toUpperCase()}
                   </Text>
                   <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
-                    Requested company: {request.requestedCompanyName || "Not specified"}
+                    Company reference: {request.requestedCompanyName || "Not specified"}
                   </Text>
                   <Text style={[styles.requestMeta, { color: colors.textTertiary }]}>
                     Location: {request.requestedBranch || "Not specified"} · Pincode: {request.requestedPincode || "—"}

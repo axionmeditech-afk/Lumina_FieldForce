@@ -7,6 +7,7 @@ import type {
   AppUser,
   AttendanceCheckPayload,
   AttendanceRecord,
+  CompanyProfile,
   Conversation,
   Expense,
   Geofence,
@@ -131,6 +132,7 @@ const REMOTE_STATE_ALLOWED_KEYS = new Set([
   "@trackforce_support_threads",
 ]);
 const NORMALIZED_STATE_KEYS = new Set([
+  "@trackforce_companies",
   "@trackforce_attendance",
   "@trackforce_expenses",
   "@trackforce_location_logs",
@@ -1108,6 +1110,7 @@ function getAuthUserByIdentifier(identifier: string): AuthUserRecord | null {
 
 async function ensureCompanyExistsInMySql(companyId: string, companyName: string): Promise<void> {
   if (!isMySqlStateEnabled()) return;
+  await ensureCompaniesTableInMySql();
   const conn = await getMySqlPool();
   const safeName = companyName?.trim() || PENDING_COMPANY_NAME;
   const safeId = companyId?.trim() || PENDING_COMPANY_ID;
@@ -2459,21 +2462,26 @@ function resolveApprovalStatus(
   return "approved";
 }
 
-function mergeApprovedAccessRequestIntoUser(
+async function mergeApprovedAccessRequestIntoUser(
   user: AppUser,
   request: AccessRequestRecord | null
-): AppUser {
+): Promise<AppUser> {
   if (!request || request.status !== "approved") return user;
   const mergedRole = normalizeRole(request.approvedRole || request.requestedRole || user.role);
-  const mergedCompanyName = normalizeCompanyName(
-    request.requestedCompanyName || user.companyName || DEFAULT_COMPANY_NAME
-  );
   const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
   const existingCompanyIds = normalizeCompanyIds(user.companyIds);
+  const selectedCompaniesById = await getCompanyProfilesByIds(assignedCompanyIds);
+  const selectedPrimaryCompany = assignedCompanyIds[0]
+    ? selectedCompaniesById.get(assignedCompanyIds[0]) || null
+    : null;
   const mergedCompanyId =
     assignedCompanyIds[0] ||
     normalizeWhitespace(user.companyId || "") ||
-    getCompanyIdFromName(mergedCompanyName);
+    DEFAULT_COMPANY_ID;
+  const mergedCompanyName =
+    selectedPrimaryCompany?.name ||
+    normalizeWhitespace(user.companyName || "") ||
+    DEFAULT_COMPANY_NAME;
   const mergedCompanyIds =
     assignedCompanyIds.length > 0
       ? assignedCompanyIds
@@ -2495,6 +2503,7 @@ function mergeApprovedAccessRequestIntoUser(
     branch:
       normalizeWhitespace(request.requestedBranch || "") ||
       normalizeWhitespace(user.branch || "") ||
+      selectedPrimaryCompany?.primaryBranch ||
       "Main Branch",
     managerId: isSalesperson
       ? undefined
@@ -4916,6 +4925,7 @@ function mapBankAccountRow(row: Record<string, unknown>): Record<string, unknown
 
 async function readNormalizedState(key: string): Promise<unknown[] | undefined> {
   if (!isNormalizedStateKey(key)) return undefined;
+  if (key === "@trackforce_companies") return listCompaniesFromMySql();
   if (key === "@trackforce_attendance") return listAttendanceFromMySql();
   if (key === "@trackforce_expenses") return listExpensesFromMySql();
   if (key === "@trackforce_location_logs") {
@@ -4940,6 +4950,10 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
     parsed = null;
   }
   const entries = Array.isArray(parsed) ? parsed : [];
+  if (key === "@trackforce_companies") {
+    await replaceCompaniesInMySql(entries);
+    return true;
+  }
   if (key === "@trackforce_attendance") {
     await mergeAttendanceInMySql(entries);
     return true;
@@ -5045,6 +5059,287 @@ function getCompanyIdFromName(companyName: string): string {
     .replace(/^_+|_+$/g, "")
     .slice(0, 42);
   return slug ? `cmp_${slug}` : DEFAULT_COMPANY_ID;
+}
+
+type CompanyProfileSummary = Pick<CompanyProfile, "id" | "name" | "primaryBranch">;
+
+let companiesTableEnsured = false;
+let legacyCompaniesStateMigrated = false;
+
+function companyProfileFromRow(row: any): CompanyProfile {
+  const nowIso = new Date().toISOString();
+  const name = normalizeCompanyName(String(row?.name || DEFAULT_COMPANY_NAME));
+  return {
+    id: normalizeWhitespace(String(row?.id || getCompanyIdFromName(name))),
+    name,
+    legalName: normalizeWhitespace(String(row?.legal_name || `${name} Pvt Ltd`)) || `${name} Pvt Ltd`,
+    industry: normalizeWhitespace(String(row?.industry || "General")) || "General",
+    headquarters: normalizeWhitespace(String(row?.headquarters || "India")) || "India",
+    primaryBranch: normalizeWhitespace(String(row?.primary_branch || "Main Branch")) || "Main Branch",
+    supportEmail:
+      normalizeEmail(String(row?.support_email || "")) ||
+      `support@${name.toLowerCase().replace(/[^a-z0-9]+/g, "") || "company"}.com`,
+    supportPhone: normalizeWhitespace(String(row?.support_phone || "")),
+    attendanceZoneLabel:
+      normalizeWhitespace(String(row?.attendance_zone_label || `${name} Attendance Zone`)) ||
+      `${name} Attendance Zone`,
+    createdAt: row?.created_at ? toIsoTimestamp(row.created_at, nowIso) : nowIso,
+    updatedAt: row?.updated_at ? toIsoTimestamp(row.updated_at, nowIso) : nowIso,
+  };
+}
+
+function normalizeCompanyProfilePayload(input: Partial<CompanyProfile>): CompanyProfile {
+  const nowIso = new Date().toISOString();
+  const name = normalizeCompanyName(String(input.name || DEFAULT_COMPANY_NAME));
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 48) || "company";
+  return {
+    id: normalizeWhitespace(input.id || "") || getCompanyIdFromName(name),
+    name,
+    legalName: normalizeWhitespace(input.legalName || `${name} Pvt Ltd`) || `${name} Pvt Ltd`,
+    industry: normalizeWhitespace(input.industry || "General") || "General",
+    headquarters: normalizeWhitespace(input.headquarters || "India") || "India",
+    primaryBranch: normalizeWhitespace(input.primaryBranch || "Main Branch") || "Main Branch",
+    supportEmail: normalizeEmail(input.supportEmail || `support@${slug}.com`) || `support@${slug}.com`,
+    supportPhone: normalizeWhitespace(input.supportPhone || ""),
+    attendanceZoneLabel:
+      normalizeWhitespace(input.attendanceZoneLabel || `${name} Attendance Zone`) ||
+      `${name} Attendance Zone`,
+    createdAt: input.createdAt || nowIso,
+    updatedAt: input.updatedAt || nowIso,
+  };
+}
+
+function parseCompanyProfilesState(value: unknown): Map<string, CompanyProfileSummary> {
+  const profiles = new Map<string, CompanyProfileSummary>();
+  if (!Array.isArray(value)) return profiles;
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const profile = normalizeCompanyProfilePayload(entry as Partial<CompanyProfile>);
+    if (!profile.id || !profile.name) continue;
+    profiles.set(profile.id, {
+      id: profile.id,
+      name: profile.name,
+      primaryBranch: profile.primaryBranch,
+    });
+  }
+  return profiles;
+}
+
+async function ensureCompaniesTableInMySql(): Promise<void> {
+  if (companiesTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `CREATE TABLE IF NOT EXISTS lff_companies (
+      id VARCHAR(64) NOT NULL,
+      name VARCHAR(191) NOT NULL,
+      legal_name VARCHAR(191) NOT NULL,
+      industry VARCHAR(120) NOT NULL DEFAULT 'General',
+      headquarters VARCHAR(191) NOT NULL DEFAULT 'India',
+      primary_branch VARCHAR(191) NOT NULL DEFAULT 'Main Branch',
+      support_email VARCHAR(191) NOT NULL DEFAULT 'support@company.com',
+      support_phone VARCHAR(64) NOT NULL DEFAULT '',
+      attendance_zone_label VARCHAR(191) NOT NULL DEFAULT 'Main Branch',
+      created_at DATETIME NOT NULL,
+      updated_at DATETIME NOT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_lff_companies_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+  );
+  companiesTableEnsured = true;
+}
+
+async function upsertCompanyProfileInMySql(profile: CompanyProfile): Promise<CompanyProfile> {
+  if (!isMySqlStateEnabled()) return profile;
+  await ensureCompaniesTableInMySql();
+  const conn = await getMySqlPool();
+  const normalized = normalizeCompanyProfilePayload(profile);
+  await conn.execute(
+    `INSERT INTO lff_companies (
+      id, name, legal_name, industry, headquarters, primary_branch, support_email, support_phone,
+      attendance_zone_label, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      name = VALUES(name),
+      legal_name = VALUES(legal_name),
+      industry = VALUES(industry),
+      headquarters = VALUES(headquarters),
+      primary_branch = VALUES(primary_branch),
+      support_email = VALUES(support_email),
+      support_phone = VALUES(support_phone),
+      attendance_zone_label = VALUES(attendance_zone_label),
+      updated_at = VALUES(updated_at)`,
+    [
+      normalized.id,
+      normalized.name,
+      normalized.legalName,
+      normalized.industry,
+      normalized.headquarters,
+      normalized.primaryBranch,
+      normalized.supportEmail,
+      normalized.supportPhone,
+      normalized.attendanceZoneLabel,
+      normalized.createdAt.slice(0, 19).replace("T", " "),
+      normalized.updatedAt.slice(0, 19).replace("T", " "),
+    ]
+  );
+  return normalized;
+}
+
+async function migrateLegacyCompaniesStateToMySql(): Promise<void> {
+  if (legacyCompaniesStateMigrated || !isMySqlStateEnabled()) return;
+  await ensureCompaniesTableInMySql();
+  const conn = await getMySqlPool();
+  const [existingRows] = await conn.query<any[]>(`SELECT id FROM lff_companies LIMIT 1`);
+  if (existingRows && existingRows.length > 0) {
+    legacyCompaniesStateMigrated = true;
+    return;
+  }
+  const raw = await getMySqlStateValue("@trackforce_companies").catch(() => null);
+  const parsed = raw ? parseJsonText(raw) : null;
+  if (Array.isArray(parsed)) {
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== "object") continue;
+      await upsertCompanyProfileInMySql(normalizeCompanyProfilePayload(entry as Partial<CompanyProfile>));
+    }
+  }
+  legacyCompaniesStateMigrated = true;
+}
+
+async function listCompaniesFromMySql(): Promise<CompanyProfile[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await migrateLegacyCompaniesStateToMySql();
+  await ensureCompaniesTableInMySql();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT id, name, legal_name, industry, headquarters, primary_branch, support_email,
+            support_phone, attendance_zone_label, created_at, updated_at
+     FROM lff_companies
+     ORDER BY created_at DESC, name ASC`
+  );
+  return (rows || []).map((row) => companyProfileFromRow(row));
+}
+
+async function persistCompaniesLegacyStateFromMySql(): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const companies = await listCompaniesFromMySql();
+  await setMySqlStateValue("@trackforce_companies", JSON.stringify(companies));
+}
+
+async function replaceCompaniesInMySql(entries: unknown[]): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureCompaniesTableInMySql();
+  const pool = await getMySqlPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM lff_companies");
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const profile = normalizeCompanyProfilePayload(entry as Partial<CompanyProfile>);
+      await conn.execute(
+        `INSERT INTO lff_companies (
+          id, name, legal_name, industry, headquarters, primary_branch, support_email, support_phone,
+          attendance_zone_label, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          profile.id,
+          profile.name,
+          profile.legalName,
+          profile.industry,
+          profile.headquarters,
+          profile.primaryBranch,
+          profile.supportEmail,
+          profile.supportPhone,
+          profile.attendanceZoneLabel,
+          profile.createdAt.slice(0, 19).replace("T", " "),
+          profile.updatedAt.slice(0, 19).replace("T", " "),
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function deleteCompanyScopedRowsInMySql(
+  companyId: string,
+  fallbackCompany: CompanyProfile
+): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT TABLE_NAME AS table_name
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND COLUMN_NAME = 'company_id'
+       AND TABLE_NAME LIKE 'lff\\_%'
+       AND TABLE_NAME <> 'lff_companies'`
+  );
+  for (const row of rows || []) {
+    const tableName = String(row?.table_name || "");
+    if (!/^lff_[a-zA-Z0-9_]+$/.test(tableName)) continue;
+    if (tableName === "lff_users") {
+      try {
+        await conn.execute(
+          `UPDATE \`${tableName}\`
+           SET company_id = ?, company_name = ?, company_ids_json = ?, updated_at = NOW()
+           WHERE company_id = ?`,
+          [
+            fallbackCompany.id,
+            fallbackCompany.name,
+            JSON.stringify([fallbackCompany.id]),
+            companyId,
+          ]
+        );
+      } catch {
+        await conn.execute(
+          `UPDATE \`${tableName}\`
+           SET company_id = ?, company_name = ?, company_ids_json = ?
+           WHERE company_id = ?`,
+          [
+            fallbackCompany.id,
+            fallbackCompany.name,
+            JSON.stringify([fallbackCompany.id]),
+            companyId,
+          ]
+        );
+      }
+      continue;
+    }
+    await conn.execute(`DELETE FROM \`${tableName}\` WHERE company_id = ?`, [companyId]);
+  }
+}
+
+async function getCompanyProfilesByIds(
+  companyIds: string[]
+): Promise<Map<string, CompanyProfileSummary>> {
+  const requestedIds = new Set(companyIds.map((id) => normalizeWhitespace(id)).filter(Boolean));
+  const matches = new Map<string, CompanyProfileSummary>();
+  if (!requestedIds.size) return matches;
+  if (isMySqlStateEnabled()) {
+    for (const company of await listCompaniesFromMySql()) {
+      if (!requestedIds.has(company.id)) continue;
+      matches.set(company.id, {
+        id: company.id,
+        name: company.name,
+        primaryBranch: company.primaryBranch,
+      });
+    }
+  }
+  if (matches.size === requestedIds.size) return matches;
+  const raw = await readRemoteState("@trackforce_companies");
+  const parsed = raw ? parseJsonText(raw) : null;
+  const legacyProfiles = parseCompanyProfilesState(parsed);
+  for (const companyId of requestedIds) {
+    if (matches.has(companyId)) continue;
+    const profile = legacyProfiles.get(companyId);
+    if (profile) matches.set(companyId, profile);
+  }
+  return matches;
 }
 
 async function hasAnyApprovedAdmin(): Promise<boolean> {
@@ -5172,6 +5467,31 @@ function parseReadByIds(value: unknown): string[] {
   return [];
 }
 
+function parseNotificationUserIds(value: unknown): string[] {
+  return Array.from(new Set(parseReadByIds(value).map((entry) => entry.trim()).filter(Boolean)));
+}
+
+function isNotificationBroadcast(notification: Pick<AppNotification, "audience" | "kind">): boolean {
+  return notification.audience === "all" && (notification.kind === "announcement" || notification.kind === "policy");
+}
+
+function canUserReceiveNotification(notification: AppNotification, role: UserRole, userId: string): boolean {
+  if (role === "admin") return true;
+  if (notification.createdById === userId) return true;
+  const audienceUserIds = parseNotificationUserIds(notification.audienceUserIds);
+  if (audienceUserIds.length > 0) {
+    return Boolean(userId && audienceUserIds.includes(userId));
+  }
+  if (isNotificationBroadcast(notification)) return true;
+  if (notification.audience !== "all") {
+    const isSalesAudience = notification.audience === "salesperson";
+    const isSalesUser = role === "salesperson";
+    if (isSalesAudience && isSalesUser) return true;
+    return notification.audience === role;
+  }
+  return false;
+}
+
 function buildNotificationFromRow(row: any): AppNotification {
   const nowIso = new Date().toISOString();
   const rawTitle = normalizeWhitespace(String(row?.title || ""));
@@ -5194,6 +5514,7 @@ function buildNotificationFromRow(row: any): AppNotification {
     createdByName: normalizeWhitespace(String(row?.created_by_name || "System")),
     createdAt: toIsoTimestamp(row?.created_at, nowIso),
     readByIds: parseReadByIds(row?.read_by_user_ids_json),
+    audienceUserIds: parseNotificationUserIds(row?.audience_user_ids_json),
   };
 }
 
@@ -5214,11 +5535,16 @@ async function ensureNotificationsTableInMySql(): Promise<void> {
       created_by_name VARCHAR(191) NOT NULL,
       created_at DATETIME NOT NULL,
       read_by_user_ids_json LONGTEXT NULL,
+      audience_user_ids_json LONGTEXT NULL,
       PRIMARY KEY (id),
       KEY idx_lff_notifications_company_time (company_id, created_at),
       KEY idx_lff_notifications_kind (kind)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   );
+  await conn.execute(`
+    ALTER TABLE lff_notifications
+      ADD COLUMN IF NOT EXISTS audience_user_ids_json LONGTEXT NULL AFTER read_by_user_ids_json
+  `);
   notificationsTableEnsured = true;
 }
 
@@ -5231,8 +5557,8 @@ async function insertNotificationInMySql(notification: AppNotification): Promise
   await conn.execute(
     `INSERT INTO lff_notifications (
       id, company_id, title, body, kind, audience, created_by_id, created_by_name,
-      created_at, read_by_user_ids_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      created_at, read_by_user_ids_json, audience_user_ids_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       title = VALUES(title),
       body = VALUES(body),
@@ -5241,7 +5567,8 @@ async function insertNotificationInMySql(notification: AppNotification): Promise
       created_by_id = VALUES(created_by_id),
       created_by_name = VALUES(created_by_name),
       created_at = VALUES(created_at),
-      read_by_user_ids_json = COALESCE(read_by_user_ids_json, VALUES(read_by_user_ids_json))`,
+      read_by_user_ids_json = COALESCE(read_by_user_ids_json, VALUES(read_by_user_ids_json)),
+      audience_user_ids_json = VALUES(audience_user_ids_json)`,
     [
       notification.id,
       notification.companyId ?? null,
@@ -5253,12 +5580,14 @@ async function insertNotificationInMySql(notification: AppNotification): Promise
       notification.createdByName,
       notification.createdAt.slice(0, 19).replace("T", " "),
       JSON.stringify(notification.readByIds || []),
+      JSON.stringify(notification.audienceUserIds || []),
     ]
   );
 }
 
 async function listNotificationsFromMySql(
   role: UserRole,
+  userId: string,
   companyId?: string | null
 ): Promise<AppNotification[]> {
   if (!isMySqlStateEnabled()) {
@@ -5266,21 +5595,23 @@ async function listNotificationsFromMySql(
   }
   await ensureNotificationsTableInMySql();
   const conn = await getMySqlPool();
-  const params: Array<string | null> = [role];
-  let where = "WHERE (audience = 'all' OR audience = ?)";
+  const params: Array<string | null> = [];
+  let where = "WHERE 1=1";
   if (companyId) {
     where += " AND (company_id = ? OR company_id IS NULL)";
     params.push(companyId);
   }
   const [rows] = await conn.query<any[]>(
-    `SELECT id, company_id, title, body, kind, audience, created_by_id, created_by_name, created_at, read_by_user_ids_json
+    `SELECT id, company_id, title, body, kind, audience, created_by_id, created_by_name, created_at, read_by_user_ids_json, audience_user_ids_json
      FROM lff_notifications
      ${where}
      ORDER BY created_at DESC
      LIMIT 500`,
     params
   );
-  return (rows || []).map((row) => buildNotificationFromRow(row));
+  return (rows || [])
+    .map((row) => buildNotificationFromRow(row))
+    .filter((notification) => canUserReceiveNotification(notification, role, userId));
 }
 
 async function markNotificationReadInMySql(notificationId: string, userId: string): Promise<void> {
@@ -5312,7 +5643,7 @@ async function markAllNotificationsReadInMySql(
     throw new Error("MySQL notifications storage is not configured.");
   }
   await ensureNotificationsTableInMySql();
-  const notifications = await listNotificationsFromMySql(role, companyId);
+  const notifications = await listNotificationsFromMySql(role, userId, companyId);
   const conn = await getMySqlPool();
   await Promise.all(
     notifications.map((notification) => {
@@ -5333,13 +5664,11 @@ function buildAccessRequestNotification(payload: {
   requestId: string;
   name: string;
   email: string;
-  companyName: string;
 }): AppNotification {
   const createdAt = new Date().toISOString();
-  const companyId = getCompanyIdFromName(payload.companyName);
   return {
     id: `notif_access_${payload.requestId}`,
-    companyId,
+    companyId: undefined,
     title: "New access request",
     body: `${payload.name} (${payload.email}) requested access.`,
     kind: "alert",
@@ -5397,7 +5726,7 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
     const latestRequest = latestAccessRequestByEmail.get(normalizeEmailKey(record.user.email)) || null;
     const hydratedRecord: AuthUserRecord = {
       ...record,
-      user: mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
+      user: await mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
       approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
     };
     setAuthUserRecord(hydratedRecord);
@@ -5494,7 +5823,7 @@ async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord 
     const latestRequest = await getLatestAccessRequestByEmailFromMySql(normalized);
     const hydratedRecord: AuthUserRecord = {
       ...record,
-      user: mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
+      user: await mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
       approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
     };
     setAuthUserRecord(hydratedRecord);
@@ -5975,7 +6304,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     try {
-      const notifications = await listNotificationsFromMySql(role, companyId);
+      const notifications = await listNotificationsFromMySql(role, req.auth?.sub || "", companyId);
       res.json(notifications);
     } catch (error) {
       res.status(500).json({
@@ -5988,11 +6317,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.post("/api/notifications", requireAuth, async (req, res) => {
-    const { title, body, kind, audience } = req.body as {
+    const { title, body, kind, audience, audienceUserIds } = req.body as {
       title?: string;
       body?: string;
       kind?: AppNotification["kind"];
       audience?: NotificationAudience;
+      audienceUserIds?: string[];
     };
     if (!title || !body) {
       res.status(400).json({ message: "Notification title and body are required." });
@@ -6032,6 +6362,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       createdByName: req.auth?.email || "System",
       createdAt,
       readByIds: [],
+      audienceUserIds: parseNotificationUserIds(audienceUserIds),
     };
 
     try {
@@ -6094,6 +6425,151 @@ export async function registerRoutes(app: Express): Promise<Server> {
           error instanceof Error
             ? `Unable to mark notifications read: ${error.message}`
             : "Unable to mark notifications read.",
+      });
+    }
+  });
+
+  app.get("/api/companies", requireAuth, async (_req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "Company database storage is not configured." });
+      return;
+    }
+    try {
+      res.json(await listCompaniesFromMySql());
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to load companies: ${error.message}`
+            : "Unable to load companies.",
+      });
+    }
+  });
+
+  app.post("/api/companies", requireAuth, requireRoles("admin"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "Company database storage is not configured." });
+      return;
+    }
+    const body = (req.body || {}) as Partial<CompanyProfile>;
+    const requestedName = normalizeWhitespace(typeof body.name === "string" ? body.name : "");
+    if (!requestedName) {
+      res.status(400).json({ message: "Company name is required." });
+      return;
+    }
+    try {
+      await ensureCompaniesTableInMySql();
+      const conn = await getMySqlPool();
+      const [existingRows] = await conn.query<any[]>(
+        `SELECT id, name, legal_name, industry, headquarters, primary_branch, support_email,
+                support_phone, attendance_zone_label, created_at, updated_at
+         FROM lff_companies
+         WHERE LOWER(TRIM(name)) = ?
+         LIMIT 1`,
+        [requestedName.toLowerCase()]
+      );
+      if (existingRows && existingRows.length > 0) {
+        res.status(200).json(companyProfileFromRow(existingRows[0]));
+        return;
+      }
+      const nowIso = new Date().toISOString();
+      const created = await upsertCompanyProfileInMySql(
+        normalizeCompanyProfilePayload({
+          ...body,
+          id:
+            normalizeWhitespace(body.id || "") ||
+            `${getCompanyIdFromName(requestedName)}_${randomUUID().slice(0, 8)}`,
+          name: requestedName,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        })
+      );
+      await persistCompaniesLegacyStateFromMySql();
+      res.status(201).json(created);
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to create company: ${error.message}`
+            : "Unable to create company.",
+      });
+    }
+  });
+
+  app.put("/api/companies/:id", requireAuth, requireRoles("admin"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "Company database storage is not configured." });
+      return;
+    }
+    const companyId = normalizeWhitespace(firstString(req.params.id));
+    if (!companyId) {
+      res.status(400).json({ message: "Company id is required." });
+      return;
+    }
+    try {
+      const companies = await listCompaniesFromMySql();
+      const current = companies.find((company) => company.id === companyId);
+      if (!current) {
+        res.status(404).json({ message: "Company not found." });
+        return;
+      }
+      const updated = await upsertCompanyProfileInMySql(
+        normalizeCompanyProfilePayload({
+          ...current,
+          ...((req.body || {}) as Partial<CompanyProfile>),
+          id: current.id,
+          createdAt: current.createdAt,
+          updatedAt: new Date().toISOString(),
+        })
+      );
+      await persistCompaniesLegacyStateFromMySql();
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to update company: ${error.message}`
+            : "Unable to update company.",
+      });
+    }
+  });
+
+  app.delete("/api/companies/:id", requireAuth, requireRoles("admin"), async (req, res) => {
+    if (!isMySqlStateEnabled()) {
+      res.status(503).json({ message: "Company database storage is not configured." });
+      return;
+    }
+    const companyId = normalizeWhitespace(firstString(req.params.id));
+    if (!companyId) {
+      res.status(400).json({ message: "Company id is required." });
+      return;
+    }
+    try {
+      const companies = await listCompaniesFromMySql();
+      if (!companies.some((company) => company.id === companyId)) {
+        res.status(404).json({ message: "Company not found." });
+        return;
+      }
+      if (companies.length <= 1) {
+        res.status(400).json({ message: "At least one company environment is required." });
+        return;
+      }
+      const fallbackCompany = companies.find((company) => company.id !== companyId);
+      if (!fallbackCompany) {
+        res.status(400).json({ message: "A fallback company is required before deletion." });
+        return;
+      }
+      await deleteCompanyScopedRowsInMySql(companyId, fallbackCompany);
+      const conn = await getMySqlPool();
+      await conn.execute(`DELETE FROM lff_companies WHERE id = ?`, [companyId]);
+      await persistCompaniesLegacyStateFromMySql();
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(500).json({
+        message:
+          error instanceof Error
+            ? `Unable to delete company: ${error.message}`
+            : "Unable to delete company.",
       });
     }
   });
@@ -6606,7 +7082,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           requestId: pendingRequest.id,
           name: pendingUser.name,
           email: pendingUser.email,
-          companyName: normalizedCompanyName,
         });
         await insertNotificationInMySql(notification);
       } catch (error) {
@@ -6676,6 +7151,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         action?: "approved" | "rejected";
         role?: UserRole;
         companyIds?: unknown;
+        companyProfiles?: unknown;
         managerId?: string;
         managerName?: string;
         stockistId?: string;
@@ -6724,6 +7200,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isSalespersonApproval = action === "approved" && isSalesRole(finalRole);
       const assignedCompanyIds =
         action === "approved" ? normalizeCompanyIds(body?.companyIds) : [];
+      let selectedCompaniesById = new Map<string, CompanyProfileSummary>();
+      if (action === "approved") {
+        if (assignedCompanyIds.length === 0) {
+          res.status(400).json({ message: "Select at least one company before approval." });
+          return;
+        }
+        selectedCompaniesById = parseCompanyProfilesState(body?.companyProfiles);
+        const storedCompaniesById = await getCompanyProfilesByIds(assignedCompanyIds);
+        for (const [companyId, company] of storedCompaniesById) {
+          selectedCompaniesById.set(companyId, company);
+        }
+        const missingCompanyIds = assignedCompanyIds.filter(
+          (companyId) => !selectedCompaniesById.has(companyId)
+        );
+        if (missingCompanyIds.length > 0) {
+          res.status(400).json({ message: "One or more selected companies are invalid." });
+          return;
+        }
+      }
       const assignedManagerId =
         action === "approved" && !isSalesRole(finalRole)
           ? normalizeWhitespace(typeof body?.managerId === "string" ? body.managerId : "") || null
@@ -6777,13 +7272,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       let reviewedUser: AppUser | null = null;
       if (action === "approved") {
-        const effectiveCompanyName = normalizeCompanyName(
-          currentRequest.requestedCompanyName || authRecord?.user.companyName || DEFAULT_COMPANY_NAME
-        );
-        const effectiveCompanyId =
-          assignedCompanyIds[0] ||
-          authRecord?.user.companyId ||
-          getCompanyIdFromName(effectiveCompanyName);
+        const selectedPrimaryCompany = selectedCompaniesById.get(assignedCompanyIds[0]);
+        if (!selectedPrimaryCompany) {
+          res.status(400).json({ message: "Selected company is invalid." });
+          return;
+        }
+        const effectiveCompanyId = selectedPrimaryCompany.id;
+        const effectiveCompanyName = selectedPrimaryCompany.name;
         reviewedUser = {
           ...(authRecord?.user ?? buildUserFromRegistration({
             name: currentRequest.name,
@@ -6802,7 +7297,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             "Main Branch",
           companyId: effectiveCompanyId,
           companyName: effectiveCompanyName,
-          companyIds: assignedCompanyIds.length ? assignedCompanyIds : [effectiveCompanyId],
+          companyIds: assignedCompanyIds,
           managerId: assignedManagerId || undefined,
           managerName: assignedManagerName || undefined,
           stockistId: assignedStockistId || undefined,

@@ -1,7 +1,6 @@
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  AppState,
   Image,
   Platform,
   Pressable,
@@ -13,7 +12,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { router, useFocusEffect } from "expo-router";
+import { router } from "expo-router";
 import Animated, {
   Extrapolation,
   FadeInDown,
@@ -36,11 +35,9 @@ import {
   getConversations,
   getExpenses,
   getNotificationsForCurrentUser,
-  STORAGE_KEYS,
   getSupportThreadsForCurrentUser,
   getTasks,
   getTeams,
-  subscribeStorageUpdates,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import type {
@@ -99,6 +96,17 @@ type MetricCard = {
   tone: string;
 };
 
+type MetricRangeId = "today" | "week" | "month" | "all";
+
+type TaskCompletionEntry = {
+  key: string;
+  name: string;
+  assigned: number;
+  completed: number;
+  open: number;
+  completionRate: number;
+};
+
 type CommandHighlight = {
   id: string;
   label: string;
@@ -125,20 +133,13 @@ type DashboardSection =
 
 const LATE_THRESHOLD_HOUR = 9;
 const LATE_THRESHOLD_MINUTE = 45;
-const DASHBOARD_POLL_INTERVAL_MS = 15_000;
-const STORAGE_EVENT_THROTTLE_MS = 900;
-const DASHBOARD_WATCH_KEYS = new Set<string>([
-  STORAGE_KEYS.EMPLOYEES,
-  STORAGE_KEYS.ATTENDANCE,
-  STORAGE_KEYS.TASKS,
-  STORAGE_KEYS.EXPENSES,
-  STORAGE_KEYS.CONVERSATIONS,
-  STORAGE_KEYS.NOTIFICATIONS,
-  STORAGE_KEYS.SUPPORT_THREADS,
-  STORAGE_KEYS.TEAMS,
-  STORAGE_KEYS.AUDIT_LOGS,
-  STORAGE_KEYS.ACCESS_REQUESTS,
-]);
+
+const METRIC_RANGE_OPTIONS: { id: MetricRangeId; label: string; shortLabel: string }[] = [
+  { id: "today", label: "Today", shortLabel: "Today" },
+  { id: "week", label: "This Week", shortLabel: "Week" },
+  { id: "month", label: "This Month", shortLabel: "Month" },
+  { id: "all", label: "All Time", shortLabel: "All" },
+];
 
 function toLocalDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -150,6 +151,46 @@ function toLocalDateKey(date: Date): string {
 function toTimestamp(value: string): number {
   const parsed = new Date(value).getTime();
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseMetricDate(value?: string | null): Date | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  const parsed = dateOnly
+    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+    : new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function startOfMetricRange(rangeId: MetricRangeId, now: Date): Date | null {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  if (rangeId === "today") return start;
+  if (rangeId === "week") {
+    const day = start.getDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    start.setDate(start.getDate() + mondayOffset);
+    return start;
+  }
+  if (rangeId === "month") {
+    start.setDate(1);
+    return start;
+  }
+  return null;
+}
+
+function isMetricDateInRange(value: string | null | undefined, rangeId: MetricRangeId, now: Date): boolean {
+  if (rangeId === "all") return true;
+  const parsed = parseMetricDate(value);
+  const start = startOfMetricRange(rangeId, now);
+  if (!parsed || !start) return false;
+  return parsed.getTime() >= start.getTime() && parsed.getTime() <= now.getTime();
+}
+
+function isTaskInMetricRange(task: Task, rangeId: MetricRangeId, now: Date): boolean {
+  return isMetricDateInRange(task.visitPlanDate || task.dueDate || task.createdAt, rangeId, now);
 }
 
 function formatTimeLabel(timestamp: string): string {
@@ -175,6 +216,58 @@ function normalizeIdentity(value?: string | null): string {
   return (value || "").trim().toLowerCase();
 }
 
+function isTaskAssignedToUser(task: Task, actor?: { id?: string | null; name?: string | null; email?: string | null } | null): boolean {
+  if (!actor) return false;
+  const normalizedId = normalizeIdentity(actor.id);
+  const normalizedName = normalizeIdentity(actor.name);
+  const normalizedEmail = normalizeIdentity(actor.email);
+  const assignedId = normalizeIdentity(task.assignedTo);
+  const assignedName = normalizeIdentity(task.assignedToName);
+  return Boolean(
+    (normalizedId && assignedId === normalizedId) ||
+      (normalizedEmail && assignedId === normalizedEmail) ||
+      (normalizedName && assignedName === normalizedName) ||
+      (normalizedEmail && assignedName === normalizedEmail)
+  );
+}
+
+function buildTaskCompletionRows(tasks: Task[], employees: Employee[]): TaskCompletionEntry[] {
+  const employeesById = new Map(employees.map((employee) => [normalizeIdentity(employee.id), employee]));
+  const rows = new Map<string, TaskCompletionEntry>();
+
+  for (const task of tasks) {
+    const assignedId = normalizeIdentity(task.assignedTo);
+    const assignedName = normalizeIdentity(task.assignedToName);
+    const key = assignedId || assignedName;
+    if (!key) continue;
+
+    const employee = employeesById.get(assignedId);
+    const name = employee?.name?.trim() || task.assignedToName?.trim() || task.assignedTo?.trim() || "Unassigned";
+    const row = rows.get(key) || {
+      key,
+      name,
+      assigned: 0,
+      completed: 0,
+      open: 0,
+      completionRate: 0,
+    };
+    row.assigned += 1;
+    if (task.status === "completed") {
+      row.completed += 1;
+    } else {
+      row.open += 1;
+    }
+    row.completionRate = row.assigned ? Math.round((row.completed / row.assigned) * 100) : 0;
+    rows.set(key, row);
+  }
+
+  return Array.from(rows.values()).sort((left, right) => {
+    if (left.completionRate !== right.completionRate) return left.completionRate - right.completionRate;
+    if (left.open !== right.open) return right.open - left.open;
+    return right.assigned - left.assigned;
+  });
+}
+
 function hasOpenAttendanceSession(
   records: AttendanceRecord[],
   userId?: string | null,
@@ -195,8 +288,8 @@ function getTaskLabel(task: Task): string {
   return task.visitLocationLabel?.trim() || task.title.trim() || "Field visit";
 }
 
-function getGreetingLabel(): string {
-  const hour = new Date().getHours();
+function getGreetingLabel(date: Date): string {
+  const hour = date.getHours();
   if (hour < 12) return "Good morning";
   if (hour < 17) return "Good afternoon";
   return "Good evening";
@@ -474,6 +567,8 @@ export default function DashboardScreen() {
   const [supportThreads, setSupportThreads] = useState<SupportThread[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [metricRange, setMetricRange] = useState<MetricRangeId>("week");
+  const [metricRangeOpen, setMetricRangeOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [, setLastSyncedAt] = useState<string | null>(null);
@@ -515,11 +610,13 @@ export default function DashboardScreen() {
         setTeams([]);
         setAuditLogs([]);
         setLastSyncedAt(null);
+        setClockNow(new Date());
         setLoading(false);
         return;
       }
 
       try {
+        setClockNow(new Date());
         const [
           employeeData,
           attendanceData,
@@ -569,51 +666,6 @@ export default function DashboardScreen() {
     void loadDashboard();
   }, [loadDashboard]);
 
-  useFocusEffect(
-    useCallback(() => {
-      void loadDashboard();
-      const pollId = setInterval(() => {
-        void loadDashboard();
-      }, DASHBOARD_POLL_INTERVAL_MS);
-      return () => {
-        clearInterval(pollId);
-      };
-    }, [loadDashboard])
-  );
-
-  useEffect(() => {
-    const appStateSubscription = AppState.addEventListener("change", (nextState) => {
-      if (nextState === "active") {
-        setClockNow(new Date());
-        void loadDashboard();
-      }
-    });
-    return () => {
-      appStateSubscription.remove();
-    };
-  }, [loadDashboard]);
-
-  useEffect(() => {
-    const intervalId = setInterval(() => {
-      setClockNow(new Date());
-    }, 30_000);
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, []);
-
-  useEffect(() => {
-    let lastTriggeredAt = 0;
-    const unsubscribe = subscribeStorageUpdates((event) => {
-      if (!DASHBOARD_WATCH_KEYS.has(event.key)) return;
-      const now = Date.now();
-      if (now - lastTriggeredAt < STORAGE_EVENT_THROTTLE_MS) return;
-      lastTriggeredAt = now;
-      void loadDashboard();
-    });
-    return unsubscribe;
-  }, [loadDashboard]);
-
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -649,14 +701,15 @@ export default function DashboardScreen() {
         record.type === "checkin" &&
         record.approvalStatus === "pending"
     ).length;
-    const assignedTasks = tasks.filter(
+    const assignedTaskList = tasks.filter(
       (task) =>
         normalizeIdentity(task.assignedTo).length > 0 ||
         normalizeIdentity(task.assignedToName).length > 0
-    ).length;
-    const pendingTasks = tasks.filter((task) => task.status === "pending").length;
-    const inProgressTasks = tasks.filter((task) => task.status === "in_progress").length;
-    const completedTasks = tasks.filter((task) => task.status === "completed").length;
+    );
+    const assignedTasks = assignedTaskList.length;
+    const pendingTasks = assignedTaskList.filter((task) => task.status === "pending").length;
+    const inProgressTasks = assignedTaskList.filter((task) => task.status === "in_progress").length;
+    const completedTasks = assignedTaskList.filter((task) => task.status === "completed").length;
     const openTasks = pendingTasks + inProgressTasks;
     const pendingExpenses = expenses.filter((expense) => expense.status === "pending").length;
     const avgInterestScore =
@@ -700,23 +753,11 @@ export default function DashboardScreen() {
   const todayKey = useMemo(() => toLocalDateKey(clockNow), [clockNow]);
   const userTasks = useMemo(() => {
     if (!user) return [] as Task[];
-    const normalizedName = normalizeIdentity(user.name);
-    const normalizedEmail = normalizeIdentity(user.email);
-    return tasks.filter((task) => {
-      if (task.assignedTo === user.id) return true;
-      const assignedName = normalizeIdentity(task.assignedToName);
-      return (
-        (normalizedName && assignedName === normalizedName) ||
-        (normalizedEmail && assignedName === normalizedEmail)
-      );
-    });
+    return tasks.filter((task) => isTaskAssignedToUser(task, user));
   }, [tasks, user]);
-  const userPendingTasks = useMemo(
-    () => userTasks.filter((task) => task.status === "pending").length,
-    [userTasks]
-  );
-  const userInProgressTasks = useMemo(
-    () => userTasks.filter((task) => task.status === "in_progress").length,
+  const userAssignedTasks = userTasks.length;
+  const userCompletedTasks = useMemo(
+    () => userTasks.filter((task) => task.status === "completed").length,
     [userTasks]
   );
   const todaysVisits = useMemo(() => {
@@ -730,17 +771,9 @@ export default function DashboardScreen() {
         return a.createdAt.localeCompare(b.createdAt);
       });
   }, [todayKey, userTasks]);
-  const visitsCompleted = useMemo(
-    () => todaysVisits.filter((task) => task.status === "completed").length,
-    [todaysVisits]
-  );
-  const visitsInProgress = useMemo(
-    () => todaysVisits.filter((task) => task.status === "in_progress").length,
-    [todaysVisits]
-  );
-  const visitsPending = useMemo(
-    () => todaysVisits.filter((task) => task.status === "pending").length,
-    [todaysVisits]
+  const taskCompletionRows = useMemo(
+    () => buildTaskCompletionRows(tasks, employees),
+    [employees, tasks]
   );
   const userPendingExpenses = useMemo(() => {
     if (!user) return 0;
@@ -749,6 +782,87 @@ export default function DashboardScreen() {
   }, [expenses, user]);
 
   const quickLinks = useMemo(() => buildQuickLinks(user?.role, colors), [colors, user?.role]);
+  const selectedMetricRange = useMemo(
+    () => METRIC_RANGE_OPTIONS.find((option) => option.id === metricRange) || METRIC_RANGE_OPTIONS[1],
+    [metricRange]
+  );
+  const rangedMetricData = useMemo(() => {
+    const validAttendance = attendance.filter((record) => record.approvalStatus !== "rejected");
+    const rangeCheckins = validAttendance.filter(
+      (record) => record.type === "checkin" && isMetricDateInRange(record.timestamp, metricRange, clockNow)
+    );
+    const checkinUsers = new Set<string>();
+    for (const record of rangeCheckins) {
+      const key = normalizeIdentity(record.userId) || normalizeIdentity(record.userName);
+      if (key) checkinUsers.add(key);
+    }
+
+    const assignedTaskList = tasks.filter(
+      (task) =>
+        isTaskInMetricRange(task, metricRange, clockNow) &&
+        (normalizeIdentity(task.assignedTo).length > 0 || normalizeIdentity(task.assignedToName).length > 0)
+    );
+    const completedTasks = assignedTaskList.filter((task) => task.status === "completed").length;
+    const openTasks = assignedTaskList.length - completedTasks;
+    const userRangeTasks = userTasks.filter((task) => isTaskInMetricRange(task, metricRange, clockNow));
+    const userCompletedTasks = userRangeTasks.filter((task) => task.status === "completed").length;
+    const userOpenTasks = userRangeTasks.length - userCompletedTasks;
+    const userRangeVisits = userRangeTasks.filter((task) => task.taskType === "field_visit");
+    const userCompletedVisits = userRangeVisits.filter((task) => task.status === "completed").length;
+    const userActiveVisits = userRangeVisits.filter((task) => task.status === "in_progress").length;
+    const userPendingVisits = userRangeVisits.filter((task) => task.status === "pending").length;
+    const rangeConversations = conversations.filter((entry) =>
+      isMetricDateInRange(entry.date, metricRange, clockNow)
+    );
+
+    return {
+      checkinUsers: checkinUsers.size,
+      checkins: rangeCheckins.length,
+      assignedTasks: assignedTaskList.length,
+      completedTasks,
+      openTasks,
+      taskCompletionRate: assignedTaskList.length ? Math.round((completedTasks / assignedTaskList.length) * 100) : 0,
+      openSupportThreads: supportThreads.filter(
+        (thread) => thread.status === "open" && isMetricDateInRange(thread.updatedAt, metricRange, clockNow)
+      ).length,
+      unreadNotifications: user
+        ? notifications.filter(
+            (item) =>
+              !(item.readByIds || []).includes(user.id) &&
+              isMetricDateInRange(item.createdAt, metricRange, clockNow)
+          ).length
+        : 0,
+      highIntentDeals: rangeConversations.filter((entry) => entry.buyingIntent === "high").length,
+      totalConversations: rangeConversations.length,
+      userAssignedTasks: userRangeTasks.length,
+      userCompletedTasks,
+      userOpenTasks,
+      userTaskCompletionRate: userRangeTasks.length ? Math.round((userCompletedTasks / userRangeTasks.length) * 100) : 0,
+      userVisits: userRangeVisits.length,
+      userCompletedVisits,
+      userActiveVisits,
+      userPendingVisits,
+      userPendingExpenses: user
+        ? expenses.filter(
+            (expense) =>
+              expense.userId === user.id &&
+              expense.status === "pending" &&
+              isMetricDateInRange(expense.date, metricRange, clockNow)
+          ).length
+        : 0,
+    };
+  }, [
+    attendance,
+    clockNow,
+    conversations,
+    expenses,
+    metricRange,
+    notifications,
+    supportThreads,
+    tasks,
+    user,
+    userTasks,
+  ]);
 
   const metricCards = useMemo<MetricCard[]>(
     () =>
@@ -756,32 +870,32 @@ export default function DashboardScreen() {
         ? [
             {
               id: "visits",
-              label: "Visits Today",
-              value: `${visitsCompleted}/${todaysVisits.length}`,
-              hint: `${visitsPending} pending · ${visitsInProgress} active`,
+              label: "Visits",
+              value: `${rangedMetricData.userCompletedVisits}/${rangedMetricData.userVisits}`,
+              hint: `${rangedMetricData.userPendingVisits} pending · ${rangedMetricData.userActiveVisits} active`,
               icon: "navigate-outline",
               tone: colors.primary,
             },
             {
               id: "tasks",
               label: "My Tasks",
-              value: `${userPendingTasks + userInProgressTasks}`,
-              hint: `${userPendingTasks} pending · ${userInProgressTasks} active`,
+              value: `${rangedMetricData.userCompletedTasks}/${rangedMetricData.userAssignedTasks}`,
+              hint: `${rangedMetricData.userTaskCompletionRate}% done · ${rangedMetricData.userOpenTasks} open`,
               icon: "checkbox-outline",
               tone: colors.success,
             },
             {
               id: "alerts",
               label: "My Alerts",
-              value: `${snapshot.unreadNotifications}`,
-              hint: `${snapshot.openSupportThreads} support threads`,
+              value: `${rangedMetricData.unreadNotifications}`,
+              hint: `${rangedMetricData.openSupportThreads} support threads`,
               icon: "notifications-outline",
               tone: colors.warning,
             },
             {
               id: "expenses",
               label: "Expenses",
-              value: `${userPendingExpenses}`,
+              value: `${rangedMetricData.userPendingExpenses}`,
               hint: "Pending approvals",
               icon: "receipt-outline",
               tone: colors.secondary,
@@ -790,33 +904,33 @@ export default function DashboardScreen() {
         : [
             {
               id: "present",
-              label: "Checked In Now",
-              value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
-              hint: `${snapshot.presentToday} open attendance sessions`,
+              label: "Check-ins",
+              value: `${rangedMetricData.checkinUsers}/${snapshot.totalEmployees || 0}`,
+              hint: `${rangedMetricData.checkins} check-ins · ${selectedMetricRange.shortLabel}`,
               icon: "person-add-outline",
               tone: colors.success,
             },
             {
               id: "tasks",
               label: "Task Completion",
-              value: `${snapshot.openTasks}/${snapshot.assignedTasks}`,
-              hint: `${snapshot.completedTasks} completed · ${snapshot.taskCompletionRate}% done`,
+              value: `${rangedMetricData.completedTasks}/${rangedMetricData.assignedTasks}`,
+              hint: `${rangedMetricData.openTasks} open · ${rangedMetricData.taskCompletionRate}% done`,
               icon: "checkbox-outline",
               tone: colors.primary,
             },
             {
               id: "support",
               label: "Support Queue",
-              value: `${snapshot.openSupportThreads}`,
-              hint: `${snapshot.unreadNotifications} unread alerts`,
+              value: `${rangedMetricData.openSupportThreads}`,
+              hint: `${rangedMetricData.unreadNotifications} unread alerts`,
               icon: "help-buoy-outline",
               tone: colors.warning,
             },
             {
               id: "sales",
               label: "High Intent",
-              value: `${snapshot.highIntentDeals}`,
-              hint: `${snapshot.totalConversations} total conversations`,
+              value: `${rangedMetricData.highIntentDeals}`,
+              hint: `${rangedMetricData.totalConversations} total conversations`,
               icon: "sparkles-outline",
               tone: colors.secondary,
             },
@@ -827,14 +941,9 @@ export default function DashboardScreen() {
       colors.success,
       colors.warning,
       isSalesperson,
-      snapshot,
-      todaysVisits.length,
-      userInProgressTasks,
-      userPendingExpenses,
-      userPendingTasks,
-      visitsCompleted,
-      visitsInProgress,
-      visitsPending,
+      rangedMetricData,
+      selectedMetricRange.shortLabel,
+      snapshot.totalEmployees,
     ]
   );
 
@@ -850,9 +959,9 @@ export default function DashboardScreen() {
               tone: colors.primary,
             },
             {
-              id: "tasks_pending",
-              label: "Pending Tasks",
-              value: `${userPendingTasks}`,
+              id: "tasks_completion",
+              label: "Task Done",
+              value: `${userCompletedTasks}/${userAssignedTasks}`,
               icon: "checkbox-outline",
               tone: colors.success,
             },
@@ -909,8 +1018,9 @@ export default function DashboardScreen() {
       isSalesperson,
       snapshot,
       todaysVisits.length,
+      userAssignedTasks,
+      userCompletedTasks,
       userPendingExpenses,
-      userPendingTasks,
     ]
   );
 
@@ -944,7 +1054,7 @@ export default function DashboardScreen() {
       }),
     [clockNow]
   );
-  const greeting = useMemo(() => getGreetingLabel(), [clockNow]);
+  const greeting = useMemo(() => getGreetingLabel(clockNow), [clockNow]);
   const heroEmailText = useMemo(() => {
     const email = user?.email?.trim();
     if (email) {
@@ -1269,7 +1379,10 @@ export default function DashboardScreen() {
         </Animated.View>
 
         {metricsSection ? (
-        <Animated.View entering={FadeInDown.duration(420).delay(metricsSection.delay)} style={styles.sectionWrap}>
+        <Animated.View
+          entering={FadeInDown.duration(420).delay(metricsSection.delay)}
+          style={[styles.sectionWrap, metricRangeOpen && styles.metricsSectionDropdownOpen]}
+        >
           <View style={styles.sectionHeaderRow}>
             <View style={styles.sectionHeaderContent}>
               <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
@@ -1282,11 +1395,81 @@ export default function DashboardScreen() {
                 {metricsSection.subtitle}
               </Text>
             </View>
-            <View style={[styles.sectionActionChip, { backgroundColor: isDark ? colors.surface : "#FFFFFF", borderColor: colors.border }]}>
-              <Text style={[styles.sectionActionText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
-                This Week
-              </Text>
-              <Ionicons name="chevron-down" size={14} color={colors.textSecondary} />
+            <View style={styles.metricsHeaderActions}>
+              <Pressable
+                onPress={onRefresh}
+                disabled={refreshing}
+                style={[
+                  styles.metricRefreshButton,
+                  {
+                    backgroundColor: isDark ? colors.surface : "#FFFFFF",
+                    borderColor: colors.border,
+                    opacity: refreshing ? 0.7 : 1,
+                  },
+                ]}
+              >
+                {refreshing ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : (
+                  <Ionicons name="refresh" size={16} color={colors.primary} />
+                )}
+              </Pressable>
+              <View style={styles.metricRangeWrap}>
+                <Pressable
+                  onPress={() => setMetricRangeOpen((open) => !open)}
+                  style={[
+                    styles.sectionActionChip,
+                    { backgroundColor: isDark ? colors.surface : "#FFFFFF", borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.sectionActionText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
+                    {selectedMetricRange.label}
+                  </Text>
+                  <Ionicons
+                    name={metricRangeOpen ? "chevron-up" : "chevron-down"}
+                    size={14}
+                    color={colors.textSecondary}
+                  />
+                </Pressable>
+                {metricRangeOpen ? (
+                  <View
+                    style={[
+                      styles.metricRangeMenu,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                    ]}
+                  >
+                    {METRIC_RANGE_OPTIONS.map((option) => {
+                      const selected = option.id === metricRange;
+                      return (
+                        <Pressable
+                          key={option.id}
+                          onPress={() => {
+                            setMetricRange(option.id);
+                            setMetricRangeOpen(false);
+                          }}
+                          style={[
+                            styles.metricRangeOption,
+                            selected && { backgroundColor: `${colors.primary}14` },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.metricRangeOptionText,
+                              {
+                                color: selected ? colors.primary : colors.text,
+                                fontFamily: selected ? "Inter_600SemiBold" : "Inter_500Medium",
+                              },
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                          {selected ? <Ionicons name="checkmark" size={14} color={colors.primary} /> : null}
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ) : null}
+              </View>
             </View>
           </View>
           <View style={styles.metricGrid}>
@@ -1502,6 +1685,59 @@ export default function DashboardScreen() {
               </View>
             </View>
 
+            <View style={[styles.taskCompletionPanel, { borderColor: colors.borderLight }]}>
+              <View style={styles.taskCompletionHeader}>
+                <Text style={[styles.taskCompletionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                  User Task Completion
+                </Text>
+                <Text style={[styles.taskCompletionMeta, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                  Completed / assigned
+                </Text>
+              </View>
+              {taskCompletionRows.length === 0 ? (
+                <Text style={[styles.taskCompletionEmpty, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                  No assigned tasks yet.
+                </Text>
+              ) : (
+                taskCompletionRows.slice(0, 5).map((entry) => (
+                  <View key={entry.key} style={styles.taskCompletionRow}>
+                    <View style={styles.taskCompletionUserBlock}>
+                      <Text
+                        style={[styles.taskCompletionName, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}
+                        numberOfLines={1}
+                      >
+                        {entry.name}
+                      </Text>
+                      <Text style={[styles.taskCompletionSubtext, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                        {entry.open} open
+                      </Text>
+                    </View>
+                    <View style={styles.taskCompletionProgressBlock}>
+                      <View style={styles.taskCompletionScoreRow}>
+                        <Text style={[styles.taskCompletionScore, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                          {entry.completed}/{entry.assigned}
+                        </Text>
+                        <Text style={[styles.taskCompletionPercent, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                          {entry.completionRate}%
+                        </Text>
+                      </View>
+                      <View style={[styles.taskCompletionTrack, { backgroundColor: colors.borderLight }]}>
+                        <View
+                          style={[
+                            styles.taskCompletionFill,
+                            {
+                              width: `${Math.min(100, Math.max(0, entry.completionRate))}%`,
+                              backgroundColor: colors.primary,
+                            },
+                          ]}
+                        />
+                      </View>
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+
             {isSalesVisible ? (
               <View
                 style={[
@@ -1544,12 +1780,6 @@ export default function DashboardScreen() {
               <Text style={[styles.sectionCaption, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                 {quickLinksSection.subtitle}
               </Text>
-            </View>
-            <View style={[styles.sectionActionChip, { backgroundColor: isDark ? colors.surface : "#FFFFFF", borderColor: colors.border }]}>
-              <Text style={[styles.sectionActionText, { color: colors.text, fontFamily: "Inter_500Medium" }]}>
-                All
-              </Text>
-              <Ionicons name="chevron-down" size={14} color={colors.textSecondary} />
             </View>
           </View>
 
@@ -2039,6 +2269,10 @@ const styles = StyleSheet.create({
     marginTop: 2,
     marginBottom: 14,
   },
+  metricsSectionDropdownOpen: {
+    zIndex: 1000,
+    elevation: 1000,
+  },
   sectionHeader: {
     marginBottom: 10,
   },
@@ -2048,6 +2282,8 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 12,
+    zIndex: 100,
+    elevation: 100,
   },
   sectionHeaderContent: {
     flex: 1,
@@ -2082,11 +2318,65 @@ const styles = StyleSheet.create({
   sectionActionText: {
     fontSize: 12.5,
   },
+  metricsHeaderActions: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    zIndex: 200,
+    elevation: 200,
+  },
+  metricRefreshButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 1,
+  },
+  metricRangeWrap: {
+    position: "relative",
+    zIndex: 200,
+    elevation: 200,
+    alignItems: "flex-end",
+  },
+  metricRangeMenu: {
+    position: "absolute",
+    top: 46,
+    right: 0,
+    width: 154,
+    zIndex: 300,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 6,
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 300,
+  },
+  metricRangeOption: {
+    minHeight: 38,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  metricRangeOptionText: {
+    fontSize: 12.5,
+  },
   metricGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "space-between",
     rowGap: 12,
+    zIndex: 1,
+    elevation: 1,
   },
   metricCard: {
     width: "48.2%",
@@ -2185,6 +2475,75 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   progressFill: {
+    height: "100%",
+    borderRadius: 999,
+  },
+  taskCompletionPanel: {
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    marginTop: 2,
+    marginBottom: 12,
+    gap: 10,
+  },
+  taskCompletionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  taskCompletionTitle: {
+    fontSize: 13,
+    flex: 1,
+  },
+  taskCompletionMeta: {
+    fontSize: 11,
+  },
+  taskCompletionEmpty: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  taskCompletionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  taskCompletionUserBlock: {
+    flex: 0.9,
+    minWidth: 0,
+  },
+  taskCompletionName: {
+    fontSize: 12.5,
+    lineHeight: 17,
+  },
+  taskCompletionSubtext: {
+    marginTop: 2,
+    fontSize: 11,
+  },
+  taskCompletionProgressBlock: {
+    flex: 1,
+    minWidth: 116,
+  },
+  taskCompletionScoreRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 5,
+    gap: 8,
+  },
+  taskCompletionScore: {
+    fontSize: 12,
+  },
+  taskCompletionPercent: {
+    fontSize: 12,
+  },
+  taskCompletionTrack: {
+    height: 7,
+    borderRadius: 999,
+    overflow: "hidden",
+  },
+  taskCompletionFill: {
     height: "100%",
     borderRadius: 999,
   },

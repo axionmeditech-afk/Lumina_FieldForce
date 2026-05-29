@@ -18,7 +18,7 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
-import type { AppNotification, NotificationAudience } from "@/lib/types";
+import type { AppNotification, Employee, NotificationAudience } from "@/lib/types";
 import {
   addAuditLog,
   addNotification,
@@ -28,6 +28,7 @@ import {
   markNotificationRead,
 } from "@/lib/storage";
 import { canBroadcastAnnouncements } from "@/lib/role-access";
+import { getEmployees } from "@/lib/employee-data";
 
 function notificationKindColor(kind: AppNotification["kind"]): string {
   if (kind === "alert") return "#EF4444";
@@ -47,18 +48,22 @@ export default function NotificationsScreen() {
   const [composeTitle, setComposeTitle] = useState("");
   const [composeBody, setComposeBody] = useState("");
   const [composeAudience, setComposeAudience] = useState<NotificationAudience>("all");
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [selectedRecipientIds, setSelectedRecipientIds] = useState<string[]>([]);
   const [sending, setSending] = useState(false);
   const canBroadcast = canBroadcastAnnouncements(user?.role);
 
   const loadData = useCallback(async () => {
-    const [items, unread] = await Promise.all([
+    const [items, unread, employeeItems] = await Promise.all([
       getNotificationsForCurrentUser(),
       getUnreadNotificationsCount(),
+      canBroadcast ? getEmployees().catch(() => []) : Promise.resolve([]),
     ]);
     setNotifications(items);
     setUnreadCount(unread);
+    setEmployees(employeeItems);
     setLoading(false);
-  }, []);
+  }, [canBroadcast]);
 
   useEffect(() => {
     void loadData();
@@ -111,7 +116,8 @@ export default function NotificationsScreen() {
         title: composeTitle.trim(),
         body: composeBody.trim(),
         kind: "announcement",
-        audience: composeAudience,
+        audience: selectedRecipientIds.length > 0 ? "employee" : composeAudience,
+        audienceUserIds: selectedRecipientIds,
         createdById: user.id,
         createdByName: user.name,
         createdAt: now,
@@ -128,6 +134,7 @@ export default function NotificationsScreen() {
       setComposeTitle("");
       setComposeBody("");
       setComposeAudience("all");
+      setSelectedRecipientIds([]);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await loadData();
     } catch (error) {
@@ -140,7 +147,7 @@ export default function NotificationsScreen() {
     } finally {
       setSending(false);
     }
-  }, [composeAudience, composeBody, composeTitle, loadData, sending, user]);
+  }, [composeAudience, composeBody, composeTitle, loadData, selectedRecipientIds, sending, user]);
 
   return (
     <AppCanvas>
@@ -241,12 +248,23 @@ export default function NotificationsScreen() {
               {(["all", "salesperson", "employee", "manager", "hr"] as const).map((value) => (
                 <Pressable
                   key={value}
-                  onPress={() => setComposeAudience(value)}
+                  onPress={() => {
+                    setComposeAudience(value);
+                    if (value === "all") {
+                      setSelectedRecipientIds([]);
+                    }
+                  }}
                   style={[
                     styles.audienceChip,
                     {
-                      borderColor: composeAudience === value ? colors.primary : colors.border,
-                      backgroundColor: composeAudience === value ? colors.primary + "14" : colors.background,
+                      borderColor:
+                        composeAudience === value && selectedRecipientIds.length === 0
+                          ? colors.primary
+                          : colors.border,
+                      backgroundColor:
+                        composeAudience === value && selectedRecipientIds.length === 0
+                          ? colors.primary + "14"
+                          : colors.background,
                     },
                   ]}
                 >
@@ -262,6 +280,47 @@ export default function NotificationsScreen() {
                 </Pressable>
               ))}
             </View>
+            {employees.length > 0 ? (
+              <View style={styles.recipientBlock}>
+                <Text style={[styles.recipientLabel, { color: colors.textSecondary }]}>
+                  Specific users
+                </Text>
+                <View style={styles.audienceRow}>
+                  {employees.slice(0, 12).map((employee) => {
+                    const selected = selectedRecipientIds.includes(employee.id);
+                    return (
+                      <Pressable
+                        key={employee.id}
+                        onPress={() => {
+                          setSelectedRecipientIds((current) =>
+                            current.includes(employee.id)
+                              ? current.filter((id) => id !== employee.id)
+                              : [...current, employee.id]
+                          );
+                        }}
+                        style={[
+                          styles.audienceChip,
+                          {
+                            borderColor: selected ? colors.primary : colors.border,
+                            backgroundColor: selected ? colors.primary + "14" : colors.background,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={{
+                            color: selected ? colors.primary : colors.textSecondary,
+                            fontFamily: "Inter_500Medium",
+                            fontSize: 10.5,
+                          }}
+                        >
+                          {employee.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
             <Pressable
               onPress={() => void handleSendBroadcast()}
               disabled={sending || !composeTitle.trim() || !composeBody.trim()}
@@ -440,6 +499,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     alignItems: "center",
     justifyContent: "center",
+  },
+  recipientBlock: {
+    marginBottom: 2,
+  },
+  recipientLabel: {
+    marginBottom: 6,
+    fontFamily: "Inter_500Medium",
+    fontSize: 11,
   },
   broadcastButton: {
     minHeight: 38,

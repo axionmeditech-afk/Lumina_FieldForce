@@ -70,7 +70,7 @@ export default function LoginScreen() {
     }
     if (mode === "signup") {
       if (!fullName.trim() || !companyName.trim()) {
-        Alert.alert("Missing Fields", "Please enter full name and company name");
+        Alert.alert("Missing Fields", "Please enter full name and company reference");
         return;
       }
       if (isSalesRole(role) && (!branch.trim() || !pincode.trim())) {
@@ -267,8 +267,8 @@ export default function LoginScreen() {
                 />
                 <InputField
                   colors={colors}
-                  label="Company Name"
-                  placeholder="Your company"
+                  label="Company Reference"
+                  placeholder="Company name for admin reference"
                   icon="business-outline"
                   value={companyName}
                   onChangeText={setCompanyName}

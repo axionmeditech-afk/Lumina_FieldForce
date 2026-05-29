@@ -343,6 +343,7 @@ CREATE TABLE IF NOT EXISTS `lff_notifications` (
   `created_by_name` VARCHAR(191) NOT NULL,
   `created_at` DATETIME NOT NULL,
   `read_by_user_ids_json` LONGTEXT NULL,
+  `audience_user_ids_json` LONGTEXT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_lff_notifications_company_time` (`company_id`, `created_at`),
   KEY `idx_lff_notifications_kind` (`kind`)

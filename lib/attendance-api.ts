@@ -892,6 +892,7 @@ export async function reviewAdminAccessRequest(payload: {
   action: "approved" | "rejected";
   role?: UserRole;
   companyIds?: string[];
+  companyProfiles?: Array<{ id: string; name: string; primaryBranch?: string }>;
   managerId?: string;
   managerName?: string;
   stockistId?: string;
@@ -906,6 +907,7 @@ export async function reviewAdminAccessRequest(payload: {
         action: payload.action,
         role: payload.role,
         companyIds: payload.companyIds,
+        companyProfiles: payload.companyProfiles,
         managerId: payload.managerId,
         managerName: payload.managerName,
         stockistId: payload.stockistId,
@@ -2248,6 +2250,7 @@ export async function createRemoteNotification(input: {
   body: string;
   kind: AppNotification["kind"];
   audience: NotificationAudience;
+  audienceUserIds?: string[];
 }): Promise<AppNotification> {
   return fetchJson<AppNotification>("/notifications", {
     method: "POST",

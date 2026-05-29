@@ -3,7 +3,7 @@ node_modules/
 jspm_packages/
 web_modules/
 bower_components/
-
+bpmn/
 # Expo / React Native build output
 .expo/
 .expo-export-check/
