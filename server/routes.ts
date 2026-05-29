@@ -83,6 +83,10 @@ const DOLIBARR_USER_AGENT = (
   process.env.DOLIBARR_USER_AGENT ||
   "LuminaFieldForce/1.0 (+https://api.axionmeditech.com)"
 ).trim();
+const LEGACY_COMPANY_DATA_REHOME_TARGET_ID = (
+  process.env.LEGACY_COMPANY_DATA_REHOME_TARGET_ID ||
+  "cmp_lumina_meditech_7f3e019e"
+).trim();
 const DOLIBARR_PROXY_RULES: Array<{
   prefix: string;
   roles: UserRole[];
@@ -5119,6 +5123,8 @@ type CompanyProfileSummary = Pick<CompanyProfile, "id" | "name" | "primaryBranch
 let companiesTableEnsured = false;
 let legacyCompaniesStateMigrated = false;
 let companyIdColumnsEnsured = false;
+let configuredLegacyCompanyDataRehomeTargetId: string | null = null;
+let configuredLegacyCompanyDataRehomePromise: Promise<void> | null = null;
 
 function companyProfileFromRow(row: any): CompanyProfile {
   const nowIso = new Date().toISOString();
@@ -5374,6 +5380,28 @@ async function ensureCompanyScopedSchemaInMySql(): Promise<void> {
   await ensureCompaniesTableInMySql();
   const conn = await getMySqlPool();
   await ensureCompanyIdColumnsForCompanyScopedTables(conn);
+}
+
+async function rehomeLegacyCompanyDataToConfiguredCompany(): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const targetCompanyId = normalizeWhitespace(LEGACY_COMPANY_DATA_REHOME_TARGET_ID);
+  if (!targetCompanyId || configuredLegacyCompanyDataRehomeTargetId === targetCompanyId) return;
+  if (!configuredLegacyCompanyDataRehomePromise) {
+    configuredLegacyCompanyDataRehomePromise = (async () => {
+      const companies = await listCompanyProfilesFromMySqlRaw();
+      const targetCompany = companies.find((company) => company.id === targetCompanyId);
+      if (!targetCompany) {
+        console.warn(`Legacy company data assignment skipped: company id ${targetCompanyId} was not found.`);
+        return;
+      }
+      await rehomeLegacyCompanyDataToMySql(targetCompany, companies);
+      await persistCompaniesLegacyStateFromMySql();
+      configuredLegacyCompanyDataRehomeTargetId = targetCompanyId;
+    })().finally(() => {
+      configuredLegacyCompanyDataRehomePromise = null;
+    });
+  }
+  await configuredLegacyCompanyDataRehomePromise;
 }
 
 async function rehomeLegacyCompanyDataToMySql(
@@ -6283,6 +6311,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   await ensureCompanyScopedSchemaInMySql().catch((error) => {
     console.warn(
       "Unable to finish company-scoped schema setup during startup:",
+      error instanceof Error ? error.message : error
+    );
+  });
+  await rehomeLegacyCompanyDataToConfiguredCompany().catch((error) => {
+    console.warn(
+      "Unable to assign legacy company data during startup:",
       error instanceof Error ? error.message : error
     );
   });
