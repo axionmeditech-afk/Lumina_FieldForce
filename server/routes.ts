@@ -1071,6 +1071,29 @@ async function resolveRequestCompanyId(req: Request): Promise<string | null> {
   return synced?.user.companyId ?? cached?.user.companyId ?? null;
 }
 
+function getRequestUser(req: Request): AppUser | null {
+  const auth = req.auth;
+  if (!auth) return null;
+  const email = normalizeEmailKey(auth.email);
+  const cached = email ? getAuthUserByIdentifier(email)?.user : null;
+  if (cached) return cached;
+  const id = normalizeWhitespace(auth.sub || email || "user");
+  const nameSeed = normalizeWhitespace(email.split("@")[0] || id);
+  return {
+    id,
+    name: nameSeed || id,
+    email,
+    login: nameSeed || undefined,
+    role: auth.role,
+    companyId: DEFAULT_COMPANY_ID,
+    companyName: DEFAULT_COMPANY_NAME,
+    department: "",
+    branch: "",
+    phone: "",
+    joinDate: new Date().toISOString().slice(0, 10),
+  };
+}
+
 interface AuthUserRecord {
   user: AppUser;
   passwordHash: string;
@@ -4307,6 +4330,12 @@ async function replaceSalariesInMySql(entries: unknown[]): Promise<void> {
 
 let expensesTableEnsured = false;
 let expensesLegacyStateHydrated = false;
+const DOLIBARR_EXPENSE_REPORT_TABLE = "nmy5_expensereport";
+const DOLIBARR_EXPENSE_REPORT_LINE_TABLE = "nmy5_expensereport_det";
+const DOLIBARR_EXPENSE_PAYMENT_TABLE = "nmy5_payment_expensereport";
+const DOLIBARR_EXPENSE_PAYMENT_LINK_TABLE = "nmy5_paymentexpensereport_expensereport";
+const DOLIBARR_DEFAULT_EXPENSE_TYPE_ID = 28;
+const dolibarrExpenseTableColumns = new Map<string, Set<string>>();
 
 function normalizeExpenseStatus(value: unknown): Expense["status"] {
   if (value === "approved" || value === "rejected") return value;
@@ -4332,60 +4361,326 @@ function normalizeExpenseInput(entry: unknown): Expense | null {
   };
 }
 
+function isWritableAppExpenseId(expenseId: string): boolean {
+  return !expenseId.toLowerCase().startsWith("dolibarr_");
+}
+
+function buildDolibarrExpenseRef(expenseId: string): string {
+  const cleaned = expenseId.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  const suffix = cleaned.length >= 8 ? cleaned : createHash("sha1").update(expenseId).digest("hex").toUpperCase();
+  return `LFF-${suffix.slice(0, 46)}`;
+}
+
+function parseExpenseIdFromDolibarrRef(ref: unknown): string | null {
+  const value = String(ref || "").trim();
+  if (!/^LFF-/i.test(value)) return null;
+  const raw = value.slice(4).toLowerCase();
+  if (/^[a-f0-9]{32}$/.test(raw)) {
+    return `${raw.slice(0, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}-${raw.slice(16, 20)}-${raw.slice(20)}`;
+  }
+  return raw || null;
+}
+
+function expenseStatusToDolibarrStatus(status: Expense["status"]): number {
+  if (status === "approved") return 5;
+  if (status === "rejected") return 99;
+  return 2;
+}
+
+function dolibarrStatusToExpenseStatus(value: unknown): Expense["status"] {
+  const status = Number(value);
+  if (status === 5 || status === 6) return "approved";
+  if (status === 99) return "rejected";
+  return "pending";
+}
+
+async function getDolibarrTableColumns(
+  conn: Pool | PoolConnection,
+  tableName: string
+): Promise<Set<string>> {
+  const cached = dolibarrExpenseTableColumns.get(tableName);
+  if (cached) return cached;
+  const [rows] = await conn.query<any[]>(`SHOW COLUMNS FROM \`${tableName}\``);
+  const columns = new Set((rows || []).map((row) => String(row.Field)));
+  dolibarrExpenseTableColumns.set(tableName, columns);
+  return columns;
+}
+
+async function ensureDolibarrExpenseTables(conn: Pool | PoolConnection): Promise<void> {
+  const requiredTables = [
+    DOLIBARR_EXPENSE_REPORT_TABLE,
+    DOLIBARR_EXPENSE_REPORT_LINE_TABLE,
+  ];
+  for (const table of requiredTables) {
+    const [rows] = await conn.query<any[]>("SHOW TABLES LIKE ?", [table]);
+    if (!rows?.length) {
+      throw new Error(`Dolibarr expense table ${table} was not found.`);
+    }
+    await getDolibarrTableColumns(conn, table);
+  }
+  for (const table of [DOLIBARR_EXPENSE_PAYMENT_TABLE, DOLIBARR_EXPENSE_PAYMENT_LINK_TABLE]) {
+    const [rows] = await conn.query<any[]>("SHOW TABLES LIKE ?", [table]);
+    if (rows?.length) {
+      await getDolibarrTableColumns(conn, table);
+    }
+  }
+}
+
 async function ensureExpensesTable(): Promise<void> {
   if (expensesTableEnsured || !isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
-  await conn.execute(`
-    CREATE TABLE IF NOT EXISTS \`lff_expenses\` (
-      \`id\` VARCHAR(64) NOT NULL,
-      \`company_id\` VARCHAR(64) NULL,
-      \`user_id\` VARCHAR(64) NOT NULL,
-      \`user_name\` VARCHAR(191) NOT NULL,
-      \`category\` VARCHAR(80) NOT NULL,
-      \`amount\` DECIMAL(12,2) NOT NULL,
-      \`description\` LONGTEXT NOT NULL,
-      \`status\` ENUM('pending','approved','rejected') NOT NULL,
-      \`date\` DATE NOT NULL,
-      \`receipt\` LONGTEXT NULL,
-      PRIMARY KEY (\`id\`),
-      KEY \`idx_lff_expenses_user_date\` (\`user_id\`, \`date\`),
-      KEY \`idx_lff_expenses_status\` (\`status\`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  `);
-  await conn.execute(`
-    ALTER TABLE \`lff_expenses\`
-      ADD COLUMN IF NOT EXISTS \`receipt\` LONGTEXT NULL AFTER \`date\`
-  `);
+  await ensureDolibarrExpenseTables(conn);
   expensesTableEnsured = true;
 }
 
-async function replaceExpensesInMySql(entries: unknown[]): Promise<void> {
+async function resolveDolibarrExpenseUserId(
+  conn: Pool | PoolConnection,
+  expense: Expense
+): Promise<number | null> {
+  const rawId = String(expense.userId || "").trim().toLowerCase();
+  const directId =
+    rawId.startsWith("dolibarr_") ? Number(rawId.replace("dolibarr_", "")) : Number(rawId);
+  if (Number.isFinite(directId) && directId > 0) {
+    const [rows] = await conn.query<any[]>("SELECT rowid FROM `nmy5_user` WHERE rowid = ? LIMIT 1", [directId]);
+    if (rows?.[0]?.rowid) return Number(rows[0].rowid);
+  }
+
+  const name = normalizeWhitespace(expense.userName || "").toLowerCase();
+  if (!name) return null;
+  const compactName = name.replace(/\s+/g, "");
+  const [rows] = await conn.query<any[]>(
+    `SELECT rowid
+       FROM \`nmy5_user\`
+      WHERE LOWER(TRIM(CONCAT_WS(' ', firstname, lastname))) = ?
+         OR LOWER(TRIM(CONCAT_WS(' ', lastname, firstname))) = ?
+         OR LOWER(REPLACE(CONCAT_WS('', firstname, lastname), ' ', '')) = ?
+         OR LOWER(REPLACE(CONCAT_WS('', lastname, firstname), ' ', '')) = ?
+         OR LOWER(TRIM(login)) = ?
+      LIMIT 1`,
+    [name, name, compactName, compactName, compactName]
+  );
+  return rows?.[0]?.rowid ? Number(rows[0].rowid) : null;
+}
+
+async function resolveDolibarrExpenseAuthorId(
+  conn: Pool | PoolConnection,
+  requestUser?: AppUser | null
+): Promise<number | null> {
+  const email = normalizeEmailKey(requestUser?.email);
+  if (email) {
+    const [rows] = await conn.query<any[]>(
+      "SELECT rowid FROM `nmy5_user` WHERE LOWER(TRIM(email)) = ? LIMIT 1",
+      [email]
+    );
+    if (rows?.[0]?.rowid) return Number(rows[0].rowid);
+  }
+  const fallbackExpense: Expense = {
+    id: "author",
+    userId: requestUser?.id || "",
+    userName: requestUser?.name || "",
+    category: "General",
+    amount: 0,
+    description: "",
+    status: "pending",
+    date: new Date().toISOString().slice(0, 10),
+  };
+  return resolveDolibarrExpenseUserId(conn, fallbackExpense);
+}
+
+async function resolveDolibarrExpenseTypeId(
+  conn: Pool | PoolConnection,
+  category: string
+): Promise<number> {
+  const normalized = normalizeWhitespace(category || "").toLowerCase();
+  if (normalized) {
+    const [matches] = await conn.query<any[]>(
+      `SELECT id
+         FROM \`nmy5_c_type_fees\`
+        WHERE active = 1
+          AND (LOWER(TRIM(code)) = ? OR LOWER(TRIM(label)) = ?)
+        LIMIT 1`,
+      [normalized, normalized]
+    ).catch(() => [null] as any);
+    if (matches?.[0]?.id) return Number(matches[0].id);
+  }
+
+  const [preferred] = await conn.query<any[]>(
+    "SELECT id FROM `nmy5_c_type_fees` WHERE id = ? LIMIT 1",
+    [DOLIBARR_DEFAULT_EXPENSE_TYPE_ID]
+  ).catch(() => [null] as any);
+  if (preferred?.[0]?.id) return Number(preferred[0].id);
+
+  const [firstActive] = await conn.query<any[]>(
+    "SELECT id FROM `nmy5_c_type_fees` WHERE active = 1 ORDER BY id LIMIT 1"
+  ).catch(() => [null] as any);
+  return firstActive?.[0]?.id ? Number(firstActive[0].id) : DOLIBARR_DEFAULT_EXPENSE_TYPE_ID;
+}
+
+function pickColumns(
+  columns: Set<string>,
+  values: Record<string, unknown>
+): { fields: string[]; params: unknown[] } {
+  const fields: string[] = [];
+  const params: unknown[] = [];
+  for (const [field, value] of Object.entries(values)) {
+    if (!columns.has(field) || typeof value === "undefined") continue;
+    fields.push(field);
+    params.push(value);
+  }
+  return { fields, params };
+}
+
+async function insertDolibarrRow(
+  conn: Pool | PoolConnection,
+  tableName: string,
+  values: Record<string, unknown>
+): Promise<number> {
+  const columns = await getDolibarrTableColumns(conn, tableName);
+  const { fields, params } = pickColumns(columns, values);
+  await conn.execute(
+    `INSERT INTO \`${tableName}\` (${fields.map((field) => `\`${field}\``).join(", ")})
+     VALUES (${fields.map(() => "?").join(", ")})`,
+    params
+  );
+  const [rows] = await conn.query<any[]>("SELECT LAST_INSERT_ID() AS id");
+  return Number(rows?.[0]?.id || 0);
+}
+
+async function updateDolibarrRow(
+  conn: Pool | PoolConnection,
+  tableName: string,
+  rowId: number,
+  values: Record<string, unknown>
+): Promise<void> {
+  const columns = await getDolibarrTableColumns(conn, tableName);
+  const { fields, params } = pickColumns(columns, values);
+  if (!fields.length) return;
+  await conn.execute(
+    `UPDATE \`${tableName}\`
+        SET ${fields.map((field) => `\`${field}\` = ?`).join(", ")}
+      WHERE \`rowid\` = ?`,
+    [...params, rowId]
+  );
+}
+
+async function upsertDolibarrExpenseRecord(
+  conn: Pool | PoolConnection,
+  expense: Expense,
+  requestUser?: AppUser | null
+): Promise<void> {
+  const fkUser = await resolveDolibarrExpenseUserId(conn, expense);
+  if (!fkUser) {
+    throw new Error(`Dolibarr user not found for expense user ${expense.userName}.`);
+  }
+  const authorId = (await resolveDolibarrExpenseAuthorId(conn, requestUser)) ?? fkUser;
+  const expenseDate = toSqlDateOnly(expense.date);
+  const amount = toSqlNumber(expense.amount);
+  const vatAmount = 0;
+  const status = expenseStatusToDolibarrStatus(expense.status);
+  const ref = buildDolibarrExpenseRef(expense.id);
+  const notePrivate = [
+    `LFF expense id: ${expense.id}`,
+    `category: ${expense.category}`,
+    expense.receipt ? `receipt: ${expense.receipt}` : "",
+  ].filter(Boolean).join("\n");
+
+  const [existingRows] = await conn.query<any[]>(
+    `SELECT rowid FROM \`${DOLIBARR_EXPENSE_REPORT_TABLE}\` WHERE ref = ? LIMIT 1`,
+    [ref]
+  );
+  const existingRowId = existingRows?.[0]?.rowid ? Number(existingRows[0].rowid) : null;
+  const headerValues: Record<string, unknown> = {
+    ref,
+    entity: 1,
+    total_ht: amount,
+    total_tva: vatAmount,
+    localtax1: 0,
+    localtax2: 0,
+    total_ttc: amount,
+    date_debut: expenseDate,
+    date_fin: expenseDate,
+    date_create: toSqlTimestamp(new Date()),
+    date_valid: status >= 2 && status !== 99 ? toSqlTimestamp(new Date()) : null,
+    date_approve: status === 5 ? toSqlTimestamp(new Date()) : null,
+    date_refuse: status === 99 ? toSqlTimestamp(new Date()) : null,
+    fk_user_author: fkUser,
+    fk_user_creat: authorId,
+    fk_user_modif: authorId,
+    fk_user_valid: status >= 2 && status !== 99 ? authorId : null,
+    fk_user_validator: status >= 2 && status !== 99 ? authorId : null,
+    fk_user_approve: status === 5 ? authorId : null,
+    fk_user_refuse: status === 99 ? authorId : null,
+    fk_statut: status,
+    paid: 0,
+    note_public: expense.description,
+    note_private: notePrivate,
+    multicurrency_code: "INR",
+    multicurrency_tx: 1,
+    multicurrency_total_ht: amount,
+    multicurrency_total_tva: vatAmount,
+    multicurrency_total_ttc: amount,
+    extraparams: JSON.stringify({ lffExpenseId: expense.id }).slice(0, 255),
+  };
+
+  const reportId = existingRowId
+    ? (await updateDolibarrRow(conn, DOLIBARR_EXPENSE_REPORT_TABLE, existingRowId, headerValues), existingRowId)
+    : await insertDolibarrRow(conn, DOLIBARR_EXPENSE_REPORT_TABLE, headerValues);
+
+  const expenseTypeId = await resolveDolibarrExpenseTypeId(conn, expense.category);
+  await conn.execute(
+    `DELETE FROM \`${DOLIBARR_EXPENSE_REPORT_LINE_TABLE}\` WHERE \`fk_expensereport\` = ?`,
+    [reportId]
+  );
+  await insertDolibarrRow(conn, DOLIBARR_EXPENSE_REPORT_LINE_TABLE, {
+    fk_expensereport: reportId,
+    docnumber: expense.receipt ?? null,
+    fk_c_type_fees: expenseTypeId,
+    fk_c_exp_tax_cat: null,
+    fk_projet: 0,
+    comments: expense.description,
+    product_type: -1,
+    qty: 1,
+    subprice: amount,
+    subprice_ttc: amount,
+    value_unit: amount,
+    remise_percent: 0,
+    vat_src_code: "",
+    tva_tx: 0,
+    localtax1_tx: 0,
+    localtax1_type: "0",
+    localtax2_tx: 0,
+    localtax2_type: "0",
+    total_ht: amount,
+    total_tva: vatAmount,
+    total_localtax1: 0,
+    total_localtax2: 0,
+    total_ttc: amount,
+    date: expenseDate,
+    info_bits: 0,
+    special_code: 0,
+    fk_facture: 0,
+    fk_code_ventilation: 0,
+    rang: 0,
+    multicurrency_code: "INR",
+    multicurrency_subprice: amount,
+    multicurrency_subprice_ttc: amount,
+    multicurrency_total_ht: amount,
+    multicurrency_total_tva: vatAmount,
+    multicurrency_total_ttc: amount,
+  });
+}
+
+async function replaceExpensesInMySql(entries: unknown[], requestUser?: AppUser | null): Promise<void> {
   await ensureExpensesTable();
   const pool = await getMySqlPool();
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    await conn.execute("DELETE FROM lff_expenses");
+    await ensureDolibarrExpenseTables(conn);
     for (const entry of entries) {
       const expense = normalizeExpenseInput(entry);
-      if (!expense) continue;
-      await conn.execute(
-        `INSERT INTO lff_expenses
-          (id, company_id, user_id, user_name, category, amount, description, status, date, receipt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          expense.id,
-          expense.companyId ?? null,
-          expense.userId,
-          expense.userName,
-          expense.category,
-          expense.amount,
-          expense.description,
-          expense.status,
-          toSqlDateOnly(expense.date),
-          expense.receipt ?? null,
-        ]
-      );
+      if (!expense || !isWritableAppExpenseId(expense.id)) continue;
+      await upsertDolibarrExpenseRecord(conn, expense, requestUser);
     }
     await conn.commit();
   } catch (error) {
@@ -4401,7 +4696,9 @@ async function hydrateExpensesFromLegacyStateIfNeeded(): Promise<void> {
   expensesLegacyStateHydrated = true;
   await ensureExpensesTable();
   const conn = await getMySqlPool();
-  const [rows] = await conn.query<any[]>("SELECT COUNT(*) AS total FROM lff_expenses");
+  const [rows] = await conn.query<any[]>(
+    `SELECT COUNT(*) AS total FROM \`${DOLIBARR_EXPENSE_REPORT_TABLE}\` WHERE ref LIKE 'LFF-%'`
+  );
   const currentCount = Number(rows?.[0]?.total);
   if (Number.isFinite(currentCount) && currentCount > 0) return;
 
@@ -4416,27 +4713,42 @@ async function hydrateExpensesFromLegacyStateIfNeeded(): Promise<void> {
   }
 }
 
+function buildDolibarrExpenseUserName(row: Record<string, unknown>): string {
+  const first = normalizeWhitespace(String(row.firstname || ""));
+  const last = normalizeWhitespace(String(row.lastname || ""));
+  const joined = `${first} ${last}`.trim();
+  return joined || normalizeWhitespace(String(row.login || "")) || `User ${String(row.fk_user_author || "")}`;
+}
+
 async function listExpensesFromMySql(): Promise<unknown[]> {
   if (!isMySqlStateEnabled()) return [];
   await ensureExpensesTable();
   await hydrateExpensesFromLegacyStateIfNeeded();
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(`
-    SELECT id, company_id, user_id, user_name, category, amount, description, status, date, receipt
-    FROM lff_expenses
-    ORDER BY date DESC, id DESC
+    SELECT er.rowid AS report_rowid, er.ref, er.total_ttc AS report_total_ttc, er.fk_statut,
+           er.date_debut, er.note_public, er.note_private, er.fk_user_author,
+           erd.rowid AS line_rowid, erd.comments, erd.total_ttc AS line_total_ttc, erd.date AS line_date,
+           ctf.label AS type_label, ctf.code AS type_code,
+           u.firstname, u.lastname, u.login
+      FROM \`${DOLIBARR_EXPENSE_REPORT_TABLE}\` er
+      LEFT JOIN \`${DOLIBARR_EXPENSE_REPORT_LINE_TABLE}\` erd ON erd.fk_expensereport = er.rowid
+      LEFT JOIN \`nmy5_c_type_fees\` ctf ON ctf.id = erd.fk_c_type_fees
+      LEFT JOIN \`nmy5_user\` u ON u.rowid = er.fk_user_author
+     ORDER BY COALESCE(erd.date, er.date_debut) DESC, er.rowid DESC, erd.rowid ASC
   `);
   return (rows || []).map((row) => ({
-    id: String(row.id),
-    companyId: row.company_id ? String(row.company_id) : undefined,
-    userId: toRequiredText(row.user_id, "unknown"),
-    userName: toRequiredText(row.user_name, "Unknown User"),
-    category: toRequiredText(row.category, "General"),
-    amount: toSqlNumber(row.amount),
-    description: toRequiredText(row.description, ""),
-    status: normalizeExpenseStatus(row.status),
-    date: toSqlDateOnly(row.date),
-    receipt: row.receipt ? String(row.receipt) : undefined,
+    id:
+      parseExpenseIdFromDolibarrRef(row.ref) ||
+      `dolibarr_expensereport_${String(row.report_rowid)}${row.line_rowid ? `_line_${String(row.line_rowid)}` : ""}`,
+    companyId: undefined,
+    userId: row.fk_user_author ? `dolibarr_${String(row.fk_user_author)}` : "unknown",
+    userName: buildDolibarrExpenseUserName(row),
+    category: toRequiredText(row.type_label || row.type_code, "General"),
+    amount: toSqlNumber(row.line_total_ttc ?? row.report_total_ttc),
+    description: toRequiredText(row.comments || row.note_public || row.note_private, ""),
+    status: dolibarrStatusToExpenseStatus(row.fk_statut),
+    date: toSqlDateOnly(row.line_date || row.date_debut),
   }));
 }
 
@@ -5036,7 +5348,11 @@ function withDefaultCompanyIdForRemoteState(
   return changed ? next : value;
 }
 
-async function writeNormalizedState(key: string, jsonValue: string): Promise<boolean> {
+async function writeNormalizedState(
+  key: string,
+  jsonValue: string,
+  requestUser?: AppUser | null
+): Promise<boolean> {
   if (!isNormalizedStateKey(key)) return false;
   let parsed: unknown = null;
   try {
@@ -5091,7 +5407,7 @@ async function writeNormalizedState(key: string, jsonValue: string): Promise<boo
     return true;
   }
   if (key === "@trackforce_expenses") {
-    await replaceExpensesInMySql(entries);
+    await replaceExpensesInMySql(entries, requestUser);
     return true;
   }
   if (key === "@trackforce_support_threads") {
@@ -5120,11 +5436,15 @@ async function readRemoteState(key: string): Promise<string | null> {
   return inMemoryStateStore.get(key) ?? null;
 }
 
-async function writeRemoteState(key: string, jsonValue: string): Promise<void> {
+async function writeRemoteState(
+  key: string,
+  jsonValue: string,
+  requestUser?: AppUser | null
+): Promise<void> {
   if (isMySqlStateEnabled()) {
     let handled = false;
     try {
-      handled = await writeNormalizedState(key, jsonValue);
+      handled = await writeNormalizedState(key, jsonValue, requestUser);
     } catch {
       handled = false;
     }
@@ -9043,7 +9363,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         defaultCompanyId
       );
       const serialized = JSON.stringify(scopedValue ?? null);
-      await writeRemoteState(key, serialized);
+      await writeRemoteState(key, serialized, getRequestUser(req));
       res.json({
         ok: true,
         key,

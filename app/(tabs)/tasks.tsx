@@ -26,6 +26,11 @@ import {
   updateTaskStatus,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
+import {
+  buildEmployeeIdentityMap,
+  getMemberIdLookupKeys,
+  resolveEmployeeByMemberId,
+} from "@/lib/employee-identity";
 import { useAuth } from "@/contexts/AuthContext";
 import type { Employee, Task, Team, UserRole } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
@@ -309,13 +314,28 @@ export default function TasksScreen() {
     return ids;
   }, [manageableTeams]);
 
-  const employeesById = useMemo(() => {
-    const map = new Map<string, Employee>();
-    for (const employee of employees) {
-      map.set(employee.id, employee);
+  const employeesByIdentity = useMemo(() => buildEmployeeIdentityMap(employees), [employees]);
+
+  const resolveTeamMember = useCallback(
+    (memberId: string) => resolveEmployeeByMemberId(employeesByIdentity, memberId),
+    [employeesByIdentity]
+  );
+
+  const manageableTaskAssigneeIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const memberId of manageableMemberIds) {
+      for (const key of getMemberIdLookupKeys(memberId)) {
+        ids.add(key);
+      }
+      const employee = resolveTeamMember(memberId);
+      if (employee) {
+        for (const key of getMemberIdLookupKeys(employee.id)) {
+          ids.add(key);
+        }
+      }
     }
-    return map;
-  }, [employees]);
+    return ids;
+  }, [manageableMemberIds, resolveTeamMember]);
 
   const assigneeOptions = useMemo(() => {
     if (!canManage) return [];
@@ -323,13 +343,19 @@ export default function TasksScreen() {
       const selectedTeam = manageableTeams.find((team) => team.id === selectedTeamId);
       if (!selectedTeam) return [];
       return selectedTeam.memberIds
-        .map((memberId) => employeesById.get(memberId))
-        .filter((member): member is Employee => Boolean(member));
+        .map((memberId) => {
+          const employee = resolveTeamMember(memberId);
+          return employee ? { memberId, employee } : null;
+        })
+        .filter((member): member is { memberId: string; employee: Employee } => Boolean(member));
     }
     return [...manageableMemberIds]
-      .map((memberId) => employeesById.get(memberId))
-      .filter((member): member is Employee => Boolean(member));
-  }, [canManage, employeesById, manageableMemberIds, manageableTeams, selectedTeamId]);
+      .map((memberId) => {
+        const employee = resolveTeamMember(memberId);
+        return employee ? { memberId, employee } : null;
+      })
+      .filter((member): member is { memberId: string; employee: Employee } => Boolean(member));
+  }, [canManage, manageableMemberIds, manageableTeams, resolveTeamMember, selectedTeamId]);
 
   const selectedCustomer = useMemo(
     () => customerOptions.find((entry) => getThirdPartyId(entry) === selectedCustomerId) ?? null,
@@ -367,7 +393,7 @@ export default function TasksScreen() {
       return;
     }
     if (!selectedAssigneeId && assigneeOptions.length > 0) {
-      setSelectedAssigneeId(assigneeOptions[0].id);
+      setSelectedAssigneeId(assigneeOptions[0].memberId);
     }
   }, [assigneeOptions, canManage, manageableTeams, selectedAssigneeId, selectedTeamId]);
 
@@ -400,19 +426,19 @@ export default function TasksScreen() {
     if (canManage) {
       return filteredByStatus.filter((task) =>
         actorIds.has(task.assignedBy) ||
-        manageableMemberIds.has(task.assignedTo) ||
+        manageableTaskAssigneeIds.has(normalizeIdentity(task.assignedTo)) ||
         isTaskAssignedToActor(task)
       );
     }
     return filteredByStatus.filter((task) => isTaskAssignedToActor(task));
-  }, [actorIds, canManage, filter, isTaskAssignedToActor, manageableMemberIds, tasks]);
+  }, [actorIds, canManage, filter, isTaskAssignedToActor, manageableTaskAssigneeIds, tasks]);
 
   const canUpdateTask = useCallback((task: Task) => {
     const isAssignee = isTaskAssignedToActor(task);
     if (isAssignee) return true;
     if (!canManage) return false;
-    return actorIds.has(task.assignedBy) || manageableMemberIds.has(task.assignedTo);
-  }, [actorIds, canManage, isTaskAssignedToActor, manageableMemberIds]);
+    return actorIds.has(task.assignedBy) || manageableTaskAssigneeIds.has(normalizeIdentity(task.assignedTo));
+  }, [actorIds, canManage, isTaskAssignedToActor, manageableTaskAssigneeIds]);
 
   const handleAdvanceStatus = useCallback(async (task: Task) => {
     if (!canUpdateTask(task)) return;
@@ -439,7 +465,7 @@ export default function TasksScreen() {
     const title = newTitle.trim();
     if (!title || !selectedAssigneeId) return;
 
-    const member = employeesById.get(selectedAssigneeId);
+    const member = resolveTeamMember(selectedAssigneeId);
     if (!member) return;
     const selectedTeam = selectedTeamId ? manageableTeams.find((team) => team.id === selectedTeamId) : null;
 
@@ -559,7 +585,6 @@ export default function TasksScreen() {
   }, [
     assignerId,
     canManage,
-    employeesById,
     loadData,
     manageableTeams,
     newDesc,
@@ -570,6 +595,7 @@ export default function TasksScreen() {
     selectedAssigneeId,
     selectedTeamId,
     selectedCustomer,
+    resolveTeamMember,
     visitDate,
     visitInputMode,
     visitLatitude,
@@ -713,15 +739,15 @@ export default function TasksScreen() {
                 Assign To
               </Text>
               <View style={styles.selectorRow}>
-                {assigneeOptions.map((member) => (
+                {assigneeOptions.map(({ memberId, employee }) => (
                   <Pressable
-                    key={member.id}
-                    onPress={() => setSelectedAssigneeId(member.id)}
+                    key={memberId}
+                    onPress={() => setSelectedAssigneeId(memberId)}
                     style={[
                       styles.selectorChip,
                       {
-                        backgroundColor: selectedAssigneeId === member.id ? colors.primary : colors.surfaceSecondary,
-                        borderColor: selectedAssigneeId === member.id ? colors.primary : colors.border,
+                        backgroundColor: selectedAssigneeId === memberId ? colors.primary : colors.surfaceSecondary,
+                        borderColor: selectedAssigneeId === memberId ? colors.primary : colors.border,
                       },
                     ]}
                   >
@@ -729,12 +755,12 @@ export default function TasksScreen() {
                       style={[
                         styles.selectorChipText,
                         {
-                          color: selectedAssigneeId === member.id ? "#FFFFFF" : colors.textSecondary,
+                          color: selectedAssigneeId === memberId ? "#FFFFFF" : colors.textSecondary,
                           fontFamily: "Inter_500Medium",
                         },
                       ]}
                     >
-                      {member.name}
+                      {employee.name}
                     </Text>
                   </Pressable>
                 ))}

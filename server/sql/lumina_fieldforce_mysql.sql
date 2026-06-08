@@ -284,21 +284,6 @@ CREATE TABLE IF NOT EXISTS `lff_tasks` (
   KEY `idx_lff_tasks_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS `lff_expenses` (
-  `id` VARCHAR(64) NOT NULL,
-  `company_id` VARCHAR(64) NULL,
-  `user_id` VARCHAR(64) NOT NULL,
-  `user_name` VARCHAR(191) NOT NULL,
-  `category` VARCHAR(80) NOT NULL,
-  `amount` DECIMAL(12,2) NOT NULL,
-  `description` LONGTEXT NOT NULL,
-  `status` ENUM('pending','approved','rejected') NOT NULL,
-  `date` DATE NOT NULL,
-  PRIMARY KEY (`id`),
-  KEY `idx_lff_expenses_user_date` (`user_id`, `date`),
-  KEY `idx_lff_expenses_status` (`status`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 CREATE TABLE IF NOT EXISTS `lff_conversations` (
   `id` VARCHAR(64) NOT NULL,
   `company_id` VARCHAR(64) NULL,

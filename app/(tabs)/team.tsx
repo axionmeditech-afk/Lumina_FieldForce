@@ -25,6 +25,7 @@ import {
   upsertTeam,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
+import { buildEmployeeIdentityMap, resolveEmployeeByMemberId } from "@/lib/employee-identity";
 import { isSalesRole } from "@/lib/role-access";
 import type { Employee, Task, Team, UserRole } from "@/lib/types";
 
@@ -36,6 +37,46 @@ function isLeadRole(role?: UserRole | null): boolean {
 
 function normalizeIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
+}
+
+function addIdentityAlias(target: Set<string>, value: string | null | undefined): void {
+  const normalized = normalizeIdentity(value);
+  if (normalized) target.add(normalized);
+}
+
+function buildUserAliases(user: {
+  id?: string | null;
+  email?: string | null;
+  login?: string | null;
+  name?: string | null;
+  phone?: string | null;
+} | null | undefined): Set<string> {
+  const aliases = new Set<string>();
+  if (!user) return aliases;
+  addIdentityAlias(aliases, user.id);
+  addIdentityAlias(aliases, user.email);
+  addIdentityAlias(aliases, user.login);
+  addIdentityAlias(aliases, user.name);
+  addIdentityAlias(aliases, user.phone);
+  return aliases;
+}
+
+function buildEmployeeAliases(employee: Employee | null | undefined, fallbackId?: string | null): Set<string> {
+  const aliases = new Set<string>();
+  addIdentityAlias(aliases, fallbackId);
+  if (!employee) return aliases;
+  addIdentityAlias(aliases, employee.id);
+  addIdentityAlias(aliases, employee.email);
+  addIdentityAlias(aliases, employee.name);
+  addIdentityAlias(aliases, employee.phone);
+  return aliases;
+}
+
+function hasAliasMatch(left: Set<string>, right: Set<string>): boolean {
+  for (const value of left) {
+    if (right.has(value)) return true;
+  }
+  return false;
 }
 
 interface TeamMemberDisplay {
@@ -144,18 +185,20 @@ function TeamCard({
 
 function MemberPickerRow({
   employee,
+  value,
   selected,
   colors,
   onToggle,
 }: {
   employee: Employee;
+  value?: string;
   selected: boolean;
   colors: typeof Colors.light;
   onToggle: (employeeId: string) => void;
 }) {
   return (
     <Pressable
-      onPress={() => onToggle(employee.id)}
+      onPress={() => onToggle(value ?? employee.id)}
       style={({ pressed }) => [
         styles.memberPickerRow,
         {
@@ -247,22 +290,6 @@ export default function TeamScreen() {
 
   const assignerId = linkedEmployeeIds[0] ?? user?.id ?? "";
 
-  const visibleTeams = useMemo(() => {
-    if (!user) return [];
-    if (canManageTeams) return teams;
-
-    const actorIds = new Set<string>([user.id, ...linkedEmployeeIds]);
-    return teams.filter(
-      (team) => team.ownerId === user.id || team.memberIds.some((memberId) => actorIds.has(memberId))
-    );
-  }, [canManageTeams, linkedEmployeeIds, teams, user]);
-
-  const currentUserTeamMemberIds = useMemo(() => {
-    if (!user) return new Set<string>();
-    return new Set<string>([user.id, ...linkedEmployeeIds]);
-  }, [linkedEmployeeIds, user]);
-  const shouldMarkCurrentUserInTeams = !canManageTeams;
-
   const headerTitle = canManageTeams ? "Team Management" : "My Team";
   const headerSubtitle = canManageTeams
     ? `Build teams for ${company?.name || "Company"}, select members, and assign tasks directly.`
@@ -280,13 +307,59 @@ export default function TeamScreen() {
     );
   }, [salespersonPool, search]);
 
-  const employeesById = useMemo(() => {
-    const map = new Map<string, Employee>();
-    for (const employee of employees) {
-      map.set(employee.id, employee);
+  const employeesByIdentity = useMemo(() => buildEmployeeIdentityMap(employees), [employees]);
+
+  const resolveTeamMember = useCallback(
+    (memberId: string) => resolveEmployeeByMemberId(employeesByIdentity, memberId),
+    [employeesByIdentity]
+  );
+
+  const currentUserAliases = useMemo(() => {
+    const aliases = buildUserAliases(user);
+    for (const employeeId of linkedEmployeeIds) {
+      const employee = resolveEmployeeByMemberId(employeesByIdentity, employeeId);
+      for (const alias of buildEmployeeAliases(employee, employeeId)) {
+        aliases.add(alias);
+      }
     }
-    return map;
-  }, [employees]);
+    return aliases;
+  }, [employeesByIdentity, linkedEmployeeIds, user]);
+
+  const memberMatchesCurrentUser = useCallback(
+    (memberId: string) => {
+      const member = resolveTeamMember(memberId);
+      const memberAliases = buildEmployeeAliases(member, memberId);
+      return hasAliasMatch(memberAliases, currentUserAliases);
+    },
+    [currentUserAliases, resolveTeamMember]
+  );
+
+  const visibleTeams = useMemo(() => {
+    if (!user) return [];
+    if (canManageTeams) return teams;
+
+    const ownerAliases = buildUserAliases(user);
+    return teams.filter((team) => {
+      const teamOwnerAliases = new Set<string>();
+      addIdentityAlias(teamOwnerAliases, team.ownerId);
+      addIdentityAlias(teamOwnerAliases, team.ownerName);
+      return (
+        hasAliasMatch(teamOwnerAliases, ownerAliases) ||
+        team.memberIds.some((memberId) => memberMatchesCurrentUser(memberId))
+      );
+    });
+  }, [canManageTeams, memberMatchesCurrentUser, teams, user]);
+
+  const currentUserTeamMemberIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const team of teams) {
+      for (const memberId of team.memberIds) {
+        if (memberMatchesCurrentUser(memberId)) ids.add(memberId);
+      }
+    }
+    return ids;
+  }, [memberMatchesCurrentUser, teams]);
+  const shouldMarkCurrentUserInTeams = !canManageTeams;
 
   const toggleCreateMember = useCallback((employeeId: string) => {
     setSelectedMemberIds((current) =>
@@ -360,7 +433,7 @@ export default function TeamScreen() {
     const description = taskDescription.trim();
 
     const selectedMembers = taskMemberIds
-      .map((id) => employeesById.get(id))
+      .map((id) => resolveTeamMember(id))
       .filter((member): member is Employee => Boolean(member));
 
     for (const member of selectedMembers) {
@@ -402,7 +475,7 @@ export default function TeamScreen() {
     activeTeam,
     assignerId,
     canManageTeams,
-    employeesById,
+    resolveTeamMember,
     taskDescription,
     taskDueDays,
     taskMemberIds,
@@ -504,10 +577,10 @@ export default function TeamScreen() {
           <TeamCard
             team={item}
             memberDisplays={item.memberIds.map((id) => {
-              const member = employeesById.get(id);
+              const member = resolveTeamMember(id);
               return {
                 id,
-                name: member?.name || `Member ${id.slice(0, 8)}`,
+                name: member?.name || "Unknown member",
                 meta: [member?.department, member?.branch].filter(Boolean).join(" | "),
                 isCurrentUser: shouldMarkCurrentUserInTeams && currentUserTeamMemberIds.has(id),
               };
@@ -616,13 +689,14 @@ export default function TeamScreen() {
               showsVerticalScrollIndicator={false}
             >
               {(activeTeam?.memberIds || []).map((memberId) => {
-                const member = employeesById.get(memberId);
+                const member = resolveTeamMember(memberId);
                 if (!member) return null;
                 const selected = taskMemberIds.includes(memberId);
                 return (
                   <MemberPickerRow
                     key={memberId}
                     employee={member}
+                    value={memberId}
                     selected={selected}
                     colors={colors}
                     onToggle={toggleTaskMember}

@@ -113,6 +113,8 @@ function mergeEmployees(
 function mapDolibarrUsersToEmployees(
   users: Array<{
     id?: number | string;
+    rowid?: number | string;
+    user_id?: number | string;
     firstname?: string;
     lastname?: string;
     login?: string;
@@ -149,7 +151,13 @@ function mapDolibarrUsersToEmployees(
       const location =
         normalizeText(user.town ? String(user.town) : "") ||
         normalizeText(user.address ? String(user.address) : "");
-      const idValue = user.id ? String(user.id) : normalizeText(user.login) || email || name;
+      const idValue =
+        (user.id ? String(user.id) : "") ||
+        (user.rowid ? String(user.rowid) : "") ||
+        (user.user_id ? String(user.user_id) : "") ||
+        normalizeText(user.login) ||
+        email ||
+        name;
       const role = currentUser && email && normalizeEmail(currentUser.email) === email
         ? currentUser.role
         : "salesperson";

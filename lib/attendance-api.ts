@@ -92,6 +92,8 @@ export interface DolibarrThirdParty {
 
 export interface DolibarrUser {
   id?: number | string;
+  rowid?: number | string;
+  user_id?: number | string;
   firstname?: string;
   lastname?: string;
   login?: string;
