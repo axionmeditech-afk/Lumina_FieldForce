@@ -7,6 +7,7 @@ import {
   Pressable,
   TextInput,
   Modal,
+  ScrollView,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -21,6 +22,15 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 
 const CATEGORIES = ["Travel", "Meals", "Accommodation", "Office Supplies", "Communication", "Other"];
+
+function todayDateKey(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+function parseDecimalInput(value: string): number {
+  const parsed = Number(value.replace(/,/g, "").trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 function ExpenseCard({
   expense,
@@ -109,6 +119,19 @@ export default function ExpensesScreen() {
   const [newDesc, setNewDesc] = useState("");
   const [newAmount, setNewAmount] = useState("");
   const [newCategory, setNewCategory] = useState("Travel");
+  const [periodStart, setPeriodStart] = useState(todayDateKey());
+  const [periodEnd, setPeriodEnd] = useState(todayDateKey());
+  const [approverName, setApproverName] = useState("SuperAdmin");
+  const [notePublic, setNotePublic] = useState("");
+  const [notePrivate, setNotePrivate] = useState("");
+  const [lineDate, setLineDate] = useState(todayDateKey());
+  const [projectName, setProjectName] = useState("");
+  const [salesTaxRate, setSalesTaxRate] = useState("0");
+  const [unitPriceNet, setUnitPriceNet] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [documentName, setDocumentName] = useState("");
+  const [submitError, setSubmitError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isAdmin = user?.role === "admin";
 
@@ -154,23 +177,70 @@ export default function ExpensesScreen() {
   };
 
   const handleAddExpense = async () => {
-    if (!newDesc.trim() || !newAmount.trim()) return;
-    const expense: Expense = {
-      id: Crypto.randomUUID(),
-      userId: user?.id || "",
-      userName: user?.name || "",
-      category: newCategory,
-      amount: parseFloat(newAmount) || 0,
-      description: newDesc.trim(),
-      status: "pending",
-      date: new Date().toISOString().split("T")[0],
-    };
-    await addExpense(expense);
-    setNewDesc("");
-    setNewAmount("");
-    setShowAdd(false);
-    await loadData();
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    if (isSubmitting) return;
+    setSubmitError("");
+    const unitInclTax = parseDecimalInput(newAmount);
+    const qty = parseDecimalInput(quantity) || 1;
+    const taxRate = parseDecimalInput(salesTaxRate);
+    const netInput = parseDecimalInput(unitPriceNet);
+    const resolvedNet = netInput > 0 ? netInput : taxRate > 0 ? unitInclTax / (1 + taxRate / 100) : unitInclTax;
+    const totalAmount = unitInclTax * qty;
+    if (!newDesc.trim() || unitInclTax <= 0 || qty <= 0) {
+      setSubmitError("Description, U.P. (inc. tax), and Qty are required.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const expense: Expense = {
+        id: Crypto.randomUUID(),
+        userId: user?.id || "",
+        userName: user?.name || "",
+        category: newCategory,
+        amount: totalAmount,
+        description: newDesc.trim(),
+        status: "pending",
+        date: lineDate || todayDateKey(),
+        periodStart: periodStart || lineDate || todayDateKey(),
+        periodEnd: periodEnd || periodStart || lineDate || todayDateKey(),
+        approverName: approverName.trim() || undefined,
+        notePublic: notePublic.trim() || undefined,
+        notePrivate: notePrivate.trim() || undefined,
+        lineDate: lineDate || todayDateKey(),
+        projectName: projectName.trim() || undefined,
+        salesTaxRate: taxRate,
+        unitPriceNet: resolvedNet,
+        unitPriceInclTax: unitInclTax,
+        quantity: qty,
+        documentName: documentName.trim() || undefined,
+        receipt: documentName.trim() || undefined,
+      };
+      await addExpense(expense);
+      setNewDesc("");
+      setNewAmount("");
+      setNewCategory("Travel");
+      const today = todayDateKey();
+      setPeriodStart(today);
+      setPeriodEnd(today);
+      setApproverName("SuperAdmin");
+      setNotePublic("");
+      setNotePrivate("");
+      setLineDate(today);
+      setProjectName("");
+      setSalesTaxRate("0");
+      setUnitPriceNet("");
+      setQuantity("1");
+      setDocumentName("");
+      setShowAdd(false);
+      await loadData();
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to submit expense.";
+      setSubmitError(message);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const totalPending = expenses.filter((e) => e.status === "pending").reduce((s, e) => s + e.amount, 0);
@@ -236,45 +306,182 @@ export default function ExpensesScreen() {
                 <Ionicons name="close" size={24} color={colors.textSecondary} />
               </Pressable>
             </View>
-            <TextInput
-              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-              placeholder="Description"
-              placeholderTextColor={colors.textTertiary}
-              value={newDesc}
-              onChangeText={setNewDesc}
-            />
-            <TextInput
-              style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-              placeholder="Amount (INR)"
-              placeholderTextColor={colors.textTertiary}
-              value={newAmount}
-              onChangeText={setNewAmount}
-              keyboardType="numeric"
-            />
-            <View style={styles.categoryRow}>
-              {CATEGORIES.map((cat) => (
-                <Pressable
-                  key={cat}
-                  onPress={() => setNewCategory(cat)}
-                  style={[
-                    styles.catChip,
-                    {
-                      backgroundColor: newCategory === cat ? colors.primary : colors.surfaceSecondary,
-                      borderColor: newCategory === cat ? colors.primary : colors.border,
-                    },
-                  ]}
-                >
-                  <Text style={[styles.catText, { color: newCategory === cat ? "#fff" : colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-                    {cat}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
+            <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalForm} showsVerticalScrollIndicator={false}>
+              <View style={styles.fieldGroup}>
+                <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>User</Text>
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  value={user?.name || ""}
+                  editable={false}
+                />
+              </View>
+              <View style={styles.twoColumnRow}>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Start date</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor={colors.textTertiary}
+                    value={periodStart}
+                    onChangeText={setPeriodStart}
+                  />
+                </View>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>End date</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor={colors.textTertiary}
+                    value={periodEnd}
+                    onChangeText={setPeriodEnd}
+                  />
+                </View>
+              </View>
+              <View style={styles.fieldGroup}>
+                <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Will be approved by</Text>
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  placeholder="SuperAdmin"
+                  placeholderTextColor={colors.textTertiary}
+                  value={approverName}
+                  onChangeText={setApproverName}
+                />
+              </View>
+              <View style={styles.twoColumnRow}>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Note (public)</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    value={notePublic}
+                    onChangeText={setNotePublic}
+                  />
+                </View>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Note (private)</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    value={notePrivate}
+                    onChangeText={setNotePrivate}
+                  />
+                </View>
+              </View>
+              <View style={styles.fieldGroup}>
+                <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Upload a new document now</Text>
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  placeholder="Document name / receipt ref"
+                  placeholderTextColor={colors.textTertiary}
+                  value={documentName}
+                  onChangeText={setDocumentName}
+                />
+              </View>
+              <View style={styles.divider} />
+              <View style={styles.twoColumnRow}>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Date</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor={colors.textTertiary}
+                    value={lineDate}
+                    onChangeText={setLineDate}
+                  />
+                </View>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Project</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    value={projectName}
+                    onChangeText={setProjectName}
+                  />
+                </View>
+              </View>
+              <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Type</Text>
+              <View style={styles.categoryRow}>
+                {CATEGORIES.map((cat) => (
+                  <Pressable
+                    key={cat}
+                    onPress={() => setNewCategory(cat)}
+                    style={[
+                      styles.catChip,
+                      {
+                        backgroundColor: newCategory === cat ? colors.primary : colors.surfaceSecondary,
+                        borderColor: newCategory === cat ? colors.primary : colors.border,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.catText, { color: newCategory === cat ? "#fff" : colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                      {cat}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={styles.fieldGroup}>
+                <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Description</Text>
+                <TextInput
+                  style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                  value={newDesc}
+                  onChangeText={setNewDesc}
+                />
+              </View>
+              <View style={styles.twoColumnRow}>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Sales tax</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="0"
+                    placeholderTextColor={colors.textTertiary}
+                    value={salesTaxRate}
+                    onChangeText={setSalesTaxRate}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Qty</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="1"
+                    placeholderTextColor={colors.textTertiary}
+                    value={quantity}
+                    onChangeText={setQuantity}
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+              <View style={styles.twoColumnRow}>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>U.P. (net)</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="0"
+                    placeholderTextColor={colors.textTertiary}
+                    value={unitPriceNet}
+                    onChangeText={setUnitPriceNet}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={styles.flexField}>
+                  <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>U.P. (inc. tax)</Text>
+                  <TextInput
+                    style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
+                    placeholder="Amount"
+                    placeholderTextColor={colors.textTertiary}
+                    value={newAmount}
+                    onChangeText={setNewAmount}
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+              {submitError ? (
+                <Text style={[styles.errorText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>{submitError}</Text>
+              ) : null}
+            </ScrollView>
             <Pressable
               onPress={handleAddExpense}
-              style={({ pressed }) => [styles.modalButton, { backgroundColor: colors.primary, opacity: pressed ? 0.85 : 1 }]}
+              disabled={isSubmitting}
+              style={({ pressed }) => [styles.modalButton, { backgroundColor: colors.primary, opacity: pressed || isSubmitting ? 0.75 : 1 }]}
             >
-              <Text style={styles.modalButtonText}>Submit Expense</Text>
+              <Text style={styles.modalButtonText}>{isSubmitting ? "Submitting..." : "Submit Expense"}</Text>
             </Pressable>
           </View>
         </View>
@@ -342,13 +549,21 @@ const styles = StyleSheet.create({
   },
   emptyText: { fontSize: 14 },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  modalContent: { borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, gap: 16 },
+  modalContent: { maxHeight: "92%", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, gap: 16 },
   modalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   modalTitle: { fontSize: 18 },
+  modalScroll: { maxHeight: 560 },
+  modalForm: { gap: 12, paddingBottom: 4 },
+  fieldGroup: { gap: 6 },
+  fieldLabel: { fontSize: 12 },
+  twoColumnRow: { flexDirection: "row", gap: 10 },
+  flexField: { flex: 1, gap: 6 },
   modalInput: { height: 48, borderRadius: 12, paddingHorizontal: 16, fontSize: 15, borderWidth: 1 },
+  divider: { height: 1, backgroundColor: "rgba(148,163,184,0.25)", marginVertical: 2 },
   categoryRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   catChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1 },
   catText: { fontSize: 12 },
+  errorText: { fontSize: 12 },
   modalButton: { height: 48, borderRadius: 12, justifyContent: "center", alignItems: "center" },
   modalButtonText: { color: "#fff", fontSize: 15, fontFamily: "Inter_600SemiBold" },
 });

@@ -206,6 +206,20 @@ export interface Expense {
   status: "pending" | "approved" | "rejected";
   date: string;
   receipt?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  approverId?: string;
+  approverName?: string;
+  notePublic?: string;
+  notePrivate?: string;
+  lineDate?: string;
+  projectId?: string;
+  projectName?: string;
+  salesTaxRate?: number;
+  unitPriceNet?: number;
+  unitPriceInclTax?: number;
+  quantity?: number;
+  documentName?: string;
 }
 
 export interface StockistProfile {

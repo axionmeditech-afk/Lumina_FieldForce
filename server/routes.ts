@@ -4358,6 +4358,20 @@ function normalizeExpenseInput(entry: unknown): Expense | null {
     status: normalizeExpenseStatus(item.status),
     date: toSqlDateOnly(item.date),
     receipt: toNullableText(item.receipt) ?? undefined,
+    periodStart: item.periodStart ? toSqlDateOnly(item.periodStart) : undefined,
+    periodEnd: item.periodEnd ? toSqlDateOnly(item.periodEnd) : undefined,
+    approverId: toNullableText(item.approverId) ?? undefined,
+    approverName: toNullableText(item.approverName) ?? undefined,
+    notePublic: toNullableText(item.notePublic) ?? undefined,
+    notePrivate: toNullableText(item.notePrivate) ?? undefined,
+    lineDate: item.lineDate ? toSqlDateOnly(item.lineDate) : undefined,
+    projectId: toNullableText(item.projectId) ?? undefined,
+    projectName: toNullableText(item.projectName) ?? undefined,
+    salesTaxRate: toSqlNumber(item.salesTaxRate),
+    unitPriceNet: toSqlNumber(item.unitPriceNet),
+    unitPriceInclTax: toSqlNumber(item.unitPriceInclTax),
+    quantity: toSqlNumber(item.quantity) || 1,
+    documentName: toNullableText(item.documentName) ?? undefined,
   };
 }
 
@@ -4540,7 +4554,7 @@ async function insertDolibarrRow(
   await conn.execute(
     `INSERT INTO \`${tableName}\` (${fields.map((field) => `\`${field}\``).join(", ")})
      VALUES (${fields.map(() => "?").join(", ")})`,
-    params
+    params as any[]
   );
   const [rows] = await conn.query<any[]>("SELECT LAST_INSERT_ID() AS id");
   return Number(rows?.[0]?.id || 0);
@@ -4559,7 +4573,7 @@ async function updateDolibarrRow(
     `UPDATE \`${tableName}\`
         SET ${fields.map((field) => `\`${field}\` = ?`).join(", ")}
       WHERE \`rowid\` = ?`,
-    [...params, rowId]
+    [...params, rowId] as any[]
   );
 }
 
@@ -4574,15 +4588,43 @@ async function upsertDolibarrExpenseRecord(
   }
   const authorId = (await resolveDolibarrExpenseAuthorId(conn, requestUser)) ?? fkUser;
   const expenseDate = toSqlDateOnly(expense.date);
-  const amount = toSqlNumber(expense.amount);
-  const vatAmount = 0;
+  const periodStart = toSqlDateOnly(expense.periodStart || expense.date);
+  const periodEnd = toSqlDateOnly(expense.periodEnd || expense.periodStart || expense.date);
+  const lineDate = toSqlDateOnly(expense.lineDate || expense.date);
+  const quantity = Math.max(toSqlNumber(expense.quantity) || 1, 0.000001);
+  const taxRate = Math.max(toSqlNumber(expense.salesTaxRate), 0);
+  const unitInclTaxInput = toSqlNumber(expense.unitPriceInclTax);
+  const unitNetInput = toSqlNumber(expense.unitPriceNet);
+  const fallbackTotal = toSqlNumber(expense.amount);
+  const unitInclTax =
+    unitInclTaxInput > 0
+      ? unitInclTaxInput
+      : unitNetInput > 0
+        ? unitNetInput * (1 + taxRate / 100)
+        : fallbackTotal / quantity;
+  const unitNet =
+    unitNetInput > 0
+      ? unitNetInput
+      : taxRate > 0
+        ? unitInclTax / (1 + taxRate / 100)
+        : unitInclTax;
+  const totalHt = Number((unitNet * quantity).toFixed(8));
+  const amount = Number(((unitInclTax || unitNet) * quantity).toFixed(8));
+  const vatAmount = Math.max(Number((amount - totalHt).toFixed(8)), 0);
   const status = expenseStatusToDolibarrStatus(expense.status);
   const ref = buildDolibarrExpenseRef(expense.id);
   const notePrivate = [
     `LFF expense id: ${expense.id}`,
     `category: ${expense.category}`,
+    expense.notePrivate ? expense.notePrivate : "",
+    expense.approverName ? `approver: ${expense.approverName}` : "",
+    expense.projectName ? `project: ${expense.projectName}` : "",
     expense.receipt ? `receipt: ${expense.receipt}` : "",
+    expense.documentName ? `document: ${expense.documentName}` : "",
   ].filter(Boolean).join("\n");
+  const notePublic = expense.notePublic || expense.description;
+  const projectId = Number(expense.projectId);
+  const fkProject = Number.isFinite(projectId) && projectId > 0 ? Math.trunc(projectId) : 0;
 
   const [existingRows] = await conn.query<any[]>(
     `SELECT rowid FROM \`${DOLIBARR_EXPENSE_REPORT_TABLE}\` WHERE ref = ? LIMIT 1`,
@@ -4592,13 +4634,13 @@ async function upsertDolibarrExpenseRecord(
   const headerValues: Record<string, unknown> = {
     ref,
     entity: 1,
-    total_ht: amount,
+    total_ht: totalHt,
     total_tva: vatAmount,
     localtax1: 0,
     localtax2: 0,
     total_ttc: amount,
-    date_debut: expenseDate,
-    date_fin: expenseDate,
+    date_debut: periodStart,
+    date_fin: periodEnd,
     date_create: toSqlTimestamp(new Date()),
     date_valid: status >= 2 && status !== 99 ? toSqlTimestamp(new Date()) : null,
     date_approve: status === 5 ? toSqlTimestamp(new Date()) : null,
@@ -4612,11 +4654,11 @@ async function upsertDolibarrExpenseRecord(
     fk_user_refuse: status === 99 ? authorId : null,
     fk_statut: status,
     paid: 0,
-    note_public: expense.description,
+    note_public: notePublic,
     note_private: notePrivate,
     multicurrency_code: "INR",
     multicurrency_tx: 1,
-    multicurrency_total_ht: amount,
+    multicurrency_total_ht: totalHt,
     multicurrency_total_tva: vatAmount,
     multicurrency_total_ttc: amount,
     extraparams: JSON.stringify({ lffExpenseId: expense.id }).slice(0, 255),
@@ -4633,38 +4675,38 @@ async function upsertDolibarrExpenseRecord(
   );
   await insertDolibarrRow(conn, DOLIBARR_EXPENSE_REPORT_LINE_TABLE, {
     fk_expensereport: reportId,
-    docnumber: expense.receipt ?? null,
+    docnumber: expense.documentName ?? expense.receipt ?? null,
     fk_c_type_fees: expenseTypeId,
     fk_c_exp_tax_cat: null,
-    fk_projet: 0,
+    fk_projet: fkProject,
     comments: expense.description,
     product_type: -1,
-    qty: 1,
-    subprice: amount,
-    subprice_ttc: amount,
-    value_unit: amount,
+    qty: quantity,
+    subprice: unitNet,
+    subprice_ttc: unitInclTax,
+    value_unit: unitInclTax,
     remise_percent: 0,
     vat_src_code: "",
-    tva_tx: 0,
+    tva_tx: taxRate,
     localtax1_tx: 0,
     localtax1_type: "0",
     localtax2_tx: 0,
     localtax2_type: "0",
-    total_ht: amount,
+    total_ht: totalHt,
     total_tva: vatAmount,
     total_localtax1: 0,
     total_localtax2: 0,
     total_ttc: amount,
-    date: expenseDate,
+    date: lineDate,
     info_bits: 0,
     special_code: 0,
     fk_facture: 0,
     fk_code_ventilation: 0,
     rang: 0,
     multicurrency_code: "INR",
-    multicurrency_subprice: amount,
-    multicurrency_subprice_ttc: amount,
-    multicurrency_total_ht: amount,
+    multicurrency_subprice: unitNet,
+    multicurrency_subprice_ttc: unitInclTax,
+    multicurrency_total_ht: totalHt,
     multicurrency_total_tva: vatAmount,
     multicurrency_total_ttc: amount,
   });
