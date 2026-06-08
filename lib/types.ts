@@ -220,6 +220,10 @@ export interface Expense {
   unitPriceInclTax?: number;
   quantity?: number;
   documentName?: string;
+  proofUrl?: string;
+  proofName?: string;
+  proofMimeType?: string;
+  proofSizeBytes?: number | null;
 }
 
 export interface StockistProfile {

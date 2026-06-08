@@ -4334,6 +4334,7 @@ const DOLIBARR_EXPENSE_REPORT_TABLE = "nmy5_expensereport";
 const DOLIBARR_EXPENSE_REPORT_LINE_TABLE = "nmy5_expensereport_det";
 const DOLIBARR_EXPENSE_PAYMENT_TABLE = "nmy5_payment_expensereport";
 const DOLIBARR_EXPENSE_PAYMENT_LINK_TABLE = "nmy5_paymentexpensereport_expensereport";
+const DOLIBARR_ECM_FILES_TABLE = "nmy5_ecm_files";
 const DOLIBARR_DEFAULT_EXPENSE_TYPE_ID = 28;
 const dolibarrExpenseTableColumns = new Map<string, Set<string>>();
 
@@ -4372,6 +4373,13 @@ function normalizeExpenseInput(entry: unknown): Expense | null {
     unitPriceInclTax: toSqlNumber(item.unitPriceInclTax),
     quantity: toSqlNumber(item.quantity) || 1,
     documentName: toNullableText(item.documentName) ?? undefined,
+    proofUrl: toNullableText(item.proofUrl) ?? undefined,
+    proofName: toNullableText(item.proofName) ?? undefined,
+    proofMimeType: toNullableText(item.proofMimeType) ?? undefined,
+    proofSizeBytes:
+      typeof item.proofSizeBytes === "number" && Number.isFinite(item.proofSizeBytes)
+        ? Math.max(0, Math.trunc(item.proofSizeBytes))
+        : null,
   };
 }
 
@@ -4558,6 +4566,53 @@ async function resolveDolibarrExpenseTypeId(
   return firstActive?.[0]?.id ? Number(firstActive[0].id) : DOLIBARR_DEFAULT_EXPENSE_TYPE_ID;
 }
 
+async function createDolibarrExpenseProofFile(
+  conn: Pool | PoolConnection,
+  expense: Expense,
+  reportId: number,
+  authorId: number | null
+): Promise<number | null> {
+  const proofUrl = toNullableText(expense.proofUrl || expense.receipt);
+  if (!proofUrl) return null;
+  const [tableRows] = await conn.query<any[]>("SHOW TABLES LIKE ?", [DOLIBARR_ECM_FILES_TABLE]);
+  if (!tableRows?.length) return null;
+
+  const proofName =
+    toNullableText(expense.proofName || expense.documentName) ||
+    proofUrl.split("/").pop() ||
+    `expense-proof-${reportId}`;
+  const ref = `LFF-PROOF-${String(expense.id).replace(/[^a-z0-9]/gi, "").slice(0, 38).toUpperCase()}`;
+  const filepath = `expensereport/${reportId}`;
+  try {
+    const [existingRows] = await conn.query<any[]>(
+      `SELECT rowid FROM \`${DOLIBARR_ECM_FILES_TABLE}\` WHERE ref = ? LIMIT 1`,
+      [ref]
+    );
+    if (existingRows?.[0]?.rowid) return Number(existingRows[0].rowid);
+
+    const rowId = await insertDolibarrRow(conn, DOLIBARR_ECM_FILES_TABLE, {
+      ref,
+      entity: 1,
+      filepath,
+      filename: proofName,
+      label: proofName,
+      fullpath_orig: proofUrl,
+      description: proofUrl,
+      keywords: "expense proof",
+      src_object_type: "expensereport",
+      src_object_id: reportId,
+      date_c: toSqlTimestamp(new Date()),
+      fk_user_c: authorId,
+      fk_user_m: authorId,
+      acl: null,
+      import_key: expense.id,
+    });
+    return rowId > 0 ? rowId : null;
+  } catch {
+    return null;
+  }
+}
+
 function pickColumns(
   columns: Set<string>,
   values: Record<string, unknown>
@@ -4650,6 +4705,7 @@ async function upsertDolibarrExpenseRecord(
     expense.projectName ? `project: ${expense.projectName}` : "",
     expense.receipt ? `receipt: ${expense.receipt}` : "",
     expense.documentName ? `document: ${expense.documentName}` : "",
+    expense.proofUrl ? `proof: ${expense.proofUrl}` : "",
   ].filter(Boolean).join("\n");
   const notePublic = expense.notePublic || expense.description;
   const projectId = Number(expense.projectId);
@@ -4698,13 +4754,15 @@ async function upsertDolibarrExpenseRecord(
     : await insertDolibarrRow(conn, DOLIBARR_EXPENSE_REPORT_TABLE, headerValues);
 
   const expenseTypeId = await resolveDolibarrExpenseTypeId(conn, expense.category);
+  const proofEcmFileId = await createDolibarrExpenseProofFile(conn, expense, reportId, authorId);
+  const proofDocNumber = expense.proofUrl || expense.receipt || expense.documentName || null;
   await conn.execute(
     `DELETE FROM \`${DOLIBARR_EXPENSE_REPORT_LINE_TABLE}\` WHERE \`fk_expensereport\` = ?`,
     [reportId]
   );
   await insertDolibarrRow(conn, DOLIBARR_EXPENSE_REPORT_LINE_TABLE, {
     fk_expensereport: reportId,
-    docnumber: expense.documentName ?? expense.receipt ?? null,
+    docnumber: proofDocNumber,
     fk_c_type_fees: expenseTypeId,
     fk_c_exp_tax_cat: null,
     fk_projet: fkProject,
@@ -4731,6 +4789,7 @@ async function upsertDolibarrExpenseRecord(
     special_code: 0,
     fk_facture: 0,
     fk_code_ventilation: 0,
+    fk_ecm_files: proofEcmFileId,
     rang: 0,
     multicurrency_code: "INR",
     multicurrency_subprice: unitNet,
@@ -4800,6 +4859,7 @@ async function listExpensesFromMySql(): Promise<unknown[]> {
     SELECT er.rowid AS report_rowid, er.ref, er.total_ttc AS report_total_ttc, er.fk_statut,
            er.date_debut, er.note_public, er.note_private, er.fk_user_author,
            erd.rowid AS line_rowid, erd.comments, erd.total_ttc AS line_total_ttc, erd.date AS line_date,
+           erd.docnumber, erd.fk_ecm_files,
            ctf.label AS type_label, ctf.code AS type_code,
            u.firstname, u.lastname, u.login
       FROM \`${DOLIBARR_EXPENSE_REPORT_TABLE}\` er
@@ -4820,6 +4880,9 @@ async function listExpensesFromMySql(): Promise<unknown[]> {
     description: toRequiredText(row.comments || row.note_public || row.note_private, ""),
     status: dolibarrStatusToExpenseStatus(row.fk_statut),
     date: toSqlDateOnly(row.line_date || row.date_debut),
+    receipt: row.docnumber ? String(row.docnumber) : undefined,
+    documentName: row.docnumber ? String(row.docnumber).split("/").pop() : undefined,
+    proofUrl: row.docnumber ? String(row.docnumber) : undefined,
   }));
 }
 

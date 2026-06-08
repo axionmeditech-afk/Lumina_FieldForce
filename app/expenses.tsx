@@ -8,16 +8,25 @@ import {
   TextInput,
   Modal,
   ScrollView,
+  Linking,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import * as Haptics from "expo-haptics";
 import * as Crypto from "expo-crypto";
+import * as DocumentPicker from "expo-document-picker";
 import Colors from "@/constants/colors";
-import { getExpenses, addExpense, updateExpenseStatus, addAuditLog } from "@/lib/storage";
+import {
+  getExpenses,
+  addExpense,
+  updateExpenseStatus,
+  addAuditLog,
+  uploadSupportAttachments,
+  type LocalSupportAttachmentInput,
+} from "@/lib/storage";
 import { useAuth } from "@/contexts/AuthContext";
-import type { AppUser, Expense } from "@/lib/types";
+import type { AppUser, Expense, SupportAttachment, SupportAttachmentType } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 
@@ -30,6 +39,16 @@ function todayDateKey(): string {
 function parseDecimalInput(value: string): number {
   const parsed = Number(value.replace(/,/g, "").trim());
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function inferProofAttachmentType(mimeType?: string, name?: string): SupportAttachmentType {
+  const mime = (mimeType || "").toLowerCase();
+  const fileName = (name || "").toLowerCase();
+  if (mime.startsWith("image/") || /\.(png|jpe?g|webp|gif|heic)$/i.test(fileName)) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime === "application/pdf" || /\.(pdf|docx?|xlsx?|txt)$/i.test(fileName)) return "document";
+  return "other";
 }
 
 function normalizeMatchKey(value: string | null | undefined): string {
@@ -142,6 +161,20 @@ function ExpenseCard({
       <Text style={[styles.expenseDate, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
         {new Date(expense.date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
       </Text>
+      {expense.proofUrl || expense.receipt ? (
+        <Pressable
+          onPress={() => {
+            const url = expense.proofUrl || expense.receipt || "";
+            if (/^https?:\/\//i.test(url)) Linking.openURL(url).catch(() => undefined);
+          }}
+          style={styles.proofLink}
+        >
+          <Ionicons name="document-attach-outline" size={14} color={colors.primary} />
+          <Text style={[styles.proofLinkText, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
+            {expense.proofName || expense.documentName || "Proof attached"}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -165,6 +198,7 @@ export default function ExpensesScreen() {
   const [unitPriceNet, setUnitPriceNet] = useState("");
   const [quantity, setQuantity] = useState("1");
   const [documentName, setDocumentName] = useState("");
+  const [proofFile, setProofFile] = useState<LocalSupportAttachmentInput | null>(null);
   const [submitError, setSubmitError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -188,6 +222,30 @@ export default function ExpensesScreen() {
   }, [isAdmin, user]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  const handleChooseProof = useCallback(async () => {
+    if (isSubmitting) return;
+    setSubmitError("");
+    const result = await DocumentPicker.getDocumentAsync({
+      type: "*/*",
+      multiple: false,
+      copyToCacheDirectory: true,
+    });
+    if (result.canceled) return;
+    const asset = result.assets?.[0];
+    if (!asset?.uri) return;
+    const name = (asset.name || asset.uri.split("/").pop() || "").trim() || "expense-proof";
+    const mimeType = (asset.mimeType || "").trim() || undefined;
+    setProofFile({
+      uri: asset.uri,
+      name,
+      mimeType,
+      sizeBytes: typeof asset.size === "number" ? asset.size : null,
+      attachmentType: inferProofAttachmentType(mimeType, name),
+    });
+    setDocumentName(name);
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }, [isSubmitting]);
 
   const handleApprove = async (id: string) => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -227,6 +285,11 @@ export default function ExpensesScreen() {
 
     setIsSubmitting(true);
     try {
+      let uploadedProof: SupportAttachment | null = null;
+      if (proofFile) {
+        const uploaded = await uploadSupportAttachments([proofFile]);
+        uploadedProof = uploaded[0] || null;
+      }
       const expense: Expense = {
         id: Crypto.randomUUID(),
         userId: user?.id || "",
@@ -247,8 +310,12 @@ export default function ExpensesScreen() {
         unitPriceNet: resolvedNet,
         unitPriceInclTax: unitInclTax,
         quantity: qty,
-        documentName: documentName.trim() || undefined,
-        receipt: documentName.trim() || undefined,
+        documentName: uploadedProof?.name || documentName.trim() || undefined,
+        receipt: uploadedProof?.url || documentName.trim() || undefined,
+        proofUrl: uploadedProof?.url,
+        proofName: uploadedProof?.name || proofFile?.name,
+        proofMimeType: uploadedProof?.mimeType || proofFile?.mimeType,
+        proofSizeBytes: uploadedProof?.sizeBytes ?? proofFile?.sizeBytes ?? null,
       };
       await addExpense(expense);
       setNewDesc("");
@@ -265,6 +332,7 @@ export default function ExpensesScreen() {
       setUnitPriceNet("");
       setQuantity("1");
       setDocumentName("");
+      setProofFile(null);
       setShowAdd(false);
       await loadData();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -399,9 +467,26 @@ export default function ExpensesScreen() {
               </View>
               <View style={styles.fieldGroup}>
                 <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Upload a new document now</Text>
+                <View style={styles.proofRow}>
+                  <Pressable
+                    onPress={handleChooseProof}
+                    style={({ pressed }) => [
+                      styles.chooseFileButton,
+                      { backgroundColor: colors.surfaceSecondary, borderColor: colors.border, opacity: pressed ? 0.75 : 1 },
+                    ]}
+                  >
+                    <Ionicons name="attach-outline" size={18} color={colors.primary} />
+                    <Text style={[styles.chooseFileText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>Choose a file</Text>
+                  </Pressable>
+                  {proofFile ? (
+                    <Pressable onPress={() => { setProofFile(null); setDocumentName(""); }} hitSlop={8}>
+                      <Ionicons name="close-circle" size={22} color={colors.textTertiary} />
+                    </Pressable>
+                  ) : null}
+                </View>
                 <TextInput
                   style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-                  placeholder="Document name / receipt ref"
+                  placeholder="Proof file name"
                   placeholderTextColor={colors.textTertiary}
                   value={documentName}
                   onChangeText={setDocumentName}
@@ -572,6 +657,8 @@ const styles = StyleSheet.create({
   },
   actionText: { fontSize: 12 },
   expenseDate: { fontSize: 11 },
+  proofLink: { flexDirection: "row", alignItems: "center", gap: 6 },
+  proofLinkText: { fontSize: 12 },
   emptyState: {
     borderRadius: 16,
     padding: 40,
@@ -591,6 +678,19 @@ const styles = StyleSheet.create({
   twoColumnRow: { flexDirection: "row", gap: 10 },
   flexField: { flex: 1, gap: 6 },
   modalInput: { height: 48, borderRadius: 12, paddingHorizontal: 16, fontSize: 15, borderWidth: 1 },
+  proofRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  chooseFileButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  chooseFileText: { fontSize: 13 },
   divider: { height: 1, backgroundColor: "rgba(148,163,184,0.25)", marginVertical: 2 },
   categoryRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   catChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1 },
