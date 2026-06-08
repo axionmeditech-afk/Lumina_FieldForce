@@ -3153,7 +3153,7 @@ export async function removeTask(taskId: string): Promise<boolean> {
 export async function getExpenses(): Promise<Expense[]> {
   const companyId = await getActiveCompanyId();
   const expenses = await getRawList<Expense>(KEYS.EXPENSES);
-  return expenses.filter((expense) => matchesCompany(expense, companyId));
+  return expenses.filter((expense) => !expense.companyId || matchesCompany(expense, companyId));
 }
 
 export async function addExpense(expense: Expense): Promise<void> {

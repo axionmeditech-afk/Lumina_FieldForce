@@ -216,6 +216,37 @@ function normalizeIdentity(value?: string | null): string {
   return (value || "").trim().toLowerCase();
 }
 
+function addIdentityVariants(target: Set<string>, value?: string | null): void {
+  const normalized = normalizeIdentity(value);
+  if (!normalized) return;
+  target.add(normalized);
+  if (normalized.startsWith("dolibarr_")) {
+    target.add(normalized.replace(/^dolibarr_/, ""));
+  } else {
+    target.add(`dolibarr_${normalized}`);
+  }
+  const localPart = normalized.includes("@") ? normalized.split("@")[0] : "";
+  if (localPart) {
+    target.add(localPart);
+    target.add(`dolibarr_${localPart}`);
+  }
+}
+
+function buildUserIdentitySet(actor?: { id?: string | null; name?: string | null; email?: string | null; login?: string | null } | null): Set<string> {
+  const keys = new Set<string>();
+  if (!actor) return keys;
+  addIdentityVariants(keys, actor.id);
+  addIdentityVariants(keys, actor.email);
+  addIdentityVariants(keys, actor.login);
+  addIdentityVariants(keys, actor.name);
+  return keys;
+}
+
+function isExpenseForUser(expense: Expense, actor?: { id?: string | null; name?: string | null; email?: string | null; login?: string | null } | null): boolean {
+  const keys = buildUserIdentitySet(actor);
+  return keys.has(normalizeIdentity(expense.userId)) || keys.has(normalizeIdentity(expense.userName));
+}
+
 function isTaskAssignedToUser(task: Task, actor?: { id?: string | null; name?: string | null; email?: string | null } | null): boolean {
   if (!actor) return false;
   const normalizedId = normalizeIdentity(actor.id);
@@ -777,7 +808,7 @@ export default function DashboardScreen() {
   );
   const userPendingExpenses = useMemo(() => {
     if (!user) return 0;
-    return expenses.filter((expense) => expense.userId === user.id && expense.status === "pending")
+    return expenses.filter((expense) => isExpenseForUser(expense, user) && expense.status === "pending")
       .length;
   }, [expenses, user]);
 
@@ -845,7 +876,7 @@ export default function DashboardScreen() {
       userPendingExpenses: user
         ? expenses.filter(
             (expense) =>
-              expense.userId === user.id &&
+              isExpenseForUser(expense, user) &&
               expense.status === "pending" &&
               isMetricDateInRange(expense.date, metricRange, clockNow)
           ).length

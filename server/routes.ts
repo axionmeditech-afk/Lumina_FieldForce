@@ -4501,6 +4501,34 @@ async function resolveDolibarrExpenseAuthorId(
   return resolveDolibarrExpenseUserId(conn, fallbackExpense);
 }
 
+async function resolveDolibarrSuperAdminUserId(conn: Pool | PoolConnection): Promise<number | null> {
+  const [namedRows] = await conn.query<any[]>(
+    `SELECT rowid
+       FROM \`nmy5_user\`
+      WHERE LOWER(TRIM(login)) = 'superadmin'
+         OR LOWER(TRIM(CONCAT_WS(' ', firstname, lastname))) = 'superadmin'
+         OR LOWER(TRIM(lastname)) = 'superadmin'
+      ORDER BY rowid ASC
+      LIMIT 1`
+  );
+  if (namedRows?.[0]?.rowid) return Number(namedRows[0].rowid);
+
+  const [adminRows] = await conn.query<any[]>(
+    `SELECT rowid
+       FROM \`nmy5_user\`
+      WHERE admin = 1
+        AND (statut IS NULL OR statut = 1)
+      ORDER BY rowid ASC
+      LIMIT 1`
+  );
+  if (adminRows?.[0]?.rowid) return Number(adminRows[0].rowid);
+
+  const [fallbackRows] = await conn.query<any[]>(
+    "SELECT rowid FROM `nmy5_user` WHERE rowid = 1 LIMIT 1"
+  );
+  return fallbackRows?.[0]?.rowid ? Number(fallbackRows[0].rowid) : null;
+}
+
 async function resolveDolibarrExpenseTypeId(
   conn: Pool | PoolConnection,
   category: string
@@ -4587,6 +4615,7 @@ async function upsertDolibarrExpenseRecord(
     throw new Error(`Dolibarr user not found for expense user ${expense.userName}.`);
   }
   const authorId = (await resolveDolibarrExpenseAuthorId(conn, requestUser)) ?? fkUser;
+  const superAdminId = (await resolveDolibarrSuperAdminUserId(conn)) ?? authorId;
   const expenseDate = toSqlDateOnly(expense.date);
   const periodStart = toSqlDateOnly(expense.periodStart || expense.date);
   const periodEnd = toSqlDateOnly(expense.periodEnd || expense.periodStart || expense.date);
@@ -4617,7 +4646,7 @@ async function upsertDolibarrExpenseRecord(
     `LFF expense id: ${expense.id}`,
     `category: ${expense.category}`,
     expense.notePrivate ? expense.notePrivate : "",
-    expense.approverName ? `approver: ${expense.approverName}` : "",
+    "approver: SuperAdmin",
     expense.projectName ? `project: ${expense.projectName}` : "",
     expense.receipt ? `receipt: ${expense.receipt}` : "",
     expense.documentName ? `document: ${expense.documentName}` : "",
@@ -4648,9 +4677,9 @@ async function upsertDolibarrExpenseRecord(
     fk_user_author: fkUser,
     fk_user_creat: authorId,
     fk_user_modif: authorId,
-    fk_user_valid: status >= 2 && status !== 99 ? authorId : null,
-    fk_user_validator: status >= 2 && status !== 99 ? authorId : null,
-    fk_user_approve: status === 5 ? authorId : null,
+    fk_user_valid: status >= 2 && status !== 99 ? superAdminId : null,
+    fk_user_validator: superAdminId,
+    fk_user_approve: status === 5 ? superAdminId : null,
     fk_user_refuse: status === 99 ? authorId : null,
     fk_statut: status,
     paid: 0,

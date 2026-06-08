@@ -17,7 +17,7 @@ import * as Crypto from "expo-crypto";
 import Colors from "@/constants/colors";
 import { getExpenses, addExpense, updateExpenseStatus, addAuditLog } from "@/lib/storage";
 import { useAuth } from "@/contexts/AuthContext";
-import type { Expense } from "@/lib/types";
+import type { AppUser, Expense } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 
@@ -30,6 +30,42 @@ function todayDateKey(): string {
 function parseDecimalInput(value: string): number {
   const parsed = Number(value.replace(/,/g, "").trim());
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeMatchKey(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
+function addExpenseIdentityVariants(target: Set<string>, value: string | null | undefined): void {
+  const normalized = normalizeMatchKey(value);
+  if (!normalized) return;
+  target.add(normalized);
+  if (normalized.startsWith("dolibarr_")) {
+    target.add(normalized.replace(/^dolibarr_/, ""));
+  } else {
+    target.add(`dolibarr_${normalized}`);
+  }
+  const localPart = normalized.includes("@") ? normalized.split("@")[0] : "";
+  if (localPart) {
+    target.add(localPart);
+    target.add(`dolibarr_${localPart}`);
+  }
+}
+
+function buildUserExpenseKeys(user: AppUser): Set<string> {
+  const keys = new Set<string>();
+  for (const value of [user.id, user.email, user.login, user.name]) {
+    addExpenseIdentityVariants(keys, value);
+  }
+  return keys;
+}
+
+function isExpenseForUser(expense: Expense, user: AppUser): boolean {
+  const keys = buildUserExpenseKeys(user);
+  return (
+    keys.has(normalizeMatchKey(expense.userId)) ||
+    keys.has(normalizeMatchKey(expense.userName))
+  );
 }
 
 function ExpenseCard({
@@ -121,7 +157,6 @@ export default function ExpensesScreen() {
   const [newCategory, setNewCategory] = useState("Travel");
   const [periodStart, setPeriodStart] = useState(todayDateKey());
   const [periodEnd, setPeriodEnd] = useState(todayDateKey());
-  const [approverName, setApproverName] = useState("SuperAdmin");
   const [notePublic, setNotePublic] = useState("");
   const [notePrivate, setNotePrivate] = useState("");
   const [lineDate, setLineDate] = useState(todayDateKey());
@@ -147,7 +182,7 @@ export default function ExpensesScreen() {
     }
     setExpenses(
       data.filter(
-        (expense) => expense.userId === user.id || expense.userName === user.name
+        (expense) => isExpenseForUser(expense, user)
       )
     );
   }, [isAdmin, user]);
@@ -203,7 +238,7 @@ export default function ExpensesScreen() {
         date: lineDate || todayDateKey(),
         periodStart: periodStart || lineDate || todayDateKey(),
         periodEnd: periodEnd || periodStart || lineDate || todayDateKey(),
-        approverName: approverName.trim() || undefined,
+        approverName: "SuperAdmin",
         notePublic: notePublic.trim() || undefined,
         notePrivate: notePrivate.trim() || undefined,
         lineDate: lineDate || todayDateKey(),
@@ -222,7 +257,6 @@ export default function ExpensesScreen() {
       const today = todayDateKey();
       setPeriodStart(today);
       setPeriodEnd(today);
-      setApproverName("SuperAdmin");
       setNotePublic("");
       setNotePrivate("");
       setLineDate(today);
@@ -341,10 +375,8 @@ export default function ExpensesScreen() {
                 <Text style={[styles.fieldLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>Will be approved by</Text>
                 <TextInput
                   style={[styles.modalInput, { color: colors.text, backgroundColor: colors.surfaceSecondary, borderColor: colors.border, fontFamily: "Inter_400Regular" }]}
-                  placeholder="SuperAdmin"
-                  placeholderTextColor={colors.textTertiary}
-                  value={approverName}
-                  onChangeText={setApproverName}
+                  value="SuperAdmin"
+                  editable={false}
                 />
               </View>
               <View style={styles.twoColumnRow}>
