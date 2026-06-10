@@ -2579,10 +2579,10 @@ async function mergeApprovedAccessRequestIntoUser(
     companyId: mergedCompanyId,
     companyName: mergedCompanyName,
     companyIds: mergedCompanyIds,
-    department:
-      normalizeWhitespace(request.requestedDepartment || "") ||
-      normalizeWhitespace(user.department || "") ||
-      roleToDepartment(mergedRole),
+    department: normalizeDepartmentForRole(
+      mergedRole,
+      request.requestedDepartment || user.department
+    ),
     branch:
       normalizeWhitespace(request.requestedBranch || "") ||
       normalizeWhitespace(user.branch || "") ||
@@ -2651,6 +2651,135 @@ function getLatestAccessRequestByEmail(email: string): AccessRequestRecord | nul
 let attendanceTableEnsured = false;
 let attendanceLegacyStateHydrated = false;
 let locationLogLegacyStateHydrated = false;
+let geofenceTableEnsured = false;
+
+function parseAssignedEmployeeIdsJson(value: unknown): string[] {
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => normalizeWhitespace(entry))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function ensureGeofenceTable(): Promise<void> {
+  if (geofenceTableEnsured) return;
+  if (!isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_geofences\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`name\` VARCHAR(191) NOT NULL,
+      \`latitude\` DECIMAL(10,7) NOT NULL,
+      \`longitude\` DECIMAL(10,7) NOT NULL,
+      \`radius_meters\` INT NOT NULL,
+      \`assigned_employee_ids_json\` LONGTEXT NOT NULL,
+      \`is_active\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`allow_override\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`working_hours_start\` VARCHAR(8) NULL,
+      \`working_hours_end\` VARCHAR(8) NULL,
+      \`created_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      KEY \`idx_lff_geofences_company\` (\`company_id\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  geofenceTableEnsured = true;
+}
+
+function mapGeofenceRow(row: any): Geofence {
+  const now = new Date().toISOString();
+  return {
+    id: String(row.id),
+    companyId: row.company_id ? String(row.company_id) : undefined,
+    name: String(row.name || "Unnamed Zone"),
+    radiusMeters: Math.max(500, Number(row.radius_meters || 500)),
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    assignedEmployeeIds: parseAssignedEmployeeIdsJson(row.assigned_employee_ids_json),
+    isActive: row.is_active === null || row.is_active === undefined ? true : Boolean(row.is_active),
+    allowOverride: Boolean(row.allow_override),
+    workingHoursStart: row.working_hours_start ? String(row.working_hours_start) : null,
+    workingHoursEnd: row.working_hours_end ? String(row.working_hours_end) : null,
+    createdAt: row.created_at ? toIsoTimestamp(row.created_at, now) : now,
+    updatedAt: row.updated_at ? toIsoTimestamp(row.updated_at, now) : now,
+  };
+}
+
+async function listGeofencesForUserFromMySql(userId: string): Promise<Geofence[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureGeofenceTable();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_geofences
+     WHERE is_active = 1
+       AND JSON_CONTAINS(assigned_employee_ids_json, JSON_QUOTE(?))
+     ORDER BY updated_at DESC`,
+    [userId]
+  );
+  return rows.map(mapGeofenceRow);
+}
+
+async function listGeofencesForUserResolved(userId: string): Promise<Geofence[]> {
+  if (isMySqlStateEnabled()) {
+    try {
+      const zones = await listGeofencesForUserFromMySql(userId);
+      if (zones.length) return zones;
+    } catch (error) {
+      console.warn(
+        "Unable to read geofences from MySQL:",
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+  return storage.listGeofencesForUser(userId);
+}
+
+async function upsertGeofenceInMySql(zone: Geofence): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureGeofenceTable();
+  const conn = await getMySqlPool();
+  const now = new Date().toISOString();
+  await conn.execute(
+    `INSERT INTO lff_geofences (
+      id, company_id, name, latitude, longitude, radius_meters, assigned_employee_ids_json,
+      is_active, allow_override, working_hours_start, working_hours_end, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      company_id = VALUES(company_id),
+      name = VALUES(name),
+      latitude = VALUES(latitude),
+      longitude = VALUES(longitude),
+      radius_meters = VALUES(radius_meters),
+      assigned_employee_ids_json = VALUES(assigned_employee_ids_json),
+      is_active = VALUES(is_active),
+      allow_override = VALUES(allow_override),
+      working_hours_start = VALUES(working_hours_start),
+      working_hours_end = VALUES(working_hours_end),
+      updated_at = VALUES(updated_at)`,
+    [
+      zone.id,
+      zone.companyId ?? null,
+      zone.name,
+      zone.latitude,
+      zone.longitude,
+      Math.max(500, Math.round(zone.radiusMeters || 500)),
+      JSON.stringify(zone.assignedEmployeeIds || []),
+      zone.isActive ? 1 : 0,
+      zone.allowOverride ? 1 : 0,
+      zone.workingHoursStart ?? null,
+      zone.workingHoursEnd ?? null,
+      toSqlTimestamp(zone.createdAt || now),
+      toSqlTimestamp(now),
+    ]
+  );
+}
 
 async function ensureAttendanceTable(): Promise<void> {
   if (attendanceTableEnsured) return;
@@ -5597,7 +5726,16 @@ function roleToDepartment(role: UserRole): string {
   if (role === "admin") return "Management";
   if (role === "hr") return "Human Resources";
   if (role === "manager") return "Operations";
-  return "Sales";
+  if (role === "employee") return "Office Employees";
+  return "On Field Employees";
+}
+
+function normalizeDepartmentForRole(role: UserRole, department?: string | null): string {
+  const normalized = normalizeWhitespace(department ?? "");
+  if (role === "salesperson" && (!normalized || normalized.toLowerCase() === "sales")) {
+    return roleToDepartment("salesperson");
+  }
+  return normalized || roleToDepartment(role);
 }
 
 function normalizeCompanyName(value: string): string {
@@ -5903,9 +6041,10 @@ async function listEmployeesFromMySql(): Promise<unknown[]> {
         companyName: company?.name,
         name: displayName,
         role,
-        department:
-          normalizeWhitespace(request.requestedDepartment || "") ||
-          (role === "admin" ? "Management" : isSalesRole(role) ? "Sales" : roleToDepartment(role)),
+        department: normalizeDepartmentForRole(
+          role,
+          request.requestedDepartment || (dolibarrUser as any)?.department
+        ),
         status: "active",
         email,
         phone: normalizeWhitespace(String(dolibarrUser?.user_mobile || dolibarrUser?.office_phone || "")),
@@ -6693,7 +6832,7 @@ function buildAuthRecordFromMySqlRow(row: any): AuthUserRecord | null {
     companyId: DEFAULT_COMPANY_ID,
     companyName: DEFAULT_COMPANY_NAME,
     companyIds: [DEFAULT_COMPANY_ID],
-    department: roleToDepartment(role),
+    department: normalizeDepartmentForRole(role),
     branch: "Main Branch",
     phone,
     joinDate: String(row?.datec ? new Date(row.datec).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10)),
@@ -6989,7 +7128,7 @@ function buildUserFromRegistration(payload: {
     role: payload.role,
     companyId: PENDING_COMPANY_ID,
     companyName: PENDING_COMPANY_NAME,
-    department: normalizeWhitespace(payload.department || roleToDepartment(payload.role)),
+    department: normalizeDepartmentForRole(payload.role, payload.department),
     branch: normalizeWhitespace(payload.branch || "Main Branch"),
     phone: normalizeWhitespace(payload.phone || "+91 00000 00000"),
     joinDate: now,
@@ -8253,7 +8392,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           })),
           role: finalRole,
           department:
-            normalizeWhitespace(currentRequest.requestedDepartment) || roleToDepartment(finalRole),
+            normalizeDepartmentForRole(finalRole, currentRequest.requestedDepartment),
           branch:
             normalizeWhitespace(currentRequest.requestedBranch) ||
             authRecord?.user.branch ||
@@ -9563,7 +9702,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(403).json({ message: "Not authorized for this user geofence data" });
       return;
     }
-    const geofences = await storage.listGeofencesForUser(userId);
+    const geofences = await listGeofencesForUserResolved(userId);
     res.json(geofences);
   });
 
@@ -9573,7 +9712,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({ message: "Missing mandatory geofence fields" });
       return;
     }
-    const created = await storage.createGeofence(payload);
+    const defaultCompanyId = await resolveRequestCompanyId(req);
+    const created = await storage.createGeofence({
+      ...payload,
+      companyId: payload.companyId ?? defaultCompanyId ?? undefined,
+      radiusMeters: Math.max(500, Math.round(payload.radiusMeters || 500)),
+      allowOverride: payload.allowOverride ?? false,
+      isActive: payload.isActive ?? true,
+    });
+    try {
+      await upsertGeofenceInMySql(created);
+    } catch (error) {
+      console.error("Failed to persist geofence in MySQL", error);
+    }
     res.status(201).json(created);
   });
 
@@ -9583,10 +9734,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(400).json({ message: "Geofence id is required" });
       return;
     }
-    const updated = await storage.updateGeofence(geofenceId, req.body as Partial<Geofence>);
+    const defaultCompanyId = await resolveRequestCompanyId(req);
+    const patch = req.body as Partial<Geofence>;
+    const updated = await storage.updateGeofence(geofenceId, {
+      ...patch,
+      companyId: patch.companyId ?? defaultCompanyId ?? undefined,
+      radiusMeters:
+        typeof patch.radiusMeters === "number"
+          ? Math.max(500, Math.round(patch.radiusMeters))
+          : patch.radiusMeters,
+    });
     if (!updated) {
       res.status(404).json({ message: "Geofence not found" });
       return;
+    }
+    try {
+      await upsertGeofenceInMySql(updated);
+    } catch (error) {
+      console.error("Failed to update geofence in MySQL", error);
     }
     res.json(updated);
   });
@@ -9601,7 +9766,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(403).json({ message: "Not authorized to post location" });
       return;
     }
-    const zones = await storage.listGeofencesForUser(sample.userId);
+    const zones = await listGeofencesForUserResolved(sample.userId);
     const status = resolveGeofenceStatus(
       {
         userId: sample.userId,
@@ -9667,7 +9832,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const zoneCache = new Map<string, Awaited<ReturnType<typeof storage.listGeofencesForUser>>>();
+    const zoneCache = new Map<string, Geofence[]>();
     let accepted = 0;
     for (const entry of validEntries) {
       if (!ensureUserMatch(req, entry.userId)) {
@@ -9676,7 +9841,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       let zones = zoneCache.get(entry.userId);
       if (!zones) {
-        zones = await storage.listGeofencesForUser(entry.userId);
+        zones = await listGeofencesForUserResolved(entry.userId);
         zoneCache.set(entry.userId, zones);
       }
       const status = resolveGeofenceStatus(
@@ -10210,10 +10375,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const userZones = await storage.listGeofencesForUser(payload.userId);
+    const userZones = await listGeofencesForUserResolved(payload.userId);
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
-    const allowOverride = zoneStatus.activeZone?.allowOverride ?? false;
-    const insideZone = zoneStatus.insideConfirmed;
+    const isEmployeeOfficeAttendance = req.auth?.role === "employee";
+    const isFieldSalespersonAttendance = req.auth?.role === "salesperson";
+    const allowOverride = isFieldSalespersonAttendance || (zoneStatus.activeZone?.allowOverride ?? false);
+    const insideZone = zoneStatus.insideConfirmed || (isEmployeeOfficeAttendance && zoneStatus.inside);
+
+    if (isEmployeeOfficeAttendance && userZones.length === 0) {
+      res.status(400).json({
+        message: "Company office location is not configured. Ask admin to set attendance location.",
+      });
+      return;
+    }
 
     if (zoneStatus.inside && !zoneStatus.insideConfirmed && !allowOverride) {
       await recordAnomaly({
@@ -10415,7 +10589,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const userZones = await storage.listGeofencesForUser(payload.userId);
+    const userZones = await listGeofencesForUserResolved(payload.userId);
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
     const now = new Date().toISOString();
     const companyId = await resolveRequestCompanyId(req);

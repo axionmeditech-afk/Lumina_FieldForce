@@ -21,26 +21,30 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
-import { evaluateGeofenceStatus } from "@/lib/geofence";
+import { evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
 import {
   addAttendance,
   addAttendanceAnomaly,
   addLocationLog,
   getAttendance,
+  getGeofences,
   getGeofencesForUser,
   getSettings,
   isCheckedIn,
   setCheckedIn,
   updateAttendanceApproval,
+  upsertGeofence,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import type { AttendanceRecord, Geofence, GeofenceEvaluation } from "@/lib/types";
 import {
   attendanceCheckIn,
   attendanceCheckOut,
+  createGeofence as createGeofenceRemote,
   flushAttendanceQueue,
   getUserGeofences,
   queueAttendanceRequest,
+  updateGeofence as updateGeofenceRemote,
 } from "@/lib/attendance-api";
 import {
   ensureBackgroundLocationTracking,
@@ -75,6 +79,7 @@ const TRACKING_DISTANCE_INTERVAL_METERS = 0;
 const ROUTE_POINT_PERSIST_INTERVAL_MS = 15 * 1000;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
+const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 
 type BannerType = "inside" | "outside" | "weak" | "boundary";
 
@@ -177,7 +182,7 @@ function resolveCheckedInFromRecords(records: AttendanceRecord[], userId: string
 }
 
 export default function AttendanceScreen() {
-  const { user, company } = useAuth();
+  const { user, company, updateCompany } = useAuth();
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
@@ -202,6 +207,8 @@ export default function AttendanceScreen() {
   const [permissionExplainerOpen, setPermissionExplainerOpen] = useState(true);
   const [autoPromptVisible, setAutoPromptVisible] = useState(false);
   const [locationReady, setLocationReady] = useState(false);
+  const [officeZone, setOfficeZone] = useState<Geofence | null>(null);
+  const [officeSaving, setOfficeSaving] = useState(false);
   const prevInsideRef = useRef(false);
   const locationWatchRef = useRef<{ remove: () => void } | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -221,6 +228,8 @@ export default function AttendanceScreen() {
 
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
   const isSalespersonFieldCheckIn = isSalesRole(user?.role);
+  const isEmployeeOfficeAttendance = user?.role === "employee";
+  const isAdminAttendanceManager = user?.role === "admin";
   const todayHeading = "Today's Log";
 
   const openAppSettings = useCallback(() => {
@@ -277,19 +286,32 @@ export default function AttendanceScreen() {
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
+    const cached = await getGeofencesForUser(user.id);
     try {
       const online = await isBackendReachable();
       if (online) {
         const zones = await getUserGeofences(user.id);
-        setGeofences(zones);
-        return;
+        if (zones.length > 0) {
+          setGeofences(zones);
+          return;
+        }
       }
     } catch {
       // fallback handled below
     }
-    const cached = await getGeofencesForUser(user.id);
     setGeofences(cached);
   }, [user?.id]);
+
+  const loadOfficeZone = useCallback(async () => {
+    if (!company?.id) return;
+    const zones = await getGeofences();
+    const expectedId = `office_${company.id}`;
+    const currentOfficeZone =
+      zones.find((zone) => zone.id === expectedId) ||
+      zones.find((zone) => zone.companyId === company.id && zone.name === `${company.name} Main Office`) ||
+      null;
+    setOfficeZone(currentOfficeZone);
+  }, [company?.id, company?.name]);
 
   useEffect(() => {
     let active = true;
@@ -471,7 +493,7 @@ export default function AttendanceScreen() {
 
         if (!fallbackLocation) {
           fallbackLocation = await getLastKnownLocationSafe({
-            maxAge: 20 * 60 * 1000,
+            maxAgeMs: 20 * 60 * 1000,
             requiredAccuracy: strict ? 450 : 1200,
           });
         }
@@ -570,8 +592,11 @@ export default function AttendanceScreen() {
     if (!user?.id) return;
     void loadBaseData();
     void loadGeofenceAssignments();
+    if (isAdminAttendanceManager) {
+      void loadOfficeZone();
+    }
     void flushAttendanceQueue();
-  }, [loadBaseData, loadGeofenceAssignments, user?.id]);
+  }, [isAdminAttendanceManager, loadBaseData, loadGeofenceAssignments, loadOfficeZone, user?.id]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -659,6 +684,73 @@ export default function AttendanceScreen() {
 
     return refreshLocation(false, { skipRoutePersistence: true });
   }, [refreshLocation]);
+
+  const saveOfficeLocationFromCurrentGps = useCallback(async () => {
+    if (!user?.id || !company?.id || !isAdminAttendanceManager) return;
+    setOfficeSaving(true);
+    try {
+      const evidence = await getFastAttendanceEvidence();
+      if (!evidence) {
+        Alert.alert("Location Unavailable", "Unable to fetch current office GPS location. Please try again.");
+        return;
+      }
+
+      const employees = await getEmployees();
+      const assignedEmployeeIds = employees
+        .filter((employee) => employee.role === "employee")
+        .map((employee) => employee.id);
+      const now = new Date().toISOString();
+      const nextOfficeZone: Geofence = {
+        id: officeZone?.id || `office_${company.id}`,
+        companyId: company.id,
+        name: `${company.name || "Company"} Main Office`,
+        radiusMeters: OFFICE_ATTENDANCE_RADIUS_METERS,
+        latitude: evidence.location.coords.latitude,
+        longitude: evidence.location.coords.longitude,
+        assignedEmployeeIds,
+        isActive: true,
+        allowOverride: false,
+        workingHoursStart: officeZone?.workingHoursStart ?? null,
+        workingHoursEnd: officeZone?.workingHoursEnd ?? null,
+        createdAt: officeZone?.createdAt || now,
+        updatedAt: now,
+      };
+
+      await upsertGeofence(nextOfficeZone);
+      try {
+        if (officeZone?.id) {
+          await updateGeofenceRemote(nextOfficeZone.id, nextOfficeZone);
+        } else {
+          await createGeofenceRemote(nextOfficeZone);
+        }
+      } catch {
+        await createGeofenceRemote(nextOfficeZone).catch(() => undefined);
+      }
+      await updateCompany({
+        attendanceZoneLabel: nextOfficeZone.name,
+        primaryBranch: company.primaryBranch || "Main Branch",
+      });
+      setOfficeZone(nextOfficeZone);
+      Alert.alert(
+        "Office Location Saved",
+        `Employee check-in is now enabled within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of ${nextOfficeZone.name}.`
+      );
+    } catch (error) {
+      Alert.alert(
+        "Office Location Failed",
+        error instanceof Error ? error.message : "Unable to save office location."
+      );
+    } finally {
+      setOfficeSaving(false);
+    }
+  }, [
+    company,
+    getFastAttendanceEvidence,
+    isAdminAttendanceManager,
+    officeZone,
+    updateCompany,
+    user?.id,
+  ]);
 
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout") => {
@@ -937,13 +1029,25 @@ export default function AttendanceScreen() {
     return `${Math.max(0, Math.floor(minutes / 60))}h ${Math.max(0, Math.floor(minutes % 60))}m`;
   }, [records]);
 
-  const bannerType: BannerType = evaluation.signalWeak ? "weak" : "inside";
+  const employeeHasOfficeZone = !isEmployeeOfficeAttendance || geofences.length > 0;
+  const employeeInsideOfficeZone = !isEmployeeOfficeAttendance || evaluation.inside;
+  const bannerType: BannerType = evaluation.signalWeak
+    ? "weak"
+    : evaluation.inside
+      ? isConfirmedInsideZone(evaluation)
+        ? "inside"
+        : "boundary"
+      : "outside";
   const banner = getBannerConfig(bannerType, colors);
   const zoneName = isSalespersonFieldCheckIn
     ? "Field Route Tracking"
-    : evaluation.activeZone?.name ?? "No zone";
-  const canCheckIn = locationReady;
-  const canSubmitAction = locationReady;
+    : evaluation.activeZone?.name ?? (isEmployeeOfficeAttendance ? "Office not set" : "No zone");
+  const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
+  const canSubmitAction = checkedInState ? locationReady : canCheckIn;
+  const employeeDistanceLabel =
+    isEmployeeOfficeAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
+      ? formatDistance(evaluation.nearestDistanceMeters)
+      : null;
 
   return (
     <AppCanvas>
@@ -954,6 +1058,8 @@ export default function AttendanceScreen() {
             <Text style={[styles.modalText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
                 ? "Tap Grant Permissions to allow location. Sales check-in will start live GPS route tracking with battery level."
+                : isEmployeeOfficeAttendance
+                  ? `Tap Grant Permissions to allow location. Check-in unlocks only within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of the company office.`
                 : "Tap Grant Permissions to allow location. Secure check-in uses face unlock, fingerprint, or device PIN/password verification and starts live location tracking."}
             </Text>
             <Pressable
@@ -1013,6 +1119,8 @@ export default function AttendanceScreen() {
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
           {isSalespersonFieldCheckIn
             ? `${company?.name || "Company"} time-based check-in with live GPS + battery tracking`
+            : isEmployeeOfficeAttendance
+              ? `${company?.name || "Company"} office check-in within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of assigned location`
             : `${company?.name || "Company"} device-authenticated secure check-in with live location tracking`}
         </Text>
 
@@ -1023,6 +1131,10 @@ export default function AttendanceScreen() {
             <Text style={[styles.bannerSubText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
                 ? "Route and battery tracking will start automatically after check-in."
+                : isEmployeeOfficeAttendance
+                  ? employeeDistanceLabel
+                    ? `Office distance: ${employeeDistanceLabel}. Check-in unlocks inside ${OFFICE_ATTENDANCE_RADIUS_METERS}m.`
+                    : "Waiting for assigned office location and live GPS."
                 : "Live route and battery tracking starts immediately after device authentication."}
             </Text>
           </View>
@@ -1043,15 +1155,54 @@ export default function AttendanceScreen() {
           </View>
         </View>
 
+        {isAdminAttendanceManager ? (
+          <View style={[styles.officePanel, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={styles.officePanelHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.officePanelTitle, { color: colors.text }]}>Employee Office Geofence</Text>
+                <Text style={[styles.officePanelMeta, { color: colors.textSecondary }]}>
+                  {officeZone
+                    ? `${officeZone.latitude.toFixed(5)}, ${officeZone.longitude.toFixed(5)} - ${officeZone.radiusMeters}m`
+                    : "No office location saved for this company"}
+                </Text>
+              </View>
+              <Ionicons name="business-outline" size={22} color={colors.primary} />
+            </View>
+            <Pressable
+              style={[
+                styles.officeButton,
+                { backgroundColor: colors.primary, opacity: officeSaving || !locationReady ? 0.72 : 1 },
+              ]}
+              onPress={saveOfficeLocationFromCurrentGps}
+              disabled={officeSaving || !locationReady}
+            >
+              {officeSaving ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="locate-outline" size={18} color="#fff" />
+                  <Text style={styles.officeButtonText}>
+                    {officeZone ? "Update Office Location" : "Set Current Location"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+          </View>
+        ) : null}
+
         <Animated.View style={pulseStyle}>
           <Pressable
             disabled={actionLoading || permissionLoading || permissionExplainerOpen || !canSubmitAction}
             onPress={() => void submitAttendance(checkedInState ? "checkout" : "checkin")}
-            style={({ pressed }) => [{ opacity: pressed || actionLoading ? 0.88 : 1 }]}
+            style={({ pressed }) => [
+              { opacity: pressed || actionLoading || !canSubmitAction ? 0.78 : 1 },
+            ]}
           >
             <LinearGradient
               colors={
-                checkedInState
+                !canSubmitAction
+                  ? ["#94a3b8", "#64748b"]
+                  : checkedInState
                   ? isDark
                     ? ["#7f1d1d", "#b91c1c"]
                     : ["#ef4444", "#dc2626"]
@@ -1079,7 +1230,11 @@ export default function AttendanceScreen() {
 
         {!checkedInState && !canCheckIn ? (
           <Text style={[styles.helperWarning, { color: colors.danger }]}>
-            Wait for location to be ready, then verify with face unlock, fingerprint, or device PIN/password to complete secure check-in.
+            {isEmployeeOfficeAttendance
+              ? !employeeHasOfficeZone
+                ? "Company office location is not configured yet. Ask admin to set it from Attendance."
+                : "Move within 500m of the assigned office location to enable employee check-in."
+              : "Wait for location to be ready, then verify with face unlock, fingerprint, or device PIN/password to complete secure check-in."}
           </Text>
         ) : null}
 
@@ -1303,6 +1458,41 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textTransform: "uppercase",
     letterSpacing: 0.6,
+  },
+  officePanel: {
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    gap: 12,
+    marginBottom: 14,
+  },
+  officePanelHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  officePanelTitle: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 14,
+  },
+  officePanelMeta: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 11.5,
+    marginTop: 3,
+  },
+  officeButton: {
+    minHeight: 42,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  officeButtonText: {
+    color: "#fff",
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
   },
   actionButton: {
     borderRadius: 18,

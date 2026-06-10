@@ -1176,8 +1176,16 @@ function roleToDepartment(role: UserRole): string {
   if (role === "admin") return "Management";
   if (role === "hr") return "Human Resources";
   if (role === "manager") return "Operations";
-  if (role === "employee") return "Sales";
-  return "Sales";
+  if (role === "employee") return "Office Employees";
+  return "On Field Employees";
+}
+
+function normalizeDepartmentForRole(role: UserRole, department?: string | null): string {
+  const normalized = normalizeWhitespace(department ?? "");
+  if (role === "salesperson" && (!normalized || normalized.toLowerCase() === "sales")) {
+    return roleToDepartment("salesperson");
+  }
+  return normalized || roleToDepartment(role);
 }
 
 function makeId(prefix: string): string {
@@ -1295,7 +1303,7 @@ function normalizeUserProfile(user: AppUser): AppUser {
     name: normalizeWhitespace(user.name),
     email: normalizeEmail(user.email),
     login: fallbackLogin || undefined,
-    department: normalizeWhitespace(user.department),
+    department: normalizeDepartmentForRole(user.role, user.department),
     branch: normalizeWhitespace(user.branch),
     phone: normalizePhone(user.phone),
     pincode: normalizePincode(user.pincode),
@@ -2283,7 +2291,7 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
       companyId: adminCompany.id,
       companyName: adminCompany.name,
       companyIds: [adminCompany.id],
-      department: normalizeWhitespace(input.department ?? "") || roleToDepartment("admin"),
+      department: normalizeDepartmentForRole("admin", input.department),
       branch: requestedBranch || adminCompany.primaryBranch,
       phone: normalizePhone(input.phone),
       pincode: requestedPincode,
@@ -2318,7 +2326,7 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
     companyId: fallbackCompany.id,
     companyName: fallbackCompany.name,
     companyIds: [fallbackCompany.id],
-    department: normalizeWhitespace(input.department ?? "") || roleToDepartment(role),
+    department: normalizeDepartmentForRole(role, input.department),
     branch: requestedBranch || fallbackCompany.primaryBranch,
     phone: normalizePhone(input.phone),
     pincode: requestedPincode,
@@ -2492,7 +2500,7 @@ export async function reviewUserAccessRequest(
     const approvedUser = normalizeUserProfile({
       ...currentAuth.user,
       role: finalApprovedRole,
-      department: roleToDepartment(finalApprovedRole),
+      department: normalizeDepartmentForRole(finalApprovedRole, currentRequest.requestedDepartment),
       companyId: primaryCompany.id,
       companyName: primaryCompany.name,
       companyIds: normalizedCompanyIds,

@@ -26,7 +26,7 @@ import type { UserRole } from "@/lib/types";
 
 const SIGNUP_ROLES: { label: string; value: UserRole }[] = [
   { label: "Admin", value: "admin" },
-  { label: "Sales", value: "salesperson" },
+  { label: "On Field Employee", value: "salesperson" },
   { label: "Employee", value: "employee" },
   { label: "Manager", value: "manager" },
   { label: "HR", value: "hr" },
@@ -56,7 +56,7 @@ export default function LoginScreen() {
     return "";
   }, [mode]);
   const selectedRoleLabel = useMemo(
-    () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "Sales",
+    () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "On Field Employee",
     [role]
   );
   const signInLabel = mode === "signin" ? "Email or Username" : "Email Address";

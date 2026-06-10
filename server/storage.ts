@@ -78,8 +78,9 @@ class MemStorage implements IStorage {
     const now = new Date().toISOString();
     const geofence: Geofence = {
       id: payload.id ?? randomUUID(),
+      companyId: payload.companyId,
       name: payload.name ?? "Unnamed Zone",
-      radiusMeters: payload.radiusMeters ?? 200,
+      radiusMeters: payload.radiusMeters ?? 500,
       latitude: payload.latitude ?? 0,
       longitude: payload.longitude ?? 0,
       assignedEmployeeIds: payload.assignedEmployeeIds ?? [],

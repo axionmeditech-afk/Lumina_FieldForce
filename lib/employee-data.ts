@@ -16,7 +16,6 @@ import {
   saveSalaryRecordRemote,
   updateSalaryStatusRemote,
 } from "@/lib/attendance-api";
-import { isSalesRole } from "@/lib/role-access";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
 function normalizeText(value: string | null | undefined): string {
@@ -31,13 +30,29 @@ function normalizeIdentity(value: string | null | undefined): string {
   return normalizeText(value).toLowerCase();
 }
 
+function getDepartmentForRole(role: AppUser["role"]): string {
+  if (role === "admin") return "Management";
+  if (role === "hr") return "Human Resources";
+  if (role === "manager") return "Operations";
+  if (role === "salesperson") return "On Field Employees";
+  return "Office Employees";
+}
+
+function normalizeDepartmentForRole(role: AppUser["role"], department?: string | null): string {
+  const normalized = normalizeText(department);
+  if (role === "salesperson" && (!normalized || normalized.toLowerCase() === "sales")) {
+    return getDepartmentForRole(role);
+  }
+  return normalized || getDepartmentForRole(role);
+}
+
 function userToEmployee(user: AppUser): Employee {
   return {
     id: user.id,
     companyId: user.companyId,
     name: user.name,
     role: user.role,
-    department: user.department,
+    department: normalizeDepartmentForRole(user.role, user.department),
     status: "active",
     email: user.email,
     phone: user.phone,
@@ -89,7 +104,7 @@ function mergeEmployees(
         name: existing.name || extra.name,
         email: existing.email || extra.email,
         role: existing.role || extra.role,
-        department: existing.department || extra.department,
+        department: normalizeDepartmentForRole(existing.role || extra.role, existing.department || extra.department),
         branch: existing.branch || extra.branch,
         phone: existing.phone || extra.phone,
         status: existing.status || extra.status,
@@ -166,7 +181,7 @@ function mapDolibarrUsersToEmployees(
         companyId,
         name,
         role,
-        department: role === "admin" ? "Management" : isSalesRole(role) ? "Sales" : "Sales",
+        department: normalizeDepartmentForRole(role),
         status: "active",
         email: email || `${idValue}@dolibarr.local`,
         phone: "",

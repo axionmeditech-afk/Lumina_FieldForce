@@ -1,7 +1,7 @@
 import type { UserRole } from "@/lib/types";
 
 export function isSalesRole(role?: UserRole | null): boolean {
-  return role === "salesperson" || role === "employee";
+  return role === "salesperson";
 }
 
 export function canAccessSalesModule(role?: UserRole | null): boolean {
