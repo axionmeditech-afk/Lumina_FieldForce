@@ -28,6 +28,12 @@ function toPort(value: string | undefined): number {
   return Math.trunc(parsed);
 }
 
+function toPositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
 function buildPoolConfig(): PoolOptions | null {
   const host = toNullable(process.env.MYSQL_HOST);
   const user = toNullable(process.env.MYSQL_USER);
@@ -51,6 +57,7 @@ function buildPoolConfig(): PoolOptions | null {
     database,
     port: toPort(process.env.MYSQL_PORT),
     connectionLimit: 12,
+    connectTimeout: toPositiveInteger(process.env.MYSQL_CONNECT_TIMEOUT_MS, 5000),
     waitForConnections: true,
     queueLimit: 0,
     namedPlaceholders: true,

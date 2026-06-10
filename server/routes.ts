@@ -6577,6 +6577,39 @@ function parseCompanyIdsFromJson(value: unknown, fallbackCompanyId: string): str
 }
 
 let authUsersStoreInitPromise: Promise<void> | null = null;
+let authUsersStoreLastFailedAt = 0;
+let authUsersStoreLastWarningAt = 0;
+
+function toPositiveDurationMs(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
+const AUTH_USERS_STORE_RETRY_MS = Math.max(
+  5000,
+  toPositiveDurationMs(process.env.AUTH_USERS_STORE_RETRY_MS, 30000)
+);
+const AUTH_USERS_STORE_WARNING_INTERVAL_MS = Math.max(
+  AUTH_USERS_STORE_RETRY_MS,
+  toPositiveDurationMs(process.env.AUTH_USERS_STORE_WARNING_INTERVAL_MS, 60000)
+);
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function warnAuthUsersHydrationFailure(error: unknown): void {
+  const now = Date.now();
+  if (now - authUsersStoreLastWarningAt < AUTH_USERS_STORE_WARNING_INTERVAL_MS) {
+    return;
+  }
+  authUsersStoreLastWarningAt = now;
+  console.warn(
+    "Unable to hydrate auth users from MySQL. Server will keep running and retry shortly:",
+    getErrorMessage(error)
+  );
+}
 
 async function hydrateAuthUsersFromMySql(): Promise<void> {
   if (!isMySqlStateEnabled()) return;
@@ -6612,9 +6645,18 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
 async function initAuthUsersStore(): Promise<void> {
   if (authUsersByEmail.size > 0) return;
   if (!isMySqlStateEnabled()) return;
+  if (authUsersStoreLastFailedAt > 0 && Date.now() - authUsersStoreLastFailedAt < AUTH_USERS_STORE_RETRY_MS) {
+    return;
+  }
   if (!authUsersStoreInitPromise) {
     authUsersStoreInitPromise = (async () => {
-      await hydrateAuthUsersFromMySql();
+      try {
+        await hydrateAuthUsersFromMySql();
+        authUsersStoreLastFailedAt = 0;
+      } catch (error) {
+        authUsersStoreLastFailedAt = Date.now();
+        warnAuthUsersHydrationFailure(error);
+      }
     })().finally(() => {
       authUsersStoreInitPromise = null;
     });
