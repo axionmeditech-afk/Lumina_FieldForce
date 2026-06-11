@@ -939,7 +939,7 @@ export default function AdminReportsScreen() {
           ) : (
             reportRows.map((row, index) => (
               <Animated.View
-                key={row.id}
+                key={`report_row_${row.id}_${index}`}
                 entering={FadeInDown.duration(260).delay(80 + index * 14)}
                 style={[
                   styles.reportCard,

@@ -963,11 +963,11 @@ export default function AdminStockScreen() {
 
           <Text style={[styles.fieldLabel, { color: colors.textSecondary }]}>Choose channel partner</Text>
           <View style={styles.chipRow}>
-            {stockists.map((stockist) => {
+            {stockists.map((stockist, index) => {
               const active = stockist.id === selectedStockistId;
               return (
                 <Pressable
-                  key={stockist.id}
+                  key={`stockist_chip_${stockist.id}_${index}`}
                   onPress={() => setSelectedStockistId(stockist.id)}
                   style={[
                     styles.chip,
@@ -1009,7 +1009,7 @@ export default function AdminStockScreen() {
             })}
           </View>
           <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
-            Sales are auto-deducted by pincode. Use "Sent to Salesperson" only for manual adjustments.
+            Sales are auto-deducted by pincode. Use &quot;Sent to Salesperson&quot; only for manual adjustments.
           </Text>
 
           <View style={styles.dropdownWrap}>
@@ -1151,11 +1151,11 @@ export default function AdminStockScreen() {
             <>
               <Text style={[styles.fieldLabel, { color: colors.textSecondary }]}>Select salesperson</Text>
               <View style={styles.chipRow}>
-                {employees.map((salesperson) => {
+                {employees.map((salesperson, index) => {
                   const active = salesperson.id === selectedSalespersonId;
                   return (
                     <Pressable
-                      key={salesperson.id}
+                      key={`salesperson_chip_${salesperson.id}_${index}`}
                       onPress={() => setSelectedSalespersonId(salesperson.id)}
                       style={[
                         styles.chip,
@@ -1383,8 +1383,8 @@ export default function AdminStockScreen() {
                       {summary.recentTransfers.length === 0 ? (
                         <Text style={[styles.detailEmpty, { color: colors.textTertiary }]}>No transfers yet.</Text>
                       ) : (
-                        summary.recentTransfers.map((entry) => (
-                          <View key={entry.id} style={styles.detailRow}>
+                        summary.recentTransfers.map((entry, index) => (
+                          <View key={`transfer_detail_${entry.id}_${index}`} style={styles.detailRow}>
                             <Text style={[styles.detailLabel, { color: colors.text }]}> 
                               {entry.type === "in" ? "IN" : "OUT"} � {entry.itemName}
                             </Text>

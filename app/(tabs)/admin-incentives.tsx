@@ -1010,9 +1010,9 @@ export default function AdminIncentivesScreen() {
                 <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No goal plans yet.</Text>
               </View>
             ) : (
-              goalPlans.map((plan) => (
+              goalPlans.map((plan, index) => (
                 <View
-                  key={plan.id}
+                  key={`goal_plan_${plan.id}_${index}`}
                   style={[styles.planCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
                 >
                   <View style={styles.planHeader}>
@@ -1213,9 +1213,9 @@ export default function AdminIncentivesScreen() {
                 <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No product plans yet.</Text>
               </View>
             ) : (
-              productPlans.map((plan) => (
+              productPlans.map((plan, index) => (
                 <View
-                  key={plan.id}
+                  key={`product_plan_${plan.id}_${index}`}
                   style={[styles.planCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
                 >
                   <View style={styles.planHeader}>

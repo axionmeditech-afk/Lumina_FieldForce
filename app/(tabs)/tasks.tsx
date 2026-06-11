@@ -701,9 +701,9 @@ export default function TasksScreen() {
                   Team
                 </Text>
                 <View style={styles.selectorRow}>
-                  {manageableTeams.map((team) => (
+                  {manageableTeams.map((team, index) => (
                     <Pressable
-                      key={team.id}
+                      key={`manageable_team_${team.id}_${index}`}
                       onPress={() => setSelectedTeamId(team.id)}
                       style={[
                         styles.selectorChip,

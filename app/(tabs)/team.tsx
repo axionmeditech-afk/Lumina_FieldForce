@@ -141,9 +141,9 @@ function TeamCard({
 
       <View style={styles.memberRow}>
         {memberDisplays.length > 0 ? (
-          memberDisplays.map((member) => (
+          memberDisplays.map((member, index) => (
             <View
-              key={member.id}
+              key={`team_member_chip_${member.id}_${index}`}
               style={[
                 styles.memberChip,
                 {
@@ -535,9 +535,9 @@ export default function TeamScreen() {
                   showsVerticalScrollIndicator={false}
                 >
                   {filteredEmployees.length > 0 ? (
-                    filteredEmployees.map((employee) => (
+                    filteredEmployees.map((employee, index) => (
                       <MemberPickerRow
-                        key={employee.id}
+                        key={`member_picker_${employee.id}_${index}`}
                         employee={employee}
                         selected={selectedMemberIds.includes(employee.id)}
                         colors={colors}

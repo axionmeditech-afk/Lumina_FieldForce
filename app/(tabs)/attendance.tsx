@@ -39,7 +39,7 @@ import {
   upsertGeofence,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import type { AttendanceRecord, Geofence, GeofenceEvaluation, LocationLog } from "@/lib/types";
+import type { AttendanceRecord, Employee, Geofence, GeofenceEvaluation, LocationLog } from "@/lib/types";
 import {
   attendanceCheckIn,
   attendanceCheckOut,
@@ -97,6 +97,18 @@ type OfficeLocationSearchResult = {
   address: string | null;
   latitude: number;
   longitude: number;
+};
+
+type AdminAttendanceStatus = {
+  id: string;
+  name: string;
+  role: string;
+  status: "checked_in" | "checked_out" | "no_activity";
+  checkInAt: string | null;
+  checkOutAt: string | null;
+  geofenceName: string | null;
+  locationLabel: string | null;
+  approvalStatus: AttendanceRecord["approvalStatus"] | null;
 };
 
 function getBannerConfig(type: BannerType, colors: ReturnType<typeof useAppTheme>["colors"]) {
@@ -227,12 +239,92 @@ function resolveCheckedInFromRecords(records: AttendanceRecord[], userId: string
   return latest.type === "checkin";
 }
 
+function formatAttendanceTime(value: string | null): string {
+  if (!value) return "--";
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function buildAdminAttendanceStatuses(
+  attendance: AttendanceRecord[],
+  employees: Employee[],
+  currentUserId?: string
+): AdminAttendanceStatus[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const employeeById = new Map<string, Employee>();
+  const employeeByName = new Map<string, Employee>();
+
+  for (const employee of employees) {
+    if (employee.role === "admin" || employee.role === "manager") continue;
+    employeeById.set(employee.id, employee);
+    employeeByName.set(employee.name.trim().toLowerCase(), employee);
+  }
+
+  for (const entry of attendance) {
+    if (entry.userId === currentUserId) continue;
+    if (!entry.timestamp.startsWith(today)) continue;
+    if (employeeById.has(entry.userId)) continue;
+    const nameKey = entry.userName.trim().toLowerCase();
+    if (employeeByName.has(nameKey)) continue;
+    const fallbackEmployee: Employee = {
+      id: entry.userId,
+      companyId: "",
+      name: entry.userName || "Employee",
+      role: "employee",
+      department: "Operations",
+      status: "active",
+      email: "",
+      phone: "",
+      branch: "Main Branch",
+      joinDate: today,
+    };
+    employeeById.set(fallbackEmployee.id, fallbackEmployee);
+    employeeByName.set(fallbackEmployee.name.trim().toLowerCase(), fallbackEmployee);
+  }
+
+  const rows = Array.from(employeeById.values()).map((employee): AdminAttendanceStatus => {
+    const nameKey = employee.name.trim().toLowerCase();
+    const entries = attendance
+      .filter(
+        (entry) =>
+          entry.timestamp.startsWith(today) &&
+          (entry.userId === employee.id || entry.userName.trim().toLowerCase() === nameKey)
+      )
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const latest = entries[entries.length - 1] ?? null;
+    const latestCheckIn = [...entries].reverse().find((entry) => entry.type === "checkin") ?? null;
+    const latestCheckOut = [...entries].reverse().find((entry) => entry.type === "checkout") ?? null;
+    const location = latest?.location ?? latestCheckIn?.location ?? latestCheckOut?.location ?? null;
+    const locationLabel = location ? `${location.lat.toFixed(5)}, ${location.lng.toFixed(5)}` : null;
+
+    return {
+      id: employee.id,
+      name: employee.name,
+      role: employee.role,
+      status: latest ? (latest.type === "checkin" ? "checked_in" : "checked_out") : "no_activity",
+      checkInAt: latestCheckIn?.timestamp ?? null,
+      checkOutAt: latestCheckOut?.timestamp ?? null,
+      geofenceName: latest?.geofenceName ?? latestCheckIn?.geofenceName ?? latestCheckOut?.geofenceName ?? null,
+      locationLabel,
+      approvalStatus: latestCheckIn?.approvalStatus ?? null,
+    };
+  });
+
+  const statusRank = { checked_in: 0, checked_out: 1, no_activity: 2 };
+  return rows.sort(
+    (a, b) =>
+      statusRank[a.status] - statusRank[b.status] ||
+      (b.checkInAt || b.checkOutAt || "").localeCompare(a.checkInAt || a.checkOutAt || "") ||
+      a.name.localeCompare(b.name)
+  );
+}
+
 export default function AttendanceScreen() {
   const { user, company, updateCompany } = useAuth();
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [pendingSignIns, setPendingSignIns] = useState<AttendanceRecord[]>([]);
+  const [adminAttendanceStatuses, setAdminAttendanceStatuses] = useState<AdminAttendanceStatus[]>([]);
   const [geofences, setGeofences] = useState<Geofence[]>([]);
   const [evaluation, setEvaluation] = useState<GeofenceEvaluation>({
     inside: false,
@@ -254,6 +346,7 @@ export default function AttendanceScreen() {
   const [autoPromptVisible, setAutoPromptVisible] = useState(false);
   const [locationReady, setLocationReady] = useState(false);
   const [officeZone, setOfficeZone] = useState<Geofence | null>(null);
+  const [officeLocationName, setOfficeLocationName] = useState("");
   const [officeSearchQuery, setOfficeSearchQuery] = useState("");
   const [officeSearchResults, setOfficeSearchResults] = useState<OfficeLocationSearchResult[]>([]);
   const [officeSearchBusy, setOfficeSearchBusy] = useState(false);
@@ -281,9 +374,11 @@ export default function AttendanceScreen() {
   }));
 
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
-  const isSalespersonFieldCheckIn = isSalesRole(user?.role);
   const isEmployeeOfficeAttendance = user?.role === "employee";
+  const isOfficeGeofenceAttendance = isEmployeeOfficeAttendance || geofences.length > 0;
+  const isSalespersonFieldCheckIn = isSalesRole(user?.role) && !isOfficeGeofenceAttendance;
   const isAdminAttendanceManager = user?.role === "admin";
+  const showAttendanceOfficeAdminPanel = false;
   const todayHeading = "Today's Log";
 
   const openAppSettings = useCallback(() => {
@@ -313,8 +408,14 @@ export default function AttendanceScreen() {
       (entry) => entry.userId === user.id || entry.userName === user.name
     );
     setRecords(userRecords);
-    if (canReviewSignIns) {
+    if (canReviewSignIns || isAdminAttendanceManager) {
       const employees = await getEmployees();
+      if (isAdminAttendanceManager) {
+        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(localAttendance, employees, user.id));
+      }
+      if (!canReviewSignIns) {
+        setPendingSignIns([]);
+      } else {
       const roleByEmployeeId = new Map(employees.map((employee) => [employee.id, employee.role]));
       const roleByName = new Map(employees.map((employee) => [employee.name, employee.role]));
       const pending = localAttendance
@@ -327,8 +428,10 @@ export default function AttendanceScreen() {
         })
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
       setPendingSignIns(pending);
+      }
     } else {
       setPendingSignIns([]);
+      setAdminAttendanceStatuses([]);
     }
     const derivedCheckIn = resolveCheckedInFromRecords(localAttendance, user.id, user.name);
     const resolvedCheckIn = derivedCheckIn ?? currentCheckIn;
@@ -336,7 +439,7 @@ export default function AttendanceScreen() {
     if (resolvedCheckIn !== currentCheckIn) {
       await setCheckedIn(resolvedCheckIn);
     }
-  }, [canReviewSignIns, user?.id, user?.name]);
+  }, [canReviewSignIns, isAdminAttendanceManager, user?.id, user?.name]);
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
@@ -357,7 +460,7 @@ export default function AttendanceScreen() {
   }, [user?.id]);
 
   const loadLatestStoredLocation = useCallback(async () => {
-    if (!user?.id || !isEmployeeOfficeAttendance) {
+    if (!user?.id || !isOfficeGeofenceAttendance) {
       setLastStoredLocationLog(null);
       return;
     }
@@ -370,7 +473,7 @@ export default function AttendanceScreen() {
     } catch {
       setLastStoredLocationLog(null);
     }
-  }, [isEmployeeOfficeAttendance, user?.id]);
+  }, [isOfficeGeofenceAttendance, user?.id]);
 
   const loadOfficeZone = useCallback(async () => {
     if (!company?.id) return;
@@ -382,6 +485,7 @@ export default function AttendanceScreen() {
       null;
     setOfficeZone(currentOfficeZone);
     if (currentOfficeZone) {
+      setOfficeLocationName(currentOfficeZone.name);
       setOfficeLocationDraft({
         id: currentOfficeZone.id,
         label: currentOfficeZone.name,
@@ -690,7 +794,7 @@ export default function AttendanceScreen() {
   useEffect(() => {
     if (!user?.id) return;
     const shouldTrackEmployeeOffice =
-      isEmployeeOfficeAttendance && geofences.length > 0 && !checkedInState;
+      isOfficeGeofenceAttendance && geofences.length > 0 && !checkedInState;
     const shouldTrackLive = checkedInState || !locationReady || shouldTrackEmployeeOffice;
     if (shouldTrackLive) {
       void refreshLocation();
@@ -705,7 +809,7 @@ export default function AttendanceScreen() {
     beginTracking,
     checkedInState,
     geofences.length,
-    isEmployeeOfficeAttendance,
+    isOfficeGeofenceAttendance,
     locationReady,
     refreshLocation,
     stopTracking,
@@ -989,11 +1093,10 @@ export default function AttendanceScreen() {
       const currentLocationDraft: OfficeLocationSearchResult = {
         ...currentLocation,
         id: "admin_current_location_draft",
-        label: `${company?.name || "Company"} Main Office`,
+        label: officeLocationName.trim() || `${company?.name || "Company"} Main Office`,
       };
       setAdminCurrentLocation(currentLocation);
       setOfficeLocationDraft(currentLocationDraft);
-      setOfficeSearchQuery(currentLocationDraft.label);
     } catch (error) {
       Alert.alert(
         "Current Location Failed",
@@ -1002,7 +1105,7 @@ export default function AttendanceScreen() {
     } finally {
       setAdminCurrentLocationBusy(false);
     }
-  }, [company?.name, isAdminAttendanceManager, showPermissionBlockedAlert]);
+  }, [company?.name, isAdminAttendanceManager, officeLocationName, showPermissionBlockedAlert]);
 
   const saveOfficeLocation = useCallback(async (selectedLocation: OfficeLocationSearchResult) => {
     if (!user?.id || !company?.id || !isAdminAttendanceManager) return;
@@ -1013,10 +1116,11 @@ export default function AttendanceScreen() {
         .filter((employee) => employee.role === "employee")
         .map((employee) => employee.id);
       const now = new Date().toISOString();
+      const officeName = officeLocationName.trim() || selectedLocation.label || `${company.name || "Company"} Main Office`;
       const nextOfficeZone: Geofence = {
         id: officeZone?.id || `office_${company.id}`,
         companyId: company.id,
-        name: selectedLocation.label || `${company.name || "Company"} Main Office`,
+        name: officeName,
         radiusMeters: OFFICE_ATTENDANCE_RADIUS_METERS,
         latitude: selectedLocation.latitude,
         longitude: selectedLocation.longitude,
@@ -1044,9 +1148,12 @@ export default function AttendanceScreen() {
         primaryBranch: company.primaryBranch || "Main Branch",
       });
       setOfficeZone(nextOfficeZone);
-      setOfficeSearchQuery(selectedLocation.label);
+      setOfficeLocationName(officeName);
       setOfficeSearchResults([]);
-      setOfficeLocationDraft(selectedLocation);
+      setOfficeLocationDraft({
+        ...selectedLocation,
+        label: officeName,
+      });
       Alert.alert(
         "Office Location Saved",
         `Employee check-in is now enabled within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of ${nextOfficeZone.name}.`
@@ -1062,6 +1169,7 @@ export default function AttendanceScreen() {
   }, [
     company,
     isAdminAttendanceManager,
+    officeLocationName,
     officeZone,
     updateCompany,
     user?.id,
@@ -1070,6 +1178,7 @@ export default function AttendanceScreen() {
   const selectOfficeLocationDraft = useCallback((result: OfficeLocationSearchResult) => {
     setOfficeLocationDraft(result);
     setOfficeSearchQuery(result.label);
+    setOfficeLocationName((current) => current.trim() || result.label);
     setOfficeSearchResults([]);
   }, []);
 
@@ -1352,8 +1461,8 @@ export default function AttendanceScreen() {
     return `${Math.max(0, Math.floor(minutes / 60))}h ${Math.max(0, Math.floor(minutes % 60))}m`;
   }, [records]);
 
-  const employeeHasOfficeZone = !isEmployeeOfficeAttendance || geofences.length > 0;
-  const employeeInsideOfficeZone = !isEmployeeOfficeAttendance || evaluation.inside;
+  const employeeHasOfficeZone = !isOfficeGeofenceAttendance || geofences.length > 0;
+  const employeeInsideOfficeZone = !isOfficeGeofenceAttendance || evaluation.inside;
   const bannerType: BannerType = evaluation.signalWeak
     ? "weak"
     : evaluation.inside
@@ -1364,24 +1473,28 @@ export default function AttendanceScreen() {
   const banner = getBannerConfig(bannerType, colors);
   const zoneName = isSalespersonFieldCheckIn
     ? "Field Route Tracking"
-    : evaluation.activeZone?.name ?? (isEmployeeOfficeAttendance ? "Office not set" : "No zone");
+    : evaluation.activeZone?.name ?? (isOfficeGeofenceAttendance ? "Office not set" : "No zone");
   const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
   const canSubmitAction = checkedInState ? locationReady : canCheckIn;
   const employeeDistanceLabel =
-    isEmployeeOfficeAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
+    isOfficeGeofenceAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
       ? formatDistance(evaluation.nearestDistanceMeters)
       : null;
   const lastStoredLocationLabel =
-    isEmployeeOfficeAttendance && lastStoredLocationLog
+    isOfficeGeofenceAttendance && lastStoredLocationLog
       ? `${lastStoredLocationLog.latitude.toFixed(5)}, ${lastStoredLocationLog.longitude.toFixed(5)}`
       : null;
+  const adminCheckedInCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_in").length;
+  const adminCheckedOutCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_out").length;
+  const adminNoActivityCount = adminAttendanceStatuses.filter((entry) => entry.status === "no_activity").length;
   const officeMapPlannedStops = useMemo<PlannedStopPoint[]>(() => {
     const stops: PlannedStopPoint[] = [];
     if (officeLocationDraft) {
+      const officeMarkerName = officeLocationName.trim() || officeLocationDraft.label;
       stops.push({
         id: "attendance_office_location",
-        label: officeLocationDraft.label,
-        customerName: officeLocationDraft.label,
+        label: officeMarkerName,
+        customerName: officeMarkerName,
         latitude: officeLocationDraft.latitude,
         longitude: officeLocationDraft.longitude,
         status: "in_progress",
@@ -1410,7 +1523,7 @@ export default function AttendanceScreen() {
       });
     }
     return stops;
-  }, [adminCurrentLocation, officeLocationDraft]);
+  }, [adminCurrentLocation, officeLocationDraft, officeLocationName]);
   const officeLocationToSave = officeLocationDraft ?? adminCurrentLocation;
 
   return (
@@ -1422,7 +1535,7 @@ export default function AttendanceScreen() {
             <Text style={[styles.modalText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
                 ? "Tap Grant Permissions to allow location. Sales check-in will start live GPS route tracking with battery level."
-                : isEmployeeOfficeAttendance
+                : isOfficeGeofenceAttendance
                   ? `Tap Grant Permissions to allow location. Check-in unlocks only within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of the company office.`
                 : "Tap Grant Permissions to allow location. Secure check-in uses face unlock, fingerprint, or device PIN/password verification and starts live location tracking."}
             </Text>
@@ -1483,11 +1596,120 @@ export default function AttendanceScreen() {
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
           {isSalespersonFieldCheckIn
             ? `${company?.name || "Company"} time-based check-in with live GPS + battery tracking`
-            : isEmployeeOfficeAttendance
+            : isOfficeGeofenceAttendance
               ? `${company?.name || "Company"} office check-in within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of assigned location`
             : `${company?.name || "Company"} device-authenticated secure check-in with live location tracking`}
         </Text>
 
+        {isAdminAttendanceManager ? (
+          <>
+          <View style={[styles.adminNoticePanel, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={[styles.adminNoticeIcon, { backgroundColor: colors.primary + "18" }]}>
+              <Ionicons name="shield-checkmark-outline" size={24} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.adminNoticeTitle, { color: colors.text }]}>Admin attendance is not required</Text>
+              <Text style={[styles.adminNoticeText, { color: colors.textSecondary }]}>
+                Employee check-in is controlled by company geofences configured during company creation.
+              </Text>
+            </View>
+          </View>
+          <View style={styles.adminAttendanceSection}>
+            <View style={styles.adminAttendanceHeader}>
+              <Text style={[styles.logsTitle, { color: colors.text, marginTop: 0, marginBottom: 0 }]}>
+                Team Attendance Today
+              </Text>
+              <Pressable
+                style={[styles.refreshButton, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
+                onPress={() => void loadBaseData()}
+              >
+                <Ionicons name="refresh-outline" size={16} color={colors.primary} />
+              </Pressable>
+            </View>
+            <View style={styles.adminSummaryRow}>
+              <View style={[styles.adminSummaryChip, { backgroundColor: colors.success + "16", borderColor: colors.success + "55" }]}>
+                <Text style={[styles.adminSummaryValue, { color: colors.success }]}>{adminCheckedInCount}</Text>
+                <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>Checked In</Text>
+              </View>
+              <View style={[styles.adminSummaryChip, { backgroundColor: colors.primary + "14", borderColor: colors.primary + "44" }]}>
+                <Text style={[styles.adminSummaryValue, { color: colors.primary }]}>{adminCheckedOutCount}</Text>
+                <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>Checked Out</Text>
+              </View>
+              <View style={[styles.adminSummaryChip, { backgroundColor: colors.textTertiary + "12", borderColor: colors.border }]}>
+                <Text style={[styles.adminSummaryValue, { color: colors.textSecondary }]}>{adminNoActivityCount}</Text>
+                <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>No Activity</Text>
+              </View>
+            </View>
+            <View style={[styles.logList, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+              {adminAttendanceStatuses.length === 0 ? (
+                <View style={styles.emptyLog}>
+                  <Ionicons name="people-outline" size={20} color={colors.textTertiary} />
+                  <Text style={[styles.emptyLogText, { color: colors.textSecondary }]}>
+                    No employee attendance data available yet.
+                  </Text>
+                </View>
+              ) : (
+                adminAttendanceStatuses.map((entry, index) => {
+                  const isCheckedIn = entry.status === "checked_in";
+                  const isCheckedOut = entry.status === "checked_out";
+                  const statusColor = isCheckedIn
+                    ? colors.success
+                    : isCheckedOut
+                      ? colors.primary
+                      : colors.textTertiary;
+                  const statusLabel = isCheckedIn ? "Checked in" : isCheckedOut ? "Checked out" : "No activity";
+                  const statusIcon = isCheckedIn
+                    ? "log-in-outline"
+                    : isCheckedOut
+                      ? "log-out-outline"
+                      : "time-outline";
+                  const metaParts = [
+                    entry.checkInAt ? `In ${formatAttendanceTime(entry.checkInAt)}` : null,
+                    entry.checkOutAt ? `Out ${formatAttendanceTime(entry.checkOutAt)}` : null,
+                    entry.geofenceName ?? entry.locationLabel,
+                  ].filter(Boolean);
+                  const approvalLabel =
+                    entry.approvalStatus === "pending"
+                      ? "Pending approval"
+                      : entry.approvalStatus === "rejected"
+                        ? "Rejected"
+                        : null;
+                  return (
+                    <View
+                      key={`admin_attendance_${entry.id}_${index}`}
+                      style={[
+                        styles.adminAttendanceRow,
+                        index < adminAttendanceStatuses.length - 1 && {
+                          borderBottomColor: colors.borderLight,
+                          borderBottomWidth: 1,
+                        },
+                      ]}
+                    >
+                      <View style={[styles.adminStatusIcon, { backgroundColor: statusColor + "18" }]}>
+                        <Ionicons name={statusIcon as never} size={18} color={statusColor} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={styles.adminAttendanceNameRow}>
+                          <Text style={[styles.logType, { color: colors.text }]}>{entry.name}</Text>
+                          <Text style={[styles.adminRolePill, { color: colors.textSecondary, borderColor: colors.border }]}>
+                            {entry.role.toUpperCase()}
+                          </Text>
+                        </View>
+                        <Text style={[styles.logMeta, { color: colors.textSecondary }]}>
+                          {metaParts.length ? metaParts.join(" | ") : "No check-in or checkout today"}
+                          {approvalLabel ? ` | ${approvalLabel}` : ""}
+                        </Text>
+                      </View>
+                      <Text style={[styles.adminStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                    </View>
+                  );
+                })
+              )}
+            </View>
+          </View>
+          </>
+        ) : (
+          <>
         <View style={[styles.banner, { backgroundColor: banner.bg, borderColor: banner.border }]}>
           <Ionicons name={banner.icon as never} size={18} color={banner.text} />
           <View style={{ flex: 1 }}>
@@ -1495,7 +1717,7 @@ export default function AttendanceScreen() {
             <Text style={[styles.bannerSubText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
                 ? "Route and battery tracking will start automatically after check-in."
-                : isEmployeeOfficeAttendance
+                : isOfficeGeofenceAttendance
                   ? employeeDistanceLabel
                     ? `Office distance: ${employeeDistanceLabel}. Last GPS: ${lastStoredLocationLabel ?? "saving..."}.`
                     : lastStoredLocationLabel
@@ -1521,7 +1743,7 @@ export default function AttendanceScreen() {
           </View>
         </View>
 
-        {isAdminAttendanceManager ? (
+        {showAttendanceOfficeAdminPanel ? (
           <View style={[styles.officePanel, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <View style={styles.officePanelHeader}>
               <View style={{ flex: 1 }}>
@@ -1533,6 +1755,17 @@ export default function AttendanceScreen() {
                 </Text>
               </View>
               <Ionicons name="business-outline" size={22} color={colors.primary} />
+            </View>
+            <View style={[styles.officeNameInputWrap, { borderColor: colors.border, backgroundColor: colors.surfaceSecondary }]}>
+              <Ionicons name="business-outline" size={18} color={colors.textTertiary} />
+              <TextInput
+                style={[styles.officeNameInput, { color: colors.text }]}
+                placeholder="Office display name"
+                placeholderTextColor={colors.textTertiary}
+                value={officeLocationName}
+                onChangeText={setOfficeLocationName}
+                autoCorrect={false}
+              />
             </View>
             <View style={styles.officeSearchRow}>
               <View style={[styles.officeSearchInputWrap, { borderColor: colors.border, backgroundColor: colors.surfaceSecondary }]}>
@@ -1577,7 +1810,7 @@ export default function AttendanceScreen() {
               <View style={[styles.officeResults, { borderColor: colors.borderLight }]}>
                 {officeSearchResults.map((result, index) => (
                   <Pressable
-                    key={result.id}
+                    key={`office_result_${result.id}_${result.latitude.toFixed(6)}_${result.longitude.toFixed(6)}_${index}`}
                     style={[
                       styles.officeResultRow,
                       index < officeSearchResults.length - 1 && { borderBottomColor: colors.borderLight, borderBottomWidth: 1 },
@@ -1705,13 +1938,15 @@ export default function AttendanceScreen() {
 
         {!checkedInState && !canCheckIn ? (
           <Text style={[styles.helperWarning, { color: colors.danger }]}>
-            {isEmployeeOfficeAttendance
+            {isOfficeGeofenceAttendance
               ? !employeeHasOfficeZone
-                ? "Company office location is not configured yet. Ask admin to set it from Attendance."
+                ? "Company office location is not configured yet. Ask admin to add office coordinates in Company creation."
                 : "Move within 500m of the assigned office location to enable employee check-in."
               : "Wait for location to be ready, then verify with face unlock, fingerprint, or device PIN/password to complete secure check-in."}
           </Text>
         ) : null}
+          </>
+        )}
 
         {canReviewSignIns ? (
           <View style={styles.approvalSection}>
@@ -1800,6 +2035,8 @@ export default function AttendanceScreen() {
           </View>
         ) : null}
 
+        {!isAdminAttendanceManager ? (
+          <>
         <Text style={[styles.logsTitle, { color: colors.text }]}>{todayHeading}</Text>
         <View style={[styles.logList, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
           {records.length === 0 ? (
@@ -1820,7 +2057,7 @@ export default function AttendanceScreen() {
                       : null;
               return (
                 <View
-                  key={entry.id}
+                  key={`attendance_record_${entry.id}_${idx}`}
                   style={[
                     styles.logRow,
                     idx < Math.min(records.length, 8) - 1 && { borderBottomWidth: 1, borderBottomColor: colors.borderLight },
@@ -1861,6 +2098,8 @@ export default function AttendanceScreen() {
             })
           )}
         </View>
+          </>
+        ) : null}
 
         <View style={{ height: 40 }} />
       </ScrollView>
@@ -1912,6 +2151,105 @@ const styles = StyleSheet.create({
     marginTop: -6,
     marginBottom: 10,
   },
+  adminNoticePanel: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 16,
+  },
+  adminNoticeIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  adminNoticeTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 16,
+    marginBottom: 3,
+  },
+  adminNoticeText: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  adminAttendanceSection: {
+    marginBottom: 18,
+  },
+  adminAttendanceHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  refreshButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  adminSummaryRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 10,
+  },
+  adminSummaryChip: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+  },
+  adminSummaryValue: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 18,
+  },
+  adminSummaryLabel: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 10,
+    marginTop: 2,
+    textTransform: "uppercase",
+  },
+  adminAttendanceRow: {
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  adminStatusIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  adminAttendanceNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginBottom: 2,
+  },
+  adminRolePill: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 9,
+  },
+  adminStatusText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 11,
+    textAlign: "right",
+    maxWidth: 78,
+  },
   statRow: {
     flexDirection: "row",
     gap: 10,
@@ -1954,6 +2292,21 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     fontSize: 11.5,
     marginTop: 3,
+  },
+  officeNameInputWrap: {
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  officeNameInput: {
+    flex: 1,
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+    paddingVertical: 0,
   },
   officeSearchRow: {
     flexDirection: "row",

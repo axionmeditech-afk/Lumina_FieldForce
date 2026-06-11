@@ -6219,9 +6219,9 @@ export default function SalesScreen() {
                           { borderColor: colors.border, backgroundColor: colors.backgroundElevated },
                         ]}
                       >
-                        {routeSearchResults.map((result) => (
+                        {routeSearchResults.map((result, index) => (
                           <Pressable
-                            key={result.id}
+                            key={`route_search_result_${result.id}_${index}`}
                             onPress={() => handleAddRouteStop(result)}
                             style={({ pressed }) => [
                               styles.routeSearchResultRow,
@@ -6348,7 +6348,7 @@ export default function SalesScreen() {
                       {routePlanStops.length ? (
                         routePlanStops.map((stop, index) => (
                           <View
-                            key={stop.id}
+                            key={`route_plan_stop_${stop.id}_${index}`}
                             style={[
                               styles.routeDraftRow,
                               index < routePlanStops.length - 1 && {
@@ -6919,7 +6919,7 @@ export default function SalesScreen() {
                           : null;
                     return (
                       <View
-                        key={task.id}
+                        key={`todays_visit_task_${task.id}_${idx}`}
                         style={[
                           styles.visitRow,
                           idx < todaysVisitTasks.length - 1 && {

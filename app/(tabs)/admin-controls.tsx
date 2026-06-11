@@ -17,6 +17,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
+import * as ExpoLocation from "expo-location";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { useFocusEffect } from "expo-router";
 import { AppCanvas } from "@/components/AppCanvas";
@@ -36,11 +37,13 @@ import {
   removeCompanyProfile,
   reviewUserAccessRequest,
   updateSettings,
+  upsertGeofence,
 } from "@/lib/storage";
 import type {
   AppNotification,
   CompanyProfile,
   Employee,
+  Geofence,
   NotificationAudience,
   StockistProfile,
   UserRole,
@@ -49,12 +52,62 @@ import type {
 import { canAccessAdminControls, isSalesRole } from "@/lib/role-access";
 import {
   createAdminUser,
+  createGeofence as createGeofenceRemote,
   getAdminAccessRequests,
   reviewAdminAccessRequest,
+  searchMapplsAutosuggest,
+  searchMapplsTextSearch,
   syncApprovedEmployeeToDolibarr,
+  updateGeofence as updateGeofenceRemote,
 } from "@/lib/attendance-api";
+import {
+  ensureLocationServicesEnabled,
+  requestLocationPermissionBundle,
+} from "@/lib/location-service";
 
 const ASSIGNABLE_ACCESS_ROLES: UserRole[] = ["salesperson", "employee", "manager", "hr"];
+const COMPANY_OFFICE_RADIUS_METERS = 500;
+const COMPANY_OFFICE_SEARCH_LIMIT = 12;
+const COMPANY_OFFICE_SEARCH_MIN_CHARS = 2;
+const COMPANY_OFFICE_SEARCH_DEBOUNCE_MS = 400;
+
+type CompanyOfficeLocation = {
+  id: string;
+  label: string;
+  address: string | null;
+  latitude: number;
+  longitude: number;
+};
+
+function isFiniteCoordinate(latitude: unknown, longitude: unknown): boolean {
+  return (
+    typeof latitude === "number" &&
+    typeof longitude === "number" &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    Math.abs(latitude) <= 90 &&
+    Math.abs(longitude) <= 180
+  );
+}
+
+function makeOfficeLocationId(prefix: string, index: number): string {
+  return `${prefix}_${Date.now()}_${index}`;
+}
+
+function getOfficeLocationKey(result: CompanyOfficeLocation): string {
+  return `${result.latitude.toFixed(6)}:${result.longitude.toFixed(6)}:${result.label.toLowerCase()}`;
+}
+
+function mergeOfficeLocationResults(
+  current: CompanyOfficeLocation[],
+  next: CompanyOfficeLocation[]
+): CompanyOfficeLocation[] {
+  const byKey = new Map<string, CompanyOfficeLocation>();
+  for (const item of [...current, ...next]) {
+    byKey.set(getOfficeLocationKey(item), item);
+  }
+  return Array.from(byKey.values()).slice(0, COMPANY_OFFICE_SEARCH_LIMIT);
+}
 
 function normalizeEmailKey(value: string): string {
   return value.trim().toLowerCase();
@@ -122,6 +175,14 @@ export default function AdminControlsScreen() {
   const [newCompanyName, setNewCompanyName] = useState("");
   const [newCompanyBranch, setNewCompanyBranch] = useState("");
   const [newCompanyHeadquarters, setNewCompanyHeadquarters] = useState("");
+  const [newCompanyOfficeName, setNewCompanyOfficeName] = useState("");
+  const [companyOfficeSearchQuery, setCompanyOfficeSearchQuery] = useState("");
+  const [companyOfficeSearchResults, setCompanyOfficeSearchResults] = useState<CompanyOfficeLocation[]>([]);
+  const [companyOfficeSearchBusy, setCompanyOfficeSearchBusy] = useState(false);
+  const [companyOfficeCurrentBusy, setCompanyOfficeCurrentBusy] = useState(false);
+  const [selectedCompanyOfficeLocation, setSelectedCompanyOfficeLocation] =
+    useState<CompanyOfficeLocation | null>(null);
+  const [, setCompanyOfficeSearchRequestId] = useState(0);
   const [annTitle, setAnnTitle] = useState("");
   const [annBody, setAnnBody] = useState("");
   const [audience, setAudience] = useState<NotificationAudience>("all");
@@ -453,11 +514,237 @@ export default function AdminControlsScreen() {
     }
   }, [annBody, annTitle, audience, busyAnnouncement, loadData, user]);
 
+  const selectCompanyOfficeLocation = useCallback((location: CompanyOfficeLocation) => {
+    setSelectedCompanyOfficeLocation(location);
+    setCompanyOfficeSearchQuery(location.label);
+    setNewCompanyOfficeName((current) => current.trim() || location.label);
+    setCompanyOfficeSearchResults([]);
+  }, []);
+
+  const searchCompanyOfficeLocations = useCallback(async (
+    queryInput?: string,
+    options?: { showAlerts?: boolean; allowDeviceGeocode?: boolean }
+  ) => {
+    const query = (queryInput ?? companyOfficeSearchQuery).trim();
+    const showAlerts = options?.showAlerts ?? false;
+    const allowDeviceGeocode = options?.allowDeviceGeocode ?? showAlerts;
+    const requestId = Date.now();
+    setCompanyOfficeSearchRequestId(requestId);
+
+    if (query.length < COMPANY_OFFICE_SEARCH_MIN_CHARS) {
+      setCompanyOfficeSearchResults([]);
+      if (showAlerts) {
+        Alert.alert("Search Required", "Enter at least 2 characters of the office name, area, landmark, or address.");
+      }
+      return;
+    }
+
+    setCompanyOfficeSearchBusy(true);
+    try {
+      let results: CompanyOfficeLocation[] = [];
+      let mapplsFailureMessage = "";
+
+      try {
+        const autosuggest = await searchMapplsAutosuggest(query, {
+          region: "ind",
+          limit: COMPANY_OFFICE_SEARCH_LIMIT,
+        });
+        const autosuggestResults = (autosuggest.suggestions || [])
+          .map((suggestion, index): CompanyOfficeLocation | null => {
+            const latitude = suggestion.latitude;
+            const longitude = suggestion.longitude;
+            if (!isFiniteCoordinate(latitude, longitude)) return null;
+            return {
+              id: suggestion.id || makeOfficeLocationId("company_office_mappls", index),
+              label: suggestion.label,
+              address: suggestion.address,
+              latitude: latitude as number,
+              longitude: longitude as number,
+            };
+          })
+          .filter((item): item is CompanyOfficeLocation => Boolean(item));
+        results = mergeOfficeLocationResults(results, autosuggestResults);
+
+        const textSearch = await searchMapplsTextSearch(query, {
+          region: "ind",
+          limit: COMPANY_OFFICE_SEARCH_LIMIT,
+        });
+        const textSearchResults = (textSearch.suggestions || [])
+          .map((suggestion, index): CompanyOfficeLocation | null => {
+            const latitude = suggestion.latitude;
+            const longitude = suggestion.longitude;
+            if (!isFiniteCoordinate(latitude, longitude)) return null;
+            return {
+              id: suggestion.id || makeOfficeLocationId("company_office_mappls_text", index),
+              label: suggestion.label,
+              address: suggestion.address,
+              latitude: latitude as number,
+              longitude: longitude as number,
+            };
+          })
+          .filter((item): item is CompanyOfficeLocation => Boolean(item));
+        results = mergeOfficeLocationResults(results, textSearchResults);
+
+        if (!results.length && textSearch.error) {
+          mapplsFailureMessage = textSearch.error;
+        } else if (!results.length && autosuggest.error) {
+          mapplsFailureMessage = autosuggest.error;
+        }
+      } catch (error) {
+        mapplsFailureMessage =
+          error instanceof Error ? error.message : "Mappls place search is unavailable right now.";
+      }
+
+      try {
+        if (query.length >= 4 && results.length < COMPANY_OFFICE_SEARCH_LIMIT) {
+          const params = new URLSearchParams({
+            q: query,
+            format: "jsonv2",
+            addressdetails: "1",
+            limit: String(COMPANY_OFFICE_SEARCH_LIMIT),
+            countrycodes: "in",
+          });
+          const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              "Accept-Language": "en-IN,en",
+              "User-Agent": "LuminaFieldForce/1.0 (company-office-geofence)",
+            },
+          });
+          if (response.ok) {
+            const payload = (await response.json()) as {
+              lat?: string;
+              lon?: string;
+              name?: string;
+              display_name?: string;
+            }[];
+            const osmResults = payload
+              .map((item, index): CompanyOfficeLocation | null => {
+                const latitude = Number.parseFloat(item.lat || "");
+                const longitude = Number.parseFloat(item.lon || "");
+                if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+                const displayName = (item.display_name || "").trim();
+                return {
+                  id: makeOfficeLocationId("company_office_osm", index),
+                  label: (item.name || "").trim() || displayName.split(",")[0]?.trim() || query,
+                  address: displayName || null,
+                  latitude,
+                  longitude,
+                };
+              })
+              .filter((item): item is CompanyOfficeLocation => Boolean(item));
+            results = mergeOfficeLocationResults(results, osmResults);
+          }
+        }
+      } catch {
+        // fall back below
+      }
+
+      if (!results.length && allowDeviceGeocode) {
+        const geocoded = await ExpoLocation.geocodeAsync(query);
+        const deviceResults = geocoded
+          .slice(0, COMPANY_OFFICE_SEARCH_LIMIT)
+          .map((entry, index): CompanyOfficeLocation => ({
+            id: makeOfficeLocationId("company_office_geo", index),
+            label: query,
+            address: null,
+            latitude: entry.latitude,
+            longitude: entry.longitude,
+          }));
+        results = mergeOfficeLocationResults(results, deviceResults);
+      }
+
+      setCompanyOfficeSearchResults(results);
+      if (!results.length && showAlerts) {
+        const suffix = mapplsFailureMessage ? `\n\nMappls: ${mapplsFailureMessage}` : "";
+        Alert.alert("No Results", `No matching office locations found. Try a more specific address.${suffix}`);
+      }
+    } catch (error) {
+      if (showAlerts) {
+        Alert.alert(
+          "Search Failed",
+          error instanceof Error ? error.message : "Unable to search office location right now."
+        );
+      }
+    } finally {
+      setCompanyOfficeSearchBusy(false);
+    }
+  }, [companyOfficeSearchQuery]);
+
+  useEffect(() => {
+    const query = companyOfficeSearchQuery.trim();
+    if (query.length < COMPANY_OFFICE_SEARCH_MIN_CHARS) {
+      setCompanyOfficeSearchRequestId((current) => current + 1);
+      setCompanyOfficeSearchResults([]);
+      setCompanyOfficeSearchBusy(false);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void searchCompanyOfficeLocations(query, { showAlerts: false, allowDeviceGeocode: false });
+    }, COMPANY_OFFICE_SEARCH_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [companyOfficeSearchQuery, searchCompanyOfficeLocations]);
+
+  const captureCompanyOfficeCurrentLocation = useCallback(async () => {
+    setCompanyOfficeCurrentBusy(true);
+    try {
+      const permission = await requestLocationPermissionBundle({ requireBackground: false });
+      if (!permission.foreground) {
+        Alert.alert("Location Required", "Allow location permission to set the company office from current GPS.");
+        return;
+      }
+
+      const gpsEnabled = await ensureLocationServicesEnabled();
+      if (!gpsEnabled) {
+        Alert.alert("Turn On GPS", "Please enable device location services and try again.");
+        return;
+      }
+
+      const position = await ExpoLocation.getCurrentPositionAsync({
+        accuracy: ExpoLocation.Accuracy.High,
+        mayShowUserSettingsDialog: true,
+      });
+      const accuracy =
+        typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
+          ? Math.round(position.coords.accuracy)
+          : null;
+      const label = newCompanyOfficeName.trim() || newCompanyName.trim() || "Current Location Office";
+      selectCompanyOfficeLocation({
+        id: "company_office_current_location",
+        label,
+        address: accuracy === null ? "Device GPS location" : `Device GPS location, accuracy +/-${accuracy}m`,
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      });
+    } catch (error) {
+      Alert.alert(
+        "Current Location Failed",
+        error instanceof Error ? error.message : "Unable to fetch current location."
+      );
+    } finally {
+      setCompanyOfficeCurrentBusy(false);
+    }
+  }, [newCompanyName, newCompanyOfficeName, selectCompanyOfficeLocation]);
+
   const handleCreateCompany = useCallback(async () => {
     if (!user || busyCreateCompany) return;
     const name = newCompanyName.trim();
+    const officeName =
+      newCompanyOfficeName.trim() ||
+      selectedCompanyOfficeLocation?.label ||
+      `${name || "Company"} Main Office`;
     if (!name) {
       Alert.alert("Company Name Required", "Please enter company name.");
+      return;
+    }
+    if (!selectedCompanyOfficeLocation) {
+      Alert.alert(
+        "Office Location Required",
+        "Search and select the office location, or use current location. Employee attendance will use this fixed 500m geofence."
+      );
       return;
     }
 
@@ -467,23 +754,50 @@ export default function AdminControlsScreen() {
         name,
         primaryBranch: newCompanyBranch.trim() || "Main Branch",
         headquarters: newCompanyHeadquarters.trim() || "India",
+        attendanceZoneLabel: officeName,
       });
       if (!created) {
         Alert.alert("Unable to Create", "Company profile could not be created.");
         return;
+      }
+      const now = new Date().toISOString();
+      const officeGeofence: Geofence = {
+        id: `office_${created.id}`,
+        companyId: created.id,
+        name: officeName,
+        radiusMeters: COMPANY_OFFICE_RADIUS_METERS,
+        latitude: selectedCompanyOfficeLocation.latitude,
+        longitude: selectedCompanyOfficeLocation.longitude,
+        assignedEmployeeIds: [],
+        isActive: true,
+        allowOverride: false,
+        workingHoursStart: null,
+        workingHoursEnd: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await upsertGeofence(officeGeofence);
+      try {
+        await createGeofenceRemote(officeGeofence);
+      } catch {
+        await updateGeofenceRemote(officeGeofence.id, officeGeofence).catch(() => undefined);
       }
       await addAuditLog({
         id: `audit_admin_company_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         userId: user.id,
         userName: user.name,
         action: "Company Environment Created",
-        details: `${created.name} (${created.primaryBranch})`,
-        timestamp: new Date().toISOString(),
+        details: `${created.name} (${created.primaryBranch}) - ${officeName} @ ${selectedCompanyOfficeLocation.latitude.toFixed(6)}, ${selectedCompanyOfficeLocation.longitude.toFixed(6)} / ${COMPANY_OFFICE_RADIUS_METERS}m`,
+        timestamp: now,
         module: "Admin Controls",
       });
       setNewCompanyName("");
       setNewCompanyBranch("");
       setNewCompanyHeadquarters("");
+      setNewCompanyOfficeName("");
+      setCompanyOfficeSearchQuery("");
+      setCompanyOfficeSearchResults([]);
+      setSelectedCompanyOfficeLocation(null);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await loadData();
     } catch (error) {
@@ -500,6 +814,8 @@ export default function AdminControlsScreen() {
     newCompanyBranch,
     newCompanyHeadquarters,
     newCompanyName,
+    newCompanyOfficeName,
+    selectedCompanyOfficeLocation,
     user,
   ]);
 
@@ -1114,9 +1430,9 @@ export default function AdminControlsScreen() {
             {companyProfiles.length === 0 ? (
               <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No company environments available.</Text>
             ) : (
-              companyProfiles.map((company) => (
+              companyProfiles.map((company, index) => (
                 <View
-                  key={company.id}
+                  key={`company_${company.id}_${index}`}
                   style={[
                     styles.companyRow,
                     { borderColor: colors.border, backgroundColor: colors.background },
@@ -1186,14 +1502,140 @@ export default function AdminControlsScreen() {
               { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
             ]}
           />
+          <TextInput
+            value={newCompanyOfficeName}
+            onChangeText={setNewCompanyOfficeName}
+            placeholder="Office display name"
+            placeholderTextColor={colors.textTertiary}
+            style={[
+              styles.input,
+              { color: colors.text, borderColor: colors.border, backgroundColor: colors.background },
+            ]}
+          />
+          <View style={styles.officeSearchRow}>
+            <View style={[styles.officeSearchInputWrap, { borderColor: colors.border, backgroundColor: colors.background }]}>
+              <Ionicons name="search-outline" size={17} color={colors.textTertiary} />
+              <TextInput
+                value={companyOfficeSearchQuery}
+                onChangeText={(value) => {
+                  setCompanyOfficeSearchQuery(value);
+                  setSelectedCompanyOfficeLocation(null);
+                }}
+                placeholder="Search office, area, landmark..."
+                placeholderTextColor={colors.textTertiary}
+                returnKeyType="search"
+                autoCorrect={false}
+                style={[styles.officeSearchInput, { color: colors.text }]}
+                onSubmitEditing={() =>
+                  void searchCompanyOfficeLocations(companyOfficeSearchQuery, {
+                    showAlerts: true,
+                    allowDeviceGeocode: true,
+                  })
+                }
+              />
+            </View>
+            <Pressable
+              onPress={() =>
+                void searchCompanyOfficeLocations(companyOfficeSearchQuery, {
+                  showAlerts: true,
+                  allowDeviceGeocode: true,
+                })
+              }
+              disabled={companyOfficeSearchBusy}
+              style={[
+                styles.iconButton,
+                { backgroundColor: colors.primary, opacity: companyOfficeSearchBusy ? 0.72 : 1 },
+              ]}
+            >
+              {companyOfficeSearchBusy ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Ionicons name="search-outline" size={18} color="#fff" />
+              )}
+            </Pressable>
+          </View>
+          <Pressable
+            onPress={() => void captureCompanyOfficeCurrentLocation()}
+            disabled={companyOfficeCurrentBusy}
+            style={[
+              styles.currentLocationButton,
+              {
+                borderColor: colors.border,
+                backgroundColor: colors.background,
+                opacity: companyOfficeCurrentBusy ? 0.72 : 1,
+              },
+            ]}
+          >
+            {companyOfficeCurrentBusy ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <>
+                <Ionicons name="locate-outline" size={17} color={colors.primary} />
+                <Text style={[styles.currentLocationButtonText, { color: colors.primary }]}>Use Current Location</Text>
+              </>
+            )}
+          </Pressable>
+          {companyOfficeSearchResults.length ? (
+            <View style={[styles.officeResults, { borderColor: colors.border }]}>
+              {companyOfficeSearchResults.map((result, index) => (
+                <Pressable
+                  key={`company_office_result_${result.id}_${result.latitude.toFixed(6)}_${result.longitude.toFixed(6)}_${index}`}
+                  style={[
+                    styles.officeResultRow,
+                    index < companyOfficeSearchResults.length - 1 && {
+                      borderBottomColor: colors.border,
+                      borderBottomWidth: 1,
+                    },
+                  ]}
+                  onPress={() => selectCompanyOfficeLocation(result)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.officeResultTitle, { color: colors.text }]}>{result.label}</Text>
+                    <Text style={[styles.officeResultMeta, { color: colors.textSecondary }]} numberOfLines={2}>
+                      {result.address || `${result.latitude.toFixed(5)}, ${result.longitude.toFixed(5)}`}
+                    </Text>
+                  </View>
+                  <Ionicons name="location-outline" size={19} color={colors.primary} />
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+          {selectedCompanyOfficeLocation ? (
+            <View style={[styles.selectedOfficeBox, { borderColor: colors.success + "66", backgroundColor: colors.success + "12" }]}>
+              <Ionicons name="checkmark-circle" size={18} color={colors.success} />
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.selectedOfficeTitle, { color: colors.text }]}>
+                  {newCompanyOfficeName.trim() || selectedCompanyOfficeLocation.label}
+                </Text>
+                <Text style={[styles.selectedOfficeMeta, { color: colors.textSecondary }]} numberOfLines={2}>
+                  {selectedCompanyOfficeLocation.address ||
+                    `${selectedCompanyOfficeLocation.latitude.toFixed(5)}, ${selectedCompanyOfficeLocation.longitude.toFixed(5)}`}
+                </Text>
+              </View>
+            </View>
+          ) : null}
+          <View style={styles.coordinateRow}>
+            <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+              Employee check-in unlocks only inside this office&apos;s {COMPANY_OFFICE_RADIUS_METERS}m company geofence.
+            </Text>
+          </View>
           <Pressable
             onPress={() => void handleCreateCompany()}
-            disabled={busyCreateCompany || !newCompanyName.trim()}
+            disabled={
+              busyCreateCompany ||
+              !newCompanyName.trim() ||
+              !selectedCompanyOfficeLocation
+            }
             style={[
               styles.primaryButton,
               {
                 backgroundColor: colors.success,
-                opacity: busyCreateCompany || !newCompanyName.trim() ? 0.6 : 1,
+                opacity:
+                  busyCreateCompany ||
+                  !newCompanyName.trim() ||
+                  !selectedCompanyOfficeLocation
+                    ? 0.6
+                    : 1,
               },
             ]}
           >
@@ -1235,7 +1677,7 @@ export default function AdminControlsScreen() {
               const isBusy = busyAccessRequestId === request.id;
               return (
                 <View
-                  key={request.id}
+                  key={`access_request_${request.id}_${index}`}
                   style={[
                     styles.requestCard,
                     {
@@ -1302,11 +1744,11 @@ export default function AdminControlsScreen() {
 
                   <Text style={[styles.assignLabel, { color: colors.textSecondary }]}>Assign to company environments</Text>
                   <View style={styles.assignChipRow}>
-                    {companyProfiles.map((company) => {
+                    {companyProfiles.map((company, companyIndex) => {
                       const selected = selectedCompanyIds.includes(company.id);
                       return (
                         <Pressable
-                          key={`${request.id}_${company.id}`}
+                          key={`${request.id}_company_${company.id}_${companyIndex}`}
                           onPress={() => toggleCompanySelection(request.id, company.id)}
                           style={[
                             styles.assignChip,
@@ -1367,11 +1809,11 @@ export default function AdminControlsScreen() {
                               Direct (Company)
                             </Text>
                           </Pressable>
-                          {stockistsForRequest.map((stockist) => {
+                          {stockistsForRequest.map((stockist, stockistIndex) => {
                             const selected = stockist.id === selectedStockistId;
                             return (
                               <Pressable
-                                key={`${request.id}_stockist_${stockist.id}`}
+                                key={`${request.id}_stockist_${stockist.id}_${stockistIndex}`}
                                 onPress={() => selectStockistForRequest(request.id, stockist.id)}
                                 style={[
                                   styles.assignChip,
@@ -1411,11 +1853,11 @@ export default function AdminControlsScreen() {
                         </Text>
                       ) : (
                         <View style={styles.assignChipRow}>
-                          {managersForRequest.map((manager) => {
+                          {managersForRequest.map((manager, managerIndex) => {
                             const selected = manager.id === selectedManagerId;
                             return (
                               <Pressable
-                                key={`${request.id}_manager_${manager.id}`}
+                                key={`${request.id}_manager_${manager.id}_${managerIndex}`}
                                 onPress={() => selectManagerForRequest(request.id, manager.id)}
                                 style={[
                                   styles.assignChip,
@@ -1628,7 +2070,7 @@ export default function AdminControlsScreen() {
           ) : (
             recentNotifications.map((item, index) => (
               <View
-                key={item.id}
+                key={`broadcast_${item.id}_${index}`}
                 style={[
                   styles.broadcastRow,
                   index < recentNotifications.length - 1 && {
@@ -1743,6 +2185,102 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     fontFamily: "Inter_400Regular",
     marginBottom: 8,
+  },
+  coordinateRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  fieldHint: {
+    flex: 1,
+    fontFamily: "Inter_400Regular",
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 10,
+  },
+  officeSearchRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 8,
+  },
+  officeSearchInputWrap: {
+    minHeight: 42,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flex: 1,
+  },
+  officeSearchInput: {
+    flex: 1,
+    fontFamily: "Inter_400Regular",
+    paddingVertical: 0,
+  },
+  iconButton: {
+    width: 44,
+    minHeight: 42,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  currentLocationButton: {
+    minHeight: 42,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 7,
+    marginBottom: 8,
+  },
+  currentLocationButtonText: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+  },
+  officeResults: {
+    borderWidth: 1,
+    borderRadius: 10,
+    overflow: "hidden",
+    marginBottom: 8,
+  },
+  officeResultRow: {
+    minHeight: 58,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  officeResultTitle: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+  },
+  officeResultMeta: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  selectedOfficeBox: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8,
+  },
+  selectedOfficeTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 13,
+  },
+  selectedOfficeMeta: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
   },
   multilineInput: {
     minHeight: 88,

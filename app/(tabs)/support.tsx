@@ -310,7 +310,7 @@ export default function SupportScreen() {
                 : "Open this thread to chat.";
               return (
                 <Pressable
-                  key={thread.id}
+                  key={`support_thread_${thread.id}_${index}`}
                   onPress={() => handleOpenThread(thread.id)}
                   style={({ pressed }) => [
                     styles.threadRow,

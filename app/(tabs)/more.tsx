@@ -17,7 +17,7 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { canAccessAdminControls, isSalesRole } from "@/lib/role-access";
-import { getCurrentUserCompanyProfiles, switchCurrentUserCompany } from "@/lib/storage";
+import { getCompanyProfiles, getCurrentUserCompanyProfiles, switchCurrentUserCompany } from "@/lib/storage";
 import type { CompanyProfile } from "@/lib/types";
 
 interface MenuItem {
@@ -57,6 +57,9 @@ export default function MoreScreen() {
   const canSeeAdminControls = canAccessAdminControls(user?.role);
   const [companyOptions, setCompanyOptions] = useState<CompanyProfile[]>([]);
   const [switchingCompanyId, setSwitchingCompanyId] = useState<string | null>(null);
+  const showCompanyEnvironmentChooser = user?.role === "admin"
+    ? companyOptions.length > 0
+    : companyOptions.length > 1;
   const baseMenuItems = isPrivileged ? PRIVILEGED_MENU_ITEMS : EMPLOYEE_MENU_ITEMS;
   const menuItems = [
     ...baseMenuItems.filter((item) => !(isSalesperson && item.title === "Route Tracking")),
@@ -77,14 +80,23 @@ export default function MoreScreen() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const companies = await getCurrentUserCompanyProfiles();
+      const companies = user?.role === "admin"
+        ? await getCompanyProfiles()
+        : await getCurrentUserCompanyProfiles();
       if (!mounted) return;
-      setCompanyOptions(companies);
+      const byId = new Map<string, CompanyProfile>();
+      for (const option of companies) {
+        byId.set(option.id, option);
+      }
+      if (company) {
+        byId.set(company.id, company);
+      }
+      setCompanyOptions(Array.from(byId.values()));
     })();
     return () => {
       mounted = false;
     };
-  }, [user?.id, user?.companyId]);
+  }, [company, user?.id, user?.companyId, user?.role]);
 
   const handleSwitchCompany = useCallback(
     async (companyId: string) => {
@@ -147,7 +159,7 @@ export default function MoreScreen() {
           </View>
         </Animated.View>
 
-        {companyOptions.length > 1 ? (
+        {showCompanyEnvironmentChooser ? (
           <Animated.View
             entering={FadeInDown.duration(400).delay(180)}
             style={[styles.companySwitchCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
@@ -161,12 +173,12 @@ export default function MoreScreen() {
               Switch active company. Team, attendance, tasks, and users will stay scoped to selected company.
             </Text>
             <View style={styles.companyChipRow}>
-              {companyOptions.map((option) => {
+              {companyOptions.map((option, index) => {
                 const isActive = option.id === user?.companyId;
                 const busy = switchingCompanyId === option.id;
                 return (
                   <Pressable
-                    key={option.id}
+                    key={`company_env_${option.id}_${index}`}
                     onPress={() => void handleSwitchCompany(option.id)}
                     disabled={Boolean(switchingCompanyId)}
                     style={[

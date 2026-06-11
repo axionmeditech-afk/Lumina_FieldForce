@@ -286,11 +286,11 @@ export default function NotificationsScreen() {
                   Specific users
                 </Text>
                 <View style={styles.audienceRow}>
-                  {employees.slice(0, 12).map((employee) => {
+                  {employees.slice(0, 12).map((employee, index) => {
                     const selected = selectedRecipientIds.includes(employee.id);
                     return (
                       <Pressable
-                        key={employee.id}
+                        key={`recipient_${employee.id}_${index}`}
                         onPress={() => {
                           setSelectedRecipientIds((current) =>
                             current.includes(employee.id)
@@ -365,7 +365,7 @@ export default function NotificationsScreen() {
               const kindColor = notificationKindColor(item.kind);
               return (
                 <Pressable
-                  key={item.id}
+                  key={`notification_${item.id}_${index}`}
                   onPress={() => void handleOpenNotification(item)}
                   style={({ pressed }) => [
                     styles.itemRow,

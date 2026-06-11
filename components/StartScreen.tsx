@@ -14,7 +14,7 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 
 const BRAND_NAME = "Lumina FieldForce";
-const START_VIDEO_PLAYBACK_RATE = 1.65;
+const START_VIDEO_PLAYBACK_RATE = 1.8;
 
 interface StartScreenProps {
   title?: string;

@@ -1343,7 +1343,7 @@ export default function DashboardScreen() {
               ]}
             >
               {heroInsights.map((item, index) => (
-                <React.Fragment key={item.id}>
+                <React.Fragment key={`hero_insight_${item.id}_${index}`}>
                   <View style={styles.heroInsightItem}>
                     <Text style={[styles.heroInsightValue, { color: colors.text }]}>{item.value}</Text>
                     <Text style={[styles.heroInsightLabel, { color: colors.textSecondary }]}>{item.label}</Text>
@@ -1363,7 +1363,7 @@ export default function DashboardScreen() {
             <View style={styles.commandStripRow}>
               {commandHighlights.map((highlight, index) => (
                 <Animated.View
-                  key={highlight.id}
+                  key={`command_highlight_${highlight.id}_${index}`}
                   entering={
                     index % 2 === 0
                       ? FadeInLeft.duration(420).delay(70 + index * 35)
@@ -1473,7 +1473,7 @@ export default function DashboardScreen() {
                       const selected = option.id === metricRange;
                       return (
                         <Pressable
-                          key={option.id}
+                          key={`metric_range_${option.id}`}
                           onPress={() => {
                             setMetricRange(option.id);
                             setMetricRangeOpen(false);
@@ -1598,7 +1598,7 @@ export default function DashboardScreen() {
                 const subtitle = task.visitLocationAddress?.trim() || task.description || "Field visit";
                 return (
                   <View
-                    key={task.id}
+                    key={`today_visit_${task.id}_${index}`}
                     style={[
                       styles.activityRow,
                       index < Math.min(4, todaysVisits.length) - 1 && {
@@ -1875,7 +1875,7 @@ export default function DashboardScreen() {
           ) : (
             prioritySupportThreads.map((thread, index) => (
               <View
-                key={thread.id}
+                key={`priority_thread_${thread.id}_${index}`}
                 style={[
                   styles.threadRow,
                   index < prioritySupportThreads.length - 1 && {
@@ -1953,7 +1953,7 @@ export default function DashboardScreen() {
             ) : (
               activityFeed.map((entry, index) => (
                 <View
-                  key={entry.id}
+                  key={`activity_entry_${entry.id}_${index}`}
                   style={[
                     styles.activityRow,
                     index < activityFeed.length - 1 && {
