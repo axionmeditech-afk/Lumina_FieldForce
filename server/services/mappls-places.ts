@@ -7,7 +7,7 @@ const REQUEST_TIMEOUT_MS = Math.max(
 const DETAIL_CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_PLACE_RESULTS = 20;
 const ENABLE_PLACE_DETAIL_ENRICHMENT =
-  (process.env.MAPPLS_PLACES_DETAIL_ENRICHMENT || "false").trim().toLowerCase() === "true";
+  (process.env.MAPPLS_PLACES_DETAIL_ENRICHMENT || "true").trim().toLowerCase() !== "false";
 
 export interface MapplsPlaceSuggestion {
   id: string;
@@ -214,10 +214,20 @@ function mapEntryToSuggestion(entry: Record<string, unknown>, index: number): Ma
   const label = firstText(
     entry.placeName,
     entry.place_name,
+    entry.placeDisplayName,
+    entry.place_display_name,
     entry.poi,
     entry.name,
+    entry.locality,
+    entry.subLocality,
+    entry.city,
+    entry.village,
+    entry.district,
     addressTokens?.poi,
     addressTokens?.locality,
+    addressTokens?.subLocality,
+    addressTokens?.city,
+    addressTokens?.district,
     entry.eLoc,
     entry.mapplsPin
   );
@@ -229,7 +239,17 @@ function mapEntryToSuggestion(entry: Record<string, unknown>, index: number): Ma
     entry.address,
     entry.formattedAddress,
     entry.placeDisplayName,
-    addressTokens?.city
+    entry.fullAddress,
+    entry.locality,
+    entry.subLocality,
+    entry.city,
+    entry.district,
+    entry.state,
+    addressTokens?.subLocality,
+    addressTokens?.locality,
+    addressTokens?.city,
+    addressTokens?.district,
+    addressTokens?.state
   );
 
   const eloc = firstText(entry.eLoc, entry.eloc, entry.mapplsPin, entry.mappls_pin) || null;

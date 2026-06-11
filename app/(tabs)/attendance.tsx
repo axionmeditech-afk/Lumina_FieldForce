@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
   Linking,
+  TextInput,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -21,6 +22,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
+import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNative";
 import { evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
 import {
   addAttendance,
@@ -29,6 +31,7 @@ import {
   getAttendance,
   getGeofences,
   getGeofencesForUser,
+  getLocationLogs,
   getSettings,
   isCheckedIn,
   setCheckedIn,
@@ -36,7 +39,7 @@ import {
   upsertGeofence,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import type { AttendanceRecord, Geofence, GeofenceEvaluation } from "@/lib/types";
+import type { AttendanceRecord, Geofence, GeofenceEvaluation, LocationLog } from "@/lib/types";
 import {
   attendanceCheckIn,
   attendanceCheckOut,
@@ -44,6 +47,8 @@ import {
   flushAttendanceQueue,
   getUserGeofences,
   queueAttendanceRequest,
+  searchMapplsAutosuggest,
+  searchMapplsTextSearch,
   updateGeofence as updateGeofenceRemote,
 } from "@/lib/attendance-api";
 import {
@@ -80,8 +85,19 @@ const ROUTE_POINT_PERSIST_INTERVAL_MS = 15 * 1000;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
+const OFFICE_LOCATION_SEARCH_LIMIT = 15;
+const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
+const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
 
 type BannerType = "inside" | "outside" | "weak" | "boundary";
+
+type OfficeLocationSearchResult = {
+  id: string;
+  label: string;
+  address: string | null;
+  latitude: number;
+  longitude: number;
+};
 
 function getBannerConfig(type: BannerType, colors: ReturnType<typeof useAppTheme>["colors"]) {
   if (type === "inside") {
@@ -136,6 +152,36 @@ function isWithinZoneShift(zone: Geofence | null): boolean {
     return nowMins >= startMins && nowMins <= endMins;
   }
   return nowMins >= startMins || nowMins <= endMins;
+}
+
+function isFiniteCoordinate(latitude: unknown, longitude: unknown): boolean {
+  return (
+    typeof latitude === "number" &&
+    Number.isFinite(latitude) &&
+    Math.abs(latitude) <= 90 &&
+    typeof longitude === "number" &&
+    Number.isFinite(longitude) &&
+    Math.abs(longitude) <= 180
+  );
+}
+
+function makeOfficeLocationId(prefix: string, index: number): string {
+  return `${prefix}_${Date.now()}_${index}`;
+}
+
+function getOfficeLocationResultKey(result: OfficeLocationSearchResult): string {
+  return `${result.latitude.toFixed(5)},${result.longitude.toFixed(5)}|${result.label.trim().toLowerCase()}`;
+}
+
+function mergeOfficeLocationResults(
+  current: OfficeLocationSearchResult[],
+  next: OfficeLocationSearchResult[]
+): OfficeLocationSearchResult[] {
+  const byKey = new Map<string, OfficeLocationSearchResult>();
+  for (const result of [...current, ...next]) {
+    byKey.set(getOfficeLocationResultKey(result), result);
+  }
+  return Array.from(byKey.values()).slice(0, OFFICE_LOCATION_SEARCH_LIMIT);
 }
 
 function makeLocalAttendanceRecord(
@@ -208,7 +254,14 @@ export default function AttendanceScreen() {
   const [autoPromptVisible, setAutoPromptVisible] = useState(false);
   const [locationReady, setLocationReady] = useState(false);
   const [officeZone, setOfficeZone] = useState<Geofence | null>(null);
+  const [officeSearchQuery, setOfficeSearchQuery] = useState("");
+  const [officeSearchResults, setOfficeSearchResults] = useState<OfficeLocationSearchResult[]>([]);
+  const [officeSearchBusy, setOfficeSearchBusy] = useState(false);
+  const [officeLocationDraft, setOfficeLocationDraft] = useState<OfficeLocationSearchResult | null>(null);
+  const [adminCurrentLocation, setAdminCurrentLocation] = useState<OfficeLocationSearchResult | null>(null);
+  const [adminCurrentLocationBusy, setAdminCurrentLocationBusy] = useState(false);
   const [officeSaving, setOfficeSaving] = useState(false);
+  const [lastStoredLocationLog, setLastStoredLocationLog] = useState<LocationLog | null>(null);
   const prevInsideRef = useRef(false);
   const locationWatchRef = useRef<{ remove: () => void } | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -220,6 +273,7 @@ export default function AttendanceScreen() {
   } | null>(null);
   const latestLocationRef = useRef<LocationObject | null>(null);
   const latestLocationCapturedAtMsRef = useRef<number>(0);
+  const officeSearchRequestIdRef = useRef(0);
   const successScale = useSharedValue(1);
 
   const pulseStyle = useAnimatedStyle(() => ({
@@ -302,6 +356,22 @@ export default function AttendanceScreen() {
     setGeofences(cached);
   }, [user?.id]);
 
+  const loadLatestStoredLocation = useCallback(async () => {
+    if (!user?.id || !isEmployeeOfficeAttendance) {
+      setLastStoredLocationLog(null);
+      return;
+    }
+    try {
+      const logs = await getLocationLogs();
+      const latest = logs
+        .filter((log) => log.userId === user.id)
+        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0] ?? null;
+      setLastStoredLocationLog(latest);
+    } catch {
+      setLastStoredLocationLog(null);
+    }
+  }, [isEmployeeOfficeAttendance, user?.id]);
+
   const loadOfficeZone = useCallback(async () => {
     if (!company?.id) return;
     const zones = await getGeofences();
@@ -311,6 +381,15 @@ export default function AttendanceScreen() {
       zones.find((zone) => zone.companyId === company.id && zone.name === `${company.name} Main Office`) ||
       null;
     setOfficeZone(currentOfficeZone);
+    if (currentOfficeZone) {
+      setOfficeLocationDraft({
+        id: currentOfficeZone.id,
+        label: currentOfficeZone.name,
+        address: null,
+        latitude: currentOfficeZone.latitude,
+        longitude: currentOfficeZone.longitude,
+      });
+    }
   }, [company?.id, company?.name]);
 
   useEffect(() => {
@@ -361,21 +440,23 @@ export default function AttendanceScreen() {
         routePersistLastAtMsRef.current = nowMs;
         void (async () => {
           const capturedAt = new Date(nowMs).toISOString();
+          const locationLog: LocationLog = {
+            id: `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            userId: user.id,
+            latitude: effectiveLocation.coords.latitude,
+            longitude: effectiveLocation.coords.longitude,
+            accuracy: effectiveLocation.coords.accuracy ?? null,
+            speed: effectiveLocation.coords.speed ?? null,
+            heading: effectiveLocation.coords.heading ?? null,
+            batteryLevel,
+            geofenceId: nextEvaluation.activeZone?.id ?? null,
+            geofenceName: nextEvaluation.activeZone?.name ?? null,
+            isInsideGeofence: nextEvaluation.inside,
+            capturedAt,
+          };
           try {
-            await addLocationLog({
-              id: `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-              userId: user.id,
-              latitude: effectiveLocation.coords.latitude,
-              longitude: effectiveLocation.coords.longitude,
-              accuracy: effectiveLocation.coords.accuracy ?? null,
-              speed: effectiveLocation.coords.speed ?? null,
-              heading: effectiveLocation.coords.heading ?? null,
-              batteryLevel,
-              geofenceId: nextEvaluation.activeZone?.id ?? null,
-              geofenceName: nextEvaluation.activeZone?.name ?? null,
-              isInsideGeofence: nextEvaluation.inside,
-              capturedAt,
-            });
+            await addLocationLog(locationLog);
+            setLastStoredLocationLog(locationLog);
           } catch {
             // never fail active session because local location persistence failed
           }
@@ -592,15 +673,25 @@ export default function AttendanceScreen() {
     if (!user?.id) return;
     void loadBaseData();
     void loadGeofenceAssignments();
+    void loadLatestStoredLocation();
     if (isAdminAttendanceManager) {
       void loadOfficeZone();
     }
     void flushAttendanceQueue();
-  }, [isAdminAttendanceManager, loadBaseData, loadGeofenceAssignments, loadOfficeZone, user?.id]);
+  }, [
+    isAdminAttendanceManager,
+    loadBaseData,
+    loadGeofenceAssignments,
+    loadLatestStoredLocation,
+    loadOfficeZone,
+    user?.id,
+  ]);
 
   useEffect(() => {
     if (!user?.id) return;
-    const shouldTrackLive = checkedInState || !locationReady;
+    const shouldTrackEmployeeOffice =
+      isEmployeeOfficeAttendance && geofences.length > 0 && !checkedInState;
+    const shouldTrackLive = checkedInState || !locationReady || shouldTrackEmployeeOffice;
     if (shouldTrackLive) {
       void refreshLocation();
       void beginTracking();
@@ -613,6 +704,8 @@ export default function AttendanceScreen() {
   }, [
     beginTracking,
     checkedInState,
+    geofences.length,
+    isEmployeeOfficeAttendance,
     locationReady,
     refreshLocation,
     stopTracking,
@@ -685,16 +778,236 @@ export default function AttendanceScreen() {
     return refreshLocation(false, { skipRoutePersistence: true });
   }, [refreshLocation]);
 
-  const saveOfficeLocationFromCurrentGps = useCallback(async () => {
-    if (!user?.id || !company?.id || !isAdminAttendanceManager) return;
-    setOfficeSaving(true);
+  const searchOfficeLocations = useCallback(async (
+    queryInput?: string,
+    options?: { showAlerts?: boolean; allowDeviceGeocode?: boolean }
+  ) => {
+    const query = (queryInput ?? officeSearchQuery).trim();
+    const showAlerts = options?.showAlerts ?? false;
+    const allowDeviceGeocode = options?.allowDeviceGeocode ?? showAlerts;
+    const requestId = officeSearchRequestIdRef.current + 1;
+    officeSearchRequestIdRef.current = requestId;
+
+    if (query.length < OFFICE_LOCATION_SEARCH_MIN_CHARS) {
+      setOfficeSearchResults([]);
+      if (showAlerts) {
+        Alert.alert("Search Required", "Enter at least 2 characters of the office name, area, landmark, or address.");
+      }
+      return;
+    }
+
+    setOfficeSearchBusy(true);
     try {
-      const evidence = await getFastAttendanceEvidence();
-      if (!evidence) {
-        Alert.alert("Location Unavailable", "Unable to fetch current office GPS location. Please try again.");
+      let results: OfficeLocationSearchResult[] = [];
+      let mapplsFailureMessage = "";
+
+      try {
+        const autosuggest = await searchMapplsAutosuggest(query, {
+          region: "ind",
+          limit: OFFICE_LOCATION_SEARCH_LIMIT,
+        });
+        const autosuggestResults = (autosuggest.suggestions || [])
+          .map((suggestion, index): OfficeLocationSearchResult | null => {
+            const latitude = suggestion.latitude;
+            const longitude = suggestion.longitude;
+            if (!isFiniteCoordinate(latitude, longitude)) return null;
+            return {
+              id: suggestion.id || makeOfficeLocationId("office_mappls", index),
+              label: suggestion.label,
+              address: suggestion.address,
+              latitude: latitude as number,
+              longitude: longitude as number,
+            };
+          })
+          .filter((item): item is OfficeLocationSearchResult => Boolean(item));
+        results = mergeOfficeLocationResults(results, autosuggestResults);
+
+        const textSearch = await searchMapplsTextSearch(query, {
+          region: "ind",
+          limit: OFFICE_LOCATION_SEARCH_LIMIT,
+        });
+        const textSearchResults = (textSearch.suggestions || [])
+          .map((suggestion, index): OfficeLocationSearchResult | null => {
+            const latitude = suggestion.latitude;
+            const longitude = suggestion.longitude;
+            if (!isFiniteCoordinate(latitude, longitude)) return null;
+            return {
+              id: suggestion.id || makeOfficeLocationId("office_mappls_text", index),
+              label: suggestion.label,
+              address: suggestion.address,
+              latitude: latitude as number,
+              longitude: longitude as number,
+            };
+          })
+          .filter((item): item is OfficeLocationSearchResult => Boolean(item));
+        results = mergeOfficeLocationResults(results, textSearchResults);
+
+        if (!results.length && textSearch.error) {
+          mapplsFailureMessage = textSearch.error;
+        } else if (!results.length && autosuggest.error) {
+          mapplsFailureMessage = autosuggest.error;
+        }
+      } catch (error) {
+        mapplsFailureMessage =
+          error instanceof Error ? error.message : "Mappls place search is unavailable right now.";
+      }
+
+      try {
+        if (query.length >= 4 && results.length < OFFICE_LOCATION_SEARCH_LIMIT) {
+          const params = new URLSearchParams({
+            q: query,
+            format: "jsonv2",
+            addressdetails: "1",
+            limit: String(Math.max(OFFICE_LOCATION_SEARCH_LIMIT, 10)),
+            countrycodes: "in",
+          });
+          const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              "Accept-Language": "en-IN,en",
+              "User-Agent": "LuminaFieldForce/1.0 (office-geofence)",
+            },
+          });
+          if (response.ok) {
+            const payload = (await response.json()) as {
+              lat?: string;
+              lon?: string;
+              name?: string;
+              display_name?: string;
+            }[];
+            if (Array.isArray(payload)) {
+              const osmResults = payload
+                .map((item, index): OfficeLocationSearchResult | null => {
+                  const latitude = Number.parseFloat(item.lat || "");
+                  const longitude = Number.parseFloat(item.lon || "");
+                  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+                  const displayName = (item.display_name || "").trim();
+                  return {
+                    id: makeOfficeLocationId("office_osm", index),
+                    label: (item.name || "").trim() || displayName.split(",")[0]?.trim() || query,
+                    address: displayName || null,
+                    latitude,
+                    longitude,
+                  };
+                })
+                .filter((item): item is OfficeLocationSearchResult => Boolean(item));
+              results = mergeOfficeLocationResults(results, osmResults);
+            }
+          }
+        }
+      } catch {
+        // fallback below
+      }
+
+      if (!results.length && allowDeviceGeocode) {
+        const geocoded = await ExpoLocation.geocodeAsync(query);
+        const deviceResults = geocoded
+          .slice(0, OFFICE_LOCATION_SEARCH_LIMIT)
+          .map((entry, index): OfficeLocationSearchResult => ({
+            id: makeOfficeLocationId("office_geo", index),
+            label: query,
+            address: null,
+            latitude: entry.latitude,
+            longitude: entry.longitude,
+          }));
+        results = mergeOfficeLocationResults(results, deviceResults);
+      }
+
+      if (officeSearchRequestIdRef.current !== requestId) return;
+      setOfficeSearchResults(results);
+      if (!results.length && showAlerts) {
+        const suffix = mapplsFailureMessage ? `\n\nMappls: ${mapplsFailureMessage}` : "";
+        Alert.alert("No Results", `No matching office locations found. Try a more specific address.${suffix}`);
+      }
+    } catch (error) {
+      if (showAlerts) {
+        Alert.alert(
+          "Search Failed",
+          error instanceof Error ? error.message : "Unable to search office location right now."
+        );
+      }
+    } finally {
+      if (officeSearchRequestIdRef.current === requestId) {
+        setOfficeSearchBusy(false);
+      }
+    }
+  }, [officeSearchQuery]);
+
+  useEffect(() => {
+    if (!isAdminAttendanceManager) return;
+    const query = officeSearchQuery.trim();
+    if (query.length < OFFICE_LOCATION_SEARCH_MIN_CHARS) {
+      officeSearchRequestIdRef.current += 1;
+      setOfficeSearchResults([]);
+      setOfficeSearchBusy(false);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void searchOfficeLocations(query, { showAlerts: false, allowDeviceGeocode: false });
+    }, OFFICE_LOCATION_SEARCH_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [isAdminAttendanceManager, officeSearchQuery, searchOfficeLocations]);
+
+  const captureAdminCurrentLocation = useCallback(async () => {
+    if (!isAdminAttendanceManager) return;
+    setAdminCurrentLocationBusy(true);
+    try {
+      const permission = await requestLocationPermissionBundle({ requireBackground: false });
+      if (!permission.foreground) {
+        if (!permission.foregroundCanAskAgain) {
+          showPermissionBlockedAlert();
+        } else {
+          Alert.alert("Location Required", "Allow location permission to show your current position on the map.");
+        }
         return;
       }
 
+      const gpsEnabled = await ensureLocationServicesEnabled();
+      if (!gpsEnabled) {
+        Alert.alert("Turn On GPS", "Please enable device location services and try again.");
+        return;
+      }
+
+      const position = await ExpoLocation.getCurrentPositionAsync({
+        accuracy: ExpoLocation.Accuracy.High,
+        mayShowUserSettingsDialog: true,
+      });
+      const accuracy =
+        typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
+          ? Math.round(position.coords.accuracy)
+          : null;
+      const currentLocation: OfficeLocationSearchResult = {
+        id: "admin_current_location",
+        label: "Current Location",
+        address: accuracy === null ? null : `GPS accuracy +/-${accuracy}m`,
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      };
+      const currentLocationDraft: OfficeLocationSearchResult = {
+        ...currentLocation,
+        id: "admin_current_location_draft",
+        label: `${company?.name || "Company"} Main Office`,
+      };
+      setAdminCurrentLocation(currentLocation);
+      setOfficeLocationDraft(currentLocationDraft);
+      setOfficeSearchQuery(currentLocationDraft.label);
+    } catch (error) {
+      Alert.alert(
+        "Current Location Failed",
+        error instanceof Error ? error.message : "Unable to fetch current location."
+      );
+    } finally {
+      setAdminCurrentLocationBusy(false);
+    }
+  }, [company?.name, isAdminAttendanceManager, showPermissionBlockedAlert]);
+
+  const saveOfficeLocation = useCallback(async (selectedLocation: OfficeLocationSearchResult) => {
+    if (!user?.id || !company?.id || !isAdminAttendanceManager) return;
+    setOfficeSaving(true);
+    try {
       const employees = await getEmployees();
       const assignedEmployeeIds = employees
         .filter((employee) => employee.role === "employee")
@@ -703,10 +1016,10 @@ export default function AttendanceScreen() {
       const nextOfficeZone: Geofence = {
         id: officeZone?.id || `office_${company.id}`,
         companyId: company.id,
-        name: `${company.name || "Company"} Main Office`,
+        name: selectedLocation.label || `${company.name || "Company"} Main Office`,
         radiusMeters: OFFICE_ATTENDANCE_RADIUS_METERS,
-        latitude: evidence.location.coords.latitude,
-        longitude: evidence.location.coords.longitude,
+        latitude: selectedLocation.latitude,
+        longitude: selectedLocation.longitude,
         assignedEmployeeIds,
         isActive: true,
         allowOverride: false,
@@ -731,6 +1044,9 @@ export default function AttendanceScreen() {
         primaryBranch: company.primaryBranch || "Main Branch",
       });
       setOfficeZone(nextOfficeZone);
+      setOfficeSearchQuery(selectedLocation.label);
+      setOfficeSearchResults([]);
+      setOfficeLocationDraft(selectedLocation);
       Alert.alert(
         "Office Location Saved",
         `Employee check-in is now enabled within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of ${nextOfficeZone.name}.`
@@ -745,12 +1061,17 @@ export default function AttendanceScreen() {
     }
   }, [
     company,
-    getFastAttendanceEvidence,
     isAdminAttendanceManager,
     officeZone,
     updateCompany,
     user?.id,
   ]);
+
+  const selectOfficeLocationDraft = useCallback((result: OfficeLocationSearchResult) => {
+    setOfficeLocationDraft(result);
+    setOfficeSearchQuery(result.label);
+    setOfficeSearchResults([]);
+  }, []);
 
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout") => {
@@ -910,7 +1231,7 @@ export default function AttendanceScreen() {
           try {
             // Seed first route point from the same check-in coordinates for admin route timeline.
             const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
-            await addLocationLog({
+            const checkInLocationLog: LocationLog = {
               id: `loc_checkin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
               userId: user.id,
               latitude: payload.latitude,
@@ -923,7 +1244,9 @@ export default function AttendanceScreen() {
               geofenceName: payload.geofenceName ?? null,
               isInsideGeofence: payload.isInsideGeofence,
               capturedAt: capturedAtClient,
-            });
+            };
+            await addLocationLog(checkInLocationLog);
+            setLastStoredLocationLog(checkInLocationLog);
             await queueLocationPoint({
               userId: user.id,
               latitude: payload.latitude,
@@ -1048,10 +1371,51 @@ export default function AttendanceScreen() {
     isEmployeeOfficeAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
       ? formatDistance(evaluation.nearestDistanceMeters)
       : null;
+  const lastStoredLocationLabel =
+    isEmployeeOfficeAttendance && lastStoredLocationLog
+      ? `${lastStoredLocationLog.latitude.toFixed(5)}, ${lastStoredLocationLog.longitude.toFixed(5)}`
+      : null;
+  const officeMapPlannedStops = useMemo<PlannedStopPoint[]>(() => {
+    const stops: PlannedStopPoint[] = [];
+    if (officeLocationDraft) {
+      stops.push({
+        id: "attendance_office_location",
+        label: officeLocationDraft.label,
+        customerName: officeLocationDraft.label,
+        latitude: officeLocationDraft.latitude,
+        longitude: officeLocationDraft.longitude,
+        status: "in_progress",
+        markerKind: "planned_stop",
+        summary: `Office geofence radius: ${OFFICE_ATTENDANCE_RADIUS_METERS}m`,
+        detail: officeLocationDraft.address || `${officeLocationDraft.latitude.toFixed(5)}, ${officeLocationDraft.longitude.toFixed(5)}`,
+      });
+    }
+    const currentMatchesOffice = Boolean(
+      officeLocationDraft &&
+      adminCurrentLocation &&
+      Math.abs(officeLocationDraft.latitude - adminCurrentLocation.latitude) <= 0.000001 &&
+      Math.abs(officeLocationDraft.longitude - adminCurrentLocation.longitude) <= 0.000001
+    );
+    if (adminCurrentLocation && !currentMatchesOffice) {
+      stops.push({
+        id: "attendance_current_location",
+        label: "Current Location",
+        customerName: "Current Location",
+        latitude: adminCurrentLocation.latitude,
+        longitude: adminCurrentLocation.longitude,
+        status: "pending",
+        markerKind: "planned_stop",
+        summary: "Your device GPS position",
+        detail: adminCurrentLocation.address || `${adminCurrentLocation.latitude.toFixed(5)}, ${adminCurrentLocation.longitude.toFixed(5)}`,
+      });
+    }
+    return stops;
+  }, [adminCurrentLocation, officeLocationDraft]);
+  const officeLocationToSave = officeLocationDraft ?? adminCurrentLocation;
 
   return (
     <AppCanvas>
-      <Modal visible={permissionExplainerOpen} transparent animationType="slide">
+      <Modal visible={permissionExplainerOpen && !isAdminAttendanceManager} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Enable Secure Attendance</Text>
@@ -1133,8 +1497,10 @@ export default function AttendanceScreen() {
                 ? "Route and battery tracking will start automatically after check-in."
                 : isEmployeeOfficeAttendance
                   ? employeeDistanceLabel
-                    ? `Office distance: ${employeeDistanceLabel}. Check-in unlocks inside ${OFFICE_ATTENDANCE_RADIUS_METERS}m.`
-                    : "Waiting for assigned office location and live GPS."
+                    ? `Office distance: ${employeeDistanceLabel}. Last GPS: ${lastStoredLocationLabel ?? "saving..."}.`
+                    : lastStoredLocationLabel
+                      ? `Last GPS: ${lastStoredLocationLabel}. Waiting for assigned office location.`
+                      : "Waiting for assigned office location and live GPS."
                 : "Live route and battery tracking starts immediately after device authentication."}
             </Text>
           </View>
@@ -1162,31 +1528,140 @@ export default function AttendanceScreen() {
                 <Text style={[styles.officePanelTitle, { color: colors.text }]}>Employee Office Geofence</Text>
                 <Text style={[styles.officePanelMeta, { color: colors.textSecondary }]}>
                   {officeZone
-                    ? `${officeZone.latitude.toFixed(5)}, ${officeZone.longitude.toFixed(5)} - ${officeZone.radiusMeters}m`
-                    : "No office location saved for this company"}
+                    ? `${officeZone.name} - ${officeZone.latitude.toFixed(5)}, ${officeZone.longitude.toFixed(5)} - ${officeZone.radiusMeters}m`
+                    : "Search and save the company office location"}
                 </Text>
               </View>
               <Ionicons name="business-outline" size={22} color={colors.primary} />
             </View>
-            <Pressable
-              style={[
-                styles.officeButton,
-                { backgroundColor: colors.primary, opacity: officeSaving || !locationReady ? 0.72 : 1 },
-              ]}
-              onPress={saveOfficeLocationFromCurrentGps}
-              disabled={officeSaving || !locationReady}
-            >
-              {officeSaving ? (
-                <ActivityIndicator size="small" color="#fff" />
+            <View style={styles.officeSearchRow}>
+              <View style={[styles.officeSearchInputWrap, { borderColor: colors.border, backgroundColor: colors.surfaceSecondary }]}>
+                <Ionicons name="search-outline" size={18} color={colors.textTertiary} />
+                <TextInput
+                  style={[styles.officeSearchInput, { color: colors.text }]}
+                  placeholder="Search office, area, landmark..."
+                  placeholderTextColor={colors.textTertiary}
+                  value={officeSearchQuery}
+                  onChangeText={setOfficeSearchQuery}
+                  returnKeyType="search"
+                  autoCorrect={false}
+                  onSubmitEditing={() =>
+                    void searchOfficeLocations(officeSearchQuery, {
+                      showAlerts: true,
+                      allowDeviceGeocode: true,
+                    })
+                  }
+                />
+              </View>
+              <Pressable
+                style={[
+                  styles.officeSearchButton,
+                  { backgroundColor: colors.primary, opacity: officeSearchBusy ? 0.72 : 1 },
+                ]}
+                onPress={() =>
+                  void searchOfficeLocations(officeSearchQuery, {
+                    showAlerts: true,
+                    allowDeviceGeocode: true,
+                  })
+                }
+                disabled={officeSearchBusy}
+              >
+                {officeSearchBusy ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Ionicons name="search-outline" size={18} color="#fff" />
+                )}
+              </Pressable>
+            </View>
+            {officeSearchResults.length ? (
+              <View style={[styles.officeResults, { borderColor: colors.borderLight }]}>
+                {officeSearchResults.map((result, index) => (
+                  <Pressable
+                    key={result.id}
+                    style={[
+                      styles.officeResultRow,
+                      index < officeSearchResults.length - 1 && { borderBottomColor: colors.borderLight, borderBottomWidth: 1 },
+                    ]}
+                    onPress={() => selectOfficeLocationDraft(result)}
+                    disabled={officeSaving}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.officeResultTitle, { color: colors.text }]}>{result.label}</Text>
+                      <Text style={[styles.officeResultMeta, { color: colors.textSecondary }]} numberOfLines={2}>
+                        {result.address || `${result.latitude.toFixed(5)}, ${result.longitude.toFixed(5)}`}
+                      </Text>
+                    </View>
+                    <Ionicons name="map-outline" size={20} color={colors.primary} />
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+            <View style={[styles.officeMapWrap, { borderColor: colors.borderLight, backgroundColor: colors.surfaceSecondary }]}>
+              {officeMapPlannedStops.length ? (
+                <RouteMapNative
+                  points={[]}
+                  halts={[]}
+                  plannedStops={officeMapPlannedStops}
+                  colors={colors}
+                  height={220}
+                />
               ) : (
-                <>
-                  <Ionicons name="locate-outline" size={18} color="#fff" />
-                  <Text style={styles.officeButtonText}>
-                    {officeZone ? "Update Office Location" : "Set Current Location"}
+                <View style={styles.officeMapFallback}>
+                  <Ionicons name="map-outline" size={28} color={colors.primary} />
+                  <Text style={[styles.officeMapFallbackTitle, { color: colors.text }]}>
+                    Select office location
                   </Text>
-                </>
+                  <Text style={[styles.officeMapFallbackText, { color: colors.textSecondary }]}>
+                    Search a place or tap Current Location to preview it on the same map used by Sales AI.
+                  </Text>
+                </View>
               )}
-            </Pressable>
+            </View>
+            <View style={styles.officeActionRow}>
+              <Pressable
+                style={[
+                  styles.officeSecondaryButton,
+                  {
+                    borderColor: colors.border,
+                    backgroundColor: colors.backgroundElevated,
+                    opacity: adminCurrentLocationBusy ? 0.72 : 1,
+                  },
+                ]}
+                onPress={captureAdminCurrentLocation}
+                disabled={adminCurrentLocationBusy}
+              >
+                {adminCurrentLocationBusy ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : (
+                  <>
+                    <Ionicons name="locate-outline" size={18} color={colors.primary} />
+                    <Text style={[styles.officeSecondaryButtonText, { color: colors.primary }]}>Current Location</Text>
+                  </>
+                )}
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.officeSetButton,
+                  {
+                    backgroundColor: colors.primary,
+                    opacity: !officeLocationToSave || officeSaving ? 0.72 : 1,
+                  },
+                ]}
+                onPress={() => {
+                  if (officeLocationToSave) void saveOfficeLocation(officeLocationToSave);
+                }}
+                disabled={!officeLocationToSave || officeSaving}
+              >
+                {officeSaving ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark-outline" size={18} color="#fff" />
+                    <Text style={styles.officeSetButtonText}>Set This Location</Text>
+                  </>
+                )}
+              </Pressable>
+            </View>
           </View>
         ) : null}
 
@@ -1479,6 +1954,115 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     fontSize: 11.5,
     marginTop: 3,
+  },
+  officeSearchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  officeSearchInputWrap: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  officeSearchInput: {
+    flex: 1,
+    fontFamily: "Inter_400Regular",
+    fontSize: 13,
+    paddingVertical: 0,
+  },
+  officeSearchButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  officeResults: {
+    borderTopWidth: 1,
+  },
+  officeResultRow: {
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+  },
+  officeResultTitle: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+  },
+  officeResultMeta: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 11.5,
+    marginTop: 2,
+    lineHeight: 16,
+  },
+  officeMapWrap: {
+    height: 220,
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: "hidden",
+  },
+  officeMap: {
+    flex: 1,
+  },
+  officeMapFallback: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 18,
+  },
+  officeMapFallbackTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 14,
+    textAlign: "center",
+  },
+  officeMapFallbackText: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 12,
+    lineHeight: 17,
+    textAlign: "center",
+  },
+  officeActionRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  officeSecondaryButton: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 7,
+    paddingHorizontal: 10,
+  },
+  officeSecondaryButtonText: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 12,
+  },
+  officeSetButton: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 7,
+    paddingHorizontal: 10,
+  },
+  officeSetButtonText: {
+    color: "#fff",
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 12,
   },
   officeButton: {
     minHeight: 42,

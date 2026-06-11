@@ -2726,10 +2726,49 @@ async function listGeofencesForUserFromMySql(userId: string): Promise<Geofence[]
   return rows.map(mapGeofenceRow);
 }
 
-async function listGeofencesForUserResolved(userId: string): Promise<Geofence[]> {
+function isCompanyOfficeGeofence(zone: Geofence, companyId: string | null | undefined): boolean {
+  if (!zone.isActive || !companyId) return false;
+  if (zone.id === `office_${companyId}`) return true;
+  return zone.companyId === companyId && zone.id.startsWith("office_");
+}
+
+function mergeGeofencesById(zones: Geofence[]): Geofence[] {
+  const byId = new Map<string, Geofence>();
+  for (const zone of zones) {
+    byId.set(zone.id, zone);
+  }
+  return Array.from(byId.values());
+}
+
+async function listCompanyOfficeGeofencesFromMySql(companyId: string | null | undefined): Promise<Geofence[]> {
+  if (!isMySqlStateEnabled() || !companyId) return [];
+  await ensureGeofenceTable();
+  const conn = await getMySqlPool();
+  const officeId = `office_${companyId}`;
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_geofences
+     WHERE is_active = 1
+       AND company_id = ?
+       AND (id = ? OR LEFT(id, 7) = 'office_')
+     ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, updated_at DESC`,
+    [companyId, officeId, officeId]
+  );
+  return rows.map(mapGeofenceRow);
+}
+
+async function listGeofencesForUserResolved(
+  userId: string,
+  options: { companyId?: string | null; role?: UserRole | null } = {}
+): Promise<Geofence[]> {
+  const includeCompanyOffice = options.role === "employee" && Boolean(options.companyId);
   if (isMySqlStateEnabled()) {
     try {
       const zones = await listGeofencesForUserFromMySql(userId);
+      if (includeCompanyOffice) {
+        const officeZones = await listCompanyOfficeGeofencesFromMySql(options.companyId);
+        const merged = mergeGeofencesById([...zones, ...officeZones]);
+        if (merged.length) return merged;
+      }
       if (zones.length) return zones;
     } catch (error) {
       console.warn(
@@ -2738,7 +2777,11 @@ async function listGeofencesForUserResolved(userId: string): Promise<Geofence[]>
       );
     }
   }
-  return storage.listGeofencesForUser(userId);
+  const zones = await storage.listGeofencesForUser(userId);
+  if (!includeCompanyOffice) return zones;
+  const allZones = await storage.listGeofences();
+  const officeZones = allZones.filter((zone) => isCompanyOfficeGeofence(zone, options.companyId));
+  return mergeGeofencesById([...zones, ...officeZones]);
 }
 
 async function upsertGeofenceInMySql(zone: Geofence): Promise<void> {
@@ -9711,7 +9754,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(403).json({ message: "Not authorized for this user geofence data" });
       return;
     }
-    const geofences = await listGeofencesForUserResolved(userId);
+    const companyId = await resolveRequestCompanyId(req);
+    const geofences = await listGeofencesForUserResolved(userId, {
+      companyId,
+      role: req.auth?.role ?? null,
+    });
     res.json(geofences);
   });
 
@@ -9775,7 +9822,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(403).json({ message: "Not authorized to post location" });
       return;
     }
-    const zones = await listGeofencesForUserResolved(sample.userId);
+    const companyId = await resolveRequestCompanyId(req);
+    const zones = await listGeofencesForUserResolved(sample.userId, {
+      companyId,
+      role: req.auth?.role ?? null,
+    });
     const status = resolveGeofenceStatus(
       {
         userId: sample.userId,
@@ -9791,6 +9842,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const log: LocationLog = {
       id: randomUUID(),
+      companyId: companyId ?? undefined,
       userId: sample.userId,
       latitude: sample.latitude,
       longitude: sample.longitude,
@@ -9841,6 +9893,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
+    const companyId = await resolveRequestCompanyId(req);
     const zoneCache = new Map<string, Geofence[]>();
     let accepted = 0;
     for (const entry of validEntries) {
@@ -9850,7 +9903,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       let zones = zoneCache.get(entry.userId);
       if (!zones) {
-        zones = await listGeofencesForUserResolved(entry.userId);
+        zones = await listGeofencesForUserResolved(entry.userId, {
+          companyId,
+          role: req.auth?.role ?? null,
+        });
         zoneCache.set(entry.userId, zones);
       }
       const status = resolveGeofenceStatus(
@@ -9868,6 +9924,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const log: LocationLog = {
         id: randomUUID(),
+        companyId: companyId ?? undefined,
         userId: entry.userId,
         latitude: entry.latitude,
         longitude: entry.longitude,
@@ -10384,7 +10441,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const userZones = await listGeofencesForUserResolved(payload.userId);
+    const companyId = await resolveRequestCompanyId(req);
+    const userZones = await listGeofencesForUserResolved(payload.userId, {
+      companyId,
+      role: req.auth?.role ?? null,
+    });
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
     const isEmployeeOfficeAttendance = req.auth?.role === "employee";
     const isFieldSalespersonAttendance = req.auth?.role === "salesperson";
@@ -10434,7 +10495,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       : null;
 
     const now = new Date().toISOString();
-    const companyId = await resolveRequestCompanyId(req);
     const attendanceRecord: AttendanceRecord = {
       id: randomUUID(),
       userId: payload.userId,
@@ -10598,10 +10658,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return;
     }
 
-    const userZones = await listGeofencesForUserResolved(payload.userId);
+    const companyId = await resolveRequestCompanyId(req);
+    const userZones = await listGeofencesForUserResolved(payload.userId, {
+      companyId,
+      role: req.auth?.role ?? null,
+    });
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
     const now = new Date().toISOString();
-    const companyId = await resolveRequestCompanyId(req);
 
     if (!zoneStatus.inside) {
       await recordAnomaly({

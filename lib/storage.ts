@@ -3962,7 +3962,24 @@ export async function getGeofences(): Promise<Geofence[]> {
 
 export async function getGeofencesForUser(userId: string): Promise<Geofence[]> {
   const geofences = await getGeofences();
-  return geofences.filter((zone) => zone.isActive && zone.assignedEmployeeIds.includes(userId));
+  const currentUser = await getCurrentUser().catch(() => null);
+  const activeCompanyId = await getActiveCompanyId();
+  const directZones = geofences.filter((zone) => zone.isActive && zone.assignedEmployeeIds.includes(userId));
+  if (currentUser?.id !== userId || currentUser.role !== "employee") {
+    return directZones;
+  }
+
+  const officeZoneId = activeCompanyId ? `office_${activeCompanyId}` : null;
+  const officeZones = geofences.filter((zone) => {
+    if (!zone.isActive) return false;
+    if (officeZoneId && zone.id === officeZoneId) return true;
+    return Boolean(activeCompanyId && zone.companyId === activeCompanyId && zone.id.startsWith("office_"));
+  });
+  const byId = new Map<string, Geofence>();
+  for (const zone of [...directZones, ...officeZones]) {
+    byId.set(zone.id, zone);
+  }
+  return Array.from(byId.values());
 }
 
 export async function upsertGeofence(geofence: Geofence): Promise<void> {
