@@ -5981,6 +5981,10 @@ async function listEmployeesFromMySql(): Promise<unknown[]> {
       email,
       name: name || email || "Employee",
       companyId,
+      employeeCategory:
+        employee.employeeCategory === "on_field" || isSalesRole(normalizeRole(employee.role))
+          ? "on_field"
+          : "fixed_location",
     });
   };
 
@@ -7766,6 +7770,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         name?: unknown;
         email?: unknown;
         role?: unknown;
+        employeeCategory?: unknown;
         department?: unknown;
         branch?: unknown;
         phone?: unknown;
@@ -7776,6 +7781,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const name = firstString(body.name);
       const email = firstString(body.email).toLowerCase();
+      const role = firstString(body.role) || null;
+      const employeeCategory = firstString(body.employeeCategory);
       if (!name || !email) {
         res.status(400).json({ message: "name and email are required." });
         return;
@@ -7803,7 +7810,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           {
             name,
             email,
-            role: firstString(body.role) || null,
+            role,
+            employeeCategory:
+              employeeCategory === "on_field" || role === "salesperson" ? "on_field" : "fixed_location",
             department: firstString(body.department) || null,
             branch: firstString(body.branch) || null,
             phone: firstString(body.phone) || null,

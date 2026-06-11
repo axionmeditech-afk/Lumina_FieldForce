@@ -1,4 +1,5 @@
 export type UserRole = "admin" | "hr" | "manager" | "salesperson" | "employee";
+export type EmployeeCategory = "on_field" | "fixed_location";
 
 export interface AppUser {
   id: string;
@@ -88,6 +89,7 @@ export interface Employee {
   companyId: string;
   name: string;
   role: UserRole;
+  employeeCategory?: EmployeeCategory;
   department: string;
   status: "active" | "idle" | "offline";
   email: string;

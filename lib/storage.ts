@@ -1173,11 +1173,15 @@ function normalizeRole(role?: UserRole): UserRole {
 }
 
 function roleToDepartment(role: UserRole): string {
-  if (role === "admin") return "Management";
-  if (role === "hr") return "Human Resources";
-  if (role === "manager") return "Operations";
-  if (role === "employee") return "Office Employees";
-  return "On Field Employees";
+	if (role === "admin") return "Management";
+	if (role === "hr") return "Human Resources";
+	if (role === "manager") return "Operations";
+	if (role === "employee") return "Office Employees";
+	return "On Field Employees";
+}
+
+function roleToEmployeeCategory(role: UserRole): "on_field" | "fixed_location" {
+	return isSalesRole(role) ? "on_field" : "fixed_location";
 }
 
 function normalizeDepartmentForRole(role: UserRole, department?: string | null): string {
@@ -2205,12 +2209,13 @@ async function upsertEmployeeForCompany(user: AppUser, company: CompanyProfile):
       normalizeEmail(employee.email) === normalizeEmail(user.email)
   );
 
-  const baseEmployee: Employee = {
-    id: existingIndex >= 0 ? employees[existingIndex].id : makeId("e"),
-    companyId: company.id,
-    name: user.name,
-    role: user.role,
-    department: user.department,
+	const baseEmployee: Employee = {
+		id: existingIndex >= 0 ? employees[existingIndex].id : makeId("e"),
+		companyId: company.id,
+		name: user.name,
+		role: user.role,
+		employeeCategory: roleToEmployeeCategory(user.role),
+		department: user.department,
     status: "active",
     email: user.email,
     phone: user.phone,

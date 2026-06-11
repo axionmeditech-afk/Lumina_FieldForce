@@ -1,6 +1,8 @@
 import { randomUUID } from "crypto";
 import type { AttendanceRecord } from "@/lib/types";
 import { storage } from "@/server/storage";
+import { getMySqlPool, isMySqlStateEnabled } from "@/server/services/mysql-state";
+import type { Pool } from "mysql2/promise";
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -27,6 +29,7 @@ export interface DolibarrEmployeeSyncInput {
   name: string;
   email: string;
   role?: string | null;
+  employeeCategory?: "on_field" | "fixed_location" | null;
   department?: string | null;
   branch?: string | null;
   phone?: string | null;
@@ -46,6 +49,16 @@ function normalizeText(value: string | null | undefined): string {
 
 function normalizeEmail(value: string): string {
   return normalizeText(value).toLowerCase();
+}
+
+function normalizeEmployeeCategory(
+  value: string | null | undefined,
+  role?: string | null
+): "on_field" | "fixed_location" {
+  if (value === "on_field" || value === "fixed_location") {
+    return value;
+  }
+  return normalizeText(role).toLowerCase() === "salesperson" ? "on_field" : "fixed_location";
 }
 
 function isLikelyEmail(value: string): boolean {
@@ -271,6 +284,127 @@ function buildDolibarrEmployeePayload(input: DolibarrEmployeeSyncInput, login: s
   return payload;
 }
 
+async function tableExists(pool: Pool, tableName: string): Promise<boolean> {
+  const [rows] = await pool.query<any[]>("SHOW TABLES LIKE ?", [tableName]);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+async function columnExists(pool: Pool, tableName: string, columnName: string): Promise<boolean> {
+  const [rows] = await pool.query<any[]>(`SHOW COLUMNS FROM \`${tableName}\` LIKE ?`, [columnName]);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+async function ensureDolibarrHrmEmployeeProfileTable(pool: Pool): Promise<void> {
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS \`nmy5_hrm_employee_profile\` (
+      \`rowid\` integer AUTO_INCREMENT PRIMARY KEY NOT NULL,
+      \`entity\` integer DEFAULT 1 NOT NULL,
+      \`fk_user\` integer NOT NULL,
+      \`employee_code\` varchar(64),
+      \`fieldforce_identifier\` varchar(128),
+      \`employee_category\` varchar(32) DEFAULT 'fixed_location' NOT NULL,
+      \`current_salary\` double(24,8) DEFAULT 0,
+      \`industry_salary\` double(24,8) DEFAULT 0,
+      \`profitability_score\` double(6,2) DEFAULT 0,
+      \`overtime_rate\` double(24,8) DEFAULT 0,
+      \`daily_hours\` double(6,2) DEFAULT 8,
+      \`work_days_per_month\` double(6,2) DEFAULT 26,
+      \`payroll_active\` smallint DEFAULT 1 NOT NULL,
+      \`datec\` datetime NOT NULL,
+      \`tms\` timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      \`fk_user_creat\` integer,
+      \`fk_user_modif\` integer,
+      UNIQUE KEY \`uk_hrm_employee_profile_user\` (\`entity\`, \`fk_user\`),
+      KEY \`idx_hrm_employee_profile_fieldforce\` (\`entity\`, \`fieldforce_identifier\`),
+      KEY \`idx_hrm_employee_profile_category\` (\`entity\`, \`employee_category\`)
+    ) ENGINE=InnoDB`
+  );
+
+  if (!(await columnExists(pool, "nmy5_hrm_employee_profile", "employee_category"))) {
+    await pool.query(
+      "ALTER TABLE `nmy5_hrm_employee_profile` ADD COLUMN `employee_category` varchar(32) DEFAULT 'fixed_location' NOT NULL AFTER `fieldforce_identifier`"
+    );
+  }
+}
+
+async function resolveDolibarrUserForHrmProfile(
+  pool: Pool,
+  userId: number | null,
+  email: string
+): Promise<{ rowid: number; entity: number; login: string } | null> {
+  if (!(await tableExists(pool, "nmy5_user"))) {
+    return null;
+  }
+
+  if (userId && userId > 0) {
+    const [rows] = await pool.query<any[]>(
+      "SELECT rowid, entity, login FROM `nmy5_user` WHERE rowid = ? LIMIT 1",
+      [userId]
+    );
+    if (rows?.[0]?.rowid) {
+      return {
+        rowid: Number(rows[0].rowid),
+        entity: Number(rows[0].entity || 1),
+        login: String(rows[0].login || ""),
+      };
+    }
+  }
+
+  const [rows] = await pool.query<any[]>(
+    "SELECT rowid, entity, login FROM `nmy5_user` WHERE LOWER(TRIM(email)) = ? LIMIT 1",
+    [normalizeEmail(email)]
+  );
+  if (!rows?.[0]?.rowid) {
+    return null;
+  }
+  return {
+    rowid: Number(rows[0].rowid),
+    entity: Number(rows[0].entity || 1),
+    login: String(rows[0].login || ""),
+  };
+}
+
+async function syncDolibarrHrmEmployeeCategory(
+  userId: number | null,
+  email: string,
+  input: DolibarrEmployeeSyncInput
+): Promise<void> {
+  if (!isMySqlStateEnabled()) {
+    return;
+  }
+
+  const pool = await getMySqlPool();
+  const dolibarrUser = await resolveDolibarrUserForHrmProfile(pool, userId, email);
+  if (!dolibarrUser) {
+    return;
+  }
+
+  const category = normalizeEmployeeCategory(input.employeeCategory, input.role);
+  await pool.query("UPDATE `nmy5_user` SET employee = 1 WHERE rowid = ?", [dolibarrUser.rowid]);
+  await ensureDolibarrHrmEmployeeProfileTable(pool);
+  await pool.query(
+    `INSERT INTO \`nmy5_hrm_employee_profile\`
+       (\`entity\`, \`fk_user\`, \`employee_code\`, \`fieldforce_identifier\`, \`employee_category\`, \`payroll_active\`, \`datec\`)
+     VALUES (?, ?, ?, ?, ?, 1, NOW())
+     ON DUPLICATE KEY UPDATE
+       \`employee_category\` = VALUES(\`employee_category\`),
+       \`fieldforce_identifier\` = IF(
+          \`fieldforce_identifier\` IS NULL OR \`fieldforce_identifier\` = '',
+          VALUES(\`fieldforce_identifier\`),
+          \`fieldforce_identifier\`
+       ),
+       \`payroll_active\` = 1,
+       \`fk_user_modif\` = 0`,
+    [
+      dolibarrUser.entity,
+      dolibarrUser.rowid,
+      dolibarrUser.login || normalizeEmail(email).split("@")[0],
+      dolibarrUser.login || normalizeEmail(email),
+      category,
+    ]
+  );
+}
+
 export async function syncApprovedUserToDolibarrEmployee(
   user: DolibarrEmployeeSyncInput,
   config?: DolibarrApiConfig
@@ -320,6 +454,7 @@ export async function syncApprovedUserToDolibarrEmployee(
       continue;
     }
     if (existing.found) {
+      await syncDolibarrHrmEmployeeCategory(existing.userId, normalizedEmail, user);
       return {
         ok: true,
         status: "exists",
@@ -332,6 +467,7 @@ export async function syncApprovedUserToDolibarrEmployee(
     const basePayload = buildDolibarrEmployeePayload(user, baseLogin);
     const created = await createDolibarrEmployee(apiBase, apiKey, basePayload);
     if (created.ok) {
+      await syncDolibarrHrmEmployeeCategory(created.userId, normalizedEmail, user);
       return {
         ok: true,
         status: "created",
@@ -345,6 +481,7 @@ export async function syncApprovedUserToDolibarrEmployee(
       const retryPayload = buildDolibarrEmployeePayload(user, buildRetryLogin(baseLogin));
       const retried = await createDolibarrEmployee(apiBase, apiKey, retryPayload);
       if (retried.ok) {
+        await syncDolibarrHrmEmployeeCategory(retried.userId, normalizedEmail, user);
         return {
           ok: true,
           status: "created",
@@ -356,6 +493,7 @@ export async function syncApprovedUserToDolibarrEmployee(
 
       const existingAfterConflict = await lookupDolibarrUserByEmail(apiBase, normalizedEmail, apiKey);
       if (existingAfterConflict.found) {
+        await syncDolibarrHrmEmployeeCategory(existingAfterConflict.userId, normalizedEmail, user);
         return {
           ok: true,
           status: "exists",

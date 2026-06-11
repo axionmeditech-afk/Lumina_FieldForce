@@ -747,6 +747,7 @@ export default function AdminControlsScreen() {
                   name: request.name,
                   email: request.email,
                   role: selectedRole,
+                  employeeCategory: selectedRole === "salesperson" ? "on_field" : "fixed_location",
                   department: request.requestedDepartment,
                   branch: request.requestedBranch,
                   location: request.requestedBranch,

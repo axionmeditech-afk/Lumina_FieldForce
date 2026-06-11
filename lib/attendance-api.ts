@@ -1158,6 +1158,7 @@ export interface DolibarrEmployeeSyncPayload {
   name: string;
   email: string;
   role?: string | null;
+  employeeCategory?: "on_field" | "fixed_location" | null;
   department?: string | null;
   branch?: string | null;
   phone?: string | null;
@@ -1239,6 +1240,17 @@ function buildDolibarrJobTitle(payload: DolibarrEmployeeSyncPayload): string | u
     .slice(0, 3);
   if (!parts.length) return undefined;
   return parts.join(" | ").slice(0, 80);
+}
+
+function resolveDolibarrEmployeeCategory(
+  payload: Pick<DolibarrEmployeeSyncPayload, "role" | "employeeCategory">
+): "on_field" | "fixed_location" {
+  if (payload.employeeCategory === "on_field" || payload.employeeCategory === "fixed_location") {
+    return payload.employeeCategory;
+  }
+  return normalizeDolibarrText(payload.role).toLowerCase() === "salesperson"
+    ? "on_field"
+    : "fixed_location";
 }
 
 function buildDolibarrHeaders(apiKey: string): HeadersInit {
@@ -2680,6 +2692,7 @@ export async function syncApprovedEmployeeToDolibarr(
 
   const body: DolibarrEmployeeSyncPayload = {
     ...payload,
+    employeeCategory: resolveDolibarrEmployeeCategory(payload),
   };
 
   if (typeof payload.enabled === "boolean") {
