@@ -6621,29 +6621,21 @@ function dedupeNotifications(notifications: AppNotification[]): AppNotification[
 
 async function removeDuplicateAccessRequestNotifications(notification: AppNotification): Promise<void> {
   if (!isMySqlStateEnabled()) return;
-  const accessKey = getAccessRequestNotificationIdentity(notification);
-  if (!accessKey) return;
   await ensureNotificationsTableInMySql();
   const conn = await getMySqlPool();
-  if (accessKey.startsWith("id:")) {
-    await conn.execute(
-      `DELETE FROM lff_notifications
-       WHERE kind = 'alert'
-         AND audience = 'admin'
-         AND created_by_id = ?
-         AND id <> ?`,
-      [notification.createdById, notification.id]
-    );
-    return;
-  }
-  const email = accessKey.slice("email:".length);
+  
+  const emailMatch = notification.body.match(/\(([^()@\s]+@[^()\s]+)\)/i);
+  if (!emailMatch) return;
+  const email = emailMatch[1].toLowerCase();
+
   await conn.execute(
     `DELETE FROM lff_notifications
      WHERE kind = 'alert'
        AND audience = 'admin'
-       AND id <> ?
-       AND LOWER(body) LIKE ?`,
-    [notification.id, `%(${email})%`]
+       AND title = 'New access request'
+       AND LOWER(body) LIKE ?
+       AND id <> ?`,
+    [`%(${email})%`, notification.id]
   );
 }
 
@@ -9158,6 +9150,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         parsedValue = null;
       }
 
+      if (Array.isArray(parsedValue) && req.auth?.role !== "admin" && req.auth?.role !== "hr" && req.auth?.role !== "manager") {
+        if (key === "@trackforce_audit_logs") {
+          parsedValue = parsedValue.filter(item => item && typeof item === 'object' && item.userId === req.auth?.sub);
+        } else if (key === "@trackforce_support_threads") {
+          parsedValue = parsedValue.filter(item => item && typeof item === 'object' && item.requestedById === req.auth?.sub);
+        }
+      }
+
       res.json({
         key,
         value: parsedValue,
@@ -9731,6 +9731,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
       const serialized = JSON.stringify(scopedValue ?? null);
       await writeRemoteState(key, serialized, getRequestUser(req));
+      
+      // --- GPS Disabled Alert Logic ---
+      if (key === "@trackforce_attendance_anomalies" && Array.isArray(scopedValue)) {
+        try {
+          const conn = await getMySqlPool();
+          for (const anom of scopedValue) {
+            if (anom && anom.type === "gps_disabled" && anom.id) {
+              const [existing] = await conn.query<any[]>("SELECT id FROM lff_notifications WHERE title = ? AND body LIKE ?", ["GPS Disabled Alert", `%${anom.id}%`]);
+              if (!existing || existing.length === 0) {
+                const notif = {
+                  id: randomUUID(),
+                  title: "GPS Disabled Alert",
+                  body: `Employee ${anom.userId} has disabled GPS or Location Services during check-in. Anomaly: ${anom.id}`,
+                  kind: "alert" as const,
+                  audience: "roles" as const,
+                  audienceUserIds: "[]",
+                  createdById: "system",
+                  createdAt: new Date().toISOString(),
+                };
+                await insertNotificationInMySql(notif);
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Failed to generate GPS disabled alert", e);
+        }
+      }
+      // --------------------------------
+
       res.json({
         ok: true,
         key,
@@ -9921,6 +9950,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
         },
         zones
       );
+
+      // --- Auto-Checkout Logic ---
+      try {
+        const activeAttendance = isMySqlStateEnabled() 
+          ? await findActiveAttendanceInMySql(entry.userId).catch(() => null)
+          : await storage.findActiveAttendance(entry.userId);
+
+        if (activeAttendance) {
+          // If checked in but now outside > 500m and GPS is accurate
+          if (!status.inside && status.distanceMeters > 500 && (entry.accuracy ?? 1000) <= 100) {
+            const now = entry.capturedAt ?? new Date().toISOString();
+            const checkoutRecord: AttendanceRecord = {
+              id: randomUUID(),
+              userId: entry.userId,
+              userName: activeAttendance.userName,
+              companyId: activeAttendance.companyId,
+              type: "checkout",
+              timestamp: now,
+              timestampServer: new Date().toISOString(),
+              location: { lat: entry.latitude, lng: entry.longitude },
+              geofenceId: activeAttendance.geofenceId,
+              geofenceName: activeAttendance.geofenceName,
+              photoUrl: null,
+              deviceId: activeAttendance.deviceId,
+              isInsideGeofence: false,
+              source: "system",
+              notes: `Auto-checkout due to geofence exit (distance: ${Math.round(status.distanceMeters)}m, accuracy: ${Math.round(entry.accuracy ?? 0)}m)`,
+              approvalStatus: "approved",
+              approvalReviewedById: "system",
+              approvalReviewedByName: "System",
+              approvalReviewedAt: now,
+            };
+            await storage.createAttendance(checkoutRecord);
+            if (isMySqlStateEnabled()) {
+              try { await insertAttendanceInMySql(checkoutRecord); } catch(e){}
+            }
+            const dolibarrConfig = await resolveDolibarrConfigForUser(entry.userId);
+            void syncAttendanceWithDolibarr(checkoutRecord, dolibarrConfig);
+
+            const notification = {
+              id: randomUUID(),
+              title: "Auto-Checkout Executed",
+              body: "You were automatically checked out for leaving the geofenced area.",
+              kind: "alert" as const,
+              audience: "all" as const,
+              audienceUserIds: JSON.stringify([entry.userId]),
+              createdById: "system",
+              createdAt: now,
+            };
+            try { await insertNotificationInMySql(notification); } catch(e){}
+          }
+        } else {
+          // --- Geofence Enter Notification ---
+          if (status.distanceMeters <= 500) {
+             const _global = global as any;
+             if (!_global._checkinRemindersSent) _global._checkinRemindersSent = new Map();
+             const today = new Date().toISOString().split('T')[0];
+             const lastSent = _global._checkinRemindersSent.get(entry.userId);
+             if (lastSent !== today) {
+               _global._checkinRemindersSent.set(entry.userId, today);
+               const now = new Date().toISOString();
+               const notification = {
+                 id: randomUUID(),
+                 title: "Check-in Reminder",
+                 body: "You are near the office. Please don't forget to check in!",
+                 kind: "alert" as const,
+                 audience: "all" as const,
+                 audienceUserIds: JSON.stringify([entry.userId]),
+                 createdById: "system",
+                 createdAt: now,
+               };
+               try { await insertNotificationInMySql(notification); } catch(e){}
+             }
+          }
+        }
+      } catch (error) {
+        console.error("Failed auto-checkout / reminder logic", error);
+      }
+      // -----------------------------
 
       const log: LocationLog = {
         id: randomUUID(),

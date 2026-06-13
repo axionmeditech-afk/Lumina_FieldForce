@@ -250,8 +250,8 @@ export async function ensureBackgroundLocationTracking(): Promise<{
       showsBackgroundLocationIndicator: false,
       activityType: Location.ActivityType.OtherNavigation,
       foregroundService: {
-        notificationTitle: "Lumina FieldForce route tracking active",
-        notificationBody: "GPS is saved every 2 minutes until checkout.",
+        notificationTitle: "Lumina FieldForce",
+        notificationBody: "App is running",
         killServiceOnDestroy: false,
       },
     });

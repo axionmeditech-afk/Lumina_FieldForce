@@ -13,6 +13,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import Animated, {
   Extrapolation,
   FadeInDown,
@@ -40,6 +41,7 @@ import {
   getTeams,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
+import { getTodayAttendance } from "@/lib/attendance-api";
 import type {
   AppNotification,
   AttendanceRecord,
@@ -598,7 +600,7 @@ export default function DashboardScreen() {
   const [supportThreads, setSupportThreads] = useState<SupportThread[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [metricRange, setMetricRange] = useState<MetricRangeId>("week");
+  const [metricRange, setMetricRange] = useState<MetricRangeId>("today");
   const [metricRangeOpen, setMetricRangeOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -743,6 +745,7 @@ export default function DashboardScreen() {
     const completedTasks = assignedTaskList.filter((task) => task.status === "completed").length;
     const openTasks = pendingTasks + inProgressTasks;
     const pendingExpenses = expenses.filter((expense) => expense.status === "pending").length;
+    const userHasOpenSession = user ? hasOpenAttendanceSession(validAttendance, user.id, user.name) : false;
     const avgInterestScore =
       conversations.length === 0
         ? 0
@@ -781,6 +784,7 @@ export default function DashboardScreen() {
   }, [attendance, clockNow, conversations, employees, expenses, notifications, supportThreads, tasks, user]);
 
   const isSalesperson = isSalesRole(user?.role);
+  const isAdmin = user?.role === "admin" || user?.role === "manager";
   const todayKey = useMemo(() => toLocalDateKey(clockNow), [clockNow]);
   const userTasks = useMemo(() => {
     if (!user) return [] as Task[];
@@ -842,6 +846,8 @@ export default function DashboardScreen() {
     const userCompletedVisits = userRangeVisits.filter((task) => task.status === "completed").length;
     const userActiveVisits = userRangeVisits.filter((task) => task.status === "in_progress").length;
     const userPendingVisits = userRangeVisits.filter((task) => task.status === "pending").length;
+    const rangeVisits = assignedTaskList.filter((task) => task.taskType === "field_visit");
+    const rangeCompletedVisits = rangeVisits.filter((task) => task.status === "completed").length;
     const rangeConversations = conversations.filter((entry) =>
       isMetricDateInRange(entry.date, metricRange, clockNow)
     );
@@ -896,9 +902,60 @@ export default function DashboardScreen() {
   ]);
 
   const metricCards = useMemo<MetricCard[]>(
-    () =>
-      isSalesperson
-        ? [
+    () => {
+      if (isAdmin) {
+        let expectedDays = 1;
+        if (selectedMetricRange.id === "week") expectedDays = 6;
+        else if (selectedMetricRange.id === "month") expectedDays = 26;
+        else if (selectedMetricRange.id === "all") expectedDays = 300;
+        
+        let approxAttendanceRate = presentRatio;
+        if (selectedMetricRange.id !== "today" && snapshot.totalEmployees > 0) {
+            const expectedCheckins = snapshot.totalEmployees * expectedDays;
+            approxAttendanceRate = Math.min(Math.round((rangedMetricData.checkins / expectedCheckins) * 100), 100);
+        }
+        
+        return [
+            {
+              id: "present",
+              label: "Attendance",
+              value: selectedMetricRange.id === "today" 
+                 ? `${snapshot.presentToday}/${snapshot.totalEmployees}`
+                 : `${approxAttendanceRate}%`,
+              hint: selectedMetricRange.id === "today"
+                 ? `${presentRatio}% attendance today`
+                 : `Approx. attendance over ${selectedMetricRange.shortLabel}`,
+              icon: "person-add-outline",
+              tone: colors.success,
+            },
+            {
+              id: "tasks",
+              label: "Execution Rate",
+              value: `${rangedMetricData.completedTasks}/${rangedMetricData.assignedTasks}`,
+              hint: `${rangedMetricData.taskCompletionRate}% task completion`,
+              icon: "checkbox-outline",
+              tone: colors.primary,
+            },
+            {
+              id: "expenses",
+              label: "Expenses Pending",
+              value: `${snapshot.pendingExpenses}`,
+              hint: `Awaiting admin approval`,
+              icon: "receipt-outline",
+              tone: colors.warning,
+            },
+            {
+              id: "sales",
+              label: "High Intent",
+              value: `${rangedMetricData.highIntentDeals}`,
+              hint: `${rangedMetricData.totalConversations} total conversations`,
+              icon: "sparkles-outline",
+              tone: colors.secondary,
+            },
+        ];
+      }
+      if (isSalesperson) {
+        return [
             {
               id: "visits",
               label: "Visits",
@@ -916,11 +973,11 @@ export default function DashboardScreen() {
               tone: colors.success,
             },
             {
-              id: "alerts",
-              label: "My Alerts",
-              value: `${rangedMetricData.unreadNotifications}`,
-              hint: `${rangedMetricData.openSupportThreads} support threads`,
-              icon: "notifications-outline",
+              id: "sales",
+              label: "High Intent",
+              value: `${rangedMetricData.highIntentDeals}`,
+              hint: `My active deals`,
+              icon: "sparkles-outline",
               tone: colors.warning,
             },
             {
@@ -931,8 +988,9 @@ export default function DashboardScreen() {
               icon: "receipt-outline",
               tone: colors.secondary,
             },
-          ]
-        : [
+        ];
+      }
+      return [
             {
               id: "present",
               label: "Check-ins",
@@ -942,53 +1000,115 @@ export default function DashboardScreen() {
               tone: colors.success,
             },
             {
-              id: "tasks",
-              label: "Task Completion",
-              value: `${rangedMetricData.completedTasks}/${rangedMetricData.assignedTasks}`,
-              hint: `${rangedMetricData.openTasks} open · ${rangedMetricData.taskCompletionRate}% done`,
-              icon: "checkbox-outline",
+              id: "alerts",
+              label: "My Alerts",
+              value: `${rangedMetricData.unreadNotifications}`,
+              hint: `${rangedMetricData.openSupportThreads} support threads`,
+              icon: "notifications-outline",
               tone: colors.primary,
             },
             {
-              id: "support",
-              label: "Support Queue",
-              value: `${rangedMetricData.openSupportThreads}`,
-              hint: `${rangedMetricData.unreadNotifications} unread alerts`,
-              icon: "help-buoy-outline",
+              id: "expenses",
+              label: "Expenses",
+              value: `${rangedMetricData.userPendingExpenses}`,
+              hint: "Pending approvals",
+              icon: "receipt-outline",
               tone: colors.warning,
             },
             {
-              id: "sales",
-              label: "High Intent",
-              value: `${rangedMetricData.highIntentDeals}`,
-              hint: `${rangedMetricData.totalConversations} total conversations`,
-              icon: "sparkles-outline",
+              id: "support",
+              label: "My Support",
+              value: `${rangedMetricData.openSupportThreads}`,
+              hint: "Open queries",
+              icon: "help-buoy-outline",
               tone: colors.secondary,
             },
-          ],
+      ];
+    },
     [
       colors.primary,
       colors.secondary,
       colors.success,
       colors.warning,
+      isAdmin,
       isSalesperson,
+      presentRatio,
       rangedMetricData,
+      selectedMetricRange.id,
       selectedMetricRange.shortLabel,
+      snapshot.pendingExpenses,
+      snapshot.presentToday,
       snapshot.totalEmployees,
     ]
   );
 
   const commandHighlights = useMemo<CommandHighlight[]>(
-    () =>
-      isSalesperson
-        ? [
+    () => {
+      if (isAdmin) {
+        return [
             {
-              id: "visits_total",
-              label: "Visits Today",
-              value: `${todaysVisits.length}`,
-              icon: "navigate-outline",
+              id: "team_presence",
+              label: "Team Presence",
+              value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
+              icon: "people-circle-outline",
+              tone: colors.success,
+            },
+            {
+              id: "pending_approvals",
+              label: "Pending Approvals",
+              value: `${snapshot.pendingSignIns + snapshot.pendingExpenses}`,
+              icon: "shield-checkmark-outline",
+              tone: colors.warning,
+            },
+            {
+              id: "urgent_alerts",
+              label: "Urgent Alerts",
+              value: `${snapshot.unreadNotifications}`,
+              icon: "notifications-outline",
               tone: colors.primary,
             },
+            {
+              id: "open_support",
+              label: "Open Support",
+              value: `${snapshot.openSupportThreads}`,
+              icon: "help-buoy-outline",
+              tone: colors.secondary,
+            },
+        ];
+      }
+      if (isSalesperson) {
+        return [
+              {
+                id: "visits_total",
+                label: "Visits Today",
+                value: `${todaysVisits.length}`,
+                icon: "navigate-outline",
+                tone: colors.primary,
+              },
+              {
+                id: "tasks_completion",
+                label: "Task Done",
+                value: `${userCompletedTasks}/${userAssignedTasks}`,
+                icon: "checkbox-outline",
+                tone: colors.success,
+              },
+              {
+                id: "alerts_unread",
+                label: "Unread Alerts",
+                value: `${snapshot.unreadNotifications}`,
+                icon: "notifications-outline",
+                tone: colors.warning,
+              },
+              {
+                id: "expenses_pending",
+                label: "Pending Expenses",
+                value: `${userPendingExpenses}`,
+                icon: "receipt-outline",
+                tone: colors.secondary,
+              },
+        ];
+      }
+      return [
             {
               id: "tasks_completion",
               label: "Task Done",
@@ -1003,51 +1123,21 @@ export default function DashboardScreen() {
               icon: "notifications-outline",
               tone: colors.warning,
             },
-            {
-              id: "expenses_pending",
-              label: "Pending Expenses",
-              value: `${userPendingExpenses}`,
-              icon: "receipt-outline",
-              tone: colors.secondary,
-            },
-          ]
-        : [
-            {
-              id: "active_staff",
-              label: "Active Staff",
-              value: `${snapshot.activeNow}`,
-              icon: "pulse-outline",
-              tone: colors.success,
-            },
-            {
-              id: "unread_alerts",
-              label: "Unread Alerts",
-              value: `${snapshot.unreadNotifications}`,
-              icon: "notifications-outline",
-              tone: colors.primary,
-            },
-            {
-              id: "pending_signins",
-              label: "Pending Sign-ins",
-              value: `${snapshot.pendingSignIns}`,
-              icon: "finger-print-outline",
-              tone: colors.warning,
-            },
-            {
-              id: "team_online",
-              label: "Team Presence",
-              value: `${snapshot.activeNow + snapshot.idleNow}/${snapshot.totalEmployees || 0}`,
-              icon: "people-circle-outline",
-              tone: colors.secondary,
-            },
-          ],
+      ];
+    },
     [
       colors.primary,
       colors.secondary,
       colors.success,
       colors.warning,
+      isAdmin,
       isSalesperson,
-      snapshot,
+      snapshot.openSupportThreads,
+      snapshot.pendingExpenses,
+      snapshot.pendingSignIns,
+      snapshot.presentToday,
+      snapshot.totalEmployees,
+      snapshot.unreadNotifications,
       todaysVisits.length,
       userAssignedTasks,
       userCompletedTasks,
@@ -1094,60 +1184,51 @@ export default function DashboardScreen() {
     return "@lumina.app";
   }, [user?.email]);
   const heroInsights = useMemo(
-    () => [
-      {
-        id: "active_now",
-        value: `${snapshot.activeNow}`,
-        label: "Live now",
-      },
-      {
-        id: "checked_in",
-        value: `${snapshot.presentToday}`,
-        label: "Checked in",
-      },
-      {
-        id: "visits_scheduled",
-        value: todaysVisits.length === 0 ? "NO" : "YES",
-        label: "Visits scheduled",
-      },
-    ],
-    [snapshot.activeNow, snapshot.presentToday, todaysVisits.length]
+    () => {
+      if (isAdmin) {
+        return [
+          {
+            id: "sys_ops",
+            value: "ONLINE",
+            label: "Operations",
+          },
+          {
+            id: "active_now",
+            value: `${snapshot.activeNow}`,
+            label: "Active Now",
+          },
+          {
+            id: "total_workforce",
+            value: `${snapshot.totalEmployees}`,
+            label: "Workforce",
+          },
+        ];
+      }
+      return [
+          {
+            id: "my_status",
+            value: snapshot.userHasOpenSession ? "YES" : "NO",
+            label: "Checked in",
+          },
+          {
+            id: "visits_assigned",
+            value: `${todaysVisits.length}`,
+            label: "Visits today",
+          },
+          {
+            id: "my_alerts",
+            value: `${snapshot.unreadNotifications}`,
+            label: "Alerts",
+          },
+      ];
+    },
+    [isAdmin, snapshot.userHasOpenSession, todaysVisits.length, snapshot.unreadNotifications, snapshot.activeNow, snapshot.totalEmployees]
   );
 
   const dashboardSections = useMemo<DashboardSection[]>(
-    () =>
-      isSalesperson
-        ? [
-            {
-              id: "metrics",
-              kind: "metrics",
-              title: "My Progress",
-              subtitle: "Today's visits, tasks, and alerts",
-              delay: 40,
-            },
-            {
-              id: "visits",
-              kind: "visits",
-              title: "Today's Visits",
-              subtitle: "Your field stops and route flow",
-              delay: 120,
-            },
-            {
-              id: "quick_links",
-              kind: "quickLinks",
-              title: "My Shortcuts",
-              subtitle: "Tools you use every day",
-              delay: 170,
-            },
-            {
-              id: "support",
-              kind: "support",
-              title: "My Support",
-              subtitle: "Your open requests and updates",
-              delay: 220,
-            },
-          ]
-        : [
+    () => {
+      if (isAdmin) {
+        return [
             {
               id: "metrics",
               kind: "metrics",
@@ -1188,8 +1269,65 @@ export default function DashboardScreen() {
               kind: "footer",
               delay: 300,
             },
-          ],
-    [isSalesperson]
+        ];
+      }
+      if (isSalesperson) {
+        return [
+              {
+                id: "metrics",
+                kind: "metrics",
+                title: "My Progress",
+                subtitle: "Today's visits, tasks, and alerts",
+                delay: 40,
+              },
+              {
+                id: "visits",
+                kind: "visits",
+                title: "Today's Visits",
+                subtitle: "Your field stops and route flow",
+                delay: 120,
+              },
+              {
+                id: "quick_links",
+                kind: "quickLinks",
+                title: "My Shortcuts",
+                subtitle: "Tools you use every day",
+                delay: 170,
+              },
+              {
+                id: "support",
+                kind: "support",
+                title: "My Support",
+                subtitle: "Your open requests and updates",
+                delay: 220,
+              },
+        ];
+      }
+      return [
+            {
+              id: "metrics",
+              kind: "metrics",
+              title: "My Progress",
+              subtitle: "Today's tasks and alerts",
+              delay: 40,
+            },
+            {
+              id: "quick_links",
+              kind: "quickLinks",
+              title: "My Shortcuts",
+              subtitle: "Tools you use every day",
+              delay: 120,
+            },
+            {
+              id: "support",
+              kind: "support",
+              title: "My Support",
+              subtitle: "Your open requests and updates",
+              delay: 170,
+            },
+      ];
+    },
+    [isAdmin, isSalesperson]
   );
   const metricsSection = dashboardSections.find((section) => section.kind === "metrics") ?? null;
   const visitsSection = dashboardSections.find((section) => section.kind === "visits") ?? null;
@@ -1417,7 +1555,7 @@ export default function DashboardScreen() {
           <View style={styles.sectionHeaderRow}>
             <View style={styles.sectionHeaderContent}>
               <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-                {getSectionEyebrow(metricsSection.id, isSalesperson)}
+                {getSectionEyebrow(metricsSection.id, !isAdmin)}
               </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {metricsSection.title}
@@ -1564,7 +1702,7 @@ export default function DashboardScreen() {
             <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
             <View style={styles.sectionHeader}>
               <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-                {getSectionEyebrow(visitsSection.id, isSalesperson)}
+                {getSectionEyebrow(visitsSection.id, !isAdmin)}
               </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {visitsSection.title}
@@ -1662,7 +1800,7 @@ export default function DashboardScreen() {
             <View style={[styles.cardSheen, { backgroundColor: `${colors.primary}26` }]} />
             <View style={styles.sectionHeader}>
               <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-                {getSectionEyebrow(pulseSection.id, isSalesperson)}
+                {getSectionEyebrow(pulseSection.id, !isAdmin)}
               </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {pulseSection.title}
@@ -1803,7 +1941,7 @@ export default function DashboardScreen() {
           <View style={styles.sectionHeaderRow}>
             <View style={styles.sectionHeaderContent}>
               <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-                {getSectionEyebrow(quickLinksSection.id, isSalesperson)}
+                {getSectionEyebrow(quickLinksSection.id, !isAdmin)}
               </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {quickLinksSection.title}
@@ -1855,7 +1993,7 @@ export default function DashboardScreen() {
           <View style={[styles.cardSheen, { backgroundColor: `${colors.warning}24` }]} />
           <View style={styles.sectionHeader}>
             <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-              {getSectionEyebrow(supportSection.id, isSalesperson)}
+              {getSectionEyebrow(supportSection.id, !isAdmin)}
             </Text>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
               {supportSection.title}
@@ -1929,7 +2067,7 @@ export default function DashboardScreen() {
             <View style={[styles.cardSheen, { backgroundColor: `${colors.secondary}24` }]} />
             <View style={styles.sectionHeader}>
               <Text style={[styles.sectionEyebrow, { color: colors.textTertiary, fontFamily: "Inter_700Bold" }]}>
-                {getSectionEyebrow(activitySection.id, isSalesperson)}
+                {getSectionEyebrow(activitySection.id, !isAdmin)}
               </Text>
               <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {activitySection.title}
