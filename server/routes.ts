@@ -11396,7 +11396,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const mapped = (rows || []).map(row => ({
         id: String(row.rowid),
         companyId: null,
-        userId: row.user_email || "",
+        userId: requestUser?.email === row.user_email ? String(requestUser?.id) : String(row.fk_user),
         userName: `${row.firstname || ""} ${row.lastname || ""}`.trim(),
         userEmail: row.user_email || "",
         leaveDate: row.date_debut ? new Date(row.date_debut).toISOString().slice(0, 10) : "",
@@ -11448,12 +11448,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const fkUser = uRows[0].rowid;
       const fkType = leaveType === "unplanned" ? 4 : 1; // typically 1=Paid, 4=Unpaid/Unplanned
+      const provRef = '(PROV' + Math.floor(Math.random() * 1000000) + ')';
 
       const [insertRes] = await conn.execute<any>(
         `INSERT INTO \`nmy5_holiday\`
-         (entity, fk_user, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day)
-         VALUES (1, ?, ?, NOW(), ?, ?, ?, 1, ?, ?)`,
-        [fkUser, fkType, leaveDate, leaveEndDate, isHalfDay ? 2 : 0, note, leaveDays]
+         (ref, entity, fk_user, fk_user_create, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day)
+         VALUES (?, 1, ?, ?, ?, NOW(), ?, ?, ?, 1, ?, ?)`,
+        [provRef, fkUser, fkUser, fkType, leaveDate, leaveEndDate, isHalfDay ? 2 : 0, note, leaveDays]
       );
       
       const rowid = insertRes.insertId;
@@ -11461,7 +11462,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json({
         id: String(rowid),
         companyId: null,
-        userId: userEmail,
+        userId: String(requestUser?.id || fkUser),
         userName,
         userEmail,
         leaveDate,
