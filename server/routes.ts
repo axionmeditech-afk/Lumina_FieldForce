@@ -11340,6 +11340,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     leaveTableEnsured = true;
   }
 
+  // Ensure App Config Table
+  async function ensureAppConfigTable() {
+    try {
+      const conn = await getMySqlPool();
+      await conn.execute(`
+        CREATE TABLE IF NOT EXISTS \`lff_app_config\` (
+          \`key\` VARCHAR(50) PRIMARY KEY,
+          \`value\` TEXT NOT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+    } catch (e) {}
+  }
+  
+  ensureAppConfigTable();
+
   function mapDolibarrLeaveStatus(statut: number): string {
     if (statut === 1 || statut === 2) return "pending";
     if (statut === 3) return "approved";
@@ -11418,6 +11433,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const body = (req.body || {}) as Record<string, unknown>;
       
       const userEmail = body.userEmail ? String(body.userEmail).trim() : requestUser?.email || "";
+      const userName = body.userName ? String(body.userName).trim() : requestUser?.name || "";
       const leaveDate = body.leaveDate ? String(body.leaveDate).trim() : "";
       const leaveEndDate = body.leaveEndDate ? String(body.leaveEndDate).trim() : leaveDate;
       const leaveType = body.leaveType === "unplanned" ? "unplanned" : "planned";
@@ -11442,7 +11458,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const rowid = insertRes.insertId;
 
-      res.status(201).json({ id: String(rowid) });
+      res.status(201).json({
+        id: String(rowid),
+        companyId: null,
+        userId: userEmail,
+        userName,
+        userEmail,
+        leaveDate,
+        leaveEndDate,
+        leaveType,
+        isHalfDay,
+        leaveDays,
+        note,
+        status: "pending",
+        reviewedById: null,
+        reviewedByName: null,
+        reviewedAt: null,
+        reviewComment: null,
+        dolibarrHolidayId: rowid,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
     } catch (error) {
       console.error("[Leave POST Error]:", error);
       const msg = error instanceof Error ? error.message : String(error);
@@ -11508,6 +11544,78 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ items: rows });
     } catch (error) {
       res.json({ items: [] });
+    }
+  });
+
+  // POST /api/public-holidays
+  app.post("/api/public-holidays", requireAuth, async (req, res) => {
+    try {
+      const conn = await getMySqlPool();
+      const requestUser = (req as any).user as AppUser;
+      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        res.status(403).json({ message: "Unauthorized" });
+        return;
+      }
+      const body = req.body || {};
+      const [insertRes] = await conn.execute<any>(
+        "INSERT INTO \`nmy5_c_hrm_public_holiday\` (day, month, year, code, day_rule, active) VALUES (?, ?, ?, ?, ?, 1)",
+        [body.day, body.month, body.year || 0, body.code || "", body.dayRule || ""]
+      );
+      res.status(201).json({ id: insertRes.insertId, ...body });
+    } catch (error) {
+      res.status(500).json({ message: "Unable to add holiday" });
+    }
+  });
+
+  // DELETE /api/public-holidays/:id
+  app.delete("/api/public-holidays/:id", requireAuth, async (req, res) => {
+    try {
+      const conn = await getMySqlPool();
+      const requestUser = (req as any).user as AppUser;
+      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        res.status(403).json({ message: "Unauthorized" });
+        return;
+      }
+      await conn.execute("DELETE FROM \`nmy5_c_hrm_public_holiday\` WHERE rowid = ?", [req.params.id]);
+      res.json({ id: req.params.id, ok: true });
+    } catch (error) {
+      res.status(500).json({ message: "Unable to delete holiday" });
+    }
+  });
+
+  // GET /api/weekend-config
+  app.get("/api/weekend-config", requireAuth, async (req, res) => {
+    try {
+      const conn = await getMySqlPool();
+      const [rows] = await conn.query<any[]>("SELECT \`value\` FROM \`lff_app_config\` WHERE \`key\` = 'weekend_days' LIMIT 1");
+      if (rows && rows.length > 0) {
+        res.json({ weekendDays: JSON.parse(rows[0].value) });
+      } else {
+        res.json({ weekendDays: [0] }); // Default Sunday
+      }
+    } catch (error) {
+      res.json({ weekendDays: [0] });
+    }
+  });
+
+  // POST /api/weekend-config
+  app.post("/api/weekend-config", requireAuth, async (req, res) => {
+    try {
+      const conn = await getMySqlPool();
+      const requestUser = (req as any).user as AppUser;
+      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
+        res.status(403).json({ message: "Unauthorized" });
+        return;
+      }
+      const body = req.body || {};
+      const weekendDays = Array.isArray(body.weekendDays) ? body.weekendDays : [0];
+      await conn.execute(
+        "INSERT INTO \`lff_app_config\` (\`key\`, \`value\`) VALUES ('weekend_days', ?) ON DUPLICATE KEY UPDATE \`value\` = ?",
+        [JSON.stringify(weekendDays), JSON.stringify(weekendDays)]
+      );
+      res.json({ weekendDays, ok: true });
+    } catch (error) {
+      res.status(500).json({ message: "Unable to update weekend config" });
     }
   });
 

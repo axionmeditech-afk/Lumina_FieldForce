@@ -47,7 +47,12 @@ import {
   deleteLeaveRequestRemote,
   getLeavesSummaryRemote,
   getPublicHolidaysRemote,
+  addPublicHolidayRemote,
+  deletePublicHolidayRemote,
+  getWeekendConfigRemote,
+  saveWeekendConfigRemote,
 } from "@/lib/attendance-api";
+import { LeaveCalendar } from "@/components/LeaveCalendar";
 
 // ─── Constants ──────────────────────────────────────────────────────
 const MONTHS = [
@@ -152,6 +157,9 @@ export default function LeaveManagementScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("my");
+  const [weekendDays, setWeekendDays] = useState<number[]>([0]);
+  const [showWeekendModal, setShowWeekendModal] = useState(false);
+  const [tempWeekendDays, setTempWeekendDays] = useState<number[]>([]);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
@@ -173,16 +181,17 @@ export default function LeaveManagementScreen() {
   const fetchData = useCallback(async () => {
     try {
       setErrorMsg(null);
-      const [leavesData, summaryData, holidaysData] = await Promise.allSettled([
+      const [leavesData, summaryData, holidaysData, weekendData] = await Promise.allSettled([
         listLeaveRequestsRemote({ year: currentYear }),
         getLeavesSummaryRemote({ month: currentMonth, year: currentYear }),
         getPublicHolidaysRemote(),
+        getWeekendConfigRemote(),
       ]);
       if (leavesData.status === "fulfilled") setLeaves(leavesData.value);
       if (summaryData.status === "fulfilled") setSummaries(summaryData.value);
       if (holidaysData.status === "fulfilled") setHolidays(holidaysData.value);
+      if (weekendData.status === "fulfilled") setWeekendDays(weekendData.value.weekendDays);
     } catch (err) {
-      console.error("[LeaveManagement] fetchData error:", err);
       setErrorMsg("Unable to load leave data. Pull down to retry.");
     } finally {
       setLoading(false);
@@ -271,6 +280,35 @@ export default function LeaveManagementScreen() {
       const message = err instanceof Error ? err.message : "Failed to update status.";
       Alert.alert("Action Failed", message);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    }
+  };
+
+  
+  const handleAddHoliday = async (day: number, month: number, year: number) => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      const res = await addPublicHolidayRemote({ day, month, year, code: "Collective Leave" });
+      setHolidays(prev => [...prev, res]);
+    } catch {
+      Alert.alert("Error", "Could not add holiday");
+    }
+  };
+  const handleDeleteHoliday = async (id: string) => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      await deletePublicHolidayRemote(id);
+      setHolidays(prev => prev.filter(h => h.id !== id));
+    } catch {
+      Alert.alert("Error", "Could not remove holiday");
+    }
+  };
+  const handleSaveWeekends = async () => {
+    try {
+      await saveWeekendConfigRemote(tempWeekendDays);
+      setWeekendDays(tempWeekendDays);
+      setShowWeekendModal(false);
+    } catch {
+      Alert.alert("Error", "Could not save weekends");
     }
   };
 
@@ -609,6 +647,28 @@ export default function LeaveManagementScreen() {
             </View>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      
+      <Modal visible={showWeekendModal} transparent animationType="fade">
+        <View style={styles.modalOuter}>
+          <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)} />
+          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white }]}>
+            <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 16 }]}>Configure Weekends</Text>
+            {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => (
+              <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderColor: cardBorder }}>
+                <Text style={{ color: colors.text, fontSize: 16 }}>{dayName}</Text>
+                <Switch
+                  value={tempWeekendDays.includes(i)}
+                  onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
+                />
+              </View>
+            ))}
+            <Pressable onPress={handleSaveWeekends} style={[styles.submitBtn, { marginTop: 24, backgroundColor: P.blue }]}>
+              <Text style={styles.submitTxt}>Save Weekends</Text>
+            </Pressable>
+          </View>
+        </View>
       </Modal>
 
       {/* Calendar */}

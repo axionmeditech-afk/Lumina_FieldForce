@@ -2919,3 +2919,29 @@ export async function getPublicHolidaysRemote(): Promise<PublicHoliday[]> {
   if (Array.isArray(response)) return response;
   return Array.isArray(response.items) ? response.items : [];
 }
+
+
+// --- Calendar Admin Endpoints ---
+export async function addPublicHolidayRemote(data: { day: number, month: number, year?: number, code?: string, dayRule?: string }): Promise<any> {
+  return fetchJson("/public-holidays", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deletePublicHolidayRemote(id: string): Promise<any> {
+  return fetchJson(`/public-holidays/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getWeekendConfigRemote(): Promise<{ weekendDays: number[] }> {
+  return fetchJson("/weekend-config", { method: "GET" });
+}
+
+export async function saveWeekendConfigRemote(weekendDays: number[]): Promise<any> {
+  return fetchJson("/weekend-config", {
+    method: "POST",
+    body: JSON.stringify({ weekendDays }),
+  });
+}
