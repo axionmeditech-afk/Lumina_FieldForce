@@ -11659,9 +11659,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // GET /api/weekend-config
   app.get("/api/weekend-config", requireAuth, async (req, res) => {
     try {
+      const companyId = await resolveRequestCompanyId(req);
       const conn = await getMySqlPool();
-
-      const [rows] = await conn.query<any[]>("SELECT weekend_days FROM lff_companies LIMIT 1");
+      
+      let queryStr = "SELECT weekend_days FROM lff_companies";
+      const queryParams: any[] = [];
+      if (companyId) {
+        queryStr += " WHERE id = ?";
+        queryParams.push(companyId);
+      }
+      queryStr += " LIMIT 1";
+      
+      const [rows] = await conn.query<any[]>(queryStr, queryParams);
       if (rows && rows.length > 0 && rows[0].weekend_days) {
         res.json({ weekendDays: JSON.parse(rows[0].weekend_days) });
       } else {
