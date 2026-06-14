@@ -6046,7 +6046,7 @@ async function listEmployeesFromMySql(): Promise<unknown[]> {
   const companyById = new Map(companies.map((company) => [company.id, company]));
   const conn = await getMySqlPool();
   const [userRows] = await conn.query<any[]>(
-    `SELECT rowid, login, email, firstname, lastname, admin, statut, employee,
+    `SELECT rowid, login, email, firstname, lastname, admin, statut, employee, job,
             office_phone, user_mobile, datec
      FROM nmy5_user`
   );
@@ -6075,7 +6075,16 @@ async function listEmployeesFromMySql(): Promise<unknown[]> {
       email ||
       "Employee";
     if (isLegacyDemoProfileName(displayName)) continue;
-    const role = normalizeRole(request.approvedRole || request.requestedRole || (Number(dolibarrUser?.admin || 0) === 1 ? "admin" : "salesperson"));
+    let mappedRole = Number(dolibarrUser?.admin || 0) === 1 ? "admin" : null;
+    if (!mappedRole && dolibarrUser?.job) {
+      const jobStr = String(dolibarrUser.job).toLowerCase();
+      if (jobStr.includes("on field") || jobStr.includes("sales")) {
+        mappedRole = "salesperson";
+      } else if (jobStr.includes("fixed") || jobStr.includes("office") || jobStr.includes("support") || jobStr.includes("hr")) {
+        mappedRole = "employee";
+      }
+    }
+    const role = normalizeRole(mappedRole || request.approvedRole || request.requestedRole || "salesperson");
     const isActive =
       dolibarrUser?.statut === undefined || dolibarrUser?.statut === null
         ? true
@@ -6795,7 +6804,7 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT
-      rowid, login, email, firstname, lastname, admin, statut, employee,
+      rowid, login, email, firstname, lastname, admin, statut, employee, job,
       office_phone, user_mobile, pass_crypted, pass, datec, tms
     FROM nmy5_user`
   );
@@ -6854,7 +6863,15 @@ function buildAuthRecordFromMySqlRow(row: any): AuthUserRecord | null {
   if (!loginValue || !passwordHashValue) return null;
 
   const isAdmin = Number(row?.admin || 0) === 1;
-  const role: UserRole = isAdmin ? "admin" : "salesperson";
+  let role: UserRole = isAdmin ? "admin" : "salesperson";
+  if (!isAdmin && row?.job) {
+    const jobStr = String(row.job).toLowerCase();
+    if (jobStr.includes("on field") || jobStr.includes("sales")) {
+      role = "salesperson";
+    } else if (jobStr.includes("fixed") || jobStr.includes("office") || jobStr.includes("support") || jobStr.includes("hr")) {
+      role = "employee";
+    }
+  }
   const nowIso = new Date().toISOString();
   const firstName = normalizeWhitespace(String(row?.firstname || ""));
   const lastName = normalizeWhitespace(String(row?.lastname || ""));
@@ -6895,7 +6912,7 @@ async function getAuthUserFromMySqlByEmail(identifier: string): Promise<AuthUser
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT
-      rowid, login, email, firstname, lastname, admin, statut, employee,
+      rowid, login, email, firstname, lastname, admin, statut, employee, job,
       office_phone, user_mobile, pass_crypted, pass, datec, tms
     FROM nmy5_user
     WHERE email = ? OR login = ?
@@ -11397,7 +11414,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const mapped = (rows || []).map(row => ({
         id: String(row.rowid),
         companyId: null,
-        userId: requestUser?.email === row.user_email ? String(requestUser?.id) : String(row.fk_user),
+        userId: (requestUser?.email || "").trim().toLowerCase() === (row.user_email || "").trim().toLowerCase() ? String(requestUser?.id) : String(row.fk_user),
         userName: `${row.firstname || ""} ${row.lastname || ""}`.trim(),
         userEmail: row.user_email || "",
         leaveDate: row.date_debut ? new Date(row.date_debut).toISOString().slice(0, 10) : "",
