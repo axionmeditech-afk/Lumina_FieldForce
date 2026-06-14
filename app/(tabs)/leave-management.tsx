@@ -385,6 +385,23 @@ export default function LeaveManagementScreen() {
           </LinearGradient>
         </Animated.View>
 
+        
+        {/* --- Company Calendar --- */}
+        <Animated.View entering={FadeInDown.duration(450).delay(150)}>
+          <LeaveCalendar
+            month={currentMonth}
+            year={currentYear}
+            leaves={leaves}
+            holidays={holidays}
+            weekendDays={weekendDays}
+            isPrivileged={isPrivileged}
+            colors={colors}
+            onAddHoliday={handleAddHoliday}
+            onDeleteHoliday={handleDeleteHoliday}
+            onConfigureWeekends={() => { setTempWeekendDays(weekendDays); setShowWeekendModal(true); }}
+          />
+        </Animated.View>
+
         {/* ─── Stats ───────────────────────────────────── */}
         <Animated.View entering={FadeInDown.duration(500).delay(80)} style={styles.statsGrid}>
           {[
