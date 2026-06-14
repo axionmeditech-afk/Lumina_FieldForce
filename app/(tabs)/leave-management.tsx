@@ -291,6 +291,36 @@ export default function LeaveManagementScreen() {
     setFormHalfDay(false);
     setFormNote("");
   };
+  const handleCollectiveSubmit = async () => {
+    if (collectiveUsers.length === 0 || !collectiveStartDate) {
+      Alert.alert("Required", "Please select users and a start date.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      await createCollectiveLeaveRemote({
+        userIds: collectiveUsers,
+        startDate: collectiveStartDate,
+        endDate: collectiveEndDate || collectiveStartDate,
+        startAmPm: collectiveStartAmPm,
+        endAmPm: collectiveEndAmPm,
+        leaveType: collectiveType,
+        approvedBy: collectiveApprovedBy,
+        autoValidate: collectiveAutoValidate,
+        note: collectiveNote
+      });
+      setShowCollectiveModal(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert("Success", "Collective leaves created!");
+      fetchData(); // Refresh UI
+    } catch {
+      Alert.alert("Error", "Failed to create collective leaves.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
 
   const handleApproveReject = async (leaveId: string, status: "approved" | "rejected") => {
     try {
