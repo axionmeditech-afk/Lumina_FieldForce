@@ -161,8 +161,6 @@ export default function LeaveManagementScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("my");
   const [weekendDays, setWeekendDays] = useState<number[]>([0]);
-  const [showWeekendModal, setShowWeekendModal] = useState(false);
-  const [tempWeekendDays, setTempWeekendDays] = useState<number[]>([]);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [calendarTarget, setCalendarTarget] = useState<"start" | "end" | "collStart" | "collEnd">("start");
@@ -370,15 +368,7 @@ export default function LeaveManagementScreen() {
       Alert.alert("Error", "Could not remove holiday");
     }
   };
-  const handleSaveWeekends = async () => {
-    try {
-      await saveWeekendConfigRemote(tempWeekendDays);
-      setWeekendDays(tempWeekendDays);
-      setShowWeekendModal(false);
-    } catch {
-      Alert.alert("Error", "Could not save weekends");
-    }
-  };
+
 
   const handleDelete = async (leaveId: string) => {
     Alert.alert("Cancel Request", "Are you sure you want to cancel this leave request?", [
@@ -467,7 +457,6 @@ export default function LeaveManagementScreen() {
             isDark={isDark}
             onAddHoliday={handleAddHoliday}
             onDeleteHoliday={handleDeleteHoliday}
-            onConfigureWeekends={() => { setTempWeekendDays(weekendDays); setShowWeekendModal(true); }}
           />
         </Animated.View>
 
@@ -743,39 +732,6 @@ export default function LeaveManagementScreen() {
 
 
       
-            <Modal visible={showWeekendModal} transparent animationType="fade" onRequestClose={() => setShowWeekendModal(false)}>
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", padding: 16 }}>
-          <View style={{ backgroundColor: isDark ? P.slate900 : "#FFF", borderRadius: 20, overflow: "hidden", maxHeight: "90%" }}>
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 20, borderBottomWidth: 1, borderColor: cardBorder }}>
-              <Text style={{ fontSize: 20, fontFamily: "Inter_700Bold", color: colors.text }}>Configure Weekends</Text>
-              <Pressable onPress={() => setShowWeekendModal(false)}>
-                <Ionicons name="close" size={24} color={colors.textSecondary} />
-              </Pressable>
-            </View>
-            <ScrollView style={{ paddingHorizontal: 20, flexShrink: 1 }} contentContainerStyle={{ paddingVertical: 20, gap: 8 }}>
-              <Text style={{ fontSize: 14, color: colors.textSecondary, marginBottom: 8 }}>Select your company's designated off days.</Text>
-              {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => {
-                const isActive = tempWeekendDays.includes(i);
-                return (
-                  <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 14, borderBottomWidth: 1, borderColor: cardBorder }}>
-                    <Text style={{ color: isActive ? P.blue : colors.text, fontSize: 16, fontFamily: "Inter_500Medium" }}>{dayName}</Text>
-                    <Switch
-                      value={isActive}
-                      onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
-                      trackColor={{ false: isDark ? "#334155" : "#E2E8F0", true: P.blue }}
-                    />
-                  </View>
-                );
-              })}
-            </ScrollView>
-            <View style={{ padding: 20, borderTopWidth: 1, borderColor: cardBorder, backgroundColor: isDark ? P.slate900 : "#FFF" }}>
-              <TouchableOpacity activeOpacity={0.7} onPress={handleSaveWeekends} disabled={submitting} style={{ backgroundColor: P.blue, paddingVertical: 14, borderRadius: 12, alignItems: "center", justifyContent: "center", opacity: submitting ? 0.5 : 1 }}>
-                {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={{ color: "#FFF", fontSize: 16, fontFamily: "Inter_600SemiBold" }}>Save Weekend Settings</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
 
       {/* Calendar */}
       <CalendarModal

@@ -79,12 +79,7 @@ export function LeaveCalendar({
           <Ionicons name="calendar" size={18} color={colors.primary} />
           <Text style={[styles.title, { color: colors.text }]}>Company Calendar</Text>
         </View>
-        {isPrivileged && (
-          <Pressable onPress={onConfigureWeekends} style={[styles.configBtn, { backgroundColor: colors.primary + "15" }]}>
-            <Ionicons name="settings-outline" size={14} color={colors.primary} />
-            <Text style={[styles.configTxt, { color: colors.primary }]}>Weekends</Text>
-          </Pressable>
-        )}
+
       </View>
 
       <View style={styles.weekDays}>
