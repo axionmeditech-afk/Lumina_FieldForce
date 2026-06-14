@@ -62,9 +62,10 @@ export function LeaveCalendar({
       }
     } else {
       if (isPrivileged) {
-        Alert.alert("Add Holiday", `Mark ${d} ${MONTHS[month - 1]} as a Collective Leave/Holiday?`, [
-          { text: "Cancel", style: "cancel" },
-          { text: "Add Holiday", onPress: () => onAddHoliday(d, month, year) }
+        Alert.alert("Manage", `Add a holiday or collective leave for ${d} ${MONTHS[month - 1]}?`, [
+          { text: "Collective Leave", onPress: () => onAddHoliday(d, month, year, true) },
+          { text: "Public Holiday", onPress: () => onAddHoliday(d, month, year, false) },
+          { text: "Cancel", style: "cancel" }
         ]);
       }
     }

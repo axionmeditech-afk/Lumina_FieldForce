@@ -2945,3 +2945,18 @@ export async function saveWeekendConfigRemote(weekendDays: number[]): Promise<an
     body: JSON.stringify({ weekendDays }),
   });
 }
+
+
+// --- Users ---
+export async function getUsersRemote(): Promise<{ id: string, name: string, email: string }[]> {
+  const data = await fetchJson("/users", { method: "GET" });
+  return data.items || [];
+}
+
+// --- Collective Leaves ---
+export async function createCollectiveLeaveRemote(data: any): Promise<any> {
+  return fetchJson("/collective-leaves", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}

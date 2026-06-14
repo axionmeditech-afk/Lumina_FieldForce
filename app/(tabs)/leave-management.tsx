@@ -51,6 +51,8 @@ import {
   deletePublicHolidayRemote,
   getWeekendConfigRemote,
   saveWeekendConfigRemote,
+  getUsersRemote,
+  createCollectiveLeaveRemote,
 } from "@/lib/attendance-api";
 import { LeaveCalendar } from "@/components/LeaveCalendar";
 
@@ -167,7 +169,27 @@ export default function LeaveManagementScreen() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Form
-  const [formDate, setFormDate] = useState("");
+  const [usersList, setUsersList] = useState<any[]>([]);
+
+  // Individual Form
+  const [formStartDate, setFormStartDate] = useState("");
+  const [formEndDate, setFormEndDate] = useState("");
+  const [formStartAmPm, setFormStartAmPm] = useState("morning");
+  const [formEndAmPm, setFormEndAmPm] = useState("afternoon");
+  const [formApprovedBy, setFormApprovedBy] = useState("");
+  
+  // Collective Form
+  const [showCollectiveModal, setShowCollectiveModal] = useState(false);
+  const [collectiveUsers, setCollectiveUsers] = useState<string[]>([]);
+  const [collectiveStartDate, setCollectiveStartDate] = useState("");
+  const [collectiveEndDate, setCollectiveEndDate] = useState("");
+  const [collectiveStartAmPm, setCollectiveStartAmPm] = useState("morning");
+  const [collectiveEndAmPm, setCollectiveEndAmPm] = useState("afternoon");
+  const [collectiveType, setCollectiveType] = useState("planned");
+  const [collectiveApprovedBy, setCollectiveApprovedBy] = useState("");
+  const [collectiveNote, setCollectiveNote] = useState("");
+  const [collectiveAutoValidate, setCollectiveAutoValidate] = useState(false);
+
   const [formLeaveType, setFormLeaveType] = useState<LeaveType>("planned");
   const [formHalfDay, setFormHalfDay] = useState(false);
   const [formNote, setFormNote] = useState("");
@@ -181,16 +203,18 @@ export default function LeaveManagementScreen() {
   const fetchData = useCallback(async () => {
     try {
       setErrorMsg(null);
-      const [leavesData, summaryData, holidaysData, weekendData] = await Promise.allSettled([
+      const [leavesData, summaryData, holidaysData, weekendData, usersData] = await Promise.allSettled([
         listLeaveRequestsRemote({ year: currentYear }),
         getLeavesSummaryRemote({ month: currentMonth, year: currentYear }),
         getPublicHolidaysRemote(),
         getWeekendConfigRemote(),
+        getUsersRemote(),
       ]);
       if (leavesData.status === "fulfilled") setLeaves(leavesData.value);
       if (summaryData.status === "fulfilled") setSummaries(summaryData.value);
       if (holidaysData.status === "fulfilled") setHolidays(holidaysData.value);
       if (weekendData.status === "fulfilled") setWeekendDays(weekendData.value.weekendDays);
+      if (usersData.status === "fulfilled") setUsersList(usersData.value);
     } catch (err) {
       setErrorMsg("Unable to load leave data. Pull down to retry.");
     } finally {
@@ -221,8 +245,8 @@ export default function LeaveManagementScreen() {
 
   // ─── Actions ────────────────────────────────────────────────
   const handleSubmitLeave = async () => {
-    if (!formDate) {
-      Alert.alert("Date Required", "Please select a date for your leave request.");
+    if (!formStartDate) {
+      Alert.alert("Date Required", "Please select a start date.");
       return;
     }
     if (submitting) return;
@@ -230,9 +254,12 @@ export default function LeaveManagementScreen() {
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const newLeave = await createLeaveRequestRemote({
-        leaveDate: formDate,
+        leaveDate: formStartDate,
+        leaveEndDate: formEndDate || formStartDate,
+        startAmPm: formStartAmPm,
+        endAmPm: formEndAmPm,
         leaveType: formLeaveType,
-        isHalfDay: formHalfDay,
+        approvedBy: formApprovedBy,
         note: formNote || undefined,
         userId: user?.id,
         userName: user?.name,
@@ -243,7 +270,7 @@ export default function LeaveManagementScreen() {
       setShowRequestModal(false);
       resetForm();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert("✅ Request Submitted", "Your leave request has been submitted successfully and is pending review.");
+      Alert.alert("Request Submitted", "Your leave request has been submitted successfully.");
     } catch (err) {
       console.error("[LeaveManagement] submit error:", err);
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
@@ -255,7 +282,11 @@ export default function LeaveManagementScreen() {
   };
 
   const resetForm = () => {
-    setFormDate("");
+    setFormStartDate("");
+    setFormEndDate("");
+    setFormStartAmPm("morning");
+    setFormEndAmPm("afternoon");
+    setFormApprovedBy("");
     setFormLeaveType("planned");
     setFormHalfDay(false);
     setFormNote("");
@@ -284,7 +315,12 @@ export default function LeaveManagementScreen() {
   };
 
   
-  const handleAddHoliday = async (day: number, month: number, year: number) => {
+  const handleAddHoliday = async (day: number, month: number, year: number, isCollective?: boolean) => {
+    if (isCollective) {
+      setCollectiveStartDate(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+      setShowCollectiveModal(true);
+      return;
+    }
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const res = await addPublicHolidayRemote({ day, month, year, code: "Collective Leave" });
@@ -550,121 +586,124 @@ export default function LeaveManagementScreen() {
       </ScrollView>
 
       {/* ─── Request Modal ─────────────────────────────── */}
-      <Modal visible={showRequestModal} transparent animationType="slide" onRequestClose={() => setShowRequestModal(false)}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <View style={styles.modalOuter}>
-            <Pressable style={styles.modalBg} onPress={() => setShowRequestModal(false)} />
-            <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white, borderColor: cardBorder }]}>
-              {/* Handle */}
-              <View style={styles.handleWrap}>
-                <View style={[styles.handle, { backgroundColor: isDark ? P.slate600 : P.slate200 }]} />
-              </View>
-
-              {/* Header */}
-              <View style={styles.modalHeaderRow}>
-                <Text style={[styles.modalTitle, { color: colors.text }]}>New Leave Request</Text>
-                <Pressable onPress={() => setShowRequestModal(false)} hitSlop={12}>
-                  <Ionicons name="close" size={22} color={colors.textTertiary} />
-                </Pressable>
-              </View>
-
-              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 10 }}>
-                {/* Date */}
-                <Text style={[styles.fldLabel, { color: colors.textSecondary }]}>DATE</Text>
-                <Pressable
-                  onPress={() => setShowCalendar(true)}
-                  style={[styles.dateBtn, { borderColor: cardBorder, backgroundColor: surfaceBg }]}
-                >
-                  <Ionicons name="calendar-outline" size={18} color={P.blue} />
-                  <Text style={[styles.dateBtnTxt, { color: formDate ? colors.text : colors.textTertiary }]}>
-                    {formDate ? fmtDate(formDate) : "Select a date"}
-                  </Text>
-                  <Ionicons name="chevron-down" size={16} color={colors.textTertiary} />
-                </Pressable>
-
-                {/* Type */}
-                <Text style={[styles.fldLabel, { color: colors.textSecondary }]}>TYPE</Text>
-                <View style={styles.typeRow}>
-                  {(["planned", "unplanned"] as LeaveType[]).map((t) => {
-                    const cfg = TYPE_CONFIG[t];
-                    const sel = formLeaveType === t;
-                    return (
-                      <Pressable
-                        key={t}
-                        onPress={() => setFormLeaveType(t)}
-                        style={[
-                          styles.typePill,
-                          sel
-                            ? { backgroundColor: isDark ? cfg.fg + "20" : cfg.bg, borderColor: cfg.fg }
-                            : { backgroundColor: surfaceBg, borderColor: cardBorder },
-                        ]}
-                      >
-                        <Ionicons name={cfg.icon as any} size={16} color={sel ? cfg.fg : colors.textTertiary} />
-                        <Text style={[styles.typePillTxt, { color: sel ? cfg.fg : colors.textSecondary, fontFamily: sel ? "Inter_600SemiBold" : "Inter_400Regular" }]}>
-                          {cfg.label}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-
-                {/* Half day */}
-                <View style={[styles.switchWrap, { borderColor: cardBorder, backgroundColor: surfaceBg }]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.switchTitle, { color: colors.text }]}>Half Day</Text>
-                    <Text style={[styles.switchDesc, { color: colors.textTertiary }]}>Counts as 0.5 of a full day</Text>
-                  </View>
-                  <Switch
-                    value={formHalfDay}
-                    onValueChange={setFormHalfDay}
-                    trackColor={{ false: isDark ? P.slate700 : P.slate200, true: P.blue + "60" }}
-                    thumbColor={formHalfDay ? P.blue : isDark ? P.slate400 : P.white}
-                  />
-                </View>
-
-                {/* Note */}
-                <Text style={[styles.fldLabel, { color: colors.textSecondary }]}>NOTE (OPTIONAL)</Text>
-                <TextInput
-                  style={[styles.noteField, { color: colors.text, borderColor: cardBorder, backgroundColor: surfaceBg }]}
-                  placeholder="Reason for leave..."
-                  placeholderTextColor={colors.textTertiary}
-                  value={formNote}
-                  onChangeText={setFormNote}
-                  multiline
-                  numberOfLines={3}
-                  textAlignVertical="top"
-                />
-
-                {/* Submit */}
-                <Pressable
-                  onPress={handleSubmitLeave}
-                  disabled={!formDate || submitting}
-                  style={({ pressed }) => [
-                    styles.submitBtn,
-                    { opacity: (!formDate || submitting) ? 0.5 : pressed ? 0.88 : 1 },
-                  ]}
-                >
-                  <LinearGradient
-                    colors={formDate ? ["#2563EB", "#1D4ED8"] : [P.slate400, P.slate500]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.submitGrad}
-                  >
-                    {submitting ? (
-                      <ActivityIndicator size="small" color="#FFF" />
-                    ) : (
-                      <>
-                        <Ionicons name="paper-plane" size={18} color="#FFF" />
-                        <Text style={styles.submitTxt}>Submit Request</Text>
-                      </>
-                    )}
-                  </LinearGradient>
-                </Pressable>
-              </ScrollView>
-            </View>
+      
+      {/* ─── NEW LEAVE REQUEST MODAL ─── */}
+      <Modal visible={showRequestModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowRequestModal(false)}>
+        <View style={{ flex: 1, backgroundColor: isDark ? P.slate900 : "#F8FAFC" }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 20, borderBottomWidth: 1, borderColor: cardBorder }}>
+            <Text style={{ fontSize: 20, fontFamily: "Inter_700Bold", color: colors.text }}>New Leave Request</Text>
+            <Pressable onPress={() => setShowRequestModal(false)}><Ionicons name="close" size={24} color={colors.textSecondary} /></Pressable>
           </View>
-        </KeyboardAvoidingView>
+          <ScrollView style={{ padding: 20 }}>
+            <Text style={styles.fldLabel}>Start Date</Text>
+            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
+              <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
+              <Text style={{ flex: 1, color: formStartDate ? colors.text : colors.textSecondary }}>{formStartDate ? new Date(formStartDate).toLocaleDateString() : "Select Start Date"}</Text>
+            </Pressable>
+
+            <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: formStartAmPm === "morning" ? P.blue : cardBorder, backgroundColor: formStartAmPm === "morning" ? P.blue + "15" : "transparent" }]} onPress={() => setFormStartAmPm("morning")}>
+                <Text style={{ color: formStartAmPm === "morning" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Morning</Text>
+              </Pressable>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: formStartAmPm === "afternoon" ? P.blue : cardBorder, backgroundColor: formStartAmPm === "afternoon" ? P.blue + "15" : "transparent" }]} onPress={() => setFormStartAmPm("afternoon")}>
+                <Text style={{ color: formStartAmPm === "afternoon" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.fldLabel}>End Date (Optional)</Text>
+            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
+              <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
+              <Text style={{ flex: 1, color: formEndDate ? colors.text : colors.textSecondary }}>{formEndDate ? new Date(formEndDate).toLocaleDateString() : "Same as Start Date"}</Text>
+            </Pressable>
+
+            <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: formEndAmPm === "morning" ? P.blue : cardBorder, backgroundColor: formEndAmPm === "morning" ? P.blue + "15" : "transparent" }]} onPress={() => setFormEndAmPm("morning")}>
+                <Text style={{ color: formEndAmPm === "morning" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Morning</Text>
+              </Pressable>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: formEndAmPm === "afternoon" ? P.blue : cardBorder, backgroundColor: formEndAmPm === "afternoon" ? P.blue + "15" : "transparent" }]} onPress={() => setFormEndAmPm("afternoon")}>
+                <Text style={{ color: formEndAmPm === "afternoon" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.fldLabel}>Leave Type</Text>
+            <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: formLeaveType === "planned" ? P.blue : cardBorder }]} onPress={() => setFormLeaveType("planned")}>
+                <Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Planned</Text>
+              </Pressable>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: formLeaveType === "unplanned" ? P.orange : cardBorder }]} onPress={() => setFormLeaveType("unplanned")}>
+                <Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Unplanned</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.fldLabel}>Approved By (Optional)</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
+              {usersList.map(u => (
+                <Pressable key={u.id} style={[{ padding: 10, borderWidth: 1, borderColor: formApprovedBy === u.id ? P.blue : cardBorder, borderRadius: 10, marginRight: 8, backgroundColor: formApprovedBy === u.id ? P.blue+"15" : "transparent" }]} onPress={() => setFormApprovedBy(u.id)}>
+                  <Text style={{ color: formApprovedBy === u.id ? P.blue : colors.text }}>{u.name}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <Text style={styles.fldLabel}>Description</Text>
+            <TextInput
+              style={[styles.input, { borderColor: cardBorder, color: colors.text, minHeight: 80, textAlignVertical: "top" }]}
+              placeholder="Why are you taking leave?"
+              placeholderTextColor={colors.textTertiary}
+              value={formNote}
+              onChangeText={setFormNote}
+              multiline
+            />
+
+            <Pressable onPress={handleSubmitLeave} disabled={!formStartDate || submitting} style={[styles.submitBtn, { backgroundColor: P.blue, marginTop: 20, marginBottom: 50, opacity: (!formStartDate || submitting) ? 0.5 : 1 }]}>
+              {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.submitTxt}>Submit Request</Text>}
+            </Pressable>
+          </ScrollView>
+        </View>
       </Modal>
+
+      {/* ─── COLLECTIVE LEAVE MODAL ─── */}
+      <Modal visible={showCollectiveModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowCollectiveModal(false)}>
+        <View style={{ flex: 1, backgroundColor: isDark ? P.slate900 : "#F8FAFC" }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 20, borderBottomWidth: 1, borderColor: cardBorder }}>
+            <Text style={{ fontSize: 20, fontFamily: "Inter_700Bold", color: colors.text }}>Collective Leave</Text>
+            <Pressable onPress={() => setShowCollectiveModal(false)}><Ionicons name="close" size={24} color={colors.textSecondary} /></Pressable>
+          </View>
+          <ScrollView style={{ padding: 20 }}>
+            <Text style={styles.fldLabel}>Select Users</Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+              {usersList.map(u => (
+                <Pressable key={u.id} style={[{ padding: 8, borderWidth: 1, borderColor: collectiveUsers.includes(u.id) ? P.blue : cardBorder, borderRadius: 10, backgroundColor: collectiveUsers.includes(u.id) ? P.blue+"15" : "transparent" }]} onPress={() => setCollectiveUsers(prev => prev.includes(u.id) ? prev.filter(id => id !== u.id) : [...prev, u.id])}>
+                  <Text style={{ color: collectiveUsers.includes(u.id) ? P.blue : colors.text, fontSize: 12 }}>{u.name}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={styles.fldLabel}>Start Date</Text>
+            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveStartDate} onChangeText={setCollectiveStartDate} />
+
+            <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveStartAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveStartAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveStartAmPm === "afternoon" ? P.blue : cardBorder }]} onPress={() => setCollectiveStartAmPm("afternoon")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text></Pressable>
+            </View>
+
+            <Text style={styles.fldLabel}>End Date (Optional)</Text>
+            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveEndDate} onChangeText={setCollectiveEndDate} />
+
+            <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveEndAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveEndAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
+              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveEndAmPm === "afternoon" ? P.blue : cardBorder }]} onPress={() => setCollectiveEndAmPm("afternoon")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text></Pressable>
+            </View>
+
+            <Text style={styles.fldLabel}>Auto Validate?</Text>
+            <Switch value={collectiveAutoValidate} onValueChange={setCollectiveAutoValidate} style={{ alignSelf: "flex-start", marginBottom: 16 }} />
+
+            <Pressable onPress={handleCollectiveSubmit} disabled={submitting} style={[styles.submitBtn, { backgroundColor: P.orange, marginTop: 20, marginBottom: 50, opacity: submitting ? 0.5 : 1 }]}>
+              {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.submitTxt}>Create Collective Leaves</Text>}
+            </Pressable>
+          </ScrollView>
+        </View>
+      </Modal>
+
 
       
       <Modal visible={showWeekendModal} transparent animationType="fade">
