@@ -5882,7 +5882,6 @@ async function ensureCompaniesTableInMySql(): Promise<void> {
       UNIQUE KEY uq_lff_companies_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   );
-  try { await conn.execute("ALTER TABLE lff_companies ADD COLUMN weekend_days VARCHAR(255) DEFAULT '[0]'"); } catch(e) {}
   companiesTableEnsured = true;
 }
 
