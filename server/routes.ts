@@ -11654,6 +11654,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/weekend-config", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
+      try {
+        await conn.execute("ALTER TABLE lff_companies ADD COLUMN weekend_days VARCHAR(255) DEFAULT '[0]'");
+      } catch (e) {
+        // ignore if exists
+      }
       const [rows] = await conn.query<any[]>("SELECT weekend_days FROM lff_companies LIMIT 1");
       if (rows && rows.length > 0 && rows[0].weekend_days) {
         res.json({ weekendDays: JSON.parse(rows[0].weekend_days) });
@@ -11661,6 +11666,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.json({ weekendDays: [0] });
       }
     } catch (error) {
+      console.error("Weekend GET error", error);
       res.json({ weekendDays: [0] });
     }
   });
@@ -11674,10 +11680,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(403).json({ message: "Unauthorized" });
         return;
       }
+
+      try {
+        await conn.execute("ALTER TABLE lff_companies ADD COLUMN weekend_days VARCHAR(255) DEFAULT '[0]'");
+      } catch (e) {
+        // ignore if exists
+      }
+
       const body = req.body || {};
       const weekendDays = Array.isArray(body.weekendDays) ? body.weekendDays : [0];
       
-      await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
+      const [result] = await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
+      
+      if ((result as any).affectedRows === 0) {
+        await conn.execute("INSERT INTO lff_companies (id, name, legal_name, weekend_days, created_at, updated_at) VALUES ('12345678-1234-1234-1234-1234567890ab', 'Company', 'Company', ?, NOW(), NOW())", [JSON.stringify(weekendDays)]);
+      }
       
       res.json({ weekendDays, ok: true });
     } catch (error) {
