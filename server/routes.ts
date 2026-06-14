@@ -11654,7 +11654,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/weekend-config", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT weekend_days FROM lff_companies LIMIT 1");
+      const [rows] = await conn.query<any[]>("SELECT weekend_days FROM nmy5_societe LIMIT 1");
       if (rows && rows.length > 0 && rows[0].weekend_days) {
         res.json({ weekendDays: JSON.parse(rows[0].weekend_days) });
       } else {
@@ -11677,13 +11677,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const body = req.body || {};
       const weekendDays = Array.isArray(body.weekendDays) ? body.weekendDays : [0];
       
-      // Update all rows in lff_companies (usually just 1 tenant row)
-      await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
+      await conn.execute("UPDATE nmy5_societe SET weekend_days = ?", [JSON.stringify(weekendDays)]);
       
       res.json({ weekendDays, ok: true });
     } catch (error) {
       console.error("Weekend save error", error);
-      res.status(500).json({ message: "Unable to update weekend config" });
+      res.status(500).json({ message: error instanceof Error ? error.message : "Unable to update weekend config" });
     }
   });
 

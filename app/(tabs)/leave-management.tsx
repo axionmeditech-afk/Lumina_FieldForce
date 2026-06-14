@@ -768,8 +768,8 @@ export default function LeaveManagementScreen() {
               })}
             </ScrollView>
             <View style={{ padding: 20, borderTopWidth: 1, borderColor: cardBorder, backgroundColor: isDark ? P.slate900 : "#FFF" }}>
-              <Pressable onPress={handleSaveWeekends} disabled={submitting} style={[styles.submitBtn, { backgroundColor: P.blue, opacity: submitting ? 0.5 : 1 }]}>
-                {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.submitTxt}>Save Weekend Settings</Text>}
+              <Pressable onPress={handleSaveWeekends} disabled={submitting} style={{ backgroundColor: P.blue, paddingVertical: 14, borderRadius: 12, alignItems: "center", justifyContent: "center", opacity: submitting ? 0.5 : 1 }}>
+                {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={{ color: "#FFF", fontSize: 16, fontFamily: "Inter_600SemiBold" }}>Save Weekend Settings</Text>}
               </Pressable>
             </View>
           </View>
