@@ -741,44 +741,31 @@ export default function LeaveManagementScreen() {
 
 
       
-      <Modal visible={showWeekendModal} transparent animationType="fade">
-        <View style={styles.modalOuter}>
-          <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)}>
-            <BlurView intensity={30} tint={isDark ? "dark" : "light"} style={StyleSheet.absoluteFill} />
-          </Pressable>
-          <Animated.View entering={FadeInDown.springify().damping(18)} style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white, maxHeight: '90%' }]}>
-            <View style={styles.handleWrap}><View style={[styles.handle, { backgroundColor: cardBorder }]} /></View>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 20 }}>
-              <View style={{ width: 44, height: 44, borderRadius: 14, backgroundColor: P.blue + "15", alignItems: "center", justifyContent: "center" }}>
-                <Ionicons name="calendar" size={22} color={P.blue} />
-              </View>
-              <View>
-                <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 2 }]}>Weekends</Text>
-                <Text style={{ fontSize: 13, color: colors.textSecondary, fontFamily: "Inter_400Regular" }}>Select your company's off days.</Text>
-              </View>
-            </View>
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
-              {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => {
-                const isActive = tempWeekendDays.includes(i);
-                return (
-                  <Pressable key={i} onPress={() => { Haptics.selectionAsync(); setTempWeekendDays(prev => isActive ? prev.filter(d => d !== i) : [...prev, i]); }} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, borderRadius: 16, borderWidth: 1, borderColor: isActive ? P.blue : cardBorder, backgroundColor: isActive ? P.blue + "08" : "transparent" }}>
-                    <Text style={{ color: isActive ? P.blue : colors.text, fontSize: 16, fontFamily: isActive ? "Inter_600SemiBold" : "Inter_500Medium" }}>{dayName}</Text>
-                    <Switch
-                      value={isActive}
-                      onValueChange={(val) => { Haptics.selectionAsync(); setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i)); }}
-                      trackColor={{ false: isDark ? "#334155" : "#E2E8F0", true: P.blue }}
-                    />
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-            <Pressable onPress={handleSaveWeekends} style={{ marginTop: 24, marginBottom: 10 }}>
-              <LinearGradient colors={["#2563EB", "#1D4ED8"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.submitBtn, { backgroundColor: "transparent" }]}>
-                <Ionicons name="checkmark-circle" size={18} color="#FFF" />
-                <Text style={styles.submitTxt}>Save Settings</Text>
-              </LinearGradient>
+            <Modal visible={showWeekendModal} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowWeekendModal(false)}>
+        <View style={{ flex: 1, backgroundColor: isDark ? P.slate900 : "#F8FAFC" }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 20, borderBottomWidth: 1, borderColor: cardBorder }}>
+            <Text style={{ fontSize: 20, fontFamily: "Inter_700Bold", color: colors.text }}>Configure Weekends</Text>
+            <Pressable onPress={() => setShowWeekendModal(false)}><Ionicons name="close" size={24} color={colors.textSecondary} /></Pressable>
+          </View>
+          <ScrollView style={{ padding: 20 }} contentContainerStyle={{ gap: 8 }}>
+            <Text style={{ fontSize: 14, color: colors.textSecondary, marginBottom: 16 }}>Select your company's designated off days.</Text>
+            {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => {
+              const isActive = tempWeekendDays.includes(i);
+              return (
+                <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 14, borderBottomWidth: 1, borderColor: cardBorder }}>
+                  <Text style={{ color: isActive ? P.blue : colors.text, fontSize: 16, fontFamily: "Inter_500Medium" }}>{dayName}</Text>
+                  <Switch
+                    value={isActive}
+                    onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
+                    trackColor={{ false: isDark ? "#334155" : "#E2E8F0", true: P.blue }}
+                  />
+                </View>
+              );
+            })}
+            <Pressable onPress={handleSaveWeekends} disabled={submitting} style={[styles.submitBtn, { backgroundColor: P.blue, marginTop: 32, opacity: submitting ? 0.5 : 1 }]}>
+              {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.submitTxt}>Save Weekend Settings</Text>}
             </Pressable>
-          </Animated.View>
+          </ScrollView>
         </View>
       </Modal>
 

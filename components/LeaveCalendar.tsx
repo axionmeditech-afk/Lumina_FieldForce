@@ -88,7 +88,7 @@ export function LeaveCalendar({
 
       <View style={styles.weekDays}>
         {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((dayName, i) => (
-          <Text key={i} style={[styles.weekDay, { color: weekendDays.includes(i) ? "#EF4444" : colors.textSecondary }]}>
+          <Text key={i} style={[styles.weekDay, { color: weekendDays.includes(i) ? colors.textTertiary : colors.textSecondary }]}>
             {dayName}
           </Text>
         ))}
@@ -107,8 +107,8 @@ export function LeaveCalendar({
               style={[
                 styles.dayCell,
                 !d && { backgroundColor: "transparent" },
-                d && weekend && { backgroundColor: "#FEE2E2" },
-                holiday && { backgroundColor: "#FFF7ED", borderColor: "#F97316", borderWidth: 1 },
+                d && weekend && { backgroundColor: isDark ? "#1E293B" : "#F1F5F9" },
+                holiday && { backgroundColor: isDark ? "#0F172A" : "#F8FAFC", borderColor: isDark ? "#334155" : "#E2E8F0", borderWidth: 1 },
                 hasLeaves && !holiday && { backgroundColor: "#DBEAFE" },
               ]}
               onPress={() => {
@@ -120,7 +120,7 @@ export function LeaveCalendar({
                 <>
                   <Text style={[
                     styles.dayText, 
-                    { color: holiday ? "#EA580C" : hasLeaves ? "#2563EB" : weekend ? "#EF4444" : colors.text },
+                    { color: holiday ? colors.primary : hasLeaves ? "#2563EB" : weekend ? colors.textTertiary : colors.text },
                     (holiday || hasLeaves) && { fontFamily: "Inter_700Bold" }
                   ]}>
                     {d}
@@ -135,9 +135,9 @@ export function LeaveCalendar({
         })}
       </View>
       <View style={styles.legend}>
-        <View style={styles.legendItem}><View style={[styles.legendColor, { backgroundColor: "#FFF7ED", borderColor: "#F97316", borderWidth: 1 }]} /><Text style={[styles.legendTxt, { color: colors.textSecondary }]}>Holiday</Text></View>
+        <View style={styles.legendItem}><View style={[styles.legendColor, { backgroundColor: isDark ? "#0F172A" : "#F8FAFC", borderColor: isDark ? "#334155" : "#E2E8F0", borderWidth: 1 }]} /><Text style={[styles.legendTxt, { color: colors.textSecondary }]}>Holiday</Text></View>
         <View style={styles.legendItem}><View style={[styles.legendColor, { backgroundColor: "#DBEAFE" }]} /><Text style={[styles.legendTxt, { color: colors.textSecondary }]}>Approved Leaves</Text></View>
-        <View style={styles.legendItem}><View style={[styles.legendColor, { backgroundColor: "#FEE2E2" }]} /><Text style={[styles.legendTxt, { color: colors.textSecondary }]}>Weekend</Text></View>
+        <View style={styles.legendItem}><View style={[styles.legendColor, { backgroundColor: isDark ? "#1E293B" : "#F1F5F9" }]} /><Text style={[styles.legendTxt, { color: colors.textSecondary }]}>Weekend</Text></View>
       </View>
     </View>
   );
