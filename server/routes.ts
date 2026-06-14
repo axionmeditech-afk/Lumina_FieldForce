@@ -5876,20 +5876,14 @@ async function ensureCompaniesTableInMySql(): Promise<void> {
       support_email VARCHAR(191) NOT NULL DEFAULT 'support@company.com',
       support_phone VARCHAR(64) NOT NULL DEFAULT '',
       attendance_zone_label VARCHAR(191) NOT NULL DEFAULT 'Main Branch',
-      weekend_days VARCHAR(255) DEFAULT '[0]',
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
       PRIMARY KEY (id),
       UNIQUE KEY uq_lff_companies_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   );
+  try { await conn.execute("ALTER TABLE lff_companies ADD COLUMN weekend_days VARCHAR(255) DEFAULT '[0]'"); } catch(e) {}
   companiesTableEnsured = true;
-  // Ensure weekend_days column exists for older tables
-  try {
-    await conn.execute("ALTER TABLE lff_companies ADD COLUMN weekend_days VARCHAR(255) DEFAULT '[0]'");
-  } catch (e) {
-    // column may already exist
-  }
 }
 
 async function upsertCompanyProfileInMySql(profile: CompanyProfile): Promise<CompanyProfile> {
@@ -11659,25 +11653,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // GET /api/weekend-config
   app.get("/api/weekend-config", requireAuth, async (req, res) => {
     try {
-      const companyId = await resolveRequestCompanyId(req);
       const conn = await getMySqlPool();
-      
-      let queryStr = "SELECT weekend_days FROM lff_companies";
-      const queryParams: any[] = [];
-      if (companyId) {
-        queryStr += " WHERE id = ?";
-        queryParams.push(companyId);
-      }
-      queryStr += " LIMIT 1";
-      
-      const [rows] = await conn.query<any[]>(queryStr, queryParams);
+      const [rows] = await conn.query<any[]>("SELECT weekend_days FROM lff_companies LIMIT 1");
       if (rows && rows.length > 0 && rows[0].weekend_days) {
         res.json({ weekendDays: JSON.parse(rows[0].weekend_days) });
       } else {
         res.json({ weekendDays: [0] });
       }
     } catch (error) {
-      console.error("Weekend GET error", error);
       res.json({ weekendDays: [0] });
     }
   });
@@ -11691,22 +11674,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(403).json({ message: "Unauthorized" });
         return;
       }
-
-
-
       const body = req.body || {};
       const weekendDays = Array.isArray(body.weekendDays) ? body.weekendDays : [0];
       
-      const [result] = await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
-      
-      if ((result as any).affectedRows === 0) {
-        await conn.execute("INSERT INTO lff_companies (id, name, legal_name, weekend_days, created_at, updated_at) VALUES ('12345678-1234-1234-1234-1234567890ab', 'Company', 'Company', ?, NOW(), NOW())", [JSON.stringify(weekendDays)]);
-      }
+      // Update all rows in lff_companies (usually just 1 tenant row)
+      await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
       
       res.json({ weekendDays, ok: true });
     } catch (error) {
       console.error("Weekend save error", error);
-      res.status(500).json({ message: error instanceof Error ? error.message : "Unable to update weekend config" });
+      res.status(500).json({ message: "Unable to update weekend config" });
     }
   });
 

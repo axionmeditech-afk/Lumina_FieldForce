@@ -5,7 +5,6 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  TouchableOpacity,
   Modal,
   TextInput,
   Switch,
@@ -50,8 +49,6 @@ import {
   getPublicHolidaysRemote,
   addPublicHolidayRemote,
   deletePublicHolidayRemote,
-  getWeekendConfigRemote,
-  saveWeekendConfigRemote,
   getUsersRemote,
   createCollectiveLeaveRemote,
 } from "@/lib/attendance-api";
@@ -160,7 +157,6 @@ export default function LeaveManagementScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("my");
-  const [weekendDays, setWeekendDays] = useState<number[]>([0]);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [calendarTarget, setCalendarTarget] = useState<"start" | "end" | "collStart" | "collEnd">("start");
@@ -203,17 +199,15 @@ export default function LeaveManagementScreen() {
   const fetchData = useCallback(async () => {
     try {
       setErrorMsg(null);
-      const [leavesData, summaryData, holidaysData, weekendData, usersData] = await Promise.allSettled([
+      const [leavesData, summaryData, holidaysData, usersData] = await Promise.allSettled([
         listLeaveRequestsRemote({ year: currentYear }),
         getLeavesSummaryRemote({ month: currentMonth, year: currentYear }),
         getPublicHolidaysRemote(),
-        getWeekendConfigRemote(),
         getUsersRemote(),
       ]);
       if (leavesData.status === "fulfilled") setLeaves(leavesData.value);
       if (summaryData.status === "fulfilled") setSummaries(summaryData.value);
       if (holidaysData.status === "fulfilled") setHolidays(holidaysData.value);
-      if (weekendData.status === "fulfilled") setWeekendDays(weekendData.value.weekendDays);
       if (usersData.status === "fulfilled") setUsersList(usersData.value);
     } catch (err) {
       setErrorMsg("Unable to load leave data. Pull down to retry.");
@@ -369,7 +363,6 @@ export default function LeaveManagementScreen() {
     }
   };
 
-
   const handleDelete = async (leaveId: string) => {
     Alert.alert("Cancel Request", "Are you sure you want to cancel this leave request?", [
       { text: "Keep", style: "cancel" },
@@ -451,10 +444,9 @@ export default function LeaveManagementScreen() {
             year={currentYear}
             leaves={leaves}
             holidays={holidays}
-            weekendDays={weekendDays}
+            weekendDays={[0]}
             isPrivileged={isPrivileged}
             colors={colors}
-            isDark={isDark}
             onAddHoliday={handleAddHoliday}
             onDeleteHoliday={handleDeleteHoliday}
           />
@@ -731,7 +723,7 @@ export default function LeaveManagementScreen() {
       </Modal>
 
 
-      
+
 
       {/* Calendar */}
       <CalendarModal
