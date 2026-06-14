@@ -49,6 +49,8 @@ import {
   getPublicHolidaysRemote,
   addPublicHolidayRemote,
   deletePublicHolidayRemote,
+  getWeekendConfigRemote,
+  saveWeekendConfigRemote,
   getUsersRemote,
   createCollectiveLeaveRemote,
 } from "@/lib/attendance-api";
@@ -157,9 +159,11 @@ export default function LeaveManagementScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("my");
+  const [weekendDays, setWeekendDays] = useState<number[]>([0]);
+  const [showWeekendModal, setShowWeekendModal] = useState(false);
+  const [tempWeekendDays, setTempWeekendDays] = useState<number[]>([]);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
-  const [calendarTarget, setCalendarTarget] = useState<"start" | "end" | "collStart" | "collEnd">("start");
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -199,15 +203,17 @@ export default function LeaveManagementScreen() {
   const fetchData = useCallback(async () => {
     try {
       setErrorMsg(null);
-      const [leavesData, summaryData, holidaysData, usersData] = await Promise.allSettled([
+      const [leavesData, summaryData, holidaysData, weekendData, usersData] = await Promise.allSettled([
         listLeaveRequestsRemote({ year: currentYear }),
         getLeavesSummaryRemote({ month: currentMonth, year: currentYear }),
         getPublicHolidaysRemote(),
+        getWeekendConfigRemote(),
         getUsersRemote(),
       ]);
       if (leavesData.status === "fulfilled") setLeaves(leavesData.value);
       if (summaryData.status === "fulfilled") setSummaries(summaryData.value);
       if (holidaysData.status === "fulfilled") setHolidays(holidaysData.value);
+      if (weekendData.status === "fulfilled") setWeekendDays(weekendData.value.weekendDays);
       if (usersData.status === "fulfilled") setUsersList(usersData.value);
     } catch (err) {
       setErrorMsg("Unable to load leave data. Pull down to retry.");
@@ -285,36 +291,6 @@ export default function LeaveManagementScreen() {
     setFormHalfDay(false);
     setFormNote("");
   };
-  const handleCollectiveSubmit = async () => {
-    if (collectiveUsers.length === 0 || !collectiveStartDate) {
-      Alert.alert("Required", "Please select users and a start date.");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      await createCollectiveLeaveRemote({
-        userIds: collectiveUsers,
-        startDate: collectiveStartDate,
-        endDate: collectiveEndDate || collectiveStartDate,
-        startAmPm: collectiveStartAmPm,
-        endAmPm: collectiveEndAmPm,
-        leaveType: collectiveType,
-        approvedBy: collectiveApprovedBy,
-        autoValidate: collectiveAutoValidate,
-        note: collectiveNote
-      });
-      setShowCollectiveModal(false);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert("Success", "Collective leaves created!");
-      fetchData(); // Refresh UI
-    } catch {
-      Alert.alert("Error", "Failed to create collective leaves.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
 
   const handleApproveReject = async (leaveId: string, status: "approved" | "rejected") => {
     try {
@@ -360,6 +336,15 @@ export default function LeaveManagementScreen() {
       setHolidays(prev => prev.filter(h => h.id !== id));
     } catch {
       Alert.alert("Error", "Could not remove holiday");
+    }
+  };
+  const handleSaveWeekends = async () => {
+    try {
+      await saveWeekendConfigRemote(tempWeekendDays);
+      setWeekendDays(tempWeekendDays);
+      setShowWeekendModal(false);
+    } catch {
+      Alert.alert("Error", "Could not save weekends");
     }
   };
 
@@ -444,11 +429,12 @@ export default function LeaveManagementScreen() {
             year={currentYear}
             leaves={leaves}
             holidays={holidays}
-            weekendDays={[0]}
+            weekendDays={weekendDays}
             isPrivileged={isPrivileged}
             colors={colors}
             onAddHoliday={handleAddHoliday}
             onDeleteHoliday={handleDeleteHoliday}
+            onConfigureWeekends={() => { setTempWeekendDays(weekendDays); setShowWeekendModal(true); }}
           />
         </Animated.View>
 
@@ -610,7 +596,7 @@ export default function LeaveManagementScreen() {
           </View>
           <ScrollView style={{ padding: 20 }}>
             <Text style={styles.fldLabel}>Start Date</Text>
-            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("start"); setShowCalendar(true); }}>
+            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
               <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
               <Text style={{ flex: 1, color: formStartDate ? colors.text : colors.textSecondary }}>{formStartDate ? new Date(formStartDate).toLocaleDateString() : "Select Start Date"}</Text>
             </Pressable>
@@ -625,7 +611,7 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>End Date (Optional)</Text>
-            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("end"); setShowCalendar(true); }}>
+            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
               <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
               <Text style={{ flex: 1, color: formEndDate ? colors.text : colors.textSecondary }}>{formEndDate ? new Date(formEndDate).toLocaleDateString() : "Same as Start Date"}</Text>
             </Pressable>
@@ -693,9 +679,7 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>Start Date</Text>
-            <Pressable style={[styles.input, { borderColor: cardBorder, justifyContent: "center", marginBottom: 16 }]} onPress={() => { setCalendarTarget("collStart"); setShowCalendar(true); }}>
-              <Text style={{ color: collectiveStartDate ? colors.text : colors.textTertiary }}>{collectiveStartDate || "YYYY-MM-DD"}</Text>
-            </Pressable>
+            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveStartDate} onChangeText={setCollectiveStartDate} />
 
             <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
               <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveStartAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveStartAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
@@ -703,9 +687,7 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>End Date (Optional)</Text>
-            <Pressable style={[styles.input, { borderColor: cardBorder, justifyContent: "center", marginBottom: 16 }]} onPress={() => { setCalendarTarget("collEnd"); setShowCalendar(true); }}>
-              <Text style={{ color: collectiveEndDate ? colors.text : colors.textTertiary }}>{collectiveEndDate || "YYYY-MM-DD"}</Text>
-            </Pressable>
+            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveEndDate} onChangeText={setCollectiveEndDate} />
 
             <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
               <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveEndAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveEndAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
@@ -723,20 +705,34 @@ export default function LeaveManagementScreen() {
       </Modal>
 
 
-
+      
+      <Modal visible={showWeekendModal} transparent animationType="fade">
+        <View style={styles.modalOuter}>
+          <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)} />
+          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white }]}>
+            <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 16 }]}>Configure Weekends</Text>
+            {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => (
+              <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderColor: cardBorder }}>
+                <Text style={{ color: colors.text, fontSize: 16 }}>{dayName}</Text>
+                <Switch
+                  value={tempWeekendDays.includes(i)}
+                  onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
+                />
+              </View>
+            ))}
+            <Pressable onPress={handleSaveWeekends} style={[styles.submitBtn, { marginTop: 24, backgroundColor: P.blue }]}>
+              <Text style={styles.submitTxt}>Save Weekends</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {/* Calendar */}
       <CalendarModal
         visible={showCalendar}
-        value={calendarTarget === "start" ? formStartDate : calendarTarget === "end" ? formEndDate : calendarTarget === "collStart" ? collectiveStartDate : collectiveEndDate}
+        value={formDate}
         onClose={() => setShowCalendar(false)}
-        onSelect={(dateStr: string) => {
-           if (calendarTarget === "start") setFormStartDate(dateStr);
-           else if (calendarTarget === "end") setFormEndDate(dateStr);
-           else if (calendarTarget === "collStart") setCollectiveStartDate(dateStr);
-           else setCollectiveEndDate(dateStr);
-           setShowCalendar(false);
-        }}
+        onSelect={(dateStr: string) => setFormDate(dateStr)}
         colors={colors}
       />
     </AppCanvas>

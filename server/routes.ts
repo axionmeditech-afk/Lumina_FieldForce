@@ -11443,7 +11443,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/collective-leaves", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const requestUser = req.user;
+      const requestUser = (req as any).user as AppUser;
       if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
         return res.status(403).json({ message: "Unauthorized" });
       }
@@ -11490,7 +11490,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     try {
       const conn = await getMySqlPool();
-      const requestUser = req.user;
+      const requestUser = (req as any).user as AppUser;
       const body = req.body || {};
       
       const userEmail = body.userEmail ? String(body.userEmail).trim() : requestUser?.email || "";
@@ -11523,7 +11523,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         [provRef, fkUser, fkUser, fkValidator, fkType, leaveDate, leaveEndDate, halfday, note]
       );
       
-      const rowid = insertRes.insertId;
+      const rowid = (insertRes as any).insertId;
 
       res.status(201).json({
         id: String(rowid),
