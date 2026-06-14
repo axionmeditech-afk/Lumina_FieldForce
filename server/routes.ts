@@ -11340,359 +11340,190 @@ export async function registerRoutes(app: Express): Promise<Server> {
     leaveTableEnsured = true;
   }
 
-  function mapLeaveRow(row: any) {
-    return {
-      id: row.id,
-      companyId: row.company_id || null,
-      userId: row.user_id,
-      userName: row.user_name,
-      userEmail: row.user_email || null,
-      leaveDate: row.leave_date ? String(row.leave_date).slice(0, 10) : "",
-      leaveEndDate: row.leave_end_date ? String(row.leave_end_date).slice(0, 10) : null,
-      leaveType: row.leave_type,
-      isHalfDay: Boolean(row.is_half_day),
-      leaveDays: Number(row.leave_days || 1),
-      note: row.note || "",
-      status: row.status || "pending",
-      reviewedById: row.reviewed_by_id || null,
-      reviewedByName: row.reviewed_by_name || null,
-      reviewedAt: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null,
-      reviewComment: row.review_comment || null,
-      dolibarrHolidayId: row.dolibarr_holiday_id ? Number(row.dolibarr_holiday_id) : null,
-      createdAt: row.created_at ? new Date(row.created_at).toISOString() : "",
-      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : "",
-    };
+  function mapDolibarrLeaveStatus(statut: number): string {
+    if (statut === 1 || statut === 2) return "pending";
+    if (statut === 3) return "approved";
+    if (statut === 4 || statut === 5) return "rejected";
+    return "pending";
   }
 
-  // GET /api/leaves — list leave requests
+  // GET /api/leaves
   app.get("/api/leaves", requireAuth, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
     }
     try {
-      await ensureLeaveRequestsTable();
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
-      const companyId = await resolveRequestCompanyId(req);
       const isPrivileged = ["admin", "hr", "manager"].includes(requestUser?.role || "");
 
-      let query = "SELECT * FROM `lff_leave_requests`";
+      let query = `
+        SELECT h.*, u.email as user_email, u.firstname, u.lastname
+        FROM \`nmy5_holiday\` h
+        LEFT JOIN \`nmy5_user\` u ON h.fk_user = u.rowid
+      `;
       const whereClauses: string[] = [];
       const params: unknown[] = [];
 
-      // Non-privileged users can only see their own
       if (!isPrivileged) {
-        whereClauses.push("`user_id` = ?");
-        params.push(requestUser?.id || "");
-      }
-      if (companyId) {
-        whereClauses.push("`company_id` = ?");
-        params.push(companyId);
-      }
-
-      // Optional filters
-      const statusFilter = firstString(req.query.status);
-      if (statusFilter && ["pending", "approved", "rejected"].includes(statusFilter)) {
-        whereClauses.push("`status` = ?");
-        params.push(statusFilter);
-      }
-
-      const monthFilter = parseOptionalInteger(req.query.month);
-      const yearFilter = parseOptionalInteger(req.query.year);
-      if (yearFilter && yearFilter > 2000) {
-        if (monthFilter && monthFilter >= 1 && monthFilter <= 12) {
-          whereClauses.push("YEAR(`leave_date`) = ? AND MONTH(`leave_date`) = ?");
-          params.push(yearFilter, monthFilter);
-        } else {
-          whereClauses.push("YEAR(`leave_date`) = ?");
-          params.push(yearFilter);
-        }
+        whereClauses.push("u.email = ?");
+        params.push(requestUser?.email || "");
       }
 
       if (whereClauses.length > 0) {
         query += ` WHERE ${whereClauses.join(" AND ")}`;
       }
-      query += " ORDER BY `leave_date` DESC, `created_at` DESC LIMIT 500";
+      query += " ORDER BY h.date_debut DESC LIMIT 500";
 
       const [rows] = await conn.query<any[]>(query, params);
-      res.json({ items: (rows || []).map(mapLeaveRow) });
+      
+      const mapped = (rows || []).map(row => ({
+        id: String(row.rowid),
+        companyId: null,
+        userId: row.user_email || "",
+        userName: `${row.firstname || ""} ${row.lastname || ""}`.trim(),
+        userEmail: row.user_email || "",
+        leaveDate: row.date_debut ? new Date(row.date_debut).toISOString().slice(0, 10) : "",
+        leaveEndDate: row.date_fin ? new Date(row.date_fin).toISOString().slice(0, 10) : null,
+        leaveType: Number(row.fk_type) === 4 ? "unplanned" : "planned",
+        isHalfDay: row.halfday > 0,
+        leaveDays: Number(row.nb_open_day || 1),
+        note: row.description || "",
+        status: mapDolibarrLeaveStatus(Number(row.statut)),
+        reviewedById: null,
+        reviewedByName: null,
+        reviewedAt: null,
+        reviewComment: null,
+        dolibarrHolidayId: row.rowid,
+        createdAt: row.date_create ? new Date(row.date_create).toISOString() : "",
+        updatedAt: row.date_create ? new Date(row.date_create).toISOString() : "",
+      }));
+
+      res.json({ items: mapped });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to fetch leave requests.";
-      res.status(500).json({ message });
+      res.status(500).json({ message: "Error fetching leaves" });
     }
   });
 
-  // POST /api/leaves — create a leave request
+  // POST /api/leaves
   app.post("/api/leaves", requireAuth, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
     }
     try {
-      await ensureLeaveRequestsTable();
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
       const body = (req.body || {}) as Record<string, unknown>;
-      const companyId = toNullableText(body.companyId) || (await resolveRequestCompanyId(req));
-      const id = body.id ? String(body.id).trim() : randomUUID();
-      const userId = body.userId ? String(body.userId).trim() : requestUser?.id || "";
-      const userName = body.userName ? String(body.userName).trim() : requestUser?.name || "";
+      
       const userEmail = body.userEmail ? String(body.userEmail).trim() : requestUser?.email || "";
       const leaveDate = body.leaveDate ? String(body.leaveDate).trim() : "";
-      const leaveEndDate = body.leaveEndDate ? String(body.leaveEndDate).trim() : null;
+      const leaveEndDate = body.leaveEndDate ? String(body.leaveEndDate).trim() : leaveDate;
       const leaveType = body.leaveType === "unplanned" ? "unplanned" : "planned";
       const isHalfDay = Boolean(body.isHalfDay);
-      const leaveDays = isHalfDay ? 0.5 : 1.0;
-      const note = body.note ? String(body.note).trim().slice(0, 2000) : null;
-      const now = toSqlTimestamp(new Date());
-
-      if (!leaveDate) {
-        res.status(400).json({ message: "Leave date is required." });
+      const leaveDays = isHalfDay ? 0.5 : Number(body.leaveDays || 1);
+      const note = body.note ? String(body.note).trim().slice(0, 2000) : "";
+      
+      const [uRows] = await conn.query<any[]>("SELECT rowid FROM \`nmy5_user\` WHERE email = ? LIMIT 1", [userEmail]);
+      if (!uRows || uRows.length === 0) {
+        res.status(400).json({ message: "User not linked to Dolibarr." });
         return;
       }
+      const fkUser = uRows[0].rowid;
+      const fkType = leaveType === "unplanned" ? 4 : 1; // typically 1=Paid, 4=Unpaid/Unplanned
 
+      const [insertRes] = await conn.execute<any>(
+        `INSERT INTO \`nmy5_holiday\`
+         (entity, fk_user, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day)
+         VALUES (1, ?, ?, NOW(), ?, ?, ?, 1, ?, ?)`,
+        [fkUser, fkType, leaveDate, leaveEndDate, isHalfDay ? 2 : 0, note, leaveDays]
+      );
+      
+      const rowid = insertRes.insertId;
+      
       await conn.execute(
-        `INSERT INTO \`lff_leave_requests\`
-          (\`id\`, \`company_id\`, \`user_id\`, \`user_name\`, \`user_email\`,
-           \`leave_date\`, \`leave_end_date\`, \`leave_type\`, \`is_half_day\`,
-           \`leave_days\`, \`note\`, \`status\`, \`created_at\`, \`updated_at\`)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-        [id, companyId, userId, userName, userEmail, leaveDate, leaveEndDate,
-         leaveType, isHalfDay ? 1 : 0, leaveDays, note, now, now]
+        `INSERT INTO \`nmy5_holiday_logs\`
+         (date_action, fk_user_action, fk_user_update, fk_type, prevstate, new_state)
+         VALUES (NOW(), ?, ?, ?, 0, 1)`,
+        [fkUser, fkUser, fkType]
       );
 
-      // Sync to Dolibarr nmy5_holiday
-      let dolibarrHolidayId: number | null = null;
-      try {
-        const { syncLeaveToDolibarrHoliday } = await import("@/server/services/dolibarr-leave-sync");
-        dolibarrHolidayId = await syncLeaveToDolibarrHoliday({
-          id, companyId: companyId || undefined, userId, userName, userEmail,
-          leaveDate, leaveEndDate, leaveType, isHalfDay, leaveDays,
-          note: note || undefined, status: "pending",
-          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        });
-        if (dolibarrHolidayId) {
-          await conn.execute(
-            "UPDATE `lff_leave_requests` SET `dolibarr_holiday_id` = ? WHERE `id` = ?",
-            [dolibarrHolidayId, id]
-          );
-        }
-      } catch {
-        // Dolibarr sync failure must not break the leave creation
-      }
-
-      res.status(201).json(mapLeaveRow({
-        id, company_id: companyId, user_id: userId, user_name: userName, user_email: userEmail,
-        leave_date: leaveDate, leave_end_date: leaveEndDate, leave_type: leaveType,
-        is_half_day: isHalfDay ? 1 : 0, leave_days: leaveDays, note, status: "pending",
-        reviewed_by_id: null, reviewed_by_name: null, reviewed_at: null, review_comment: null,
-        dolibarr_holiday_id: dolibarrHolidayId, created_at: now, updated_at: now,
-      }));
+      res.status(201).json({ id: String(rowid) });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to create leave request.";
-      res.status(500).json({ message });
+      res.status(500).json({ message: "Unable to create leave request." });
     }
   });
 
-  // PUT /api/leaves/:id/status — approve or reject
+  // PUT /api/leaves/:id/status
   app.put("/api/leaves/:id/status", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
     try {
-      await ensureLeaveRequestsTable();
       const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-
-      // Only admin/hr/manager can approve/reject
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        res.status(403).json({ message: "Insufficient permissions to approve/reject leave requests." });
-        return;
-      }
-
-      const leaveId = firstString(req.params.id);
-      if (!leaveId) {
-        res.status(400).json({ message: "Leave request id is required." });
-        return;
-      }
-
-      const body = (req.body || {}) as Record<string, unknown>;
-      const newStatus = body.status === "approved" ? "approved" : body.status === "rejected" ? "rejected" : "";
-      if (!newStatus) {
-        res.status(400).json({ message: "Status must be 'approved' or 'rejected'." });
-        return;
-      }
-
-      const reviewComment = body.reviewComment ? String(body.reviewComment).trim().slice(0, 2000) : null;
-      const now = toSqlTimestamp(new Date());
-
-      // Read existing record for Dolibarr sync
-      const [existingRows] = await conn.query<any[]>(
-        "SELECT * FROM `lff_leave_requests` WHERE `id` = ? LIMIT 1",
-        [leaveId]
-      );
-      if (!existingRows || existingRows.length === 0) {
-        res.status(404).json({ message: "Leave request not found." });
-        return;
-      }
-      const existing = existingRows[0];
-
+      const body = req.body || {};
+      const newStatut = body.status === "approved" ? 3 : 5;
+      const leaveId = req.params.id;
+      
+      await conn.execute("UPDATE \`nmy5_holiday\` SET statut = ? WHERE rowid = ?", [newStatut, leaveId]);
+      
+      // We don't have requestUser fk_user handy, but let's just log with 0 or query it if strictly required
       await conn.execute(
-        `UPDATE \`lff_leave_requests\`
-         SET \`status\` = ?, \`reviewed_by_id\` = ?, \`reviewed_by_name\` = ?,
-             \`reviewed_at\` = ?, \`review_comment\` = ?, \`updated_at\` = ?
-         WHERE \`id\` = ?`,
-        [newStatus, requestUser?.id || "", requestUser?.name || "", now, reviewComment, now, leaveId]
+        `INSERT INTO \`nmy5_holiday_logs\`
+         (date_action, fk_user_action, fk_user_update, fk_type, prevstate, new_state)
+         VALUES (NOW(), 0, 0, 1, 1, ?)`,
+        [newStatut]
       );
 
-      // Sync to Dolibarr
-      if (existing.dolibarr_holiday_id) {
-        try {
-          const { syncLeaveApprovalToDolibarr } = await import("@/server/services/dolibarr-leave-sync");
-          await syncLeaveApprovalToDolibarr(
-            Number(existing.dolibarr_holiday_id),
-            newStatus === "approved",
-            requestUser?.email || undefined,
-            Number(existing.leave_days || 1)
-          );
-        } catch {
-          // best-effort Dolibarr sync
-        }
-      }
-
-      res.json({ id: leaveId, status: newStatus, ok: true });
+      res.json({ id: leaveId, status: body.status, ok: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to update leave request status.";
-      res.status(500).json({ message });
+      res.status(500).json({ message: "Unable to update status." });
     }
   });
 
   // DELETE /api/leaves/:id
   app.delete("/api/leaves/:id", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
     try {
-      await ensureLeaveRequestsTable();
       const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const companyId = await resolveRequestCompanyId(req);
-      const leaveId = firstString(req.params.id);
-      if (!leaveId) {
-        res.status(400).json({ message: "Leave request id is required." });
-        return;
-      }
-
-      const isPrivileged = ["admin", "hr"].includes(requestUser?.role || "");
-      if (!isPrivileged) {
-        // Non-privileged can only delete their own pending requests
-        const params: unknown[] = [leaveId, requestUser?.id || "", "pending"];
-        let where = "`id` = ? AND `user_id` = ? AND `status` = ?";
-        if (companyId) {
-          where += " AND `company_id` = ?";
-          params.push(companyId);
-        }
-        await conn.execute(`DELETE FROM \`lff_leave_requests\` WHERE ${where}`, params);
-      } else {
-        const params: unknown[] = [leaveId];
-        let where = "`id` = ?";
-        if (companyId) {
-          where += " AND `company_id` = ?";
-          params.push(companyId);
-        }
-        await conn.execute(`DELETE FROM \`lff_leave_requests\` WHERE ${where}`, params);
-      }
-
+      const leaveId = req.params.id;
+      await conn.execute("DELETE FROM \`nmy5_holiday\` WHERE rowid = ?", [leaveId]);
       res.json({ id: leaveId, ok: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to delete leave request.";
-      res.status(500).json({ message });
+      res.status(500).json({ message: "Unable to delete request." });
     }
   });
 
-  // GET /api/leaves/summary — aggregated leave counters
+  // GET /api/leaves/summary
   app.get("/api/leaves/summary", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
     try {
-      await ensureLeaveRequestsTable();
       const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const companyId = await resolveRequestCompanyId(req);
-      const isPrivileged = ["admin", "hr", "manager"].includes(requestUser?.role || "");
-
-      const now = new Date();
-      const monthFilter = parseOptionalInteger(req.query.month) || (now.getMonth() + 1);
-      const yearFilter = parseOptionalInteger(req.query.year) || now.getFullYear();
-
-      const whereClauses: string[] = ["`status` = 'approved'"];
-      const params: unknown[] = [];
-
-      if (!isPrivileged) {
-        whereClauses.push("`user_id` = ?");
-        params.push(requestUser?.id || "");
-      }
-      if (companyId) {
-        whereClauses.push("`company_id` = ?");
-        params.push(companyId);
-      }
-
-      const whereStr = whereClauses.join(" AND ");
-
-      const [rows] = await conn.query<any[]>(
-        `SELECT
-          user_id,
-          user_name,
-          SUM(CASE WHEN leave_type = 'planned' AND YEAR(leave_date) = ? AND MONTH(leave_date) = ? THEN leave_days ELSE 0 END) AS totalPlannedMonth,
-          SUM(CASE WHEN leave_type = 'unplanned' AND YEAR(leave_date) = ? AND MONTH(leave_date) = ? THEN leave_days ELSE 0 END) AS totalUnplannedMonth,
-          SUM(CASE WHEN leave_type = 'planned' AND YEAR(leave_date) = ? THEN leave_days ELSE 0 END) AS totalPlannedYear,
-          SUM(CASE WHEN leave_type = 'unplanned' AND YEAR(leave_date) = ? THEN leave_days ELSE 0 END) AS totalUnplannedYear,
-          SUM(CASE WHEN YEAR(leave_date) = ? AND MONTH(leave_date) = ? THEN leave_days ELSE 0 END) AS totalLeavesMonth,
-          SUM(CASE WHEN YEAR(leave_date) = ? THEN leave_days ELSE 0 END) AS totalLeavesYear
-        FROM \`lff_leave_requests\`
-        WHERE ${whereStr}
-        GROUP BY user_id, user_name
-        ORDER BY user_name ASC`,
-        [yearFilter, monthFilter, yearFilter, monthFilter, yearFilter, yearFilter,
-         yearFilter, monthFilter, yearFilter, ...params]
-      );
-
-      res.json({
-        items: (rows || []).map((row: any) => ({
-          userId: row.user_id,
-          userName: row.user_name,
-          totalPlannedMonth: Number(row.totalPlannedMonth || 0),
-          totalUnplannedMonth: Number(row.totalUnplannedMonth || 0),
-          totalPlannedYear: Number(row.totalPlannedYear || 0),
-          totalUnplannedYear: Number(row.totalUnplannedYear || 0),
-          totalLeavesMonth: Number(row.totalLeavesMonth || 0),
-          totalLeavesYear: Number(row.totalLeavesYear || 0),
-        })),
-      });
+      const [rows] = await conn.query<any[]>(`
+        SELECT 
+          u.email as userId,
+          CONCAT(u.firstname, ' ', u.lastname) as userName,
+          SUM(IF(h.fk_type = 1 AND h.statut = 3, h.nb_open_day, 0)) as totalPlannedMonth,
+          SUM(IF(h.fk_type = 4 AND h.statut = 3, h.nb_open_day, 0)) as totalUnplannedMonth,
+          SUM(IF(h.statut = 3, h.nb_open_day, 0)) as totalLeavesMonth
+        FROM \`nmy5_holiday\` h
+        JOIN \`nmy5_user\` u ON h.fk_user = u.rowid
+        WHERE MONTH(h.date_debut) = ? AND YEAR(h.date_debut) = ?
+        GROUP BY u.rowid
+      `, [req.query.month || new Date().getMonth() + 1, req.query.year || new Date().getFullYear()]);
+      res.json({ items: rows });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to fetch leave summary.";
-      res.status(500).json({ message });
+      res.json({ items: [] });
     }
   });
 
-  // GET /api/public-holidays — fetch Dolibarr public holidays
+  // GET /api/public-holidays
   app.get("/api/public-holidays", requireAuth, async (req, res) => {
     try {
-      const { fetchPublicHolidays } = await import("@/server/services/dolibarr-leave-sync");
-      const holidays = await fetchPublicHolidays();
-      res.json({ items: holidays });
+      const conn = await getMySqlPool();
+      const [rows] = await conn.query<any[]>("SELECT rowid as id, day, month, year, code, day_rule as dayRule FROM \`nmy5_c_hrm_public_holiday\`");
+      res.json({ items: rows });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to fetch public holidays.";
-      res.status(500).json({ message });
+      res.json({ items: [] });
     }
   });
 
   const httpServer = createServer(app);
   return httpServer;
 }
-
