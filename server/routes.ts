@@ -11441,13 +11441,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
       
       const rowid = insertRes.insertId;
-      
-      await conn.execute(
-        `INSERT INTO \`nmy5_holiday_logs\`
-         (date_action, fk_user_action, fk_user_update, fk_type, prevstate, new_state)
-         VALUES (NOW(), ?, ?, ?, 0, 1)`,
-        [fkUser, fkUser, fkType]
-      );
 
       res.status(201).json({ id: String(rowid) });
     } catch (error) {
@@ -11466,14 +11459,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const leaveId = req.params.id;
       
       await conn.execute("UPDATE \`nmy5_holiday\` SET statut = ? WHERE rowid = ?", [newStatut, leaveId]);
-      
-      // We don't have requestUser fk_user handy, but let's just log with 0 or query it if strictly required
-      await conn.execute(
-        `INSERT INTO \`nmy5_holiday_logs\`
-         (date_action, fk_user_action, fk_user_update, fk_type, prevstate, new_state)
-         VALUES (NOW(), 0, 0, 1, 1, ?)`,
-        [newStatut]
-      );
 
       res.json({ id: leaveId, status: body.status, ok: true });
     } catch (error) {
