@@ -5876,6 +5876,7 @@ async function ensureCompaniesTableInMySql(): Promise<void> {
       support_email VARCHAR(191) NOT NULL DEFAULT 'support@company.com',
       support_phone VARCHAR(64) NOT NULL DEFAULT '',
       attendance_zone_label VARCHAR(191) NOT NULL DEFAULT 'Main Branch',
+      weekend_days VARCHAR(255) DEFAULT '[0]',
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
       PRIMARY KEY (id),
