@@ -11457,7 +11457,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const endAmPm = body.endAmPm || "afternoon";
       const fkType = body.leaveType === "unplanned" ? 4 : 1;
       const note = (body.note || "").slice(0, 2000);
-      const fkValidator = Number(body.approvedBy) || null;
+      const fkValidator = Number(body.approvedBy) || 1;
       const autoValidate = Boolean(body.autoValidate);
       const statut = autoValidate ? 3 : 2;
       
@@ -11471,7 +11471,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       for (const uid of userIds) {
         const provRef = "(PROV" + Math.floor(Math.random() * 1000000) + ")";
         await conn.execute(
-          "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_user_valid, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, 1)",
+          "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_validator, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, 1)",
           [provRef, Number(uid), requestUser?.id ? Number(requestUser.id) : null, fkValidator, fkType, startDate, endDate, halfday, statut, note]
         );
         insertedCount++;
@@ -11502,7 +11502,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const startAmPm = body.startAmPm || "morning";
       const endAmPm = body.endAmPm || "afternoon";
-      const fkValidator = Number(body.approvedBy) || null;
+      const fkValidator = Number(body.approvedBy) || 1;
       
       let halfday = 0;
       if (startAmPm === "morning" && endAmPm === "afternoon") halfday = 0;
@@ -11519,7 +11519,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const provRef = "(PROV" + Math.floor(Math.random() * 1000000) + ")";
 
       const [insertRes] = await conn.execute(
-        "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_user_valid, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, 2, ?, 1)",
+        "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_validator, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, 2, ?, 1)",
         [provRef, fkUser, fkUser, fkValidator, fkType, leaveDate, leaveEndDate, halfday, note]
       );
       
