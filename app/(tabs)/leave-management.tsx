@@ -164,6 +164,7 @@ export default function LeaveManagementScreen() {
   const [tempWeekendDays, setTempWeekendDays] = useState<number[]>([]);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [calendarTarget, setCalendarTarget] = useState<"start" | "end" | "collStart" | "collEnd">("start");
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -626,7 +627,7 @@ export default function LeaveManagementScreen() {
           </View>
           <ScrollView style={{ padding: 20 }}>
             <Text style={styles.fldLabel}>Start Date</Text>
-            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
+            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("start"); setShowCalendar(true); }}>
               <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
               <Text style={{ flex: 1, color: formStartDate ? colors.text : colors.textSecondary }}>{formStartDate ? new Date(formStartDate).toLocaleDateString() : "Select Start Date"}</Text>
             </Pressable>
@@ -641,7 +642,7 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>End Date (Optional)</Text>
-            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
+            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("end"); setShowCalendar(true); }}>
               <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
               <Text style={{ flex: 1, color: formEndDate ? colors.text : colors.textSecondary }}>{formEndDate ? new Date(formEndDate).toLocaleDateString() : "Same as Start Date"}</Text>
             </Pressable>
@@ -709,7 +710,9 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>Start Date</Text>
-            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveStartDate} onChangeText={setCollectiveStartDate} />
+            <Pressable style={[styles.input, { borderColor: cardBorder, justifyContent: "center", marginBottom: 16 }]} onPress={() => { setCalendarTarget("collStart"); setShowCalendar(true); }}>
+              <Text style={{ color: collectiveStartDate ? colors.text : colors.textTertiary }}>{collectiveStartDate || "YYYY-MM-DD"}</Text>
+            </Pressable>
 
             <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
               <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveStartAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveStartAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
@@ -717,7 +720,9 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>End Date (Optional)</Text>
-            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveEndDate} onChangeText={setCollectiveEndDate} />
+            <Pressable style={[styles.input, { borderColor: cardBorder, justifyContent: "center", marginBottom: 16 }]} onPress={() => { setCalendarTarget("collEnd"); setShowCalendar(true); }}>
+              <Text style={{ color: collectiveEndDate ? colors.text : colors.textTertiary }}>{collectiveEndDate || "YYYY-MM-DD"}</Text>
+            </Pressable>
 
             <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
               <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveEndAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveEndAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
@@ -738,31 +743,57 @@ export default function LeaveManagementScreen() {
       
       <Modal visible={showWeekendModal} transparent animationType="fade">
         <View style={styles.modalOuter}>
-          <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)} />
-          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white }]}>
-            <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 16 }]}>Configure Weekends</Text>
-            {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => (
-              <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderColor: cardBorder }}>
-                <Text style={{ color: colors.text, fontSize: 16 }}>{dayName}</Text>
-                <Switch
-                  value={tempWeekendDays.includes(i)}
-                  onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
-                />
+          <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)}>
+            <BlurView intensity={30} tint={isDark ? "dark" : "light"} style={StyleSheet.absoluteFill} />
+          </Pressable>
+          <Animated.View entering={FadeInDown.springify().damping(18)} style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white, maxHeight: '90%' }]}>
+            <View style={styles.handleWrap}><View style={[styles.handle, { backgroundColor: cardBorder }]} /></View>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 20 }}>
+              <View style={{ width: 44, height: 44, borderRadius: 14, backgroundColor: P.blue + "15", alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="calendar" size={22} color={P.blue} />
               </View>
-            ))}
-            <Pressable onPress={handleSaveWeekends} style={[styles.submitBtn, { marginTop: 24, backgroundColor: P.blue }]}>
-              <Text style={styles.submitTxt}>Save Weekends</Text>
+              <View>
+                <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 2 }]}>Weekends</Text>
+                <Text style={{ fontSize: 13, color: colors.textSecondary, fontFamily: "Inter_400Regular" }}>Select your company's off days.</Text>
+              </View>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
+              {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => {
+                const isActive = tempWeekendDays.includes(i);
+                return (
+                  <Pressable key={i} onPress={() => { Haptics.selectionAsync(); setTempWeekendDays(prev => isActive ? prev.filter(d => d !== i) : [...prev, i]); }} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, borderRadius: 16, borderWidth: 1, borderColor: isActive ? P.blue : cardBorder, backgroundColor: isActive ? P.blue + "08" : "transparent" }}>
+                    <Text style={{ color: isActive ? P.blue : colors.text, fontSize: 16, fontFamily: isActive ? "Inter_600SemiBold" : "Inter_500Medium" }}>{dayName}</Text>
+                    <Switch
+                      value={isActive}
+                      onValueChange={(val) => { Haptics.selectionAsync(); setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i)); }}
+                      trackColor={{ false: isDark ? "#334155" : "#E2E8F0", true: P.blue }}
+                    />
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <Pressable onPress={handleSaveWeekends} style={{ marginTop: 24, marginBottom: 10 }}>
+              <LinearGradient colors={["#2563EB", "#1D4ED8"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[styles.submitBtn, { backgroundColor: "transparent" }]}>
+                <Ionicons name="checkmark-circle" size={18} color="#FFF" />
+                <Text style={styles.submitTxt}>Save Settings</Text>
+              </LinearGradient>
             </Pressable>
-          </View>
+          </Animated.View>
         </View>
       </Modal>
 
       {/* Calendar */}
       <CalendarModal
         visible={showCalendar}
-        value={formDate}
+        value={calendarTarget === "start" ? formStartDate : calendarTarget === "end" ? formEndDate : calendarTarget === "collStart" ? collectiveStartDate : collectiveEndDate}
         onClose={() => setShowCalendar(false)}
-        onSelect={(dateStr: string) => setFormDate(dateStr)}
+        onSelect={(dateStr: string) => {
+           if (calendarTarget === "start") setFormStartDate(dateStr);
+           else if (calendarTarget === "end") setFormEndDate(dateStr);
+           else if (calendarTarget === "collStart") setCollectiveStartDate(dateStr);
+           else setCollectiveEndDate(dateStr);
+           setShowCalendar(false);
+        }}
         colors={colors}
       />
     </AppCanvas>
