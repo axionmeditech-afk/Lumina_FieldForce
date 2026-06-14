@@ -11459,7 +11459,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const note = (body.note || "").slice(0, 2000);
       const fkValidator = Number(body.approvedBy) || 0;
       const autoValidate = Boolean(body.autoValidate);
-      const statut = autoValidate ? 3 : 1;
+      const statut = autoValidate ? 3 : 2;
       
       let halfday = 0;
       if (startAmPm === "morning" && endAmPm === "afternoon") halfday = 0;
@@ -11519,7 +11519,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const provRef = "(PROV" + Math.floor(Math.random() * 1000000) + ")";
 
       const [insertRes] = await conn.execute(
-        "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_user_valid, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, 1, ?, 1)",
+        "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_user_valid, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, 2, ?, 1)",
         [provRef, fkUser, fkUser, fkValidator, fkType, leaveDate, leaveEndDate, halfday, note]
       );
       

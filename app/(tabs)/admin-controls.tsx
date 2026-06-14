@@ -176,6 +176,7 @@ export default function AdminControlsScreen() {
   const [newCompanyBranch, setNewCompanyBranch] = useState("");
   const [newCompanyHeadquarters, setNewCompanyHeadquarters] = useState("");
   const [newCompanyOfficeName, setNewCompanyOfficeName] = useState("");
+  const [newCompanyWeekendDays, setNewCompanyWeekendDays] = useState<number[]>([]);
   const [companyOfficeSearchQuery, setCompanyOfficeSearchQuery] = useState("");
   const [companyOfficeSearchResults, setCompanyOfficeSearchResults] = useState<CompanyOfficeLocation[]>([]);
   const [companyOfficeSearchBusy, setCompanyOfficeSearchBusy] = useState(false);

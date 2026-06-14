@@ -74,7 +74,7 @@ function mapVisitHistoryReminderEntry(
   return {
     id: `visit_${entry.taskId}`,
     taskId: entry.taskId,
-    salespersonId: input.salespersonId,
+    salespersonId: entry.salespersonId || input.salespersonId,
     companyId: input.companyId ?? null,
     label,
     latitude: entry.visitLatitude,
@@ -169,7 +169,7 @@ export async function syncLocationReminderCatalog(input: {
       return {
         id: `quick_sale_${sale.id}`,
         taskId: sale.visitTaskId || sale.id,
-        salespersonId: input.salespersonId,
+        salespersonId: sale.salespersonId || input.salespersonId,
         companyId: input.companyId ?? null,
         label: sale.customerName,
         latitude: sale.latitude,

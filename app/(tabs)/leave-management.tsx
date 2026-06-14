@@ -164,6 +164,7 @@ export default function LeaveManagementScreen() {
   const [tempWeekendDays, setTempWeekendDays] = useState<number[]>([]);
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [calendarTarget, setCalendarTarget] = useState<"formStart"|"formEnd"|"collectiveStart"|"collectiveEnd" | null>(null);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [reviewComment, setReviewComment] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -315,6 +316,36 @@ export default function LeaveManagementScreen() {
   };
 
   
+  const handleCollectiveSubmit = async () => {
+    if (collectiveUsers.length === 0 || !collectiveStartDate) {
+      Alert.alert("Required", "Please select users and a start date.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      await createCollectiveLeaveRemote({
+        userIds: collectiveUsers,
+        startDate: collectiveStartDate,
+        endDate: collectiveEndDate || collectiveStartDate,
+        startAmPm: collectiveStartAmPm,
+        endAmPm: collectiveEndAmPm,
+        leaveType: collectiveType,
+        approvedBy: collectiveApprovedBy,
+        autoValidate: collectiveAutoValidate,
+        note: collectiveNote
+      });
+      setShowCollectiveModal(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert("Success", "Collective leaves created!");
+      fetchData(); // Refresh UI
+    } catch {
+      Alert.alert("Error", "Failed to create collective leaves.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleAddHoliday = async (day: number, month: number, year: number, isCollective?: boolean) => {
     if (isCollective) {
       setCollectiveStartDate(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
@@ -596,7 +627,7 @@ export default function LeaveManagementScreen() {
           </View>
           <ScrollView style={{ padding: 20 }}>
             <Text style={styles.fldLabel}>Start Date</Text>
-            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
+            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("formStart"); setShowCalendar(true); }}>
               <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
               <Text style={{ flex: 1, color: formStartDate ? colors.text : colors.textSecondary }}>{formStartDate ? new Date(formStartDate).toLocaleDateString() : "Select Start Date"}</Text>
             </Pressable>
@@ -611,7 +642,7 @@ export default function LeaveManagementScreen() {
             </View>
 
             <Text style={styles.fldLabel}>End Date (Optional)</Text>
-            <Pressable style={styles.dateBtn} onPress={() => setShowCalendar(true)}>
+            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("formEnd"); setShowCalendar(true); }}>
               <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
               <Text style={{ flex: 1, color: formEndDate ? colors.text : colors.textSecondary }}>{formEndDate ? new Date(formEndDate).toLocaleDateString() : "Same as Start Date"}</Text>
             </Pressable>
@@ -730,9 +761,20 @@ export default function LeaveManagementScreen() {
       {/* Calendar */}
       <CalendarModal
         visible={showCalendar}
-        value={formDate}
+        value={
+          calendarTarget === "formStart" ? formStartDate :
+          calendarTarget === "formEnd" ? formEndDate :
+          calendarTarget === "collectiveStart" ? collectiveStartDate :
+          calendarTarget === "collectiveEnd" ? collectiveEndDate : ""
+        }
         onClose={() => setShowCalendar(false)}
-        onSelect={(dateStr: string) => setFormDate(dateStr)}
+        onSelect={(dateStr: string) => {
+          if (calendarTarget === "formStart") setFormStartDate(dateStr);
+          else if (calendarTarget === "formEnd") setFormEndDate(dateStr);
+          else if (calendarTarget === "collectiveStart") setCollectiveStartDate(dateStr);
+          else if (calendarTarget === "collectiveEnd") setCollectiveEndDate(dateStr);
+          setShowCalendar(false);
+        }}
         colors={colors}
       />
     </AppCanvas>
