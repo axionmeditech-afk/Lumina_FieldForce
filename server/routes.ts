@@ -5882,6 +5882,7 @@ async function ensureCompaniesTableInMySql(): Promise<void> {
       UNIQUE KEY uq_lff_companies_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   );
+  try { await conn.execute("ALTER TABLE lff_companies ADD COLUMN weekend_days VARCHAR(255) DEFAULT '[0]'"); } catch(e) {}
   companiesTableEnsured = true;
 }
 
@@ -11653,11 +11654,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/weekend-config", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT \`value\` FROM \`lff_app_config\` WHERE \`key\` = 'weekend_days' LIMIT 1");
-      if (rows && rows.length > 0) {
-        res.json({ weekendDays: JSON.parse(rows[0].value) });
+      const [rows] = await conn.query<any[]>("SELECT weekend_days FROM lff_companies LIMIT 1");
+      if (rows && rows.length > 0 && rows[0].weekend_days) {
+        res.json({ weekendDays: JSON.parse(rows[0].weekend_days) });
       } else {
-        res.json({ weekendDays: [0] }); // Default Sunday
+        res.json({ weekendDays: [0] });
       }
     } catch (error) {
       res.json({ weekendDays: [0] });
@@ -11675,12 +11676,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const body = req.body || {};
       const weekendDays = Array.isArray(body.weekendDays) ? body.weekendDays : [0];
-      await conn.execute(
-        "INSERT INTO \`lff_app_config\` (\`key\`, \`value\`) VALUES ('weekend_days', ?) ON DUPLICATE KEY UPDATE \`value\` = ?",
-        [JSON.stringify(weekendDays), JSON.stringify(weekendDays)]
-      );
+      
+      // Update all rows in lff_companies (usually just 1 tenant row)
+      await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
+      
       res.json({ weekendDays, ok: true });
     } catch (error) {
+      console.error("Weekend save error", error);
       res.status(500).json({ message: "Unable to update weekend config" });
     }
   });

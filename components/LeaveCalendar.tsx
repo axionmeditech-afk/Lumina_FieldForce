@@ -24,6 +24,7 @@ export function LeaveCalendar({
   weekendDays,
   isPrivileged,
   colors,
+  isDark,
   onAddHoliday,
   onDeleteHoliday,
   onConfigureWeekends,
