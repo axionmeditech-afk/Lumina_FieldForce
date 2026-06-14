@@ -11451,7 +11451,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.status(201).json({ id: String(rowid) });
     } catch (error) {
-      res.status(500).json({ message: "Unable to create leave request." });
+      console.error("[Leave POST Error]:", error);
+      const msg = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ message: "Unable to create leave request. DB ERROR: " + msg });
     }
   });
 
