@@ -5,6 +5,7 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
+  TouchableOpacity,
   Modal,
   TextInput,
   Switch,
@@ -751,7 +752,7 @@ export default function LeaveManagementScreen() {
                 <Ionicons name="close" size={24} color={colors.textSecondary} />
               </Pressable>
             </View>
-            <ScrollView style={{ paddingHorizontal: 20 }} contentContainerStyle={{ paddingVertical: 20, gap: 8 }}>
+            <ScrollView style={{ paddingHorizontal: 20, flexShrink: 1 }} contentContainerStyle={{ paddingVertical: 20, gap: 8 }}>
               <Text style={{ fontSize: 14, color: colors.textSecondary, marginBottom: 8 }}>Select your company's designated off days.</Text>
               {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => {
                 const isActive = tempWeekendDays.includes(i);
@@ -768,9 +769,9 @@ export default function LeaveManagementScreen() {
               })}
             </ScrollView>
             <View style={{ padding: 20, borderTopWidth: 1, borderColor: cardBorder, backgroundColor: isDark ? P.slate900 : "#FFF" }}>
-              <Pressable onPress={handleSaveWeekends} disabled={submitting} style={{ backgroundColor: P.blue, paddingVertical: 14, borderRadius: 12, alignItems: "center", justifyContent: "center", opacity: submitting ? 0.5 : 1 }}>
+              <TouchableOpacity activeOpacity={0.7} onPress={handleSaveWeekends} disabled={submitting} style={{ backgroundColor: P.blue, paddingVertical: 14, borderRadius: 12, alignItems: "center", justifyContent: "center", opacity: submitting ? 0.5 : 1 }}>
                 {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={{ color: "#FFF", fontSize: 16, fontFamily: "Inter_600SemiBold" }}>Save Weekend Settings</Text>}
-              </Pressable>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
