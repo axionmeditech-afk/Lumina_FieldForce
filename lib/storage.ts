@@ -4116,6 +4116,7 @@ function canReceiveNotification(notification: AppNotification, user?: { id?: str
   if (isBroadcastNotification(notification)) return true;
   if (notification.audience !== "all") {
     if (isSalesRole(notification.audience) && isSalesRole(user.role)) return true;
+    if (notification.audience === "salesperson" && user.role === "employee") return false;
     return notification.audience === user.role;
   }
   return false;
@@ -4144,6 +4145,14 @@ function resolveNotificationGroupKey(notification: AppNotification): string | un
   const subject = normalizeSupportNotificationSubject(notification.title).toLowerCase();
   if (!subject) return "support-thread-general";
   return `support-thread-${hashGroupKey(subject)}`;
+}
+
+function getNotificationDedupKey(notification: AppNotification): string {
+  if (notification.title === "New access request") {
+    const emailMatch = notification.body.match(/\(([^()@\s]+@[^()\s]+)\)/i);
+    if (emailMatch) return `access:${normalizeEmail(emailMatch[1])}`;
+  }
+  return `id:${notification.id}`;
 }
 
 function compactErrorMessage(value: string, fallback: string): string {
@@ -4366,23 +4375,28 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
     const companyId = await getActiveCompanyId();
     const existing = await getRawList<AppNotification>(KEYS.NOTIFICATIONS);
     const preserved = existing.filter((item) => !matchesCompany(item, companyId));
-    const existingIds = new Set(
-      existing
-        .filter((item) => matchesCompany(item, companyId))
-        .map((item) => item.id)
-    );
     const normalized = remote.map((item) => ({
       ...item,
       readByIds: Array.isArray(item.readByIds) ? item.readByIds : [],
       audienceUserIds: normalizeNotificationUserIds(item.audienceUserIds),
     }));
 
+    const dedupedRemote = normalized.filter(
+      (item, index, list) =>
+        list.findIndex((candidate) => getNotificationDedupKey(candidate) === getNotificationDedupKey(item)) === index
+    );
+    const existingIds = new Set(
+      existing
+        .filter((item) => matchesCompany(item, companyId))
+        .map((item) => getNotificationDedupKey(item))
+    );
+
     if (currentUser) {
       const settings = await getSettings();
       if (settings.notifications !== "false") {
         const nowMs = Date.now();
-        const freshUnseen = normalized
-          .filter((item) => !existingIds.has(item.id))
+        const freshUnseen = dedupedRemote
+          .filter((item) => !existingIds.has(getNotificationDedupKey(item)))
           .filter((item) => canReceiveNotification(item, currentUser))
           .filter((item) => item.createdById !== currentUser.id)
           .filter((item) => !(item.readByIds || []).includes(currentUser.id))
@@ -4412,8 +4426,8 @@ async function refreshRemoteNotifications(): Promise<AppNotification[] | null> {
       }
     }
 
-    await setItem(KEYS.NOTIFICATIONS, [...normalized, ...preserved]);
-    return normalized;
+    await setItem(KEYS.NOTIFICATIONS, [...dedupedRemote, ...preserved]);
+    return dedupedRemote;
   } catch {
     return null;
   }

@@ -68,6 +68,7 @@ type ActivityEntry = {
 };
 
 type DashboardSnapshot = DashboardStats & {
+  userHasOpenSession: boolean;
   openTasks: number;
   assignedTasks: number;
   completedTasks: number;
@@ -757,6 +758,7 @@ export default function DashboardScreen() {
           );
 
     return {
+      userHasOpenSession,
       totalEmployees: employeeRoster.length,
       presentToday: checkedInNowCount,
       lateToday,
@@ -900,6 +902,11 @@ export default function DashboardScreen() {
     user,
     userTasks,
   ]);
+
+  const presentRatio = useMemo(() => {
+    if (snapshot.totalEmployees <= 0) return 0;
+    return Math.round((snapshot.presentToday / snapshot.totalEmployees) * 100);
+  }, [snapshot.presentToday, snapshot.totalEmployees]);
 
   const metricCards = useMemo<MetricCard[]>(
     () => {
@@ -1144,11 +1151,6 @@ export default function DashboardScreen() {
       userPendingExpenses,
     ]
   );
-
-  const presentRatio = useMemo(() => {
-    if (snapshot.totalEmployees <= 0) return 0;
-    return Math.round((snapshot.presentToday / snapshot.totalEmployees) * 100);
-  }, [snapshot.presentToday, snapshot.totalEmployees]);
 
   const activityFeed = useMemo(
     () =>

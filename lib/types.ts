@@ -671,3 +671,49 @@ export interface BankAccount {
   createdAt: string;
   updatedAt: string;
 }
+
+export type LeaveType = "planned" | "unplanned";
+export type LeaveStatus = "pending" | "approved" | "rejected";
+
+export interface LeaveRequest {
+  id: string;
+  companyId?: string;
+  userId: string;
+  userName: string;
+  userEmail?: string;
+  leaveDate: string;
+  leaveEndDate?: string | null;
+  leaveType: LeaveType;
+  isHalfDay: boolean;
+  leaveDays: number;
+  note?: string;
+  status: LeaveStatus;
+  reviewedById?: string | null;
+  reviewedByName?: string | null;
+  reviewedAt?: string | null;
+  reviewComment?: string | null;
+  dolibarrHolidayId?: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LeaveSummary {
+  userId: string;
+  userName: string;
+  totalPlannedMonth: number;
+  totalUnplannedMonth: number;
+  totalPlannedYear: number;
+  totalUnplannedYear: number;
+  totalLeavesMonth: number;
+  totalLeavesYear: number;
+}
+
+export interface PublicHoliday {
+  id: number;
+  day: number;
+  month: number;
+  year: number;
+  code: string;
+  dayRule: string;
+  countryId: number | null;
+}

@@ -15,6 +15,7 @@ import type { AuditLog } from "@/lib/types";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { useAuth } from "@/contexts/AuthContext";
+import { canModerateSupport } from "@/lib/role-access";
 
 const moduleIcons: Record<string, { icon: string; color: string }> = {
   Auth: { icon: "lock-closed-outline", color: "#6366F1" },
@@ -68,7 +69,7 @@ export default function AuditScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
   const [logs, setLogs] = useState<AuditLog[]>([]);
-  const isAdmin = user?.role === "admin";
+  const canViewAllLogs = user?.role === "admin" || canModerateSupport(user?.role);
 
   const loadData = useCallback(async () => {
     const data = await getAuditLogs();
@@ -76,12 +77,12 @@ export default function AuditScreen() {
       setLogs([]);
       return;
     }
-    if (isAdmin) {
+    if (canViewAllLogs) {
       setLogs(data);
       return;
     }
     setLogs(data.filter((log) => log.userId === user.id || log.userName === user.name));
-  }, [isAdmin, user]);
+  }, [canViewAllLogs, user]);
 
   useEffect(() => { loadData(); }, [loadData]);
 

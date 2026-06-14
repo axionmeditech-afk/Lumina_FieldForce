@@ -340,6 +340,7 @@ export default function AttendanceScreen() {
   const [gpsLoading, setGpsLoading] = useState(true);
   const [gpsEvidence, setGpsEvidence] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
+  const consecutiveOutsideRef = useRef(0);
   const [approvalActionId, setApprovalActionId] = useState<string | null>(null);
   const [permissionLoading, setPermissionLoading] = useState(false);
   const [permissionExplainerOpen, setPermissionExplainerOpen] = useState(true);
@@ -532,6 +533,21 @@ export default function AttendanceScreen() {
       setEvaluation(nextEvaluation);
       setGpsLoading(false);
       setLocationReady(true);
+
+      // AUTO CHECKOUT: if checked in, but GPS is confirmed >500m away with good accuracy
+      if (checkedInState && !nextEvaluation.inside && !nextEvaluation.signalWeak && (effectiveLocation.coords.accuracy ?? 100) < 50) {
+        if (nextEvaluation.nearestDistanceMeters > 500) {
+          consecutiveOutsideRef.current += 1;
+          if (consecutiveOutsideRef.current >= 3) {
+            void submitAttendance("checkout", { isAuto: true, silent: true });
+            consecutiveOutsideRef.current = 0;
+          }
+        } else {
+          consecutiveOutsideRef.current = 0;
+        }
+      } else {
+        consecutiveOutsideRef.current = 0;
+      }
 
       const shouldPersistRoutePoint =
         (!isSalespersonFieldCheckIn || checkedInState) && !options?.skipRoutePersistence;
@@ -1183,18 +1199,19 @@ export default function AttendanceScreen() {
   }, []);
 
   const submitAttendance = useCallback(
-    async (type: "checkin" | "checkout") => {
+    async (type: "checkin" | "checkout", options?: { isAuto?: boolean, silent?: boolean }) => {
       if (!user?.id) return;
-      setActionLoading(true);
+      if (!options?.silent) setActionLoading(true);
       try {
-        const biometricRequired = true;
+        const isAuto = options?.isAuto === true;
+        const biometricRequired = !isAuto;
         let biometricVerified = false;
         let biometricType: string | null = null;
         let biometricFailureReason: string | null = null;
 
         const preCaptureEvidence = await getFastAttendanceEvidence();
         if (!preCaptureEvidence) {
-          Alert.alert("Location Unavailable", "Unable to fetch live GPS location. Please try again.");
+          if (!options?.silent) Alert.alert("Location Unavailable", "Unable to fetch live GPS location. Please try again.");
           return;
         }
 
@@ -1388,14 +1405,14 @@ export default function AttendanceScreen() {
             "Your check-in was captured and is now pending manager/admin approval."
           );
         }
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {
-          // ignore haptics runtime failures
-        });
-        animateSuccess();
+        if (!options?.silent) {
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+          animateSuccess();
+        }
       } catch (error) {
-        Alert.alert("Attendance Failed", error instanceof Error ? error.message : "Unknown error");
+        if (!options?.silent) Alert.alert("Attendance Failed", error instanceof Error ? error.message : "Unknown error");
       } finally {
-        setActionLoading(false);
+        if (!options?.silent) setActionLoading(false);
       }
     },
     [

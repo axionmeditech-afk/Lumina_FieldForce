@@ -11,6 +11,8 @@ import AnalyticsUpIcon from "@hugeicons/core-free-icons/AnalyticsUpIcon";
 // eslint-disable-next-line import/no-unresolved
 import Award04Icon from "@hugeicons/core-free-icons/Award04Icon";
 // eslint-disable-next-line import/no-unresolved
+import Calendar03Icon from "@hugeicons/core-free-icons/Calendar03Icon";
+// eslint-disable-next-line import/no-unresolved
 import ClipboardClockIcon from "@hugeicons/core-free-icons/ClipboardClockIcon";
 // eslint-disable-next-line import/no-unresolved
 import Configuration01Icon from "@hugeicons/core-free-icons/Configuration01Icon";
@@ -493,6 +495,26 @@ function BankAccountsDrawerIcon({ focused, size }: { focused: boolean; size: num
   );
 }
 
+function LeaveManagementDrawerIcon({ focused, size }: { focused: boolean; size: number }) {
+  const { isDark } = useAppTheme();
+  const palette = getDrawerPalette(isDark);
+  const iconColor = focused ? palette.activeIconColor : palette.inactiveIconColor;
+  const iconSize = Math.max(size, 20);
+
+  return (
+    <View style={styles.iconShell}>
+      <View style={styles.iconInner}>
+        <HugeiconsIcon
+          icon={Calendar03Icon}
+          size={iconSize}
+          color={iconColor}
+          strokeWidth={1.7}
+        />
+      </View>
+    </View>
+  );
+}
+
 function NotificationsDrawerIcon({
   focused,
   size,
@@ -689,6 +711,13 @@ export default function SidebarLayout() {
         options={{
           title: "Attendance",
           drawerIcon: ({ focused, size }) => <AttendanceDrawerIcon focused={focused} size={size} />,
+        }}
+      />
+      <Drawer.Screen
+        name="leave-management"
+        options={{
+          title: "Leave Mgmt",
+          drawerIcon: ({ focused, size }) => <LeaveManagementDrawerIcon focused={focused} size={size} />,
         }}
       />
       <Drawer.Screen

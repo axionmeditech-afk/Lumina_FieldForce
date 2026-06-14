@@ -28,3 +28,11 @@ export function canAccessAdminControls(role?: UserRole | null): boolean {
 export function canBroadcastAnnouncements(role?: UserRole | null): boolean {
   return role === "admin" || role === "manager";
 }
+
+export function canApproveLeaves(role?: UserRole | null): boolean {
+  return role === "admin" || role === "manager" || role === "hr";
+}
+
+export function canRequestLeave(role?: UserRole | null): boolean {
+  return role === "employee" || role === "salesperson" || role === "manager" || role === "hr";
+}

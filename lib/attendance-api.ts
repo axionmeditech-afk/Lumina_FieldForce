@@ -2833,4 +2833,89 @@ export async function flushAttendanceQueue(): Promise<void> {
   await setAttendanceQueue(remaining);
 }
 
+// ---------------------------------------------------------------------------
+// Leave Management API
+// ---------------------------------------------------------------------------
 
+import type { LeaveRequest, LeaveSummary, PublicHoliday } from "@/lib/types";
+
+export async function listLeaveRequestsRemote(filters?: {
+  status?: string;
+  month?: number;
+  year?: number;
+}): Promise<LeaveRequest[]> {
+  const params = new URLSearchParams();
+  if (filters?.status) params.set("status", filters.status);
+  if (filters?.month) params.set("month", String(filters.month));
+  if (filters?.year) params.set("year", String(filters.year));
+  const query = params.toString();
+  const response = await fetchJson<{ items?: LeaveRequest[] } | LeaveRequest[]>(
+    `/leaves${query ? `?${query}` : ""}`,
+    { method: "GET" }
+  );
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response.items) ? response.items : [];
+}
+
+export async function createLeaveRequestRemote(data: {
+  leaveDate: string;
+  leaveEndDate?: string | null;
+  leaveType: "planned" | "unplanned";
+  isHalfDay: boolean;
+  note?: string;
+  userId?: string;
+  userName?: string;
+  userEmail?: string;
+  companyId?: string;
+}): Promise<LeaveRequest> {
+  return fetchJson<LeaveRequest>("/leaves", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateLeaveRequestStatusRemote(
+  id: string,
+  status: "approved" | "rejected",
+  reviewComment?: string
+): Promise<{ id: string; status: string; ok: boolean }> {
+  return fetchJson<{ id: string; status: string; ok: boolean }>(
+    `/leaves/${encodeURIComponent(id)}/status`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ status, reviewComment }),
+    }
+  );
+}
+
+export async function deleteLeaveRequestRemote(id: string): Promise<void> {
+  await fetchJson<Record<string, unknown>>(
+    `/leaves/${encodeURIComponent(id)}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function getLeavesSummaryRemote(filters?: {
+  month?: number;
+  year?: number;
+}): Promise<LeaveSummary[]> {
+  const params = new URLSearchParams();
+  if (filters?.month) params.set("month", String(filters.month));
+  if (filters?.year) params.set("year", String(filters.year));
+  const query = params.toString();
+  const response = await fetchJson<{ items?: LeaveSummary[] } | LeaveSummary[]>(
+    `/leaves/summary${query ? `?${query}` : ""}`,
+    { method: "GET" }
+  );
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response.items) ? response.items : [];
+}
+
+export async function getPublicHolidaysRemote(): Promise<PublicHoliday[]> {
+  const response = await fetchJson<{ items?: PublicHoliday[] } | PublicHoliday[]>(
+    "/public-holidays",
+    { method: "GET" }
+  );
+  if (Array.isArray(response)) return response;
+  return Array.isArray(response.items) ? response.items : [];
+}

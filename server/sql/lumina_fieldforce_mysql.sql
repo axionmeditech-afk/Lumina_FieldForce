@@ -514,3 +514,30 @@ CREATE TABLE IF NOT EXISTS `lff_incentive_payouts` (
   KEY `idx_lff_incentive_payout_salesperson` (`salesperson_id`),
   KEY `idx_lff_incentive_payout_range` (`range_key`, `range_start`, `range_end`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `lff_leave_requests` (
+  `id`                    VARCHAR(64) NOT NULL,
+  `company_id`            VARCHAR(64) NULL,
+  `user_id`               VARCHAR(64) NOT NULL,
+  `user_name`             VARCHAR(191) NOT NULL,
+  `user_email`            VARCHAR(191) NULL,
+  `leave_date`            DATE NOT NULL,
+  `leave_end_date`        DATE NULL,
+  `leave_type`            ENUM('planned','unplanned') NOT NULL,
+  `is_half_day`           TINYINT(1) NOT NULL DEFAULT 0,
+  `leave_days`            DECIMAL(3,1) NOT NULL DEFAULT 1.0,
+  `note`                  LONGTEXT NULL,
+  `status`                ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+  `reviewed_by_id`        VARCHAR(64) NULL,
+  `reviewed_by_name`      VARCHAR(191) NULL,
+  `reviewed_at`           DATETIME NULL,
+  `review_comment`        LONGTEXT NULL,
+  `dolibarr_holiday_id`   BIGINT NULL,
+  `created_at`            DATETIME NOT NULL,
+  `updated_at`            DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_lff_leave_user_date` (`user_id`, `leave_date`),
+  KEY `idx_lff_leave_status` (`status`),
+  KEY `idx_lff_leave_company` (`company_id`),
+  KEY `idx_lff_leave_dolibarr` (`dolibarr_holiday_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
