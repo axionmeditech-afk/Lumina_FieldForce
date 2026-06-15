@@ -11680,9 +11680,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const body = req.body || {};
       console.log("[POST /api/public-holidays] received body:", body);
       
-      // We insert day, month, year, code, omitting day_rule and active to prevent unknown column errors
+      // Use ON DUPLICATE KEY UPDATE to handle the unique constraint uk_c_hrm_public_holiday
       const [insertRes] = await conn.execute<any>(
-        "INSERT INTO \`nmy5_c_hrm_public_holiday\` (day, month, year, code) VALUES (?, ?, ?, ?)",
+        "INSERT INTO `nmy5_c_hrm_public_holiday` (day, month, year, code) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE month = VALUES(month), year = VALUES(year)",
         [body.day, body.month, body.year || 0, body.code || ""]
       );
 

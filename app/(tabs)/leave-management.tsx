@@ -912,20 +912,24 @@ export default function LeaveManagementScreen() {
       <Modal visible={showWeekendModal} transparent animationType="fade">
         <View style={styles.modalOuter}>
           <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)} />
-          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white }]}>
+          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white, maxHeight: '80%' }]}>
             <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 16 }]}>Configure Weekends</Text>
-            {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => (
-              <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderColor: cardBorder }}>
-                <Text style={{ color: colors.text, fontSize: 16 }}>{dayName}</Text>
-                <Switch
-                  value={tempWeekendDays.includes(i)}
-                  onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
-                />
-              </View>
-            ))}
-            <Pressable onPress={handleSaveWeekends} style={[styles.submitBtn, { marginTop: 24, backgroundColor: P.blue }]}>
-              <Text style={styles.submitTxt}>Save Weekends</Text>
-            </Pressable>
+            <ScrollView showsVerticalScrollIndicator={false} bounces={false}>
+              {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => (
+                <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 14, borderBottomWidth: 1, borderColor: cardBorder }}>
+                  <Text style={{ color: colors.text, fontSize: 16, fontFamily: "Inter_500Medium" }}>{dayName}</Text>
+                  <Switch
+                    value={tempWeekendDays.includes(i)}
+                    onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
+                    trackColor={{ false: isDark ? '#555' : '#ccc', true: P.blue + '60' }}
+                    thumbColor={tempWeekendDays.includes(i) ? P.blue : isDark ? '#888' : '#f4f3f4'}
+                  />
+                </View>
+              ))}
+              <Pressable onPress={handleSaveWeekends} style={[styles.submitBtn, { marginTop: 24, backgroundColor: P.blue }]}>
+                <Text style={styles.submitTxt}>Save Weekends</Text>
+              </Pressable>
+            </ScrollView>
           </View>
         </View>
       </Modal>
