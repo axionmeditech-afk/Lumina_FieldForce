@@ -11661,9 +11661,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/public-holidays", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT rowid as id, day, month, year, code, code as dayRule FROM \`nmy5_c_hrm_public_holiday\`");
+      const [rows] = await conn.query<any[]>("SELECT id, day, month, year, code, code as dayRule FROM `nmy5_c_hrm_public_holiday`");
       res.json({ items: rows });
     } catch (error) {
+      console.error("[GET /api/public-holidays] Error:", error);
       res.json({ items: [] });
     }
   });
@@ -11725,7 +11726,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
       console.log("[DELETE /api/public-holidays] deleting id:", req.params.id);
-      const [result] = await conn.execute<any>("DELETE FROM `nmy5_c_hrm_public_holiday` WHERE rowid = ?", [req.params.id]);
+      const [result] = await conn.execute<any>("DELETE FROM `nmy5_c_hrm_public_holiday` WHERE id = ?", [req.params.id]);
       console.log("[DELETE /api/public-holidays] result:", result);
       res.json({ id: req.params.id, ok: true });
     } catch (error: any) {

@@ -911,26 +911,135 @@ export default function LeaveManagementScreen() {
 
 
       
-      <Modal visible={showWeekendModal} transparent animationType="fade">
+      <Modal visible={showWeekendModal} transparent animationType="slide">
         <View style={styles.modalOuter}>
           <Pressable style={styles.modalBg} onPress={() => setShowWeekendModal(false)} />
-          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white, maxHeight: '80%' }]}>
-            <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 16 }]}>Configure Weekends</Text>
-            <ScrollView showsVerticalScrollIndicator={false} bounces={false}>
-              {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((dayName, i) => (
-                <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 14, borderBottomWidth: 1, borderColor: cardBorder }}>
-                  <Text style={{ color: colors.text, fontSize: 16, fontFamily: "Inter_500Medium" }}>{dayName}</Text>
-                  <Switch
-                    value={tempWeekendDays.includes(i)}
-                    onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
-                    trackColor={{ false: isDark ? '#555' : '#ccc', true: P.blue + '60' }}
-                    thumbColor={tempWeekendDays.includes(i) ? P.blue : isDark ? '#888' : '#f4f3f4'}
-                  />
+          <View style={[styles.modalSheet, { backgroundColor: isDark ? P.slate900 : P.white, maxHeight: '85%', paddingTop: 24 }]}>
+            {/* Header */}
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: P.violet + "15", justifyContent: "center", alignItems: "center" }}>
+                  <Ionicons name="calendar-outline" size={18} color={P.violet} />
                 </View>
-              ))}
-              <Pressable onPress={handleSaveWeekends} style={[styles.submitBtn, { marginTop: 24, backgroundColor: P.blue }]}>
-                <Text style={styles.submitTxt}>Save Weekends</Text>
+                <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 0 }]}>Configure Weekends</Text>
+              </View>
+              <Pressable onPress={() => setShowWeekendModal(false)} style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isDark ? P.slate800 : P.slate100, justifyContent: "center", alignItems: "center" }}>
+                <Ionicons name="close" size={18} color={colors.textSecondary} />
               </Pressable>
+            </View>
+            <Text style={{ color: colors.textSecondary, fontSize: 13, fontFamily: "Inter_400Regular", marginBottom: 16 }}>
+              Select which days are non-working weekends for your company.
+            </Text>
+
+            <ScrollView showsVerticalScrollIndicator={false} bounces={false}>
+              {[
+                { name: "Sunday", short: "Su", icon: "sunny-outline" },
+                { name: "Monday", short: "Mo", icon: "moon-outline" },
+                { name: "Tuesday", short: "Tu", icon: "flame-outline" },
+                { name: "Wednesday", short: "We", icon: "water-outline" },
+                { name: "Thursday", short: "Th", icon: "thunderstorm-outline" },
+                { name: "Friday", short: "Fr", icon: "leaf-outline" },
+                { name: "Saturday", short: "Sa", icon: "planet-outline" },
+              ].map((day, i) => {
+                const isSelected = tempWeekendDays.includes(i);
+                return (
+                  <Pressable
+                    key={i}
+                    onPress={() => setTempWeekendDays(prev => isSelected ? prev.filter(d => d !== i) : [...prev, i])}
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      paddingVertical: 14,
+                      paddingHorizontal: 12,
+                      marginBottom: 6,
+                      borderRadius: 12,
+                      backgroundColor: isSelected
+                        ? (isDark ? P.violet + "15" : P.violetSoft)
+                        : (isDark ? P.slate800 + "60" : P.slate50),
+                      borderWidth: 1,
+                      borderColor: isSelected
+                        ? (isDark ? P.violet + "40" : P.violet + "30")
+                        : "transparent",
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+                      <View style={{
+                        width: 32, height: 32, borderRadius: 8,
+                        backgroundColor: isSelected ? P.violet + "20" : (isDark ? P.slate700 : P.slate200),
+                        justifyContent: "center", alignItems: "center",
+                      }}>
+                        <Text style={{
+                          fontSize: 12, fontFamily: "Inter_700Bold",
+                          color: isSelected ? P.violet : colors.textSecondary,
+                        }}>{day.short}</Text>
+                      </View>
+                      <Text style={{
+                        color: isSelected ? (isDark ? P.violet : P.violet) : colors.text,
+                        fontSize: 15,
+                        fontFamily: isSelected ? "Inter_600SemiBold" : "Inter_500Medium",
+                      }}>{day.name}</Text>
+                    </View>
+                    <Switch
+                      value={isSelected}
+                      onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
+                      trackColor={{ false: isDark ? '#3a3a3a' : '#ddd', true: P.violet + '50' }}
+                      thumbColor={isSelected ? P.violet : isDark ? '#666' : '#f4f3f4'}
+                    />
+                  </Pressable>
+                );
+              })}
+
+              {/* Selected summary */}
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12, marginBottom: 8 }}>
+                {tempWeekendDays.length === 0 ? (
+                  <Text style={{ color: colors.textSecondary, fontSize: 13, fontFamily: "Inter_400Regular", fontStyle: "italic" }}>No weekends selected</Text>
+                ) : (
+                  tempWeekendDays.sort().map(d => (
+                    <View key={d} style={{ backgroundColor: P.violet + "15", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
+                      <Text style={{ color: P.violet, fontSize: 12, fontFamily: "Inter_600SemiBold" }}>
+                        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d]}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
+
+              {/* Buttons */}
+              <View style={{ gap: 10, marginTop: 16, marginBottom: 8 }}>
+                <Pressable
+                  onPress={handleSaveWeekends}
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "center",
+                    alignItems: "center",
+                    gap: 8,
+                    backgroundColor: P.violet,
+                    paddingVertical: 14,
+                    borderRadius: 14,
+                    shadowColor: P.violet,
+                    shadowOffset: { width: 0, height: 4 },
+                    shadowOpacity: 0.3,
+                    shadowRadius: 8,
+                    elevation: 6,
+                  }}
+                >
+                  <Ionicons name="checkmark-circle" size={20} color="#FFF" />
+                  <Text style={{ color: "#FFF", fontSize: 16, fontFamily: "Inter_600SemiBold" }}>Save Weekends</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setShowWeekendModal(false)}
+                  style={{
+                    justifyContent: "center",
+                    alignItems: "center",
+                    paddingVertical: 12,
+                    borderRadius: 14,
+                    backgroundColor: isDark ? P.slate800 : P.slate100,
+                  }}
+                >
+                  <Text style={{ color: colors.textSecondary, fontSize: 15, fontFamily: "Inter_500Medium" }}>Cancel</Text>
+                </Pressable>
+              </View>
             </ScrollView>
           </View>
         </View>
