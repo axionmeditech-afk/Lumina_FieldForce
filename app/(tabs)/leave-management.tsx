@@ -235,13 +235,41 @@ export default function LeaveManagementScreen() {
 
   // ─── Computed ───────────────────────────────────────────────
   const myLeaves = useMemo(() => leaves.filter((l) => l.userId === user?.id), [leaves, user?.id]);
-  const pendingLeaves = useMemo(() => leaves.filter((l) => l.status === "pending"), [leaves]);
+  const pendingLeaves = useMemo(() => {
+    return [...leaves].sort((a, b) => {
+      const aIsPending = a.status === "pending";
+      const bIsPending = b.status === "pending";
+      if (aIsPending && !bIsPending) return -1;
+      if (!aIsPending && bIsPending) return 1;
+      return new Date(b.leaveDate + "T00:00:00").getTime() - new Date(a.leaveDate + "T00:00:00").getTime();
+    });
+  }, [leaves]);
   const mySummary = useMemo(() => summaries.find((s) => s.userId === user?.id) || null, [summaries, user?.id]);
 
-  const plannedCount = mySummary?.totalPlannedMonth ?? 0;
-  const unplannedCount = mySummary?.totalUnplannedMonth ?? 0;
-  const totalCount = mySummary?.totalLeavesMonth ?? 0;
-  const pendingCount = pendingLeaves.length;
+  const myCurrentMonthLeaves = useMemo(() => {
+    return leaves.filter((l) => {
+      if (l.userId !== user?.id) return false;
+      if (l.status !== "approved") return false;
+      const d = new Date(l.leaveDate + "T00:00:00");
+      return d.getMonth() + 1 === currentMonth && d.getFullYear() === currentYear;
+    });
+  }, [leaves, user?.id, currentMonth, currentYear]);
+
+  const plannedCount = useMemo(() => {
+    return myCurrentMonthLeaves
+      .filter((l) => l.leaveType === "planned")
+      .reduce((sum, l) => sum + (l.leaveDays || 1), 0);
+  }, [myCurrentMonthLeaves]);
+
+  const unplannedCount = useMemo(() => {
+    return myCurrentMonthLeaves
+      .filter((l) => l.leaveType === "unplanned")
+      .reduce((sum, l) => sum + (l.leaveDays || 1), 0);
+  }, [myCurrentMonthLeaves]);
+
+  const totalCount = plannedCount + unplannedCount;
+
+  const pendingCount = useMemo(() => leaves.filter((l) => l.status === "pending").length, [leaves]);
   const displayLeaves = activeTab === "my" ? myLeaves : activeTab === "pending" ? pendingLeaves : [];
 
   // ─── Actions ────────────────────────────────────────────────
@@ -272,6 +300,7 @@ export default function LeaveManagementScreen() {
       resetForm();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert("Request Submitted", "Your leave request has been submitted successfully.");
+      void fetchData();
     } catch (err) {
       console.error("[LeaveManagement] submit error:", err);
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
@@ -307,6 +336,7 @@ export default function LeaveManagementScreen() {
       setReviewingId(null);
       setReviewComment("");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      void fetchData();
     } catch (err) {
       console.error("[LeaveManagement] approve/reject error:", err);
       const message = err instanceof Error ? err.message : "Failed to update status.";
@@ -390,6 +420,7 @@ export default function LeaveManagementScreen() {
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             await deleteLeaveRequestRemote(leaveId);
             setLeaves((prev) => prev.filter((l) => l.id !== leaveId));
+            void fetchData();
           } catch (err) {
             console.error("[LeaveManagement] delete error:", err);
             Alert.alert("Failed", "Unable to cancel request.");
@@ -531,7 +562,7 @@ export default function LeaveManagementScreen() {
                 ]}
               >
                 <Text style={[styles.tabLabel, { color: active ? P.blue : colors.textSecondary, fontFamily: active ? "Inter_600SemiBold" : "Inter_400Regular" }]}>
-                  {tab === "my" ? "My Leaves" : tab === "pending" ? "Pending" : "Team Summary"}
+                  {tab === "my" ? "My Leaves" : tab === "pending" ? "Team Requests" : "Team Summary"}
                 </Text>
                 {tab === "pending" && pendingCount > 0 && (
                   <View style={styles.badge}>
