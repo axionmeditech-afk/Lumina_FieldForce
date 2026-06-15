@@ -6864,7 +6864,14 @@ function buildAuthRecordFromMySqlRow(row: any): AuthUserRecord | null {
 
   const isAdmin = Number(row?.admin || 0) === 1;
   let role: UserRole = isAdmin ? "admin" : "salesperson";
-  if (!isAdmin && row?.job) {
+  if (!isAdmin && row?.employee_category) {
+    const catStr = String(row.employee_category).toLowerCase();
+    if (catStr === "on_field") {
+      role = "salesperson";
+    } else if (catStr === "fixed_location") {
+      role = "employee";
+    }
+  } else if (!isAdmin && row?.job) {
     const jobStr = String(row.job).toLowerCase();
     if (jobStr.includes("on field") || jobStr.includes("sales")) {
       role = "salesperson";
@@ -6912,10 +6919,12 @@ async function getAuthUserFromMySqlByEmail(identifier: string): Promise<AuthUser
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT
-      rowid, login, email, firstname, lastname, admin, statut, employee, job,
-      office_phone, user_mobile, pass_crypted, pass, datec, tms
-    FROM nmy5_user
-    WHERE email = ? OR login = ?
+      u.rowid, u.login, u.email, u.firstname, u.lastname, u.admin, u.statut, u.employee, u.job,
+      u.office_phone, u.user_mobile, u.pass_crypted, u.pass, u.datec, u.tms,
+      p.employee_category
+    FROM nmy5_user u
+    LEFT JOIN nmy5_hrm_employee_profile p ON p.fk_user = u.rowid
+    WHERE u.email = ? OR u.login = ?
     LIMIT 1`,
     [normalizedEmail, normalizedLogin]
   );

@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -4283,7 +4283,7 @@ export default function SalesScreen() {
           }
           setRecordError(null);
         } catch (error) {
-          setRecordError(getErrorMessage(error, TRANSCRIPTION_FAILED_MESSAGE));
+          setRecordError("Transcription unavailable. Audio fallback in progress...");
           fallbackChunkBufferRef.current.set(chunkIndex, "");
         } finally {
           flushFallbackChunks();
@@ -4671,11 +4671,16 @@ export default function SalesScreen() {
         }
         return null;
       }
-      if (!transcript || transcript.length < minTranscriptLength) {
-        if (!silent) {
-          Alert.alert("Transcript Too Short", "Please record a longer conversation before saving.");
+      let finalTranscript = transcript;
+      if (!finalTranscript || finalTranscript.length < minTranscriptLength) {
+        if (audioUri) {
+          finalTranscript = "Transcription unavailable. Voice recording is preserved.";
+        } else {
+          if (!silent) {
+            Alert.alert("Transcript Too Short", "Please record a longer conversation before saving.");
+          }
+          return null;
         }
-        return null;
       }
 
       setSaving(true);
@@ -4688,7 +4693,7 @@ export default function SalesScreen() {
           salespersonId,
           salespersonName,
           customerName: resolvedCustomerName,
-          transcript,
+          transcript: finalTranscript,
           durationMs: elapsedMs,
           audioUri: playableAudioUri,
         });
@@ -4902,7 +4907,8 @@ export default function SalesScreen() {
           autoCaptureConversationId: conversation.id,
         });
         let analyzedConversation = conversation;
-        if ((conversation.transcript || "").trim().length >= 20) {
+        const transcriptText = (conversation.transcript || "").trim();
+        if (transcriptText.length >= 20 && transcriptText !== "Transcription unavailable. Voice recording is preserved.") {
           try {
             const aiResult = await analyzeConversationWithBackendAIForMeeting({
               transcript: conversation.transcript || "",
