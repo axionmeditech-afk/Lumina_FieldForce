@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   View,
@@ -738,7 +738,7 @@ export default function AdminControlsScreen() {
       selectedCompanyOfficeLocation?.label ||
       `${name || "Company"} Main Office`;
     if (!name) {
-      Alert.alert("Company Name Required", "Please enter company name.");
+      Alert.alert("Workspace Name Required", "Please enter workspace name.");
       return;
     }
     if (!selectedCompanyOfficeLocation) {
@@ -758,7 +758,7 @@ export default function AdminControlsScreen() {
         attendanceZoneLabel: officeName,
       });
       if (!created) {
-        Alert.alert("Unable to Create", "Company profile could not be created.");
+        Alert.alert("Unable to Create", "Workspace profile could not be created.");
         return;
       }
       const now = new Date().toISOString();
@@ -824,7 +824,7 @@ export default function AdminControlsScreen() {
     async (company: CompanyProfile) => {
       if (!user || busyDeleteCompanyId) return;
       if (companyProfiles.length <= 1) {
-        Alert.alert("Cannot Delete", "At least one company environment is required.");
+        Alert.alert("Cannot Delete", "At least one workspace is required.");
         return;
       }
 
@@ -834,7 +834,7 @@ export default function AdminControlsScreen() {
         if (!removed) {
           Alert.alert(
             "Unable to Delete",
-            "This company environment cannot be deleted right now."
+            "This workspace cannot be deleted right now."
           );
           return;
         }
@@ -851,7 +851,7 @@ export default function AdminControlsScreen() {
         await Promise.all([loadData(), refreshSession()]);
       } catch (error) {
         const message =
-          error instanceof Error ? error.message : "Unable to delete company environment.";
+          error instanceof Error ? error.message : "Unable to delete workspace.";
         Alert.alert("Delete Failed", message);
       } finally {
         setBusyDeleteCompanyId(null);
@@ -870,11 +870,11 @@ export default function AdminControlsScreen() {
     (company: CompanyProfile) => {
       if (busyDeleteCompanyId) return;
       if (companyProfiles.length <= 1) {
-        Alert.alert("Cannot Delete", "At least one company environment is required.");
+        Alert.alert("Cannot Delete", "At least one workspace is required.");
         return;
       }
       Alert.alert(
-        "Delete Company Environment",
+        "Delete Workspace",
         `Are you sure you want to delete ${company.name}? This will remove access for all assigned users.`,
         [
           { text: "Cancel", style: "cancel" },
@@ -1250,7 +1250,7 @@ export default function AdminControlsScreen() {
             Admin Controls
           </Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-            Manage company environments, approvals, announcements, and policy controls.
+            Manage workspaces, approvals, announcements, and policy controls.
           </Text>
         </Animated.View>
         <View style={styles.adminTabRow}>
@@ -1425,11 +1425,11 @@ export default function AdminControlsScreen() {
           style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
         >
           <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-            Company Environments
+            Workspaces
           </Text>
           <View style={styles.companyListWrap}>
             {companyProfiles.length === 0 ? (
-              <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No company environments available.</Text>
+              <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No workspaces available.</Text>
             ) : (
               companyProfiles.map((company, index) => (
                 <View
@@ -1472,11 +1472,11 @@ export default function AdminControlsScreen() {
           </View>
 
           <View style={styles.divider} />
-          <Text style={[styles.subSectionTitle, { color: colors.textSecondary }]}>Create New Company</Text>
+          <Text style={[styles.subSectionTitle, { color: colors.textSecondary }]}>Create New Workspace</Text>
           <TextInput
             value={newCompanyName}
             onChangeText={setNewCompanyName}
-            placeholder="Company name"
+            placeholder="Workspace name"
             placeholderTextColor={colors.textTertiary}
             style={[
               styles.input,

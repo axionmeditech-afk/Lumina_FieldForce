@@ -10058,21 +10058,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // --- Geofence Enter Notification ---
           if (status.distanceMeters <= 500) {
             const today = new Date().toISOString().split('T')[0];
-            const reminderId = `notif_checkin_reminder_${entry.userId}_${today}`;
-            const now = new Date().toISOString();
-            const notification = {
-              id: reminderId,
-              title: "Check-in Reminder",
-              body: "You are near the office location. Please check in for the day.",
-              kind: "alert" as const,
-              audience: "all" as const,
-              audienceUserIds: [entry.userId],
-              readByIds: [] as string[],
-              createdById: "system",
-              createdByName: "System",
-              createdAt: now,
-            };
-            try { await insertNotificationInMySql(notification); } catch (e) {}
+            
+            // Check if user already checked in today to prevent spam
+            const history = isMySqlStateEnabled() 
+              ? await getAttendanceHistoryFromMySql(entry.userId).catch(() => []) 
+              : await storage.getAttendanceToday(entry.userId);
+              
+            const hasCheckedInToday = history.some(a => a.type === "checkin" && a.timestamp.startsWith(today));
+            
+            if (!hasCheckedInToday) {
+              const reminderId = `notif_checkin_reminder_${entry.userId}_${today}`;
+              const now = new Date().toISOString();
+              const notification = {
+                id: reminderId,
+                title: "Check-in Reminder",
+                body: "You are near the office location. Please check in for the day.",
+                kind: "alert" as const,
+                audience: "all" as const,
+                audienceUserIds: [entry.userId],
+                readByIds: [] as string[],
+                createdById: "system",
+                createdByName: "System",
+                createdAt: now,
+              };
+              try { await insertNotificationInMySql(notification); } catch (e) {}
+            }
           }
         }
       } catch (error) {

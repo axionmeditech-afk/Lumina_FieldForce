@@ -479,7 +479,7 @@ export default function LeaveManagementScreen() {
                   <Ionicons name="calendar" size={22} color="#FFF" />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.heroTitle}>Leave Management</Text>
+                  <Text style={[styles.heroTitle, { color: P.blueSoft }]}>Leave Management</Text>
                   <Text style={styles.heroSub}>
                     {MONTHS[selectedMonth - 1]} {selectedYear}
                   </Text>
@@ -918,8 +918,8 @@ export default function LeaveManagementScreen() {
             {/* Header */}
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: P.violet + "15", justifyContent: "center", alignItems: "center" }}>
-                  <Ionicons name="calendar-outline" size={18} color={P.violet} />
+                <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: P.blue + "15", justifyContent: "center", alignItems: "center" }}>
+                  <Ionicons name="calendar-outline" size={18} color={P.blue} />
                 </View>
                 <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 0 }]}>Configure Weekends</Text>
               </View>
@@ -955,27 +955,27 @@ export default function LeaveManagementScreen() {
                       marginBottom: 6,
                       borderRadius: 12,
                       backgroundColor: isSelected
-                        ? (isDark ? P.violet + "15" : P.violetSoft)
+                        ? (isDark ? P.blue + "15" : P.blueSoft)
                         : (isDark ? P.slate800 + "60" : P.slate50),
                       borderWidth: 1,
                       borderColor: isSelected
-                        ? (isDark ? P.violet + "40" : P.violet + "30")
+                        ? (isDark ? P.blue + "40" : P.blue + "30")
                         : "transparent",
                     }}
                   >
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
                       <View style={{
                         width: 32, height: 32, borderRadius: 8,
-                        backgroundColor: isSelected ? P.violet + "20" : (isDark ? P.slate700 : P.slate200),
+                        backgroundColor: isSelected ? P.blue + "20" : (isDark ? P.slate700 : P.slate200),
                         justifyContent: "center", alignItems: "center",
                       }}>
                         <Text style={{
                           fontSize: 12, fontFamily: "Inter_700Bold",
-                          color: isSelected ? P.violet : colors.textSecondary,
+                          color: isSelected ? P.blue : colors.textSecondary,
                         }}>{day.short}</Text>
                       </View>
                       <Text style={{
-                        color: isSelected ? (isDark ? P.violet : P.violet) : colors.text,
+                        color: isSelected ? (isDark ? P.blueLight : P.blue) : colors.text,
                         fontSize: 15,
                         fontFamily: isSelected ? "Inter_600SemiBold" : "Inter_500Medium",
                       }}>{day.name}</Text>
@@ -983,8 +983,8 @@ export default function LeaveManagementScreen() {
                     <Switch
                       value={isSelected}
                       onValueChange={(val) => setTempWeekendDays(prev => val ? [...prev, i] : prev.filter(d => d !== i))}
-                      trackColor={{ false: isDark ? '#3a3a3a' : '#ddd', true: P.violet + '50' }}
-                      thumbColor={isSelected ? P.violet : isDark ? '#666' : '#f4f3f4'}
+                      trackColor={{ false: isDark ? '#3a3a3a' : '#ddd', true: P.blue + '50' }}
+                      thumbColor={isSelected ? P.blue : isDark ? '#666' : '#f4f3f4'}
                     />
                   </Pressable>
                 );
@@ -996,8 +996,8 @@ export default function LeaveManagementScreen() {
                   <Text style={{ color: colors.textSecondary, fontSize: 13, fontFamily: "Inter_400Regular", fontStyle: "italic" }}>No weekends selected</Text>
                 ) : (
                   tempWeekendDays.sort().map(d => (
-                    <View key={d} style={{ backgroundColor: P.violet + "15", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
-                      <Text style={{ color: P.violet, fontSize: 12, fontFamily: "Inter_600SemiBold" }}>
+                    <View key={d} style={{ backgroundColor: P.blue + "15", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
+                      <Text style={{ color: P.blue, fontSize: 12, fontFamily: "Inter_600SemiBold" }}>
                         {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d]}
                       </Text>
                     </View>
@@ -1014,10 +1014,10 @@ export default function LeaveManagementScreen() {
                     justifyContent: "center",
                     alignItems: "center",
                     gap: 8,
-                    backgroundColor: P.violet,
+                    backgroundColor: P.blue,
                     paddingVertical: 14,
                     borderRadius: 14,
-                    shadowColor: P.violet,
+                    shadowColor: P.blue,
                     shadowOffset: { width: 0, height: 4 },
                     shadowOpacity: 0.3,
                     shadowRadius: 8,

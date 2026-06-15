@@ -143,6 +143,9 @@ export async function registerForPushTokenIfPossible(): Promise<string | null> {
   }
 }
 
+const recentNotifications = new Map<string, number>();
+const NOTIFICATION_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
+
 export async function sendDeviceLocalNotification(input: {
   title: string;
   body: string;
@@ -160,6 +163,15 @@ export async function sendDeviceLocalNotification(input: {
     title: input.title,
     body: input.body,
   });
+
+  // Prevent duplicate identical notifications within cooldown
+  const contentHash = `${content.title}::::${content.body}`;
+  const now = Date.now();
+  const lastSent = recentNotifications.get(contentHash);
+  if (lastSent && now - lastSent < NOTIFICATION_COOLDOWN_MS) {
+    return; // Ignore duplicate notification
+  }
+  recentNotifications.set(contentHash, now);
   const groupKey = normalizeNotificationGroupKey(input.groupKey);
   const shouldReplaceInGroup = input.replaceExistingInGroup !== false;
   const previousGroupNotificationId =
