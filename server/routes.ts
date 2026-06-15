@@ -7195,6 +7195,19 @@ function buildUserFromRegistration(payload: {
 
 export async function registerRoutes(app: Express): Promise<Server> {
   await initAuthUsersStore();
+
+  const populateUser = async (req: Request, res: Response, next: any) => {
+    if (req.auth && req.auth.email) {
+      const email = req.auth.email;
+      await initAuthUsersStore();
+      const identifier = email.endsWith("@dolibarr.local") ? email.split("@")[0] || email : email;
+      const record = (await syncAuthUserCacheForEmail(identifier)) || getAuthUserByIdentifier(identifier);
+      if (record) {
+        (req as any).user = record.user;
+      }
+    }
+    next();
+  };
   await ensureCompanyScopedSchemaInMySql().catch((error) => {
     console.warn(
       "Unable to finish company-scoped schema setup during startup:",
@@ -10968,7 +10981,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/salaries", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+  app.post("/api/salaries", requireAuth, requireRoles("admin", "hr", "manager"), populateUser, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
@@ -11091,7 +11104,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ─── Employee Bank Accounts REST endpoints ────────────────────────────────
 
-  app.get("/api/bank-accounts", requireAuth, async (req, res) => {
+  app.get("/api/bank-accounts", requireAuth, populateUser, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
@@ -11182,7 +11195,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/bank-accounts", requireAuth, async (req, res) => {
+  app.post("/api/bank-accounts", requireAuth, populateUser, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
@@ -11276,7 +11289,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/bank-accounts/:id", requireAuth, async (req, res) => {
+  app.delete("/api/bank-accounts/:id", requireAuth, populateUser, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
@@ -11381,7 +11394,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   // GET /api/leaves
-  app.get("/api/leaves", requireAuth, async (req, res) => {
+  app.get("/api/leaves", requireAuth, populateUser, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       res.status(503).json({ message: "MySQL is not configured." });
       return;
@@ -11457,7 +11470,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // POST /api/collective-leaves
-  app.post("/api/collective-leaves", requireAuth, async (req, res) => {
+  app.post("/api/collective-leaves", requireAuth, populateUser, async (req, res) => {
     try {
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
@@ -11501,7 +11514,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
 // POST /api/leaves
-  app.post("/api/leaves", requireAuth, async (req, res) => {
+  app.post("/api/leaves", requireAuth, populateUser, async (req, res) => {
     if (!isMySqlStateEnabled()) {
       return res.status(503).json({ message: "MySQL is not configured." });
     }
@@ -11632,7 +11645,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // POST /api/public-holidays
-  app.post("/api/public-holidays", requireAuth, async (req, res) => {
+  app.post("/api/public-holidays", requireAuth, populateUser, async (req, res) => {
     try {
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
@@ -11652,7 +11665,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // DELETE /api/public-holidays/:id
-  app.delete("/api/public-holidays/:id", requireAuth, async (req, res) => {
+  app.delete("/api/public-holidays/:id", requireAuth, populateUser, async (req, res) => {
     try {
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
@@ -11683,7 +11696,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // POST /api/weekend-config
-  app.post("/api/weekend-config", requireAuth, async (req, res) => {
+  app.post("/api/weekend-config", requireAuth, populateUser, async (req, res) => {
     try {
       const conn = await getMySqlPool();
       const requestUser = (req as any).user as AppUser;
