@@ -408,8 +408,10 @@ export default function LeaveManagementScreen() {
       const stringId = String(id);
       await deletePublicHolidayRemote(stringId);
       setHolidays(prev => prev.filter(h => String(h.id) !== stringId));
-    } catch {
-      Alert.alert("Error", "Could not remove holiday");
+    } catch (err: any) {
+      console.error("[handleDeleteHoliday] error:", err);
+      const msg = err instanceof Error ? err.message : "Could not remove holiday";
+      Alert.alert("Error", msg);
     }
   };
   const handleSaveWeekends = async () => {
