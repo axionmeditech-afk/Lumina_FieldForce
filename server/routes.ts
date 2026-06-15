@@ -11657,6 +11657,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // TEMP DEBUG ENDPOINT
+  app.get("/api/public-debug-columns", async (req, res) => {
+    try {
+      const conn = await getMySqlPool();
+      const [rows] = await conn.query("SHOW COLUMNS FROM \`nmy5_c_hrm_public_holiday\`");
+      res.json({ ok: true, columns: rows });
+    } catch (err: any) {
+      res.json({ ok: false, error: err.message });
+    }
+  });
+
   // GET /api/public-holidays
   app.get("/api/public-holidays", requireAuth, async (req, res) => {
     try {
