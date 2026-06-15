@@ -1383,7 +1383,7 @@ export default function ConversationDetailScreen() {
           </View>
         </Animated.View>
 
-        {canViewAnalysis && convo.transcript ? (
+        {convo.transcript ? (
           <Animated.View entering={FadeInDown.duration(400).delay(460)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               Transcript
@@ -1396,7 +1396,7 @@ export default function ConversationDetailScreen() {
           </Animated.View>
         ) : null}
 
-        {canViewAnalysis ? (
+        {convo.keyPhrases && convo.keyPhrases.length > 0 ? (
           <Animated.View entering={FadeInDown.duration(400).delay(450)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               Key Phrases
@@ -1411,7 +1411,7 @@ export default function ConversationDetailScreen() {
           </Animated.View>
         ) : null}
 
-        {canViewAnalysis && productRecommendations.length > 0 ? (
+        {productRecommendations.length > 0 ? (
           <Animated.View entering={FadeInDown.duration(400).delay(480)}>
             <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
               Recommended Products by Conversation Specs

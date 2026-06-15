@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -688,7 +688,7 @@ export default function AdminReportsScreen() {
   if (!canAccess) {
     return (
       <AppCanvas>
-        <View style={[styles.lockedWrap, { paddingTop: insets.top + 16 }]}> 
+        <View style={[styles.lockedWrap, { paddingTop: insets.top + 16 }]}>
           <View style={styles.navToggleWrap}>
             <DrawerToggleButton />
           </View>
@@ -699,10 +699,10 @@ export default function AdminReportsScreen() {
             ]}
           >
             <Ionicons name="lock-closed-outline" size={42} color={colors.warning} />
-            <Text style={[styles.lockedTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+            <Text style={[styles.lockedTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
               Admin Access Required
             </Text>
-            <Text style={[styles.lockedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+            <Text style={[styles.lockedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               Only admins can access sales reports. Contact your administrator for access.
             </Text>
           </View>
@@ -722,10 +722,10 @@ export default function AdminReportsScreen() {
         </View>
 
         <Animated.View entering={FadeInDown.duration(280)} style={styles.headerWrap}>
-          <Text style={[styles.title, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+          <Text style={[styles.title, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
             Admin Sales Reports
           </Text>
-          <Text style={[styles.subtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+          <Text style={[styles.subtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
             {company?.name ? `${company.name} • ` : ""}{rangeLabel}
           </Text>
         </Animated.View>
@@ -736,26 +736,26 @@ export default function AdminReportsScreen() {
         >
           <View style={styles.summaryRow}>
             <View style={styles.summaryBlock}>
-              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Orders
               </Text>
-              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {totalOrders}
               </Text>
             </View>
             <View style={styles.summaryBlock}>
-              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Total Value
               </Text>
-              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {formatCurrency(totalValue)}
               </Text>
             </View>
             <View style={styles.summaryBlock}>
-              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Avg. Order
               </Text>
-              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {formatCurrency(averageOrderValue)}
               </Text>
             </View>
@@ -777,7 +777,7 @@ export default function AdminReportsScreen() {
                     },
                   ]}
                 >
-                  <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}> 
+                  <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
                     {option.label}
                   </Text>
                 </Pressable>
@@ -849,7 +849,7 @@ export default function AdminReportsScreen() {
                   ]}
                 >
                   <Ionicons name={option.icon} size={14} color={active ? colors.primary : colors.textSecondary} />
-                  <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}> 
+                  <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
                     {option.label}
                   </Text>
                 </Pressable>
@@ -860,30 +860,30 @@ export default function AdminReportsScreen() {
           {loading ? (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Loading sales data...
               </Text>
             </View>
           ) : null}
 
           {error ? (
-            <View style={[styles.statusBanner, { backgroundColor: colors.danger + "14", borderColor: colors.danger + "45" }]}> 
+            <View style={[styles.statusBanner, { backgroundColor: colors.danger + "14", borderColor: colors.danger + "45" }]}>
               <Ionicons name="alert-circle-outline" size={16} color={colors.danger} />
-              <Text style={[styles.statusText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.statusText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>
                 {error}
               </Text>
             </View>
           ) : null}
 
           {reportKey === "dealer" ? (
-            <Text style={[styles.helperText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}> 
+            <Text style={[styles.helperText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
               Dealer grouping uses Dolibarr client flag (client=0). Update customer type in Dolibarr if needed.
             </Text>
           ) : null}
 
           {reportKey === "item" ? (
             <View style={styles.itemInfoRow}>
-              <Text style={[styles.helperText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}> 
+              <Text style={[styles.helperText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
                 Itemwise totals use order line items for {loadedItemOrders}/{limitedOrderIds.length} orders.
               </Text>
               {limitedOrderIds.length < filteredOrderIds.length ? (
@@ -912,16 +912,16 @@ export default function AdminReportsScreen() {
           {reportKey === "item" && itemLinesLoading ? (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Loading item lines...
               </Text>
             </View>
           ) : null}
 
           {reportKey === "item" && itemLinesError ? (
-            <View style={[styles.statusBanner, { backgroundColor: colors.warning + "18", borderColor: colors.warning + "40" }]}> 
+            <View style={[styles.statusBanner, { backgroundColor: colors.warning + "18", borderColor: colors.warning + "40" }]}>
               <Ionicons name="warning-outline" size={16} color={colors.warning} />
-              <Text style={[styles.statusText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.statusText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
                 {itemLinesError}
               </Text>
             </View>
@@ -930,9 +930,9 @@ export default function AdminReportsScreen() {
 
         <View style={styles.listWrap}>
           {reportRows.length === 0 ? (
-            <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}> 
+            <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
               <Ionicons name="analytics-outline" size={36} color={colors.textTertiary} />
-              <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+              <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                 No report data found for the selected range.
               </Text>
             </View>
@@ -948,18 +948,18 @@ export default function AdminReportsScreen() {
               >
                 <View style={styles.reportHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.reportTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+                    <Text style={[styles.reportTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
                       {row.title}
                     </Text>
-                    <Text style={[styles.reportSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+                    <Text style={[styles.reportSubtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                       {row.subtitle}
                     </Text>
                   </View>
-                  <View style={[styles.countBadge, { borderColor: colors.primary + "55", backgroundColor: colors.primary + "12" }]}> 
-                    <Text style={[styles.countBadgeText, { color: colors.primary, fontFamily: "Inter_700Bold" }]}> 
+                  <View style={[styles.countBadge, { borderColor: colors.primary + "55", backgroundColor: colors.primary + "12" }]}>
+                    <Text style={[styles.countBadgeText, { color: colors.primary, fontFamily: "Inter_700Bold" }]}>
                       {row.metricValue}
                     </Text>
-                    <Text style={[styles.countBadgeLabel, { color: colors.primary, fontFamily: "Inter_500Medium" }]}> 
+                    <Text style={[styles.countBadgeLabel, { color: colors.primary, fontFamily: "Inter_500Medium" }]}>
                       {row.metricLabel}
                     </Text>
                   </View>
@@ -967,19 +967,19 @@ export default function AdminReportsScreen() {
 
                 <View style={styles.reportFooter}>
                   <View>
-                    <Text style={[styles.reportMetaLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+                    <Text style={[styles.reportMetaLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                       Total Value
                     </Text>
-                    <Text style={[styles.reportMetaValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+                    <Text style={[styles.reportMetaValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
                       {formatCurrency(row.totalValue)}
                     </Text>
                   </View>
                   {row.lastOrderAt ? (
                     <View>
-                      <Text style={[styles.reportMetaLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+                      <Text style={[styles.reportMetaLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                         Last Order
                       </Text>
-                      <Text style={[styles.reportMetaValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+                      <Text style={[styles.reportMetaValue, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
                         {row.lastOrderAt.toLocaleDateString()}
                       </Text>
                     </View>

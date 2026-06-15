@@ -6804,9 +6804,11 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
   const conn = await getMySqlPool();
   const [rows] = await conn.query<any[]>(
     `SELECT
-      rowid, login, email, firstname, lastname, admin, statut, employee, job,
-      office_phone, user_mobile, pass_crypted, pass, datec, tms
-    FROM nmy5_user`
+      u.rowid, u.login, u.email, u.firstname, u.lastname, u.admin, u.statut, u.employee, u.job,
+      u.office_phone, u.user_mobile, u.pass_crypted, u.pass, u.datec, u.tms,
+      p.employee_category
+    FROM nmy5_user u
+    LEFT JOIN nmy5_hrm_employee_profile p ON p.fk_user = u.rowid`
   );
   const latestAccessRequestByEmail = new Map<string, AccessRequestRecord>();
   const accessRequests = await listAccessRequestsFromMySql(null);
@@ -9780,13 +9782,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (anom && anom.type === "gps_disabled" && anom.id) {
               const [existing] = await conn.query<any[]>("SELECT id FROM lff_notifications WHERE title = ? AND body LIKE ?", ["GPS Disabled Alert", `%${anom.id}%`]);
               if (!existing || existing.length === 0) {
+                let employeeName = anom.userId;
+                for (const r of authUsersByEmail.values()) {
+                  if (r.user.id === anom.userId) {
+                    employeeName = r.user.name || r.user.login || anom.userId;
+                    break;
+                  }
+                }
                 const notif = {
                   id: randomUUID(),
                   title: "GPS Disabled Alert",
-                  body: `Employee ${anom.userId} has disabled GPS or Location Services during check-in. Anomaly: ${anom.id}`,
+                  body: `Employee ${employeeName} has disabled GPS or Location Services during check-in. Anomaly: ${anom.id}`,
                   kind: "alert" as const,
-                  audience: "roles" as const,
-                  audienceUserIds: "[]",
+                  audience: "all" as const,
+                  audienceUserIds: [] as string[],
+                  readByIds: [] as string[],
                   createdById: "system",
                   createdByName: "System",
                   createdAt: new Date().toISOString(),
@@ -10036,8 +10046,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               body: "You were automatically checked out for leaving the geofenced area.",
               kind: "alert" as const,
               audience: "all" as const,
-              audienceUserIds: JSON.stringify([entry.userId]),
+              audienceUserIds: [entry.userId],
+              readByIds: [] as string[],
               createdById: "system",
+              createdByName: "System",
               createdAt: now,
             };
             try { await insertNotificationInMySql(notification); } catch(e){}
@@ -10054,8 +10066,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               body: "You are near the office location. Please check in for the day.",
               kind: "alert" as const,
               audience: "all" as const,
-              audienceUserIds: JSON.stringify([entry.userId]),
+              audienceUserIds: [entry.userId],
+              readByIds: [] as string[],
               createdById: "system",
+              createdByName: "System",
               createdAt: now,
             };
             try { await insertNotificationInMySql(notification); } catch (e) {}
@@ -11664,13 +11678,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
       const body = req.body || {};
+      console.log("[POST /api/public-holidays] received body:", body);
+      
+      // We insert day, month, year, code, day_rule, omitting "active" to avoid Bad Field schema errors
       const [insertRes] = await conn.execute<any>(
-        "INSERT INTO \`nmy5_c_hrm_public_holiday\` (day, month, year, code, day_rule, active) VALUES (?, ?, ?, ?, ?, 1)",
+        "INSERT INTO \`nmy5_c_hrm_public_holiday\` (day, month, year, code, day_rule) VALUES (?, ?, ?, ?, ?)",
         [body.day, body.month, body.year || 0, body.code || "", body.dayRule || ""]
       );
+
+      // Create and dispatch a broadcast notification to all users
+      const holidayDate = `${body.day}/${body.month}/${body.year || new Date().getFullYear()}`;
+      const notifId = `holiday_declared_${insertRes.insertId}_${Date.now()}`;
+      const notification: AppNotification = {
+        id: notifId,
+        title: "Public Holiday Declared",
+        body: `Admin ${requestUser.name || "Admin"} has declared ${holidayDate} as a Public Holiday.`,
+        kind: "announcement" as const,
+        audience: "all" as const,
+        audienceUserIds: [],
+        readByIds: [],
+        createdById: requestUser.id,
+        createdByName: requestUser.name || "Admin",
+        createdAt: new Date().toISOString(),
+      };
+
+      try {
+        await insertNotificationInMySql(notification);
+      } catch (err: any) {
+        console.error("Failed to insert public holiday notification:", err);
+      }
+
       res.status(201).json({ id: insertRes.insertId, ...body });
-    } catch (error) {
-      res.status(500).json({ message: "Unable to add holiday" });
+    } catch (error: any) {
+      console.error("[POST /api/public-holidays] INSERT FAILED:", error);
+      res.status(500).json({ message: `Unable to add holiday: ${error.message}` });
     }
   });
 

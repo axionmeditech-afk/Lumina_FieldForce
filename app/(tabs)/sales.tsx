@@ -2141,6 +2141,7 @@ export default function SalesScreen() {
   const recordingModeRef = useRef<RecordingMode | null>(null);
   const fallbackRecordingRef = useRef<Audio.Recording | null>(null);
   const fallbackLoopRunningRef = useRef(false);
+  const isTranscriptionUnavailableRef = useRef(false);
   const fallbackStopRequestedRef = useRef(false);
   const fallbackChunkIndexRef = useRef(0);
   const fallbackNextChunkToApplyRef = useRef(0);
@@ -4221,6 +4222,28 @@ export default function SalesScreen() {
       return;
     }
 
+    // Check if the speech API is reachable
+    const apiBaseCandidates = await getApiBaseUrlCandidates();
+    let apiReachable = false;
+    for (const apiBase of apiBaseCandidates) {
+      if (await isSpeechApiBaseReachable(apiBase)) {
+        apiReachable = true;
+        break;
+      }
+    }
+
+    isTranscriptionUnavailableRef.current = !apiReachable;
+    if (!apiReachable) {
+      setRecordError("Transcription unavailable. Recording voice only...");
+      Alert.alert(
+        "Transcription Offline",
+        "The transcription service is currently offline. We will record the audio only so you can play it later.",
+        [{ text: "OK" }]
+      );
+    } else {
+      setRecordError(null);
+    }
+
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
       playsInSilentModeIOS: true,
@@ -4247,8 +4270,10 @@ export default function SalesScreen() {
     voiceLastInputAtRef.current = Date.now();
     setIsRecording(true);
     setIsTranscribingFile(false);
-    setInterimTranscript("Listening...");
-    startLiveHintSpeechRecognition();
+    setInterimTranscript(isTranscriptionUnavailableRef.current ? "Recording voice only..." : "Listening...");
+    if (!isTranscriptionUnavailableRef.current) {
+      startLiveHintSpeechRecognition();
+    }
 
     const flushFallbackChunks = () => {
       let updated = false;
@@ -4297,7 +4322,7 @@ export default function SalesScreen() {
 
     const runFallbackLoop = async () => {
       try {
-        while (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
+        if (isTranscriptionUnavailableRef.current) {
           const recording = new Audio.Recording();
           recording.setProgressUpdateInterval(60);
           recording.setOnRecordingStatusUpdate((status) => {
@@ -4314,14 +4339,9 @@ export default function SalesScreen() {
           await recording.startAsync();
           fallbackRecordingRef.current = recording;
 
-          let waited = 0;
-          while (
-            waited < FALLBACK_SEGMENT_MS &&
-            fallbackLoopRunningRef.current &&
-            !fallbackStopRequestedRef.current
-          ) {
+          // Keep recording continuously until stop is requested
+          while (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
             await wait(FALLBACK_POLL_MS);
-            waited += FALLBACK_POLL_MS;
           }
 
           let uri: string | null = null;
@@ -4337,7 +4357,51 @@ export default function SalesScreen() {
 
           if (uri) {
             setAudioUri(uri);
-            queueFallbackTranscription(uri);
+            setTranscriptDraft("Transcription unavailable. Voice recording is preserved.");
+          }
+        } else {
+          while (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
+            const recording = new Audio.Recording();
+            recording.setProgressUpdateInterval(60);
+            recording.setOnRecordingStatusUpdate((status) => {
+              if (!status.isRecording || !("metering" in status)) return;
+              const metering =
+                typeof status.metering === "number" ? status.metering : Number.NaN;
+              if (!Number.isFinite(metering)) return;
+              updateVoicePulseInput(normalizeMeteringDbValue(metering));
+            });
+            await recording.prepareToRecordAsync({
+              ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+              isMeteringEnabled: true,
+            });
+            await recording.startAsync();
+            fallbackRecordingRef.current = recording;
+
+            let waited = 0;
+            while (
+              waited < FALLBACK_SEGMENT_MS &&
+              fallbackLoopRunningRef.current &&
+              !fallbackStopRequestedRef.current
+            ) {
+              await wait(FALLBACK_POLL_MS);
+              waited += FALLBACK_POLL_MS;
+            }
+
+            let uri: string | null = null;
+            try {
+              await recording.stopAndUnloadAsync();
+              uri = recording.getURI();
+            } catch {
+              uri = recording.getURI();
+            } finally {
+              recording.setOnRecordingStatusUpdate(null);
+              fallbackRecordingRef.current = null;
+            }
+
+            if (uri) {
+              setAudioUri(uri);
+              queueFallbackTranscription(uri);
+            }
           }
         }
       } catch (error) {
@@ -6001,7 +6065,7 @@ export default function SalesScreen() {
     <AppCanvas>
       <FlatList
         ref={rootListRef}
-        data={isAdminViewer ? visibleConversations : []}
+        data={visibleConversations}
         keyExtractor={(item) => item.id}
         contentContainerStyle={[
           styles.listContent,
@@ -7839,61 +7903,59 @@ export default function SalesScreen() {
               </>
             ) : null}
 
-            {isAdminViewer ? (
-              <View style={styles.sectionHeaderRow}>
+            <View style={styles.sectionHeaderRow}>
+              <Text
+                style={[
+                  styles.sectionTitle,
+                  styles.sectionTitleFlexible,
+                  { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                ]}
+              >
+                {isAdminViewer
+                  ? selectedSalesperson
+                    ? `Recent Conversations - ${selectedSalesperson.name}`
+                    : "Recent Conversations"
+                  : "My Recent Conversations"}
+              </Text>
+              <Pressable
+                onPress={() => void loadConversations({ preserveExistingOnEmpty: false, showBusy: true })}
+                disabled={isConversationReloading}
+                style={({ pressed }) => [
+                  styles.reviewNotesButton,
+                  {
+                    backgroundColor: colors.surface,
+                    borderColor: colors.border,
+                    opacity: isConversationReloading ? 0.65 : pressed ? 0.82 : 1,
+                  },
+                ]}
+              >
+                {isConversationReloading ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : (
+                  <Ionicons name="refresh-outline" size={14} color={colors.primary} />
+                )}
                 <Text
                   style={[
-                    styles.sectionTitle,
-                    styles.sectionTitleFlexible,
-                    { color: colors.text, fontFamily: "Inter_600SemiBold" },
+                    styles.reviewNotesButtonText,
+                    { color: colors.primary, fontFamily: "Inter_600SemiBold" },
                   ]}
                 >
-                  {selectedSalesperson
-                    ? `Recent Conversations - ${selectedSalesperson.name}`
-                    : "Recent Conversations"}
+                  {isConversationReloading ? "Reloading" : "Reload"}
                 </Text>
-                <Pressable
-                  onPress={() => void loadConversations({ preserveExistingOnEmpty: false, showBusy: true })}
-                  disabled={isConversationReloading}
-                  style={({ pressed }) => [
-                    styles.reviewNotesButton,
-                    {
-                      backgroundColor: colors.surface,
-                      borderColor: colors.border,
-                      opacity: isConversationReloading ? 0.65 : pressed ? 0.82 : 1,
-                    },
-                  ]}
-                >
-                  {isConversationReloading ? (
-                    <ActivityIndicator size="small" color={colors.primary} />
-                  ) : (
-                    <Ionicons name="refresh-outline" size={14} color={colors.primary} />
-                  )}
-                  <Text
-                    style={[
-                      styles.reviewNotesButtonText,
-                      { color: colors.primary, fontFamily: "Inter_600SemiBold" },
-                    ]}
-                  >
-                    {isConversationReloading ? "Reloading" : "Reload"}
-                  </Text>
-                </Pressable>
-              </View>
-            ) : null}
+              </Pressable>
+            </View>
           </>
         }
         renderItem={({ item }) => <ConversationCard conversation={item} colors={colors} />}
         ListEmptyComponent={
-          isAdminViewer ? (
-            <View
-              style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
-            >
-              <Ionicons name="chatbubbles-outline" size={40} color={colors.textTertiary} />
-              <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                No conversations analyzed yet
-              </Text>
-            </View>
-          ) : null
+          <View
+            style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+          >
+            <Ionicons name="chatbubbles-outline" size={40} color={colors.textTertiary} />
+            <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+              {isAdminViewer ? "No conversations analyzed yet" : "No conversations recorded yet"}
+            </Text>
+          </View>
         }
       />
       <Modal

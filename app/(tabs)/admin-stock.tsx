@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -758,7 +758,7 @@ export default function AdminStockScreen() {
   if (!canAccess) {
     return (
       <AppCanvas>
-        <View style={[styles.lockedWrap, { paddingTop: insets.top + 16 }]}> 
+        <View style={[styles.lockedWrap, { paddingTop: insets.top + 16 }]}>
           <View style={styles.navToggleWrap}>
             <DrawerToggleButton />
           </View>
@@ -769,10 +769,10 @@ export default function AdminStockScreen() {
             ]}
           >
             <Ionicons name="lock-closed-outline" size={42} color={colors.warning} />
-            <Text style={[styles.lockedTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+            <Text style={[styles.lockedTitle, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
               Admin Access Required
             </Text>
-            <Text style={[styles.lockedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+            <Text style={[styles.lockedText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               Stock movement tracking is only available to admins.
             </Text>
           </View>
@@ -793,10 +793,10 @@ export default function AdminStockScreen() {
         </View>
 
         <Animated.View entering={FadeInDown.duration(240)} style={styles.headerWrap}>
-          <Text style={[styles.title, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+          <Text style={[styles.title, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
             Channel Partner Tracking
           </Text>
-          <Text style={[styles.subtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+          <Text style={[styles.subtitle, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
             Monitor stock sent to channel partners and forwarded to sales team.
           </Text>
         </Animated.View>
@@ -807,26 +807,26 @@ export default function AdminStockScreen() {
         >
           <View style={styles.summaryRow}>
             <View style={styles.summaryBlock}>
-              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Channel Partners
               </Text>
-              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {stockists.length}
               </Text>
             </View>
             <View style={styles.summaryBlock}>
-              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Channel Partner Stock
               </Text>
-              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {formatQty(totalStock)}
               </Text>
             </View>
             <View style={styles.summaryBlock}>
-              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Transfers
               </Text>
-              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}> 
+              <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
                 {totalTransfers}
               </Text>
             </View>
@@ -849,7 +849,7 @@ export default function AdminStockScreen() {
           {loading ? (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Loading stock data...
               </Text>
             </View>
@@ -858,31 +858,31 @@ export default function AdminStockScreen() {
           {orderLinesLoading ? (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}> 
+              <Text style={[styles.loadingText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
                 Calculating sales deductions...
               </Text>
             </View>
           ) : null}
 
           {orderLinesError ? (
-            <Text style={[styles.helperText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}> 
+            <Text style={[styles.helperText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}>
               {orderLinesError}
             </Text>
           ) : null}
 
           {directSalesSummary.totalQty > 0 ? (
-            <View style={[styles.directSummaryRow, { backgroundColor: colors.warning + "12", borderColor: colors.warning + "45" }]}> 
-              <Text style={[styles.directSummaryLabel, { color: colors.warning }]}> 
+            <View style={[styles.directSummaryRow, { backgroundColor: colors.warning + "12", borderColor: colors.warning + "45" }]}>
+              <Text style={[styles.directSummaryLabel, { color: colors.warning }]}>
                 Direct sales (no channel partner)
               </Text>
-              <Text style={[styles.directSummaryValue, { color: colors.warning }]}> 
+              <Text style={[styles.directSummaryValue, { color: colors.warning }]}>
                 {formatQty(directSalesSummary.totalQty)}
               </Text>
             </View>
           ) : null}
 
           {stockistAreaMap.duplicates.size > 0 ? (
-            <Text style={[styles.helperText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}> 
+            <Text style={[styles.helperText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>
               Multiple partners share the same pincode. Auto-deduction uses the first match only.
             </Text>
           ) : null}
@@ -892,7 +892,7 @@ export default function AdminStockScreen() {
           entering={FadeInDown.duration(300).delay(100)}
           style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
         >
-          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
             Add Channel Partner
           </Text>
           <TextInput
@@ -924,7 +924,7 @@ export default function AdminStockScreen() {
             keyboardType="number-pad"
             style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
           />
-          <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+          <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
             Auto deduction matches salesperson pincode first, then location if pincode is missing.
           </Text>
           <TextInput
@@ -957,7 +957,7 @@ export default function AdminStockScreen() {
           entering={FadeInDown.duration(320).delay(140)}
           style={[styles.card, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
         >
-          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+          <Text style={[styles.sectionTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
             Record Stock Movement
           </Text>
 
@@ -977,7 +977,7 @@ export default function AdminStockScreen() {
                     },
                   ]}
                 >
-                  <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}> 
+                  <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
                     {stockist.name}
                   </Text>
                 </Pressable>
@@ -1001,14 +1001,14 @@ export default function AdminStockScreen() {
                     },
                   ]}
                 >
-                  <Text style={[styles.chipText, { color: active ? colors.success : colors.textSecondary }]}> 
+                  <Text style={[styles.chipText, { color: active ? colors.success : colors.textSecondary }]}>
                     {option.label}
                   </Text>
                 </Pressable>
               );
             })}
           </View>
-          <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+          <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
             Sales are auto-deducted by pincode. Use &quot;Sent to Salesperson&quot; only for manual adjustments.
           </Text>
 
@@ -1040,81 +1040,81 @@ export default function AdminStockScreen() {
               placeholderTextColor={colors.textTertiary}
               style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.background }]}
             />
-              {showItemDropdown ? (
-                <View style={[styles.dropdownList, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-                  {loadingProducts ? (
-                    <View style={styles.dropdownRow}>
-                      <ActivityIndicator size="small" color={colors.primary} />
-                      <Text style={[styles.dropdownText, { color: colors.textSecondary }]}>Loading items...</Text>
-                    </View>
-                  ) : matchingProducts.length === 0 ? (
-                    <View style={styles.dropdownRow}>
-                      <Text style={[styles.dropdownText, { color: colors.textSecondary }]}>No matching items</Text>
-                    </View>
-                  ) : (
-                    <ScrollView
-                      style={styles.dropdownScroll}
-                      contentContainerStyle={styles.dropdownContent}
-                      nestedScrollEnabled
-                      keyboardShouldPersistTaps="always"
-                      scrollEventThrottle={16}
-                      onScroll={({ nativeEvent }) => {
-                        if (!hasMoreProducts || loadMoreBusy.current) return;
-                        const { layoutMeasurement, contentOffset, contentSize } = nativeEvent;
-                        const paddingToBottom = 24;
-                        if (layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom) {
-                          loadMoreBusy.current = true;
-                          setProductLimit((current) =>
-                            Math.min(current + PRODUCT_DROPDOWN_PAGE, matchingProducts.length)
-                          );
-                          setTimeout(() => {
-                            loadMoreBusy.current = false;
-                          }, 150);
-                        }
-                      }}
-                    >
-                      {filteredProducts.map((product) => {
-                        const label =
-                          product.label?.toString().trim() || product.ref?.toString().trim() || "Item";
-                        const productId = product.id ? String(product.id) : "";
-                        const hasCachedStock =
-                          productId &&
-                          Object.prototype.hasOwnProperty.call(productStockById, productId);
-                        const stockQty = hasCachedStock ? productStockById[productId] : null;
-                        return (
-                          <Pressable
-                            key={String(product.id || label)}
-                            onPress={() => {
-                              setItemName(label);
-                              setItemSearch(label);
-                              setItemProductId(product.id ? String(product.id) : null);
-                              setShowItemDropdown(false);
-                            }}
-                            style={({ pressed }) => [
-                              styles.dropdownRow,
-                              { backgroundColor: pressed ? colors.primary + "10" : "transparent" },
-                            ]}
-                          >
-                            <View style={styles.dropdownRowHeader}>
-                              <Text style={[styles.dropdownText, { color: colors.text }]}>{label}</Text>
-                              {stockQty !== null ? (
-                                <Text style={[styles.dropdownStockText, { color: colors.textSecondary }]}>
-                                  Stock: {formatQty(stockQty)}
-                                </Text>
-                              ) : null}
-                            </View>
-                            {product.ref ? (
-                              <Text style={[styles.dropdownMeta, { color: colors.textSecondary }]}>
-                                {product.ref}
+            {showItemDropdown ? (
+              <View style={[styles.dropdownList, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                {loadingProducts ? (
+                  <View style={styles.dropdownRow}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={[styles.dropdownText, { color: colors.textSecondary }]}>Loading items...</Text>
+                  </View>
+                ) : matchingProducts.length === 0 ? (
+                  <View style={styles.dropdownRow}>
+                    <Text style={[styles.dropdownText, { color: colors.textSecondary }]}>No matching items</Text>
+                  </View>
+                ) : (
+                  <ScrollView
+                    style={styles.dropdownScroll}
+                    contentContainerStyle={styles.dropdownContent}
+                    nestedScrollEnabled
+                    keyboardShouldPersistTaps="always"
+                    scrollEventThrottle={16}
+                    onScroll={({ nativeEvent }) => {
+                      if (!hasMoreProducts || loadMoreBusy.current) return;
+                      const { layoutMeasurement, contentOffset, contentSize } = nativeEvent;
+                      const paddingToBottom = 24;
+                      if (layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom) {
+                        loadMoreBusy.current = true;
+                        setProductLimit((current) =>
+                          Math.min(current + PRODUCT_DROPDOWN_PAGE, matchingProducts.length)
+                        );
+                        setTimeout(() => {
+                          loadMoreBusy.current = false;
+                        }, 150);
+                      }
+                    }}
+                  >
+                    {filteredProducts.map((product) => {
+                      const label =
+                        product.label?.toString().trim() || product.ref?.toString().trim() || "Item";
+                      const productId = product.id ? String(product.id) : "";
+                      const hasCachedStock =
+                        productId &&
+                        Object.prototype.hasOwnProperty.call(productStockById, productId);
+                      const stockQty = hasCachedStock ? productStockById[productId] : null;
+                      return (
+                        <Pressable
+                          key={String(product.id || label)}
+                          onPress={() => {
+                            setItemName(label);
+                            setItemSearch(label);
+                            setItemProductId(product.id ? String(product.id) : null);
+                            setShowItemDropdown(false);
+                          }}
+                          style={({ pressed }) => [
+                            styles.dropdownRow,
+                            { backgroundColor: pressed ? colors.primary + "10" : "transparent" },
+                          ]}
+                        >
+                          <View style={styles.dropdownRowHeader}>
+                            <Text style={[styles.dropdownText, { color: colors.text }]}>{label}</Text>
+                            {stockQty !== null ? (
+                              <Text style={[styles.dropdownStockText, { color: colors.textSecondary }]}>
+                                Stock: {formatQty(stockQty)}
                               </Text>
                             ) : null}
-                          </Pressable>
-                        );
-                      })}
-                    </ScrollView>
-                  )}
-                </View>
-              ) : null}
+                          </View>
+                          {product.ref ? (
+                            <Text style={[styles.dropdownMeta, { color: colors.textSecondary }]}>
+                              {product.ref}
+                            </Text>
+                          ) : null}
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+              </View>
+            ) : null}
           </View>
           {itemProductId ? (
             <Text style={[styles.helperText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
@@ -1165,7 +1165,7 @@ export default function AdminStockScreen() {
                         },
                       ]}
                     >
-                      <Text style={[styles.chipText, { color: active ? colors.warning : colors.textSecondary }]}> 
+                      <Text style={[styles.chipText, { color: active ? colors.warning : colors.textSecondary }]}>
                         {salesperson.name}
                       </Text>
                     </Pressable>
@@ -1204,9 +1204,9 @@ export default function AdminStockScreen() {
 
         <View style={styles.listWrap}>
           {stockistSummaries.length === 0 && !loading ? (
-            <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}> 
+            <View style={[styles.emptyState, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
               <Ionicons name="cube-outline" size={36} color={colors.textTertiary} />
-              <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}> 
+              <Text style={[styles.emptyText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                 No channel partners or transfers yet.
               </Text>
             </View>
@@ -1228,7 +1228,7 @@ export default function AdminStockScreen() {
                   <View style={styles.stockHeader}>
                     <View style={{ flex: 1 }}>
                       <View style={styles.stockTitleRow}>
-                        <Text style={[styles.stockName, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}> 
+                        <Text style={[styles.stockName, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
                           {summary.stockist.name}
                         </Text>
                         {summary.autoOut > 0 ? (
@@ -1238,7 +1238,7 @@ export default function AdminStockScreen() {
                               { borderColor: colors.warning + "55", backgroundColor: colors.warning + "12" },
                             ]}
                           >
-                            <Text style={[styles.autoChipText, { color: colors.warning }]}> 
+                            <Text style={[styles.autoChipText, { color: colors.warning }]}>
                               Auto -{formatQty(summary.autoOut)}
                             </Text>
                           </View>
@@ -1247,34 +1247,34 @@ export default function AdminStockScreen() {
 
                       <View style={styles.metaRow}>
                         {stockistLocation ? (
-                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
-                            <Text style={[styles.metaChipText, { color: colors.textSecondary }]}> 
+                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+                            <Text style={[styles.metaChipText, { color: colors.textSecondary }]}>
                               {stockistLocation}
                             </Text>
                           </View>
                         ) : null}
                         {stockistPincode ? (
-                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
-                            <Text style={[styles.metaChipText, { color: colors.textSecondary }]}> 
+                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+                            <Text style={[styles.metaChipText, { color: colors.textSecondary }]}>
                               {stockistPincode}
                             </Text>
                           </View>
                         ) : null}
                         {stockistPhone ? (
-                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
-                            <Text style={[styles.metaChipText, { color: colors.textSecondary }]}> 
+                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+                            <Text style={[styles.metaChipText, { color: colors.textSecondary }]}>
                               {stockistPhone}
                             </Text>
                           </View>
                         ) : null}
                         {!stockistMeta ? (
-                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
+                          <View style={[styles.metaChip, { borderColor: colors.border, backgroundColor: colors.surface }]}>
                             <Text style={[styles.metaChipText, { color: colors.textSecondary }]}>Channel Partner</Text>
                           </View>
                         ) : null}
                       </View>
 
-                      <Text style={[styles.stockMeta, { color: colors.textTertiary }]}> 
+                      <Text style={[styles.stockMeta, { color: colors.textTertiary }]}>
                         Last movement: {summary.lastMovementAt ? summary.lastMovementAt.toLocaleDateString() : "�"}
                       </Text>
                     </View>
@@ -1284,7 +1284,7 @@ export default function AdminStockScreen() {
                         { borderColor: colors.primary + "55", backgroundColor: colors.primary + "12" },
                       ]}
                     >
-                      <Text style={[styles.balanceValue, { color: colors.primary }]}> 
+                      <Text style={[styles.balanceValue, { color: colors.primary }]}>
                         {formatQty(summary.balance)}
                       </Text>
                       <Text style={[styles.balanceLabel, { color: colors.primary }]}>In Stock</Text>
@@ -1292,21 +1292,21 @@ export default function AdminStockScreen() {
                   </View>
 
                   <View style={styles.summaryMiniRow}>
-                    <View style={[styles.summaryMiniCard, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
+                    <View style={[styles.summaryMiniCard, { borderColor: colors.border, backgroundColor: colors.surface }]}>
                       <Text style={[styles.summaryMiniLabel, { color: colors.textSecondary }]}>IN</Text>
-                      <Text style={[styles.summaryMiniValue, { color: colors.success }]}> 
+                      <Text style={[styles.summaryMiniValue, { color: colors.success }]}>
                         {formatQty(summary.totalIn)}
                       </Text>
                     </View>
-                    <View style={[styles.summaryMiniCard, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
+                    <View style={[styles.summaryMiniCard, { borderColor: colors.border, backgroundColor: colors.surface }]}>
                       <Text style={[styles.summaryMiniLabel, { color: colors.textSecondary }]}>OUT</Text>
-                      <Text style={[styles.summaryMiniValue, { color: colors.warning }]}> 
+                      <Text style={[styles.summaryMiniValue, { color: colors.warning }]}>
                         {formatQty(summary.totalOut)}
                       </Text>
                     </View>
-                    <View style={[styles.summaryMiniCard, { borderColor: colors.border, backgroundColor: colors.surface }]}> 
+                    <View style={[styles.summaryMiniCard, { borderColor: colors.border, backgroundColor: colors.surface }]}>
                       <Text style={[styles.summaryMiniLabel, { color: colors.textSecondary }]}>ITEMS</Text>
-                      <Text style={[styles.summaryMiniValue, { color: colors.text }]}> 
+                      <Text style={[styles.summaryMiniValue, { color: colors.text }]}>
                         {summary.items.length}
                       </Text>
                     </View>
@@ -1322,7 +1322,7 @@ export default function AdminStockScreen() {
                         size={16}
                         color={colors.textSecondary}
                       />
-                      <Text style={[styles.expandText, { color: colors.textSecondary }]}> 
+                      <Text style={[styles.expandText, { color: colors.textSecondary }]}>
                         {expanded ? "Hide details" : "View details"}
                       </Text>
                     </Pressable>
@@ -1350,7 +1350,7 @@ export default function AdminStockScreen() {
                   </View>
 
                   {expanded ? (
-                    <View style={[styles.detailCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}> 
+                    <View style={[styles.detailCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
                       <Text style={[styles.detailTitle, { color: colors.textSecondary }]}>Item balances</Text>
                       {summary.items.length === 0 ? (
                         <Text style={[styles.detailEmpty, { color: colors.textTertiary }]}>No item balances yet.</Text>
@@ -1385,10 +1385,10 @@ export default function AdminStockScreen() {
                       ) : (
                         summary.recentTransfers.map((entry, index) => (
                           <View key={`transfer_detail_${entry.id}_${index}`} style={styles.detailRow}>
-                            <Text style={[styles.detailLabel, { color: colors.text }]}> 
+                            <Text style={[styles.detailLabel, { color: colors.text }]}>
                               {entry.type === "in" ? "IN" : "OUT"} � {entry.itemName}
                             </Text>
-                            <Text style={[styles.detailValue, { color: colors.textSecondary }]}> 
+                            <Text style={[styles.detailValue, { color: colors.textSecondary }]}>
                               {formatQty(entry.quantity, entry.unitLabel)}
                             </Text>
                           </View>
@@ -1536,7 +1536,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: "rgba(148, 163, 184, 0.35)",
-    },
+  },
   dropdownRowHeader: {
     flexDirection: "row",
     alignItems: "center",

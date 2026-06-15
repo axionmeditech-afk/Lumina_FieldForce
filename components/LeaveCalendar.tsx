@@ -27,7 +27,25 @@ export function LeaveCalendar({
   onAddHoliday,
   onDeleteHoliday,
   onConfigureWeekends,
+  onMonthYearChange,
 }: any) {
+  const handlePrevMonth = () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    if (month === 1) {
+      onMonthYearChange?.(12, year - 1);
+    } else {
+      onMonthYearChange?.(month - 1, year);
+    }
+  };
+
+  const handleNextMonth = () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    if (month === 12) {
+      onMonthYearChange?.(1, year + 1);
+    } else {
+      onMonthYearChange?.(month + 1, year);
+    }
+  };
   const daysInMonth = getDaysInMonth(year, month - 1);
   const firstDay = getFirstDayOfMonth(year, month - 1);
   const days = Array(firstDay).fill(null).concat(Array.from({ length: daysInMonth }, (_, i) => i + 1));
@@ -76,7 +94,13 @@ export function LeaveCalendar({
       <View style={styles.header}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <Ionicons name="calendar" size={18} color={colors.primary} />
-          <Text style={[styles.title, { color: colors.text }]}>Company Calendar</Text>
+          <Pressable onPress={handlePrevMonth} style={{ padding: 4 }}>
+            <Ionicons name="chevron-back" size={16} color={colors.textSecondary} />
+          </Pressable>
+          <Text style={[styles.title, { color: colors.text }]}>{MONTHS[month - 1]} {year}</Text>
+          <Pressable onPress={handleNextMonth} style={{ padding: 4 }}>
+            <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
+          </Pressable>
         </View>
         {isPrivileged && (
           <Pressable onPress={onConfigureWeekends} style={[styles.configBtn, { backgroundColor: colors.primary + "15" }]}>
@@ -112,7 +136,7 @@ export function LeaveCalendar({
                 hasLeaves && !holiday && { backgroundColor: "#DBEAFE" },
               ]}
               onPress={() => {
-                Haptics.selectionAsync();
+                void Haptics.selectionAsync().catch(() => {});
                 handleDayPress(d);
               }}
             >
@@ -125,9 +149,10 @@ export function LeaveCalendar({
                   ]}>
                     {d}
                   </Text>
-                  {hasLeaves && !holiday && (
-                    <View style={[styles.dot, { backgroundColor: "#2563EB" }]} />
-                  )}
+                  <View style={styles.dotRow}>
+                    {holiday && <View style={[styles.dot, { backgroundColor: "#EA580C" }]} />}
+                    {hasLeaves && <View style={[styles.dot, { backgroundColor: "#2563EB" }]} />}
+                  </View>
                 </>
               )}
             </Pressable>
@@ -154,7 +179,8 @@ const styles = StyleSheet.create({
   grid: { flexDirection: "row", flexWrap: "wrap" },
   dayCell: { width: "14.28%", aspectRatio: 1, justifyContent: "center", alignItems: "center", borderRadius: 8 },
   dayText: { fontSize: 14, fontFamily: "Inter_400Regular" },
-  dot: { width: 4, height: 4, borderRadius: 2, marginTop: 2 },
+  dot: { width: 4, height: 4, borderRadius: 2 },
+  dotRow: { flexDirection: "row", gap: 3, marginTop: 2 },
   legend: { flexDirection: "row", marginTop: 12, gap: 12, flexWrap: "wrap" },
   legendItem: { flexDirection: "row", alignItems: "center", gap: 4 },
   legendColor: { width: 12, height: 12, borderRadius: 3 },

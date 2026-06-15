@@ -68,8 +68,8 @@ export async function recordGpsDisabledDuringCheckIn(
 
   if (notify) {
     await sendDeviceLocalNotification({
-      title: "GPS enable karo",
-      body: "Aap checked in hain. Route tracking ke liye phone Location/GPS ON rakhein.",
+      title: "GPS Required",
+      body: "You are checked in. Please keep phone Location/GPS ON for route tracking.",
       channelId: "alerts",
       groupKey: "gps-disabled",
       data: {

@@ -2861,12 +2861,15 @@ export async function createLeaveRequestRemote(data: {
   leaveDate: string;
   leaveEndDate?: string | null;
   leaveType: "planned" | "unplanned";
-  isHalfDay: boolean;
+  isHalfDay?: boolean;
   note?: string;
   userId?: string;
   userName?: string;
   userEmail?: string;
   companyId?: string;
+  startAmPm?: string;
+  endAmPm?: string;
+  approvedBy?: string;
 }): Promise<LeaveRequest> {
   return fetchJson<LeaveRequest>("/leaves", {
     method: "POST",

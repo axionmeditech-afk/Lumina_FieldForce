@@ -862,7 +862,7 @@ export default function AdminIncentivesScreen() {
                       },
                     ]}
                   >
-                    <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}> 
+                    <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
                       {option.label}
                     </Text>
                   </Pressable>
@@ -976,7 +976,7 @@ export default function AdminIncentivesScreen() {
                       },
                     ]}
                   >
-                    <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}> 
+                    <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
                       {option.label}
                     </Text>
                   </Pressable>
@@ -1345,19 +1345,19 @@ export default function AdminIncentivesScreen() {
                       <View style={styles.metricGrid}>
                         <View style={styles.metricBlock}>
                           <Text style={[styles.metricLabel, { color: colors.textSecondary }]}>Sales Value</Text>
-                          <Text style={[styles.metricValue, { color: colors.text }]}> 
+                          <Text style={[styles.metricValue, { color: colors.text }]}>
                             {formatCurrency(row.totalValue)}
                           </Text>
                         </View>
                         <View style={styles.metricBlock}>
                           <Text style={[styles.metricLabel, { color: colors.textSecondary }]}>Goal</Text>
-                          <Text style={[styles.metricValue, { color: colors.text }]}> 
+                          <Text style={[styles.metricValue, { color: colors.text }]}>
                             {formatCurrency(row.goalAmount)}
                           </Text>
                         </View>
                         <View style={styles.metricBlock}>
                           <Text style={[styles.metricLabel, { color: colors.textSecondary }]}>Product</Text>
-                          <Text style={[styles.metricValue, { color: colors.text }]}> 
+                          <Text style={[styles.metricValue, { color: colors.text }]}>
                             {formatCurrency(row.productAmount)}
                           </Text>
                         </View>
@@ -1365,7 +1365,7 @@ export default function AdminIncentivesScreen() {
 
                       <View style={styles.totalRow}>
                         <Text style={[styles.totalLabel, { color: colors.textSecondary }]}>Total Incentive</Text>
-                        <Text style={[styles.totalValue, { color: colors.primary }]}> 
+                        <Text style={[styles.totalValue, { color: colors.primary }]}>
                           {formatCurrency(row.totalAmount)}
                         </Text>
                       </View>

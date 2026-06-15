@@ -151,6 +151,9 @@ export default function LeaveManagementScreen() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const isPrivileged = canApproveLeaves(user?.role);
+  const isAdmin = user?.role === "admin";
+
+  const now = useMemo(() => new Date(), []);
 
   // ─── State ──────────────────────────────────────────────────
   const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
@@ -158,7 +161,18 @@ export default function LeaveManagementScreen() {
   const [holidays, setHolidays] = useState<PublicHoliday[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabKey>("my");
+  const [activeTab, setActiveTab] = useState<TabKey>(user?.role === "admin" ? "pending" : "my");
+  const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState(now.getFullYear());
+  const hasInitializedTab = useRef(false);
+
+  useEffect(() => {
+    if (user && !hasInitializedTab.current) {
+      setActiveTab(user.role === "admin" ? "pending" : "my");
+      hasInitializedTab.current = true;
+    }
+  }, [user]);
+
   const [weekendDays, setWeekendDays] = useState<number[]>([0]);
   const [showWeekendModal, setShowWeekendModal] = useState(false);
   const [tempWeekendDays, setTempWeekendDays] = useState<number[]>([]);
@@ -196,17 +210,13 @@ export default function LeaveManagementScreen() {
   const [formNote, setFormNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const now = new Date();
-  const currentMonth = now.getMonth() + 1;
-  const currentYear = now.getFullYear();
-
   // ─── Data ───────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
     try {
       setErrorMsg(null);
       const [leavesData, summaryData, holidaysData, weekendData, usersData] = await Promise.allSettled([
-        listLeaveRequestsRemote({ year: currentYear }),
-        getLeavesSummaryRemote({ month: currentMonth, year: currentYear }),
+        listLeaveRequestsRemote({ year: selectedYear }),
+        getLeavesSummaryRemote({ month: selectedMonth, year: selectedYear }),
         getPublicHolidaysRemote(),
         getWeekendConfigRemote(),
         getUsersRemote(),
@@ -222,7 +232,7 @@ export default function LeaveManagementScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [currentMonth, currentYear]);
+  }, [selectedMonth, selectedYear]);
 
   useEffect(() => {
     void fetchData();
@@ -246,26 +256,26 @@ export default function LeaveManagementScreen() {
   }, [leaves]);
   const mySummary = useMemo(() => summaries.find((s) => s.userId === user?.id) || null, [summaries, user?.id]);
 
-  const myCurrentMonthLeaves = useMemo(() => {
+  const currentMonthLeaves = useMemo(() => {
     return leaves.filter((l) => {
-      if (l.userId !== user?.id) return false;
+      if (!isAdmin && l.userId !== user?.id) return false;
       if (l.status !== "approved") return false;
       const d = new Date(l.leaveDate + "T00:00:00");
-      return d.getMonth() + 1 === currentMonth && d.getFullYear() === currentYear;
+      return d.getMonth() + 1 === selectedMonth && d.getFullYear() === selectedYear;
     });
-  }, [leaves, user?.id, currentMonth, currentYear]);
+  }, [leaves, user?.id, selectedMonth, selectedYear, isAdmin]);
 
   const plannedCount = useMemo(() => {
-    return myCurrentMonthLeaves
+    return currentMonthLeaves
       .filter((l) => l.leaveType === "planned")
       .reduce((sum, l) => sum + (l.leaveDays || 1), 0);
-  }, [myCurrentMonthLeaves]);
+  }, [currentMonthLeaves]);
 
   const unplannedCount = useMemo(() => {
-    return myCurrentMonthLeaves
+    return currentMonthLeaves
       .filter((l) => l.leaveType === "unplanned")
       .reduce((sum, l) => sum + (l.leaveDays || 1), 0);
-  }, [myCurrentMonthLeaves]);
+  }, [currentMonthLeaves]);
 
   const totalCount = plannedCount + unplannedCount;
 
@@ -386,15 +396,18 @@ export default function LeaveManagementScreen() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       const res = await addPublicHolidayRemote({ day, month, year, code: "Collective Leave" });
       setHolidays(prev => [...prev, res]);
-    } catch {
-      Alert.alert("Error", "Could not add holiday");
+    } catch (err: any) {
+      console.error("[handleAddHoliday] error:", err);
+      const msg = err instanceof Error ? err.message : "Could not add holiday";
+      Alert.alert("Error", msg);
     }
   };
-  const handleDeleteHoliday = async (id: string) => {
+  const handleDeleteHoliday = async (id: string | number) => {
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      await deletePublicHolidayRemote(id);
-      setHolidays(prev => prev.filter(h => h.id !== id));
+      const stringId = String(id);
+      await deletePublicHolidayRemote(stringId);
+      setHolidays(prev => prev.filter(h => String(h.id) !== stringId));
     } catch {
       Alert.alert("Error", "Could not remove holiday");
     }
@@ -466,13 +479,15 @@ export default function LeaveManagementScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.heroTitle}>Leave Management</Text>
                   <Text style={styles.heroSub}>
-                    {MONTHS[currentMonth - 1]} {currentYear}
+                    {MONTHS[selectedMonth - 1]} {selectedYear}
                   </Text>
                 </View>
-                <Pressable onPress={() => { setShowRequestModal(true); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); }} style={styles.heroBtn}>
-                  <Ionicons name="add" size={16} color={"#FFF"} />
-                  <Text style={styles.heroBtnTxt}>New</Text>
-                </Pressable>
+                {!isAdmin && (
+                  <Pressable onPress={() => { setShowRequestModal(true); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); }} style={styles.heroBtn}>
+                    <Ionicons name="add" size={16} color={"#FFF"} />
+                    <Text style={styles.heroBtnTxt}>New</Text>
+                  </Pressable>
+                )}
               </View>
             </View>
             {/* Decorations */}
@@ -487,8 +502,8 @@ export default function LeaveManagementScreen() {
         {/* --- Company Calendar --- */}
         <Animated.View entering={FadeInDown.duration(450).delay(150)}>
           <LeaveCalendar
-            month={currentMonth}
-            year={currentYear}
+            month={selectedMonth}
+            year={selectedYear}
             leaves={leaves}
             holidays={holidays}
             weekendDays={weekendDays}
@@ -497,15 +512,19 @@ export default function LeaveManagementScreen() {
             onAddHoliday={handleAddHoliday}
             onDeleteHoliday={handleDeleteHoliday}
             onConfigureWeekends={() => { setTempWeekendDays(weekendDays); setShowWeekendModal(true); }}
+            onMonthYearChange={(m: number, y: number) => {
+              setSelectedMonth(m);
+              setSelectedYear(y);
+            }}
           />
         </Animated.View>
 
         {/* ─── Stats ───────────────────────────────────── */}
         <Animated.View entering={FadeInDown.duration(500).delay(80)} style={styles.statsGrid}>
           {[
-            { value: plannedCount, label: "Planned", icon: "calendar-outline" as const, fg: P.blue, bg: isDark ? "#1E3A5F" : P.blueSoft },
-            { value: unplannedCount, label: "Unplanned", icon: "flash-outline" as const, fg: P.orangeLight, bg: isDark ? "#3D2307" : P.orangeSoft },
-            { value: totalCount, label: "Total", icon: "pie-chart-outline" as const, fg: P.violet, bg: isDark ? "#2D1B69" : P.violetSoft },
+            { value: plannedCount, label: isAdmin ? "Team Planned" : "Planned", icon: "calendar-outline" as const, fg: P.blue, bg: isDark ? "#1E3A5F" : P.blueSoft },
+            { value: unplannedCount, label: isAdmin ? "Team Unplanned" : "Unplanned", icon: "flash-outline" as const, fg: P.orangeLight, bg: isDark ? "#3D2307" : P.orangeSoft },
+            { value: totalCount, label: isAdmin ? "Team Total" : "Total", icon: "pie-chart-outline" as const, fg: P.violet, bg: isDark ? "#2D1B69" : P.violetSoft },
           ].map((stat, i) => (
             <View
               key={stat.label}
@@ -548,7 +567,7 @@ export default function LeaveManagementScreen() {
 
         {/* ─── Tabs ────────────────────────────────────── */}
         <Animated.View entering={FadeInDown.duration(450).delay(200)} style={styles.tabRow}>
-          {(["my", ...(isPrivileged ? ["pending", "summary"] as const : [])] as TabKey[]).map((tab) => {
+          {((isAdmin ? ["pending", "summary"] : ["my", ...(isPrivileged ? ["pending", "summary"] : [])]) as TabKey[]).map((tab) => {
             const active = activeTab === tab;
             return (
               <Pressable
@@ -581,7 +600,7 @@ export default function LeaveManagementScreen() {
             <Text style={[styles.loaderText, { color: colors.textTertiary }]}>Loading leaves...</Text>
           </View>
         ) : activeTab === "summary" ? (
-          <SummarySection summaries={summaries} month={currentMonth} colors={colors} isDark={isDark} cardBg={cardBg} cardBorder={cardBorder} />
+          <SummarySection summaries={summaries} month={selectedMonth} colors={colors} isDark={isDark} cardBg={cardBg} cardBorder={cardBorder} />
         ) : displayLeaves.length === 0 ? (
           <EmptyState
             tab={activeTab}
@@ -608,9 +627,9 @@ export default function LeaveManagementScreen() {
               currentUserId={user?.id}
               setReviewingId={setReviewingId}
               setReviewComment={setReviewComment}
-              onApprove={(id) => void handleApproveReject(id, "approved")}
-              onReject={(id) => void handleApproveReject(id, "rejected")}
-              onDelete={(id) => void handleDelete(id)}
+              onApprove={(id: string) => void handleApproveReject(id, "approved")}
+              onReject={(id: string) => void handleApproveReject(id, "rejected")}
+              onDelete={(id: string) => void handleDelete(id)}
             />
           ))
         )}
@@ -730,37 +749,159 @@ export default function LeaveManagementScreen() {
             <Text style={{ fontSize: 20, fontFamily: "Inter_700Bold", color: colors.text }}>Collective Leave</Text>
             <Pressable onPress={() => setShowCollectiveModal(false)}><Ionicons name="close" size={24} color={colors.textSecondary} /></Pressable>
           </View>
-          <ScrollView style={{ padding: 20 }}>
-            <Text style={styles.fldLabel}>Select Users</Text>
+          <ScrollView style={{ padding: 20 }} showsVerticalScrollIndicator={false}>
+            
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <Text style={styles.fldLabel}>Select Users</Text>
+              <Pressable
+                onPress={() => {
+                  if (collectiveUsers.length === usersList.length) {
+                    setCollectiveUsers([]);
+                  } else {
+                    setCollectiveUsers(usersList.map(u => u.id));
+                  }
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                }}
+                style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, backgroundColor: isDark ? "rgba(30,41,59,0.5)" : P.slate100 }}
+              >
+                <Text style={{ fontSize: 11, fontFamily: "Inter_600SemiBold", color: P.blue }}>
+                  {collectiveUsers.length === usersList.length ? "Deselect All" : "Select All"}
+                </Text>
+              </Pressable>
+            </View>
+
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-              {usersList.map(u => (
-                <Pressable key={u.id} style={[{ padding: 8, borderWidth: 1, borderColor: collectiveUsers.includes(u.id) ? P.blue : cardBorder, borderRadius: 10, backgroundColor: collectiveUsers.includes(u.id) ? P.blue+"15" : "transparent" }]} onPress={() => setCollectiveUsers(prev => prev.includes(u.id) ? prev.filter(id => id !== u.id) : [...prev, u.id])}>
-                  <Text style={{ color: collectiveUsers.includes(u.id) ? P.blue : colors.text, fontSize: 12 }}>{u.name}</Text>
-                </Pressable>
-              ))}
+              {usersList.map(u => {
+                const selected = collectiveUsers.includes(u.id);
+                return (
+                  <Pressable
+                    key={u.id}
+                    style={[
+                      styles.userPill,
+                      {
+                        borderColor: selected ? P.blue : cardBorder,
+                        backgroundColor: selected ? P.blue + "15" : "transparent"
+                      }
+                    ]}
+                    onPress={() => {
+                      setCollectiveUsers(prev => prev.includes(u.id) ? prev.filter(id => id !== u.id) : [...prev, u.id]);
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    }}
+                  >
+                    {selected && <Ionicons name="checkmark" size={12} color={P.blue} style={{ marginRight: 4 }} />}
+                    <Text style={{ color: selected ? P.blue : colors.text, fontSize: 12, fontFamily: selected ? "Inter_600SemiBold" : "Inter_400Regular" }}>{u.name}</Text>
+                  </Pressable>
+                );
+              })}
             </View>
 
             <Text style={styles.fldLabel}>Start Date</Text>
-            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveStartDate} onChangeText={setCollectiveStartDate} />
+            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("collectiveStart"); setShowCalendar(true); }}>
+              <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
+              <Text style={{ flex: 1, color: collectiveStartDate ? colors.text : colors.textSecondary }}>
+                {collectiveStartDate ? new Date(collectiveStartDate).toLocaleDateString() : "Select Start Date"}
+              </Text>
+            </Pressable>
 
             <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
-              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveStartAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveStartAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
-              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveStartAmPm === "afternoon" ? P.blue : cardBorder }]} onPress={() => setCollectiveStartAmPm("afternoon")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text></Pressable>
+              <Pressable
+                style={[
+                  styles.dateBtn,
+                  {
+                    flex: 1,
+                    marginBottom: 0,
+                    borderColor: collectiveStartAmPm === "morning" ? P.blue : cardBorder,
+                    backgroundColor: collectiveStartAmPm === "morning" ? P.blue + "15" : "transparent"
+                  }
+                ]}
+                onPress={() => setCollectiveStartAmPm("morning")}
+              >
+                <Text style={{ color: collectiveStartAmPm === "morning" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Morning</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.dateBtn,
+                  {
+                    flex: 1,
+                    marginBottom: 0,
+                    borderColor: collectiveStartAmPm === "afternoon" ? P.blue : cardBorder,
+                    backgroundColor: collectiveStartAmPm === "afternoon" ? P.blue + "15" : "transparent"
+                  }
+                ]}
+                onPress={() => setCollectiveStartAmPm("afternoon")}
+              >
+                <Text style={{ color: collectiveStartAmPm === "afternoon" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text>
+              </Pressable>
             </View>
 
             <Text style={styles.fldLabel}>End Date (Optional)</Text>
-            <TextInput style={[styles.input, { borderColor: cardBorder, color: colors.text, marginBottom: 16 }]} placeholder="YYYY-MM-DD" placeholderTextColor={colors.textTertiary} value={collectiveEndDate} onChangeText={setCollectiveEndDate} />
+            <Pressable style={styles.dateBtn} onPress={() => { setCalendarTarget("collectiveEnd"); setShowCalendar(true); }}>
+              <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
+              <Text style={{ flex: 1, color: collectiveEndDate ? colors.text : colors.textSecondary }}>
+                {collectiveEndDate ? new Date(collectiveEndDate).toLocaleDateString() : "Same as Start Date"}
+              </Text>
+            </Pressable>
 
             <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
-              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveEndAmPm === "morning" ? P.blue : cardBorder }]} onPress={() => setCollectiveEndAmPm("morning")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Morning</Text></Pressable>
-              <Pressable style={[styles.dateBtn, { flex: 1, marginBottom: 0, borderColor: collectiveEndAmPm === "afternoon" ? P.blue : cardBorder }]} onPress={() => setCollectiveEndAmPm("afternoon")}><Text style={{ color: colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text></Pressable>
+              <Pressable
+                style={[
+                  styles.dateBtn,
+                  {
+                    flex: 1,
+                    marginBottom: 0,
+                    borderColor: collectiveEndAmPm === "morning" ? P.blue : cardBorder,
+                    backgroundColor: collectiveEndAmPm === "morning" ? P.blue + "15" : "transparent"
+                  }
+                ]}
+                onPress={() => setCollectiveEndAmPm("morning")}
+              >
+                <Text style={{ color: collectiveEndAmPm === "morning" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Morning</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.dateBtn,
+                  {
+                    flex: 1,
+                    marginBottom: 0,
+                    borderColor: collectiveEndAmPm === "afternoon" ? P.blue : cardBorder,
+                    backgroundColor: collectiveEndAmPm === "afternoon" ? P.blue + "15" : "transparent"
+                  }
+                ]}
+                onPress={() => setCollectiveEndAmPm("afternoon")}
+              >
+                <Text style={{ color: collectiveEndAmPm === "afternoon" ? P.blue : colors.text, textAlign: "center", flex: 1 }}>Afternoon</Text>
+              </Pressable>
             </View>
 
-            <Text style={styles.fldLabel}>Auto Validate?</Text>
-            <Switch value={collectiveAutoValidate} onValueChange={setCollectiveAutoValidate} style={{ alignSelf: "flex-start", marginBottom: 16 }} />
+            <View style={[styles.switchWrap, { borderColor: cardBorder, backgroundColor: isDark ? "rgba(30,41,59,0.3)" : "rgba(255,255,255,0.8)" }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.switchTitle, { color: colors.text }]}>Auto Validate Leaves</Text>
+                <Text style={[styles.switchDesc, { color: colors.textTertiary }]}>Automatically approve these leaves upon creation</Text>
+              </View>
+              <Switch value={collectiveAutoValidate} onValueChange={setCollectiveAutoValidate} />
+            </View>
 
-            <Pressable onPress={handleCollectiveSubmit} disabled={submitting} style={[styles.submitBtn, { backgroundColor: P.orange, marginTop: 20, marginBottom: 50, opacity: submitting ? 0.5 : 1 }]}>
-              {submitting ? <ActivityIndicator color="#FFF" /> : <Text style={styles.submitTxt}>Create Collective Leaves</Text>}
+            <Pressable
+              onPress={handleCollectiveSubmit}
+              disabled={submitting}
+              style={[
+                styles.submitBtn,
+                {
+                  marginTop: 20,
+                  marginBottom: 60,
+                  opacity: submitting ? 0.6 : 1,
+                  backgroundColor: P.orange
+                }
+              ]}
+            >
+              {submitting ? (
+                <ActivityIndicator color="#FFF" />
+              ) : (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, height: 54 }}>
+                  <Ionicons name="duplicate-outline" size={20} color="#FFF" />
+                  <Text style={styles.submitTxt}>Create Collective Leaves</Text>
+                </View>
+              )}
             </Pressable>
           </ScrollView>
         </View>
@@ -1135,6 +1276,21 @@ const styles = StyleSheet.create({
   switchTitle: { fontSize: 14, fontFamily: "Inter_500Medium" },
   switchDesc: { fontSize: 11, fontFamily: "Inter_400Regular", marginTop: 2 },
   noteField: { borderWidth: 1, borderRadius: 14, padding: 14, fontSize: 14, fontFamily: "Inter_400Regular", minHeight: 80, textAlignVertical: "top", marginBottom: 20 },
+  input: {
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+  },
+  userPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderRadius: 10,
+  },
   submitBtn: { borderRadius: 16, overflow: "hidden" },
   submitGrad: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, height: 54, borderRadius: 16 },
   submitTxt: { color: "#FFF", fontSize: 16, fontFamily: "Inter_600SemiBold" },

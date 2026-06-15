@@ -89,7 +89,7 @@ const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
 const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
 
-type BannerType = "inside" | "outside" | "weak" | "boundary";
+type BannerType = "inside" | "outside" | "weak" | "boundary" | "loading";
 
 type OfficeLocationSearchResult = {
   id: string;
@@ -111,7 +111,51 @@ type AdminAttendanceStatus = {
   approvalStatus: AttendanceRecord["approvalStatus"] | null;
 };
 
-function getBannerConfig(type: BannerType, colors: ReturnType<typeof useAppTheme>["colors"]) {
+function getBannerConfig(
+  type: BannerType,
+  colors: ReturnType<typeof useAppTheme>["colors"],
+  isOfficeGeofence: boolean,
+  hasGeofences: boolean
+) {
+  if (type === "loading") {
+    return {
+      bg: `${colors.textTertiary}12`,
+      border: colors.border,
+      text: colors.textSecondary,
+      icon: "time-outline",
+      label: isOfficeGeofence ? "Initializing geofence check..." : "Initializing GPS tracking...",
+    };
+  }
+
+  if (!isOfficeGeofence) {
+    if (type === "weak") {
+      return {
+        bg: `${colors.warning}1A`,
+        border: `${colors.warning}55`,
+        text: colors.warning,
+        icon: "radio-outline",
+        label: "Weak GPS signal",
+      };
+    }
+    return {
+      bg: `${colors.success}1C`,
+      border: `${colors.success}55`,
+      text: colors.success,
+      icon: "checkmark-circle",
+      label: "GPS Tracking Active",
+    };
+  }
+
+  if (!hasGeofences) {
+    return {
+      bg: `${colors.textTertiary}12`,
+      border: colors.border,
+      text: colors.textSecondary,
+      icon: "business-outline",
+      label: "No Office Zone Configured",
+    };
+  }
+
   if (type === "inside") {
     return {
       bg: `${colors.success}1C`,
@@ -326,6 +370,7 @@ export default function AttendanceScreen() {
   const [pendingSignIns, setPendingSignIns] = useState<AttendanceRecord[]>([]);
   const [adminAttendanceStatuses, setAdminAttendanceStatuses] = useState<AdminAttendanceStatus[]>([]);
   const [geofences, setGeofences] = useState<Geofence[]>([]);
+  const [geofencesLoaded, setGeofencesLoaded] = useState(false);
   const [evaluation, setEvaluation] = useState<GeofenceEvaluation>({
     inside: false,
     insideConfirmed: false,
@@ -341,6 +386,7 @@ export default function AttendanceScreen() {
   const [gpsEvidence, setGpsEvidence] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
   const consecutiveOutsideRef = useRef(0);
+  const attendanceSubmissionInProgressRef = useRef<"checkin" | "checkout" | null>(null);
   const [approvalActionId, setApprovalActionId] = useState<string | null>(null);
   const [permissionLoading, setPermissionLoading] = useState(false);
   const [permissionExplainerOpen, setPermissionExplainerOpen] = useState(true);
@@ -444,20 +490,24 @@ export default function AttendanceScreen() {
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
-    const cached = await getGeofencesForUser(user.id);
     try {
-      const online = await isBackendReachable();
-      if (online) {
-        const zones = await getUserGeofences(user.id);
-        if (zones.length > 0) {
-          setGeofences(zones);
-          return;
+      const cached = await getGeofencesForUser(user.id);
+      try {
+        const online = await isBackendReachable();
+        if (online) {
+          const zones = await getUserGeofences(user.id);
+          if (zones.length > 0) {
+            setGeofences(zones);
+            return;
+          }
         }
+      } catch {
+        // fallback handled below
       }
-    } catch {
-      // fallback handled below
+      setGeofences(cached);
+    } finally {
+      setGeofencesLoaded(true);
     }
-    setGeofences(cached);
   }, [user?.id]);
 
   const loadLatestStoredLocation = useCallback(async () => {
@@ -535,10 +585,17 @@ export default function AttendanceScreen() {
       setLocationReady(true);
 
       // AUTO CHECKOUT: if checked in, but GPS is confirmed >500m away with good accuracy
-      if (checkedInState && !nextEvaluation.inside && !nextEvaluation.signalWeak && (effectiveLocation.coords.accuracy ?? 100) < 50) {
+      const canTriggerAutoCheckout =
+        checkedInState &&
+        isOfficeGeofenceAttendance &&
+        geofencesLoaded &&
+        geofences.length > 0 &&
+        nextEvaluation.nearestDistanceMeters !== Number.POSITIVE_INFINITY;
+
+      if (canTriggerAutoCheckout && !nextEvaluation.inside && !nextEvaluation.signalWeak && (effectiveLocation.coords.accuracy ?? 100) < 50) {
         if (nextEvaluation.nearestDistanceMeters > 500) {
           consecutiveOutsideRef.current += 1;
-          if (consecutiveOutsideRef.current >= 3) {
+          if (consecutiveOutsideRef.current >= 5) {
             void submitAttendance("checkout", { isAuto: true, silent: true });
             consecutiveOutsideRef.current = 0;
           }
@@ -609,7 +666,7 @@ export default function AttendanceScreen() {
           try {
             const settings = await getSettings();
             if (settings.notifications !== "false") {
-              setAutoPromptVisible(true);
+               setAutoPromptVisible(true);
             }
           } catch {
             // ignore settings read failure for passive prompt
@@ -617,7 +674,15 @@ export default function AttendanceScreen() {
         })();
       }
     },
-    [applyAhmedabadOfficeLocationLock, checkedInState, geofences, isSalespersonFieldCheckIn, user?.id]
+    [
+      applyAhmedabadOfficeLocationLock,
+      checkedInState,
+      geofences,
+      geofencesLoaded,
+      isOfficeGeofenceAttendance,
+      isSalespersonFieldCheckIn,
+      user?.id,
+    ]
   );
 
   const refreshLocation = useCallback(
@@ -1194,13 +1259,18 @@ export default function AttendanceScreen() {
   const selectOfficeLocationDraft = useCallback((result: OfficeLocationSearchResult) => {
     setOfficeLocationDraft(result);
     setOfficeSearchQuery(result.label);
-    setOfficeLocationName((current) => current.trim() || result.label);
+setOfficeLocationName((current) => current.trim() || result.label);
     setOfficeSearchResults([]);
   }, []);
 
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout", options?: { isAuto?: boolean, silent?: boolean }) => {
       if (!user?.id) return;
+      if (attendanceSubmissionInProgressRef.current !== null) return;
+      if (type === "checkout" && !checkedInState) return;
+      if (type === "checkin" && checkedInState) return;
+
+      attendanceSubmissionInProgressRef.current = type;
       if (!options?.silent) setActionLoading(true);
       try {
         const isAuto = options?.isAuto === true;
@@ -1412,12 +1482,14 @@ export default function AttendanceScreen() {
       } catch (error) {
         if (!options?.silent) Alert.alert("Attendance Failed", error instanceof Error ? error.message : "Unknown error");
       } finally {
+        attendanceSubmissionInProgressRef.current = null;
         if (!options?.silent) setActionLoading(false);
       }
     },
     [
       animateSuccess,
       beginTracking,
+      checkedInState,
       geofences,
       getFastAttendanceEvidence,
       isSalespersonFieldCheckIn,
@@ -1480,14 +1552,16 @@ export default function AttendanceScreen() {
 
   const employeeHasOfficeZone = !isOfficeGeofenceAttendance || geofences.length > 0;
   const employeeInsideOfficeZone = !isOfficeGeofenceAttendance || evaluation.inside;
-  const bannerType: BannerType = evaluation.signalWeak
+  const bannerType: BannerType = (!geofencesLoaded || !locationReady)
+    ? "loading"
+    : evaluation.signalWeak
     ? "weak"
     : evaluation.inside
       ? isConfirmedInsideZone(evaluation)
         ? "inside"
         : "boundary"
       : "outside";
-  const banner = getBannerConfig(bannerType, colors);
+  const banner = getBannerConfig(bannerType, colors, isOfficeGeofenceAttendance, geofences.length > 0);
   const zoneName = isSalespersonFieldCheckIn
     ? "Field Route Tracking"
     : evaluation.activeZone?.name ?? (isOfficeGeofenceAttendance ? "Office not set" : "No zone");
