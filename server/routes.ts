@@ -11657,22 +11657,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // TEMP DEBUG ENDPOINT
-  app.get("/api/public-debug-columns", async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const [rows] = await conn.query("SHOW COLUMNS FROM \`nmy5_c_hrm_public_holiday\`");
-      res.json({ ok: true, columns: rows });
-    } catch (err: any) {
-      res.json({ ok: false, error: err.message });
-    }
-  });
-
   // GET /api/public-holidays
   app.get("/api/public-holidays", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT rowid as id, day, month, year, code, day_rule as dayRule FROM \`nmy5_c_hrm_public_holiday\`");
+      const [rows] = await conn.query<any[]>("SELECT rowid as id, day, month, year, code, code as dayRule FROM \`nmy5_c_hrm_public_holiday\`");
       res.json({ items: rows });
     } catch (error) {
       res.json({ items: [] });
@@ -11691,10 +11680,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const body = req.body || {};
       console.log("[POST /api/public-holidays] received body:", body);
       
-      // We insert day, month, year, code, day_rule, omitting "active" to avoid Bad Field schema errors
+      // We insert day, month, year, code, omitting day_rule and active to prevent unknown column errors
       const [insertRes] = await conn.execute<any>(
-        "INSERT INTO \`nmy5_c_hrm_public_holiday\` (day, month, year, code, day_rule) VALUES (?, ?, ?, ?, ?)",
-        [body.day, body.month, body.year || 0, body.code || "", body.dayRule || ""]
+        "INSERT INTO \`nmy5_c_hrm_public_holiday\` (day, month, year, code) VALUES (?, ?, ?, ?)",
+        [body.day, body.month, body.year || 0, body.code || ""]
       );
 
       // Create and dispatch a broadcast notification to all users
