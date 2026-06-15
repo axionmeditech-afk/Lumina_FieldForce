@@ -156,7 +156,7 @@ export default function LoginScreen() {
             </View>
 
             <LinearGradient
-              colors={AUTH_HERO_GRADIENT as unknown as string[]}
+              colors={[...AUTH_HERO_GRADIENT]}
               start={{ x: 0.1, y: 0 }}
               end={{ x: 0.9, y: 1 }}
               style={styles.heroBackdrop}
@@ -406,7 +406,7 @@ export default function LoginScreen() {
               ]}
             >
               <LinearGradient
-                colors={AUTH_BUTTON_GRADIENT as unknown as string[]}
+                colors={[...AUTH_BUTTON_GRADIENT]}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.loginButtonGradient}

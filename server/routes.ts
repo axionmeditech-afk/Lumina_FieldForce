@@ -2101,7 +2101,7 @@ async function upsertConversationInMySql(
       toMySqlDateTime(conversation.date) || new Date().toISOString().slice(0, 19).replace("T", " "),
       conversation.duration,
       safeTranscript,
-      conversation.transcriptStatus,
+      conversation.transcriptStatus ?? null,
       conversation.audioUri ?? null,
       conversation.transcriptionError ?? null,
       conversation.source ?? null,
@@ -2550,7 +2550,7 @@ async function mergeApprovedAccessRequestIntoUser(
   request: AccessRequestRecord | null
 ): Promise<AppUser> {
   if (!request || request.status !== "approved") return user;
-  const mergedRole = normalizeRole(request.approvedRole || request.requestedRole || user.role);
+  const mergedRole = normalizeRole(user.role || request.approvedRole || request.requestedRole);
   const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
   const existingCompanyIds = normalizeCompanyIds(user.companyIds);
   const selectedCompaniesById = await getCompanyProfilesByIds(assignedCompanyIds);
@@ -6245,7 +6245,7 @@ async function rehomeLegacyCompanyDataToMySql(
           OR NOT EXISTS (
             SELECT 1 FROM lff_companies companies WHERE companies.id = scoped.company_id
           )`,
-      params
+      params as any[]
     );
   }
 
@@ -9223,7 +9223,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salespersonId) || "");
       const salespersonId =
         isSalesRole(req.auth?.role)
-          ? normalizeWhitespace(req.auth.sub || "")
+          ? normalizeWhitespace(req.auth?.sub || "")
           : requestedSalespersonId || null;
       const limit =
         parseOptionalInteger(req.query.limit) ??
@@ -9788,6 +9788,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   audience: "roles" as const,
                   audienceUserIds: "[]",
                   createdById: "system",
+                  createdByName: "System",
                   createdAt: new Date().toISOString(),
                 };
                 await insertNotificationInMySql(notif);
@@ -10015,7 +10016,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               photoUrl: null,
               deviceId: activeAttendance.deviceId,
               isInsideGeofence: false,
-              source: "system",
+              source: "synced",
               notes: `Auto-checkout due to geofence exit (distance: ${Math.round(status.distanceMeters)}m, accuracy: ${Math.round(entry.accuracy ?? 0)}m)`,
               approvalStatus: "approved",
               approvalReviewedById: "system",
@@ -11466,8 +11467,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/users", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const [rows] = await conn.query("SELECT rowid as id, firstname, lastname, email FROM \`nmy5_user\` WHERE statut = 1");
-      const mapped = rows.map((r) => ({
+      const [rows] = await conn.query<any[]>("SELECT rowid as id, firstname, lastname, email FROM \`nmy5_user\` WHERE statut = 1");
+      const mapped = rows.map((r: any) => ({
         id: String(r.id),
         name: `${r.firstname || ""} ${r.lastname || ""}`.trim(),
         email: r.email || ""
@@ -11549,7 +11550,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       else if (startAmPm === "morning" && endAmPm === "morning") halfday = 2;
       else if (startAmPm === "afternoon" && endAmPm === "morning") halfday = 3;
 
-      const [uRows] = await conn.query("SELECT rowid FROM \`nmy5_user\` WHERE email = ? LIMIT 1", [userEmail]);
+      const [uRows] = await conn.query<any[]>("SELECT rowid FROM \`nmy5_user\` WHERE email = ? LIMIT 1", [userEmail]);
       if (!uRows || uRows.length === 0) {
         return res.status(400).json({ message: "User not linked to Dolibarr." });
       }
