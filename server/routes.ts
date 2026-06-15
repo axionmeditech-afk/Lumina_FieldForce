@@ -11724,10 +11724,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         res.status(403).json({ message: "Unauthorized" });
         return;
       }
-      await conn.execute("DELETE FROM \`nmy5_c_hrm_public_holiday\` WHERE rowid = ?", [req.params.id]);
+      console.log("[DELETE /api/public-holidays] deleting id:", req.params.id);
+      const [result] = await conn.execute<any>("DELETE FROM `nmy5_c_hrm_public_holiday` WHERE rowid = ?", [req.params.id]);
+      console.log("[DELETE /api/public-holidays] result:", result);
       res.json({ id: req.params.id, ok: true });
-    } catch (error) {
-      res.status(500).json({ message: "Unable to delete holiday" });
+    } catch (error: any) {
+      console.error("[DELETE /api/public-holidays] FAILED:", error);
+      res.status(500).json({ message: `Unable to delete holiday: ${error.message}` });
     }
   });
 
