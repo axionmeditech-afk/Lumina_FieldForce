@@ -11506,11 +11506,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/users", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT rowid as id, firstname, lastname, email FROM \`nmy5_user\` WHERE statut = 1");
+      const requestUser = getRequestUser(req);
+      const companyId = (await resolveRequestCompanyId(req)) || requestUser?.companyId || DEFAULT_COMPANY_ID;
+      const companyName = requestUser?.companyName || DEFAULT_COMPANY_NAME;
+      const [rows] = await conn.query<any[]>(
+        `SELECT
+          u.rowid as id,
+          u.login,
+          u.firstname,
+          u.lastname,
+          u.email,
+          u.office_phone,
+          u.user_mobile,
+          u.admin,
+          u.employee,
+          u.job,
+          u.statut,
+          u.town,
+          u.address,
+          u.zip,
+          p.employee_category
+         FROM \`nmy5_user\` u
+         LEFT JOIN \`nmy5_hrm_employee_profile\` p ON p.fk_user = u.rowid
+         WHERE u.statut = 1`
+      );
       const mapped = rows.map((r: any) => ({
         id: String(r.id),
-        name: `${r.firstname || ""} ${r.lastname || ""}`.trim(),
-        email: r.email || ""
+        rowid: String(r.id),
+        user_id: String(r.id),
+        login: r.login || "",
+        firstname: r.firstname || "",
+        lastname: r.lastname || "",
+        name: `${r.firstname || ""} ${r.lastname || ""}`.trim() || r.login || "Employee",
+        email: r.email || "",
+        phone: r.user_mobile || r.office_phone || "",
+        town: r.town || "",
+        address: r.address || "",
+        zip: r.zip || "",
+        statut: r.statut,
+        status: r.statut,
+        companyId,
+        companyName,
+        employeeCategory:
+          String(r.employee_category || "").toLowerCase() === "on_field"
+            ? "on_field"
+            : "fixed_location",
+        employee_category:
+          String(r.employee_category || "").toLowerCase() === "on_field"
+            ? "on_field"
+            : "fixed_location",
+        role:
+          Number(r.admin || 0) === 1
+            ? "admin"
+            : String(r.employee_category || "").toLowerCase() === "on_field"
+              ? "salesperson"
+              : "employee",
+        department:
+          String(r.employee_category || "").toLowerCase() === "on_field"
+            ? "On Field Employees"
+            : "Office Employees",
+        branch: r.town || r.address || requestUser?.branch || "Main Branch",
       }));
       res.json({ items: mapped });
     } catch (e) {

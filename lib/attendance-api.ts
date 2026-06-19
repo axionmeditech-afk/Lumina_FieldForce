@@ -103,6 +103,14 @@ export interface DolibarrUser {
   address?: string;
   statut?: number | string;
   status?: number | string;
+  companyId?: string;
+  companyName?: string;
+  role?: UserRole;
+  employeeCategory?: "on_field" | "fixed_location" | string | null;
+  employee_category?: "on_field" | "fixed_location" | string | null;
+  department?: string;
+  phone?: string;
+  branch?: string;
 }
 
 export interface DolibarrBankAccount {
@@ -2951,9 +2959,9 @@ export async function saveWeekendConfigRemote(weekendDays: number[]): Promise<an
 
 
 // --- Users ---
-export async function getUsersRemote(): Promise<{ id: string, name: string, email: string }[]> {
-  const data = await fetchJson("/users", { method: "GET" });
-  return data.items || [];
+export async function getUsersRemote(): Promise<DolibarrUser[]> {
+  const data = await fetchJson<{ items?: DolibarrUser[] }>("/users", { method: "GET" });
+  return Array.isArray(data.items) ? data.items : [];
 }
 
 // --- Collective Leaves ---

@@ -24,11 +24,11 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNative";
 import { evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   addAttendance,
   addAttendanceAnomaly,
   addLocationLog,
+  getApiToken,
   getAttendance,
   getGeofences,
   getGeofencesForUser,
@@ -36,6 +36,8 @@ import {
   getSettings,
   isCheckedIn,
   setCheckedIn,
+  STORAGE_KEYS,
+  subscribeStorageUpdates,
   updateAttendanceApproval,
   upsertGeofence,
 } from "@/lib/storage";
@@ -46,6 +48,7 @@ import {
   attendanceCheckOut,
   createGeofence as createGeofenceRemote,
   flushAttendanceQueue,
+  getApiBaseUrlCandidates,
   getUserGeofences,
   queueAttendanceRequest,
   searchMapplsAutosuggest,
@@ -73,6 +76,7 @@ import {
   recordGpsDisabledDuringCheckIn,
   recordGpsRestoredDuringCheckIn,
 } from "@/lib/gps-tracking-alerts";
+import { toMumbaiDateKey } from "@/lib/ist-time";
 import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
@@ -89,6 +93,7 @@ const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
 const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
+const ADMIN_ATTENDANCE_REFRESH_MS = 15 * 1000;
 
 type BannerType = "inside" | "outside" | "weak" | "boundary" | "loading";
 
@@ -289,49 +294,59 @@ function formatAttendanceTime(value: string | null): string {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function normalizeAttendanceIdentity(value: string | null | undefined): string {
+  return (value || "").trim().toLowerCase();
+}
+
 function buildAdminAttendanceStatuses(
   attendance: AttendanceRecord[],
   employees: Employee[],
   currentUserId?: string
 ): AdminAttendanceStatus[] {
-  const today = new Date().toISOString().slice(0, 10);
-  const employeeById = new Map<string, Employee>();
-  const employeeByName = new Map<string, Employee>();
+  const today = toMumbaiDateKey(new Date());
+  const employeeGroups = new Map<
+    string,
+    {
+      employee: Employee;
+      ids: Set<string>;
+      names: Set<string>;
+    }
+  >();
 
   for (const employee of employees) {
-    employeeById.set(employee.id, employee);
-    employeeByName.set(employee.name.trim().toLowerCase(), employee);
+    if (employee.status && employee.status !== "active") continue;
+    if (employee.role !== "employee" && employee.role !== "salesperson") continue;
+    const nameKey = normalizeAttendanceIdentity(employee.name);
+    const roleKey = normalizeAttendanceIdentity(employee.role);
+    const groupKey = nameKey ? `name:${roleKey}:${nameKey}` : `id:${employee.id}`;
+    const existing = employeeGroups.get(groupKey);
+    if (existing) {
+      existing.ids.add(employee.id);
+      if (nameKey) existing.names.add(nameKey);
+      existing.employee = {
+        ...employee,
+        ...existing.employee,
+        id: existing.employee.id || employee.id,
+        email: existing.employee.email || employee.email,
+        phone: existing.employee.phone || employee.phone,
+        branch: existing.employee.branch || employee.branch,
+      };
+      continue;
+    }
+    employeeGroups.set(groupKey, {
+      employee,
+      ids: new Set([employee.id]),
+      names: nameKey ? new Set([nameKey]) : new Set(),
+    });
   }
 
-  for (const entry of attendance) {
-    if (entry.userId === currentUserId) continue;
-    if (!entry.timestamp.startsWith(today)) continue;
-    if (employeeById.has(entry.userId)) continue;
-    const nameKey = entry.userName.trim().toLowerCase();
-    if (employeeByName.has(nameKey)) continue;
-    const fallbackEmployee: Employee = {
-      id: entry.userId,
-      companyId: "",
-      name: entry.userName || "Employee",
-      role: "employee",
-      department: "Operations",
-      status: "active",
-      email: "",
-      phone: "",
-      branch: "Main Branch",
-      joinDate: today,
-    };
-    employeeById.set(fallbackEmployee.id, fallbackEmployee);
-    employeeByName.set(fallbackEmployee.name.trim().toLowerCase(), fallbackEmployee);
-  }
-
-  const rows = Array.from(employeeById.values()).map((employee): AdminAttendanceStatus => {
-    const nameKey = employee.name.trim().toLowerCase();
+  const rows = Array.from(employeeGroups.values()).map((group): AdminAttendanceStatus => {
+    const { employee, ids, names } = group;
     const entries = attendance
       .filter(
         (entry) =>
-          entry.timestamp.startsWith(today) &&
-          (entry.userId === employee.id || entry.userName.trim().toLowerCase() === nameKey)
+          toMumbaiDateKey(entry.timestamp) === today &&
+          (ids.has(entry.userId) || names.has(normalizeAttendanceIdentity(entry.userName)))
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const latest = entries[entries.length - 1] ?? null;
@@ -361,6 +376,20 @@ function buildAdminAttendanceStatuses(
       a.name.localeCompare(b.name)
   );
 }
+
+function getAttendanceWsUrl(apiBase: string, token: string): string | null {
+  try {
+    const url = new URL(apiBase);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const basePath = url.pathname.replace(/\/+$/, "");
+    url.pathname = `${basePath}/ws/attendance`;
+    url.searchParams.set("token", token);
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 // === WEBSOCKET HOOK DEFINITION ===
 function useAttendanceWebSocket(
   isAdminOrManager: boolean, 
@@ -370,22 +399,51 @@ function useAttendanceWebSocket(
     if (!isAdminOrManager) return;
 
     let ws: WebSocket | null = null;
-    let reconnectTimeout: NodeJS.Timeout;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let closed = false;
+    let connecting = false;
     let attempt = 0;
 
-    const connect = async () => {
-      try {
-        // App ke local storage se token lena zaroori hai connection identify karne ke liye
-        const token = await AsyncStorage.getItem("token"); 
-        if (!token) return;
+    const scheduleReconnect = () => {
+      if (closed) return;
+      const delay = Math.min(1000 * 2 ** attempt, 30000);
+      attempt++;
+      reconnectTimeout = setTimeout(() => {
+        void connect(0);
+      }, delay);
+    };
 
-        // Aapka direct backend domain WebSocket protocol (wss) ke sath
-        const wsUrl = `wss://api.axionmeditech.com/api/ws/attendance?token=${token}`;
+    const connect = async (candidateIndex = 0) => {
+      if (closed || connecting) return;
+      connecting = true;
+      try {
+        const [token, apiBases] = await Promise.all([getApiToken(), getApiBaseUrlCandidates()]);
+        if (closed) return;
+        if (!token) {
+          scheduleReconnect();
+          return;
+        }
+
+        const wsUrls = apiBases
+          .map((apiBase) => getAttendanceWsUrl(apiBase, token))
+          .filter((url): url is string => Boolean(url));
+        if (wsUrls.length === 0) {
+          scheduleReconnect();
+          return;
+        }
+
+        const wsUrl = wsUrls[Math.min(candidateIndex, wsUrls.length - 1)];
         ws = new WebSocket(wsUrl);
+        let opened = false;
+        const openTimeout = setTimeout(() => {
+          if (!opened) ws?.close();
+        }, 8000);
 
         ws.onopen = () => {
-          console.log("Attendance WS Connected");
+          opened = true;
+          clearTimeout(openTimeout);
           attempt = 0; 
+          void loadBaseData();
         };
 
         ws.onmessage = (event) => {
@@ -400,20 +458,31 @@ function useAttendanceWebSocket(
         };
 
         ws.onclose = () => {
-          console.log("Attendance WS Disconnected. Reconnecting...");
-          const delay = Math.min(1000 * 2 ** attempt, 30000);
-          attempt++;
-          reconnectTimeout = setTimeout(connect, delay);
+          clearTimeout(openTimeout);
+          if (closed) return;
+          if (!opened && candidateIndex < wsUrls.length - 1) {
+            void connect(candidateIndex + 1);
+            return;
+          }
+          scheduleReconnect();
+        };
+
+        ws.onerror = () => {
+          ws?.close();
         };
       } catch (error) {
         console.error("WS connection setup failed", error);
+        scheduleReconnect();
+      } finally {
+        connecting = false;
       }
     };
 
-    connect();
+    void connect();
 
     return () => {
-      clearTimeout(reconnectTimeout);
+      closed = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) {
         ws.onclose = null; 
         ws.close();
@@ -474,6 +543,7 @@ export default function AttendanceScreen() {
   const latestLocationRef = useRef<LocationObject | null>(null);
   const latestLocationCapturedAtMsRef = useRef<number>(0);
   const officeSearchRequestIdRef = useRef(0);
+  const loadBaseDataRequestRef = useRef(0);
   const successScale = useSharedValue(1);
 
   const pulseStyle = useAnimatedStyle(() => ({
@@ -510,31 +580,45 @@ export default function AttendanceScreen() {
 
   const loadBaseData = useCallback(async () => {
     if (!user?.id) return;
-    const [localAttendance, currentCheckIn] = await Promise.all([getAttendance(), isCheckedIn()]);
+    const requestId = ++loadBaseDataRequestRef.current;
+    const shouldLoadRoster = canReviewSignIns || isAdminAttendanceManager;
+    const [localAttendance, currentCheckIn, employees] = await Promise.all([
+      getAttendance(),
+      isCheckedIn(),
+      shouldLoadRoster ? getEmployees().catch(() => [] as Employee[]) : Promise.resolve([] as Employee[]),
+    ]);
+    if (requestId !== loadBaseDataRequestRef.current) return;
+
     const userRecords = localAttendance.filter(
-      (entry) => entry.userId === user.id || entry.userName === user.name
+      (entry) =>
+        entry.userId === user.id ||
+        normalizeAttendanceIdentity(entry.userName) === normalizeAttendanceIdentity(user.name)
     );
     setRecords(userRecords);
-    if (canReviewSignIns || isAdminAttendanceManager) {
-      const employees = await getEmployees();
+    if (shouldLoadRoster) {
       if (isAdminAttendanceManager) {
         setAdminAttendanceStatuses(buildAdminAttendanceStatuses(localAttendance, employees, user.id));
       }
       if (!canReviewSignIns) {
         setPendingSignIns([]);
       } else {
-      const roleByEmployeeId = new Map(employees.map((employee) => [employee.id, employee.role]));
-      const roleByName = new Map(employees.map((employee) => [employee.name, employee.role]));
-      const pending = localAttendance
-        .filter((entry) => {
-          if (entry.type !== "checkin") return false;
-          if ((entry.approvalStatus ?? "approved") !== "pending") return false;
-          if (entry.userId === user.id) return false;
-          const recordRole = roleByEmployeeId.get(entry.userId) ?? roleByName.get(entry.userName) ?? "salesperson";
-          return recordRole !== "admin" && recordRole !== "manager";
-        })
-        .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-      setPendingSignIns(pending);
+        const employeeById = new Map(employees.map((employee) => [employee.id, employee]));
+        const employeeByName = new Map(
+          employees.map((employee) => [normalizeAttendanceIdentity(employee.name), employee])
+        );
+        const pending = localAttendance
+          .filter((entry) => {
+            if (entry.type !== "checkin") return false;
+            if ((entry.approvalStatus ?? "approved") !== "pending") return false;
+            if (entry.userId === user.id) return false;
+            const matchedEmployee =
+              employeeById.get(entry.userId) ?? employeeByName.get(normalizeAttendanceIdentity(entry.userName));
+            if (!matchedEmployee || (matchedEmployee.status && matchedEmployee.status !== "active")) return false;
+            const recordRole = matchedEmployee.role;
+            return recordRole !== "admin" && recordRole !== "manager";
+          })
+          .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        setPendingSignIns(pending);
       }
     } else {
       setPendingSignIns([]);
@@ -551,6 +635,22 @@ export default function AttendanceScreen() {
   // Note: user?.role 'admin' ya 'manager' dono ke liye check kiya hai
   useAttendanceWebSocket(isAdminAttendanceManager || user?.role === "manager", loadBaseData);
   // ============================
+
+  useEffect(() => {
+    return subscribeStorageUpdates((event) => {
+      if (event.key !== STORAGE_KEYS.ATTENDANCE && event.key !== STORAGE_KEYS.EMPLOYEES) return;
+      void loadBaseData();
+    });
+  }, [loadBaseData]);
+
+  useEffect(() => {
+    if (!user?.id || (!canReviewSignIns && !isAdminAttendanceManager)) return;
+    const interval = setInterval(() => {
+      void loadBaseData();
+    }, ADMIN_ATTENDANCE_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [canReviewSignIns, isAdminAttendanceManager, loadBaseData, user?.id]);
+
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
     try {
@@ -1593,9 +1693,9 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
   const workingHours = useMemo(() => {
     if (!records.length) return "0h 0m";
-    const today = new Date().toISOString().slice(0, 10);
+    const today = toMumbaiDateKey(new Date());
     const todayEntries = records
-      .filter((entry) => entry.timestamp.startsWith(today))
+      .filter((entry) => toMumbaiDateKey(entry.timestamp) === today)
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     let minutes = 0;
     let checkInTime: Date | null = null;
