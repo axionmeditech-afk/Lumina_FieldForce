@@ -96,6 +96,7 @@ export interface DolibarrUser {
   user_id?: number | string;
   firstname?: string;
   lastname?: string;
+  name?: string;
   login?: string;
   email?: string;
   zip?: string;
@@ -105,6 +106,7 @@ export interface DolibarrUser {
   status?: number | string;
   companyId?: string;
   companyName?: string;
+  assignedCompanyIds?: string[];
   role?: UserRole;
   employeeCategory?: "on_field" | "fixed_location" | string | null;
   employee_category?: "on_field" | "fixed_location" | string | null;

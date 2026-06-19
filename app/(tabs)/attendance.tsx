@@ -50,10 +50,12 @@ import {
   flushAttendanceQueue,
   getApiBaseUrlCandidates,
   getUserGeofences,
+  getUsersRemote,
   queueAttendanceRequest,
   searchMapplsAutosuggest,
   searchMapplsTextSearch,
   updateGeofence as updateGeofenceRemote,
+  type DolibarrUser,
 } from "@/lib/attendance-api";
 import {
   ensureBackgroundLocationTracking,
@@ -305,6 +307,89 @@ function formatAttendanceTime(value: string | null): string {
 
 function normalizeAttendanceIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
+}
+
+function normalizeRosterStatus(value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return true;
+  const numeric = Number(value);
+  if (!Number.isNaN(numeric)) return numeric === 1;
+  const text = String(value).trim().toLowerCase();
+  return text !== "0" && text !== "false" && text !== "disabled";
+}
+
+function mapAttendanceUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?: string; name?: string }): Employee | null {
+  if (!normalizeRosterStatus(user.statut ?? user.status)) return null;
+  const activeCompanyId = (fallbackCompany?.id || "").trim();
+  const assignedCompanyIds = Array.isArray(user.assignedCompanyIds)
+    ? user.assignedCompanyIds.map((id) => id.trim()).filter(Boolean)
+    : [];
+  if (assignedCompanyIds.length > 0 && activeCompanyId && !assignedCompanyIds.includes(activeCompanyId)) {
+    return null;
+  }
+  if (Array.isArray(user.assignedCompanyIds) && assignedCompanyIds.length === 0) {
+    return null;
+  }
+
+  const first = (user.firstname || "").trim();
+  const last = (user.lastname || "").trim();
+  const name = (user.name || `${first} ${last}`.trim() || user.login || "").trim();
+  if (!name) return null;
+
+  const rawCategory = normalizeAttendanceIdentity(user.employeeCategory || user.employee_category);
+  const role =
+    user.role === "salesperson" || rawCategory === "on_field"
+      ? "salesperson"
+      : user.role === "employee" || rawCategory === "fixed_location"
+        ? "employee"
+        : null;
+  if (!role) return null;
+
+  const idValue =
+    String(user.id || user.rowid || user.user_id || user.login || user.email || name).trim();
+  if (!idValue) return null;
+
+  const employee: Employee & { companyName?: string } = {
+    id: String(user.id || user.rowid || user.user_id || `user_${idValue}`),
+    companyId: (user.companyId || fallbackCompany?.id || "workspace_default").trim(),
+    companyName: (user.companyName || fallbackCompany?.name || "").trim(),
+    name,
+    role,
+    employeeCategory: role === "salesperson" ? "on_field" : "fixed_location",
+    department: role === "salesperson" ? "On Field Employees" : "Office Employees",
+    status: "active",
+    email: (user.email || "").trim().toLowerCase(),
+    phone: (user.phone || "").trim(),
+    branch: (user.branch || "Main Branch").trim(),
+    joinDate: new Date().toISOString().slice(0, 10),
+  };
+  return employee;
+}
+
+function mergeAttendanceRoster(primary: Employee[], extra: Employee[]): Employee[] {
+  const merged: Employee[] = [];
+  const seenIds = new Set<string>();
+
+  for (const employee of [...primary, ...extra]) {
+    const role = employee.role || "employee";
+    if (role !== "employee" && role !== "salesperson") continue;
+    const idKey = normalizeAttendanceIdentity(employee.id);
+    if (idKey && seenIds.has(idKey)) continue;
+    merged.push(employee);
+    if (idKey) seenIds.add(idKey);
+  }
+
+  return merged;
+}
+
+async function loadAttendanceRoster(fallbackCompany?: { id?: string; name?: string }): Promise<Employee[]> {
+  const [employees, users] = await Promise.all([
+    getEmployees().catch(() => [] as Employee[]),
+    getUsersRemote().catch(() => [] as DolibarrUser[]),
+  ]);
+  const userEmployees = users
+    .map((entry) => mapAttendanceUserToEmployee(entry, fallbackCompany))
+    .filter((entry): entry is Employee => Boolean(entry));
+  return mergeAttendanceRoster(employees, userEmployees);
 }
 
 function buildAdminAttendanceStatuses(
@@ -600,7 +685,9 @@ export default function AttendanceScreen() {
     const [localAttendance, currentCheckIn, employees] = await Promise.all([
       getAttendance(),
       isCheckedIn(),
-      shouldLoadRoster ? getEmployees().catch(() => [] as Employee[]) : Promise.resolve([] as Employee[]),
+      shouldLoadRoster
+        ? loadAttendanceRoster({ id: company?.id, name: company?.name }).catch(() => [] as Employee[])
+        : Promise.resolve([] as Employee[]),
     ]);
     if (requestId !== loadBaseDataRequestRef.current) return;
 
@@ -645,7 +732,7 @@ export default function AttendanceScreen() {
     if (resolvedCheckIn !== currentCheckIn) {
       await setCheckedIn(resolvedCheckIn);
     }
-  }, [canReviewSignIns, isAdminAttendanceManager, user?.id, user?.name]);
+  }, [canReviewSignIns, company?.id, company?.name, isAdminAttendanceManager, user?.id, user?.name]);
   // === WEBSOCKET HOOK CALL ===
   // Note: user?.role 'admin' ya 'manager' dono ke liye check kiya hai
   useAttendanceWebSocket(isAdminAttendanceManager || user?.role === "manager", loadBaseData);

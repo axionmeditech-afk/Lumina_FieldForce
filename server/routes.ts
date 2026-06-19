@@ -11508,10 +11508,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const conn = await getMySqlPool();
       const requestUser = getRequestUser(req);
       const companyId = (await resolveRequestCompanyId(req)) || requestUser?.companyId || DEFAULT_COMPANY_ID;
-      const companyName = requestUser?.companyName || DEFAULT_COMPANY_NAME;
-      let rows: any[] = [];
+      const companies = await listCompanyProfilesFromMySqlRaw();
+      const companyById = new Map(companies.map((company) => [company.id, company]));
       try {
-        [rows] = await conn.query<any[]>(
+        await ensureAccessRequestAssignmentColumns();
+      } catch {
+        // Continue with the current schema; the access request reader will handle missing data.
+      }
+
+      let userRows: any[] = [];
+      try {
+        [userRows] = await conn.query<any[]>(
           `SELECT
             u.rowid as id,
             u.login,
@@ -11530,7 +11537,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
            WHERE u.statut = 1`
         );
       } catch {
-        [rows] = await conn.query<any[]>(
+        [userRows] = await conn.query<any[]>(
           `SELECT
             rowid as id,
             login,
@@ -11548,44 +11555,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
            WHERE statut = 1`
         );
       }
-      const mapped = rows.map((r: any) => ({
-        id: String(r.id),
-        rowid: String(r.id),
-        user_id: String(r.id),
-        login: r.login || "",
-        firstname: r.firstname || "",
-        lastname: r.lastname || "",
-        name: `${r.firstname || ""} ${r.lastname || ""}`.trim() || r.login || "Employee",
-        email: r.email || "",
-        phone: r.user_mobile || r.office_phone || "",
-        town: "",
-        address: "",
-        zip: "",
-        statut: r.statut,
-        status: r.statut,
-        companyId,
-        companyName,
-        employeeCategory:
-          String(r.employee_category || "").toLowerCase() === "on_field"
-            ? "on_field"
-            : "fixed_location",
-        employee_category:
-          String(r.employee_category || "").toLowerCase() === "on_field"
-            ? "on_field"
-            : "fixed_location",
-        role:
-          Number(r.admin || 0) === 1
-            ? "admin"
-            : String(r.employee_category || "").toLowerCase() === "on_field"
-              ? "salesperson"
-              : "employee",
-        department:
-          String(r.employee_category || "").toLowerCase() === "on_field"
-            ? "On Field Employees"
-            : "Office Employees",
-        branch: requestUser?.branch || "Main Branch",
-      }));
-      res.json({ items: mapped });
+      const dolibarrUserByEmail = new Map<string, any>();
+      const dolibarrUserByLogin = new Map<string, any>();
+      for (const row of userRows || []) {
+        const email = normalizeEmail(String(row.email || ""));
+        const login = normalizeLoginKey(String(row.login || ""));
+        if (email) dolibarrUserByEmail.set(email, row);
+        if (login) dolibarrUserByLogin.set(login, row);
+      }
+
+      const approvedRequests = await listAccessRequestsFromMySql("approved");
+      const mappedByScope = new Map<string, Record<string, unknown>>();
+      for (const request of approvedRequests) {
+        const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
+        if (!assignedCompanyIds.length) continue;
+        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
+
+        const email = normalizeEmail(request.email || "");
+        const loginKey = normalizeLoginKey(email.split("@")[0] || "");
+        const dolibarrUser =
+          (email && dolibarrUserByEmail.get(email)) ||
+          (loginKey && dolibarrUserByLogin.get(loginKey)) ||
+          null;
+        const firstName = normalizeWhitespace(String(dolibarrUser?.firstname || ""));
+        const lastName = normalizeWhitespace(String(dolibarrUser?.lastname || ""));
+        const displayName =
+          normalizeWhitespace(request.name) ||
+          normalizeWhitespace(`${firstName} ${lastName}`) ||
+          normalizeWhitespace(String(dolibarrUser?.login || "")) ||
+          email ||
+          "Employee";
+        if (isLegacyDemoProfileName(displayName)) continue;
+
+        const role = normalizeRole(request.approvedRole || request.requestedRole || "employee");
+        const employeeCategory = isSalesRole(role) ? "on_field" : "fixed_location";
+        const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
+        for (const assignedCompanyId of targetCompanyIds) {
+          const company = companyById.get(assignedCompanyId);
+          const id = dolibarrUser?.id || dolibarrUser?.rowid || `access_${request.id}`;
+          const key = `${assignedCompanyId}:${email || String(id) || displayName.toLowerCase()}`;
+          mappedByScope.set(key, {
+            id: String(id),
+            rowid: dolibarrUser?.id || dolibarrUser?.rowid ? String(dolibarrUser.id || dolibarrUser.rowid) : undefined,
+            user_id: dolibarrUser?.id || dolibarrUser?.rowid ? String(dolibarrUser.id || dolibarrUser.rowid) : undefined,
+            login: normalizeWhitespace(String(dolibarrUser?.login || email.split("@")[0] || "")),
+            firstname: firstName || displayName.split(" ")[0] || "",
+            lastname: lastName || displayName.split(" ").slice(1).join(" ") || "",
+            name: displayName,
+            email,
+            phone: normalizeWhitespace(String(dolibarrUser?.user_mobile || dolibarrUser?.office_phone || "")),
+            town: "",
+            address: "",
+            zip: "",
+            statut: dolibarrUser?.statut ?? 1,
+            status: dolibarrUser?.statut ?? 1,
+            companyId: assignedCompanyId,
+            companyName:
+              company?.name ||
+              (assignedCompanyId === requestUser?.companyId ? requestUser?.companyName : "") ||
+              request.requestedCompanyName ||
+              assignedCompanyId,
+            assignedCompanyIds,
+            employeeCategory,
+            employee_category: employeeCategory,
+            role,
+            department: normalizeDepartmentForRole(role, request.requestedDepartment),
+            branch:
+              normalizeWhitespace(request.requestedBranch || "") ||
+              company?.primaryBranch ||
+              requestUser?.branch ||
+              "Main Branch",
+            managerId: request.assignedManagerId || undefined,
+            managerName: request.assignedManagerName || undefined,
+            stockistId: request.assignedStockistId || undefined,
+            stockistName: request.assignedStockistName || undefined,
+          });
+        }
+      }
+
+      res.json({ items: Array.from(mappedByScope.values()) });
     } catch (e) {
       res.json({ items: [] });
     }
