@@ -7245,8 +7245,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       error instanceof Error ? error.message : error
     );
   });
-  app.post("/api/login", ...);
-  app.get("/api/users", ...);
   app.get("/api/health", (_req, res) => {
     res.json({
       ok: true,
