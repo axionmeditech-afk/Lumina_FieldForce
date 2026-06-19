@@ -11507,7 +11507,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const conn = await getMySqlPool();
       const requestUser = getRequestUser(req);
-      const companyId = (await resolveRequestCompanyId(req)) || requestUser?.companyId || DEFAULT_COMPANY_ID;
+      const requestedCompanyId = normalizeWhitespace(
+        typeof req.query.companyId === "string" ? req.query.companyId : ""
+      );
+      const allowedCompanyIds = new Set(
+        normalizeCompanyIds(requestUser?.companyIds || (requestUser?.companyId ? [requestUser.companyId] : []))
+      );
+      const canUseRequestedCompany =
+        requestedCompanyId &&
+        (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
+      const companyId =
+        (canUseRequestedCompany ? requestedCompanyId : "") ||
+        (await resolveRequestCompanyId(req)) ||
+        requestUser?.companyId ||
+        DEFAULT_COMPANY_ID;
       const companies = await listCompanyProfilesFromMySqlRaw();
       const companyById = new Map(companies.map((company) => [company.id, company]));
       try {

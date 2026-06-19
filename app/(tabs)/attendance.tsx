@@ -384,7 +384,7 @@ function mergeAttendanceRoster(primary: Employee[], extra: Employee[]): Employee
 async function loadAttendanceRoster(fallbackCompany?: { id?: string; name?: string }): Promise<Employee[]> {
   const [employees, users] = await Promise.all([
     getEmployees().catch(() => [] as Employee[]),
-    getUsersRemote().catch(() => [] as DolibarrUser[]),
+    getUsersRemote({ companyId: fallbackCompany?.id }).catch(() => [] as DolibarrUser[]),
   ]);
   const userEmployees = users
     .map((entry) => mapAttendanceUserToEmployee(entry, fallbackCompany))

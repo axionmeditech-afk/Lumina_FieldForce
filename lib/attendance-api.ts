@@ -2961,8 +2961,11 @@ export async function saveWeekendConfigRemote(weekendDays: number[]): Promise<an
 
 
 // --- Users ---
-export async function getUsersRemote(): Promise<DolibarrUser[]> {
-  const data = await fetchJson<{ items?: DolibarrUser[] }>("/users", { method: "GET" });
+export async function getUsersRemote(options?: { companyId?: string | null }): Promise<DolibarrUser[]> {
+  const params = new URLSearchParams();
+  if (options?.companyId) params.set("companyId", options.companyId);
+  const query = params.toString();
+  const data = await fetchJson<{ items?: DolibarrUser[] }>(`/users${query ? `?${query}` : ""}`, { method: "GET" });
   return Array.isArray(data.items) ? data.items : [];
 }
 
