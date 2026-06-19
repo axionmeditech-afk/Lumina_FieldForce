@@ -410,6 +410,7 @@ function buildAdminAttendanceStatuses(
   for (const employee of employees) {
     const employeeRole = employee.role || "employee";
     if (employeeRole !== "employee" && employeeRole !== "salesperson") continue;
+    if (!employee.companyId || employee.companyId === "workspace_default") continue;
     const nameKey = normalizeAttendanceIdentity(employee.name);
     const roleKey = normalizeAttendanceIdentity(employeeRole);
     const groupKey = nameKey ? `name:${roleKey}:${nameKey}` : `id:${employee.id}`;
@@ -597,7 +598,7 @@ export default function AttendanceScreen() {
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [pendingSignIns, setPendingSignIns] = useState<AttendanceRecord[]>([]);
   const [adminAttendanceStatuses, setAdminAttendanceStatuses] = useState<AdminAttendanceStatus[]>([]);
-  const [expandedAttendanceCompanyIds, setExpandedAttendanceCompanyIds] = useState<Set<string>>(new Set());
+  const [collapsedAttendanceCompanyIds, setCollapsedAttendanceCompanyIds] = useState<Set<string>>(new Set());
   const [geofences, setGeofences] = useState<Geofence[]>([]);
   const [geofencesLoaded, setGeofencesLoaded] = useState(false);
   const [evaluation, setEvaluation] = useState<GeofenceEvaluation>({
@@ -1864,12 +1865,12 @@ setOfficeLocationName((current) => current.trim() || result.label);
       id,
       name: entries[0]?.companyName || (id === company?.id ? company?.name : null) || "Workspace",
       entries,
-      checkedInCount: entries.filter((entry) => entry.status === "checked_in").length,
+      checkedInCount: entries.filter((entry) => entry.status === "checked_in" || entry.status === "checked_out").length,
     }));
   }, [adminAttendanceStatuses, company?.id, company?.name]);
   const hasMultipleAttendanceGroups = adminAttendanceGroups.length > 1;
   const toggleAttendanceGroup = useCallback((groupId: string) => {
-    setExpandedAttendanceCompanyIds((current) => {
+    setCollapsedAttendanceCompanyIds((current) => {
       const next = new Set(current);
       if (next.has(groupId)) {
         next.delete(groupId);
@@ -2042,8 +2043,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
                 </View>
               ) : (
                 adminAttendanceGroups.map((group, groupIndex) => {
-                  const groupOpen =
-                    !hasMultipleAttendanceGroups || expandedAttendanceCompanyIds.has(group.id);
+                  const groupOpen = !collapsedAttendanceCompanyIds.has(group.id);
                   return (
                     <View
                       key={`admin_attendance_group_${group.id}`}
