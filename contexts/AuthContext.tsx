@@ -7,6 +7,7 @@ import {
   logoutUser,
   seedDataIfNeeded,
   registerUser,
+  deleteAuthUserByEmail,
   getCurrentCompanyProfile,
   syncBackendAuthenticatedUser,
   updateCompanyProfile,
@@ -229,7 +230,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { ok: true, message: result.message, authenticated: true };
     }
 
-    await submitAccessRequestToBackend(
+    const backendResult = await submitAccessRequestToBackend(
       {
         name: input.name,
         email: input.email,
@@ -241,8 +242,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         phone: input.phone,
         pincode: input.pincode,
       },
-      { timeoutMs: 2600 }
+      { timeoutMs: 3500 }
     );
+
+    if (backendResult && !backendResult.ok) {
+      await deleteAuthUserByEmail(input.email);
+      return {
+        ok: false,
+        message: backendResult.message || "Signup request rejected by backend.",
+        authenticated: false,
+      };
+    }
 
     return {
       ok: true,

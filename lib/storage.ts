@@ -2274,11 +2274,8 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
     return { ok: false, message: "Password must be at least 6 characters" };
   }
 
-  const authUsers = await getAuthUsersRaw();
-  const alreadyExists = authUsers.some((entry) => normalizeEmail(entry.user.email) === email);
-  if (alreadyExists) {
-    return { ok: false, message: "User already exists for this email" };
-  }
+  const rawAuthUsers = await getAuthUsersRaw();
+  const authUsers = rawAuthUsers.filter((entry) => normalizeEmail(entry.user.email) !== email);
 
   const role = normalizeRole(input.role);
   const now = new Date().toISOString();
@@ -2379,6 +2376,14 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
     message: "Signup request submitted. Wait for admin approval before signing in.",
   };
 }
+
+export async function deleteAuthUserByEmail(email: string): Promise<void> {
+  const normalized = normalizeEmail(email);
+  const rawAuthUsers = await getAuthUsersRaw();
+  const filtered = rawAuthUsers.filter((entry) => normalizeEmail(entry.user.email) !== normalized);
+  await setAuthUsersRaw(filtered);
+}
+
 
 export async function getUserAccessRequests(
   status?: UserAccessRequest["status"]

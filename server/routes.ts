@@ -6994,6 +6994,26 @@ async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord 
   }
 }
 
+async function checkAuthUserForSignup(email: string): Promise<AuthUserRecord | null> {
+  const normalized = normalizeEmail(email);
+  if (!isMySqlStateEnabled()) {
+    return authUsersByEmail.get(normalized) ?? null;
+  }
+  const record = await getAuthUserFromMySqlByEmail(normalized);
+  if (!record) {
+    removeAuthUserByEmail(normalized);
+    return null;
+  }
+  const latestRequest = await getLatestAccessRequestByEmailFromMySql(normalized);
+  const hydratedRecord: AuthUserRecord = {
+    ...record,
+    user: await mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
+    approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
+  };
+  setAuthUserRecord(hydratedRecord);
+  return hydratedRecord;
+}
+
 type ActiveAuthSessionRecord = {
   userId: string;
   email: string;
@@ -8059,7 +8079,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     const normalizedRole = normalizeRole(role);
     const normalizedCompanyName = normalizeCompanyName(companyName);
-    const existingRecord = await syncAuthUserCacheForEmail(normalizedEmail);
+    const existingRecord = await checkAuthUserForSignup(normalizedEmail);
     if (existingRecord && resolveApprovalStatus(existingRecord) === "approved") {
       res.status(409).json({ message: "User already exists for this email" });
       return;
@@ -8166,7 +8186,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const normalizedCompanyName = normalizeCompanyName(companyName);
     const adminAlreadyExists = await hasAnyApprovedAdmin();
 
-    const existingRecord = await syncAuthUserCacheForEmail(normalizedEmail);
+    const existingRecord = await checkAuthUserForSignup(normalizedEmail);
     const existingStatus = existingRecord ? resolveApprovalStatus(existingRecord) : null;
     if (existingRecord && existingStatus === "approved") {
       res.status(409).json({ message: "User already exists for this email" });
@@ -8668,7 +8688,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return;
       }
 
-      const existingRecord = await syncAuthUserCacheForEmail(normalizedEmail);
+      const existingRecord = await checkAuthUserForSignup(normalizedEmail);
       if (existingRecord) {
         const existingStatus = resolveApprovalStatus(existingRecord);
         if (existingStatus === "approved") {

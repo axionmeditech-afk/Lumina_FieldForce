@@ -885,8 +885,11 @@ export async function submitAccessRequestToBackend(
       },
       timeoutMs
     );
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Access request failed.",
+    };
   }
 }
 
