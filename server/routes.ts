@@ -10020,52 +10020,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const activeAttendance = isMySqlStateEnabled() 
           ? await findActiveAttendanceInMySql(entry.userId).catch(() => null)
           : await storage.findActiveAttendance(entry.userId);
-
         if (activeAttendance) {
-          // If checked in but now outside > 500m and GPS is accurate
-          if (!status.inside && status.distanceMeters > 500 && (entry.accuracy ?? 1000) <= 100) {
-            const now = entry.capturedAt ?? new Date().toISOString();
-            const checkoutRecord: AttendanceRecord = {
-              id: randomUUID(),
-              userId: entry.userId,
-              userName: activeAttendance.userName,
-              companyId: activeAttendance.companyId,
-              type: "checkout",
-              timestamp: now,
-              timestampServer: new Date().toISOString(),
-              location: { lat: entry.latitude, lng: entry.longitude },
-              geofenceId: activeAttendance.geofenceId,
-              geofenceName: activeAttendance.geofenceName,
-              photoUrl: null,
-              deviceId: activeAttendance.deviceId,
-              isInsideGeofence: false,
-              source: "synced",
-              notes: `Auto-checkout due to geofence exit (distance: ${Math.round(status.distanceMeters)}m, accuracy: ${Math.round(entry.accuracy ?? 0)}m)`,
-              approvalStatus: "approved",
-              approvalReviewedById: "system",
-              approvalReviewedByName: "System",
-              approvalReviewedAt: now,
-            };
-            await storage.createAttendance(checkoutRecord);
-            if (isMySqlStateEnabled()) {
-              try { await insertAttendanceInMySql(checkoutRecord); } catch(e){}
-            }
-            const dolibarrConfig = await resolveDolibarrConfigForUser(entry.userId);
-            void syncAttendanceWithDolibarr(checkoutRecord, dolibarrConfig);
+          // Verify that the location log was captured AFTER the active check-in
+          const logTime = entry.capturedAt ? new Date(entry.capturedAt).getTime() : Date.now();
+          const checkInTime = new Date(activeAttendance.timestamp).getTime();
+          if (logTime > checkInTime) {
+            // If checked in but now outside > 500m and GPS is accurate
+            if (!status.inside && status.distanceMeters > 500 && (entry.accuracy ?? 1000) <= 100) {
+              const now = entry.capturedAt ?? new Date().toISOString();
+              const checkoutRecord: AttendanceRecord = {
+                id: randomUUID(),
+                userId: entry.userId,
+                userName: activeAttendance.userName,
+                companyId: activeAttendance.companyId,
+                type: "checkout",
+                timestamp: now,
+                timestampServer: new Date().toISOString(),
+                location: { lat: entry.latitude, lng: entry.longitude },
+                geofenceId: activeAttendance.geofenceId,
+                geofenceName: activeAttendance.geofenceName,
+                photoUrl: null,
+                deviceId: activeAttendance.deviceId,
+                isInsideGeofence: false,
+                source: "synced",
+                notes: `Auto-checkout due to geofence exit (distance: ${Math.round(status.distanceMeters)}m, accuracy: ${Math.round(entry.accuracy ?? 0)}m)`,
+                approvalStatus: "approved",
+                approvalReviewedById: "system",
+                approvalReviewedByName: "System",
+                approvalReviewedAt: now,
+              };
+              await storage.createAttendance(checkoutRecord);
+              if (isMySqlStateEnabled()) {
+                try { await insertAttendanceInMySql(checkoutRecord); } catch(e){}
+              }
+              const dolibarrConfig = await resolveDolibarrConfigForUser(entry.userId);
+              void syncAttendanceWithDolibarr(checkoutRecord, dolibarrConfig);
 
-            const notification = {
-              id: randomUUID(),
-              title: "Auto-Checkout Executed",
-              body: "You were automatically checked out for leaving the geofenced area.",
-              kind: "alert" as const,
-              audience: "all" as const,
-              audienceUserIds: [entry.userId],
-              readByIds: [] as string[],
-              createdById: "system",
-              createdByName: "System",
-              createdAt: now,
-            };
-            try { await insertNotificationInMySql(notification); } catch(e){}
+              const notification = {
+                id: randomUUID(),
+                title: "Auto-Checkout Executed",
+                body: "You were automatically checked out for leaving the geofenced area.",
+                kind: "alert" as const,
+                audience: "all" as const,
+                audienceUserIds: [entry.userId],
+                readByIds: [] as string[],
+                createdById: "system",
+                createdByName: "System",
+                createdAt: now,
+              };
+              try { await insertNotificationInMySql(notification); } catch(e){}
+            }
           }
         } else {
           // --- Geofence Enter Notification ---
@@ -11568,60 +11572,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
            WHERE statut = 1`
         );
       }
-      const dolibarrUserByEmail = new Map<string, any>();
-      const dolibarrUserByLogin = new Map<string, any>();
-      for (const row of userRows || []) {
-        const email = normalizeEmail(String(row.email || ""));
-        const login = normalizeLoginKey(String(row.login || ""));
-        if (email) dolibarrUserByEmail.set(email, row);
-        if (login) dolibarrUserByLogin.set(login, row);
+      const approvedRequests = await listAccessRequestsFromMySql("approved");
+      const requestByEmail = new Map<string, AccessRequestRecord>();
+      const requestByLogin = new Map<string, AccessRequestRecord>();
+      for (const r of approvedRequests) {
+        const emailKey = normalizeEmail(r.email || "");
+        const loginKey = normalizeLoginKey(emailKey.split("@")[0] || "");
+        if (emailKey && !requestByEmail.has(emailKey)) {
+          requestByEmail.set(emailKey, r);
+        }
+        if (loginKey && !requestByLogin.has(loginKey)) {
+          requestByLogin.set(loginKey, r);
+        }
       }
 
-      const approvedRequests = await listAccessRequestsFromMySql("approved");
       const mappedByScope = new Map<string, Record<string, unknown>>();
-      for (const request of approvedRequests) {
+      for (const row of userRows || []) {
+        const email = normalizeEmail(String(row.email || ""));
+        const loginKey = normalizeLoginKey(String(row.login || ""));
+        
+        // Find matching access request to get company assignments
+        const request = (email && requestByEmail.get(email)) || (loginKey && requestByLogin.get(loginKey)) || null;
+        if (!request) continue;
+
         const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
         if (!assignedCompanyIds.length) continue;
         if (companyId && !assignedCompanyIds.includes(companyId)) continue;
 
-        const email = normalizeEmail(request.email || "");
-        const loginKey = normalizeLoginKey(email.split("@")[0] || "");
-        const dolibarrUser =
-          (email && dolibarrUserByEmail.get(email)) ||
-          (loginKey && dolibarrUserByLogin.get(loginKey)) ||
-          null;
-        const firstName = normalizeWhitespace(String(dolibarrUser?.firstname || ""));
-        const lastName = normalizeWhitespace(String(dolibarrUser?.lastname || ""));
+        const firstName = normalizeWhitespace(String(row.firstname || ""));
+        const lastName = normalizeWhitespace(String(row.lastname || ""));
         const displayName =
           normalizeWhitespace(request.name) ||
           normalizeWhitespace(`${firstName} ${lastName}`) ||
-          normalizeWhitespace(String(dolibarrUser?.login || "")) ||
+          normalizeWhitespace(String(row.login || "")) ||
           email ||
           "Employee";
         if (isLegacyDemoProfileName(displayName)) continue;
 
-        const role = normalizeRole(request.approvedRole || request.requestedRole || "employee");
-        const employeeCategory = isSalesRole(role) ? "on_field" : "fixed_location";
+        // Check whether they are employee or salesperson using the employee profile table
+        let role: string = "employee";
+        if (row.employee_category === "on_field") {
+          role = "salesperson";
+        } else if (row.employee_category === "fixed_location") {
+          role = "employee";
+        } else {
+          // Fallback: decide from admin flag, job title, or request
+          let mappedRole = Number(row.admin || 0) === 1 ? "admin" : null;
+          if (!mappedRole && row.job) {
+            const jobStr = String(row.job).toLowerCase();
+            if (jobStr.includes("on field") || jobStr.includes("sales")) {
+              mappedRole = "salesperson";
+            } else if (jobStr.includes("fixed") || jobStr.includes("office") || jobStr.includes("support") || jobStr.includes("hr")) {
+              mappedRole = "employee";
+            }
+          }
+          role = mappedRole || request.approvedRole || request.requestedRole || "salesperson";
+        }
+        const finalRole = normalizeRole(role);
+        const employeeCategory = isSalesRole(finalRole) ? "on_field" : "fixed_location";
+
         const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
         for (const assignedCompanyId of targetCompanyIds) {
           const company = companyById.get(assignedCompanyId);
-          const id = dolibarrUser?.id || dolibarrUser?.rowid || `access_${request.id}`;
+          const id = row.id || `access_${request.id}`;
           const key = `${assignedCompanyId}:${email || String(id) || displayName.toLowerCase()}`;
           mappedByScope.set(key, {
             id: String(id),
-            rowid: dolibarrUser?.id || dolibarrUser?.rowid ? String(dolibarrUser.id || dolibarrUser.rowid) : undefined,
-            user_id: dolibarrUser?.id || dolibarrUser?.rowid ? String(dolibarrUser.id || dolibarrUser.rowid) : undefined,
-            login: normalizeWhitespace(String(dolibarrUser?.login || email.split("@")[0] || "")),
+            rowid: row.id ? String(row.id) : undefined,
+            user_id: row.id ? String(row.id) : undefined,
+            login: normalizeWhitespace(String(row.login || email.split("@")[0] || "")),
             firstname: firstName || displayName.split(" ")[0] || "",
             lastname: lastName || displayName.split(" ").slice(1).join(" ") || "",
             name: displayName,
             email,
-            phone: normalizeWhitespace(String(dolibarrUser?.user_mobile || dolibarrUser?.office_phone || "")),
+            phone: normalizeWhitespace(String(row.user_mobile || row.office_phone || "")),
             town: "",
             address: "",
             zip: "",
-            statut: dolibarrUser?.statut ?? 1,
-            status: dolibarrUser?.statut ?? 1,
+            statut: row.statut ?? 1,
+            status: row.statut ?? 1,
             companyId: assignedCompanyId,
             companyName:
               company?.name ||
@@ -11631,8 +11660,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             assignedCompanyIds,
             employeeCategory,
             employee_category: employeeCategory,
-            role,
-            department: normalizeDepartmentForRole(role, request.requestedDepartment),
+            role: finalRole,
+            department: normalizeDepartmentForRole(finalRole, request.requestedDepartment || row.job),
             branch:
               normalizeWhitespace(request.requestedBranch || "") ||
               company?.primaryBranch ||

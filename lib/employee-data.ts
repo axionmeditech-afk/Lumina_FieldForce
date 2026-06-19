@@ -172,8 +172,8 @@ function scopeUsersToCurrentCompany(users: DolibarrUser[], currentUser: AppUser 
   if (!currentUser?.companyId) return users;
   return users.map((user) => ({
     ...user,
-    companyId: currentUser.companyId,
-    companyName: currentUser.companyName,
+    companyId: user.companyId || currentUser.companyId,
+    companyName: user.companyName || currentUser.companyName,
   }));
 }
 

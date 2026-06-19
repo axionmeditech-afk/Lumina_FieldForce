@@ -62,6 +62,7 @@ function buildPoolConfig(): PoolOptions | null {
     queueLimit: 0,
     namedPlaceholders: true,
     charset: "utf8mb4",
+    timezone: "+00:00",
   };
 
   if (sslEnabled) {
