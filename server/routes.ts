@@ -3032,6 +3032,28 @@ async function listAttendanceTodayFromMySql(userId: string): Promise<AttendanceR
   return rows.map(mapAttendanceRow);
 }
 
+async function listAttendanceTodayFromMySqlAll(companyId?: string): Promise<AttendanceRecord[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureAttendanceTable();
+  const range = parseDateKeyToUtcRange(toMumbaiDateKey(new Date()));
+  if (!range) return [];
+  const conn = await getMySqlPool();
+  const cleanCompanyId = companyId ? String(companyId).trim() : "";
+  let query = `SELECT * FROM lff_attendance WHERE \`timestamp\` BETWEEN ? AND ?`;
+  const params: any[] = [range.start, range.end];
+  if (cleanCompanyId) {
+    query += ` AND company_id = ?`;
+    params.push(cleanCompanyId);
+  }
+  query += ` ORDER BY \`timestamp\` DESC`;
+  let [rows] = await conn.query<any[]>(query, params);
+  if ((!rows || rows.length === 0) && !attendanceLegacyStateHydrated) {
+    await hydrateAttendanceFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(query, params);
+  }
+  return rows.map(mapAttendanceRow);
+}
+
 async function listAttendanceFromMySql(limit = 10000): Promise<AttendanceRecord[]> {
   if (!isMySqlStateEnabled()) return [];
   await ensureAttendanceTable();
@@ -10952,6 +10974,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ? await listAttendanceTodayFromMySql(userId).catch(() => storage.getAttendanceToday(userId))
       : await storage.getAttendanceToday(userId);
     res.json(records);
+  });
+
+  app.get("/api/attendance/company/today", requireAuth, async (req, res) => {
+    try {
+      const requestUser = getRequestUser(req);
+      const requestedCompanyId = normalizeWhitespace(
+        typeof req.query.company_id === "string" ? req.query.company_id : ""
+      );
+      const allowedCompanyIds = new Set(
+        normalizeCompanyIds(requestUser?.companyIds || (requestUser?.companyId ? [requestUser.companyId] : []))
+      );
+      const canUseRequestedCompany =
+        requestedCompanyId &&
+        (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
+      const companyId =
+        (canUseRequestedCompany ? requestedCompanyId : "") ||
+        (await resolveRequestCompanyId(req)) ||
+        requestUser?.companyId ||
+        DEFAULT_COMPANY_ID;
+
+      const records = isMySqlStateEnabled()
+        ? await listAttendanceTodayFromMySqlAll(companyId)
+        : [];
+      res.json(records);
+    } catch (error) {
+      console.error("Failed to list company attendance today", error);
+      res.status(500).json({ message: "Failed to list company attendance" });
+    }
   });
 
   app.get("/api/attendance/history", requireAuth, async (req, res) => {

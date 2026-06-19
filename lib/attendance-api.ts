@@ -1018,6 +1018,13 @@ export async function getTodayAttendance(userId: string): Promise<AttendanceReco
   });
 }
 
+export async function getCompanyAttendanceToday(companyId?: string): Promise<AttendanceRecord[]> {
+  const query = companyId ? `?company_id=${encodeURIComponent(companyId)}` : "";
+  return fetchJson<AttendanceRecord[]>(`/attendance/company/today${query}`, {
+    method: "GET",
+  });
+}
+
 export async function getAttendanceHistory(userId: string): Promise<AttendanceRecord[]> {
   return fetchJson<AttendanceRecord[]>(
     `/attendance/history?user_id=${encodeURIComponent(userId)}`,

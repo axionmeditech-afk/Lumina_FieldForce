@@ -51,6 +51,7 @@ import {
   getApiBaseUrlCandidates,
   getUserGeofences,
   getUsersRemote,
+  getCompanyAttendanceToday,
   queueAttendanceRequest,
   searchMapplsAutosuggest,
   searchMapplsTextSearch,
@@ -683,8 +684,11 @@ export default function AttendanceScreen() {
     if (!user?.id) return;
     const requestId = ++loadBaseDataRequestRef.current;
     const shouldLoadRoster = canReviewSignIns || isAdminAttendanceManager;
-    const [localAttendance, currentCheckIn, employees] = await Promise.all([
+    const [localAttendance, companyAttendance, currentCheckIn, employees] = await Promise.all([
       getAttendance(),
+      isAdminAttendanceManager
+        ? getCompanyAttendanceToday(company?.id || undefined).catch(() => [] as AttendanceRecord[])
+        : Promise.resolve([] as AttendanceRecord[]),
       isCheckedIn(),
       shouldLoadRoster
         ? loadAttendanceRoster({ id: company?.id, name: company?.name }).catch(() => [] as Employee[])
@@ -700,7 +704,7 @@ export default function AttendanceScreen() {
     setRecords(userRecords);
     if (shouldLoadRoster) {
       if (isAdminAttendanceManager) {
-        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(localAttendance, employees, user.id));
+        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id));
       }
       if (!canReviewSignIns) {
         setPendingSignIns([]);
