@@ -1884,6 +1884,23 @@ setOfficeLocationName((current) => current.trim() || result.label);
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    if (company?.id && adminAttendanceGroups.length > 0) {
+      setCollapsedAttendanceCompanyIds((current) => {
+        const next = new Set(current);
+        // Ensure active company is open (not collapsed)
+        next.delete(company.id);
+        // Collapse other groups by default
+        for (const g of adminAttendanceGroups) {
+          if (g.id !== company.id) {
+            next.add(g.id);
+          }
+        }
+        return next;
+      });
+    }
+  }, [company?.id, adminAttendanceGroups]);
   const officeMapPlannedStops = useMemo<PlannedStopPoint[]>(() => {
     const stops: PlannedStopPoint[] = [];
     if (officeLocationDraft) {

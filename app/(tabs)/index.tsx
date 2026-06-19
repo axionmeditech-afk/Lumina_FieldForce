@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -41,7 +41,8 @@ import {
   getTeams,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import { getTodayAttendance } from "@/lib/attendance-api";
+import { getTodayAttendance, getCompanyAttendanceToday, getUsersRemote } from "@/lib/attendance-api";
+import type { DolibarrUser } from "@/lib/attendance-api";
 import type {
   AppNotification,
   AttendanceRecord,
@@ -586,10 +587,82 @@ function buildActivityFeed(
     .slice(0, 10);
 }
 
+function normalizeRosterStatus(value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return true;
+  const numeric = Number(value);
+  if (!Number.isNaN(numeric)) return numeric === 1;
+  const text = String(value).trim().toLowerCase();
+  return text !== "0" && text !== "false" && text !== "disabled";
+}
+
+function mapUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?: string; name?: string }): Employee | null {
+  if (!normalizeRosterStatus(user.statut ?? user.status)) return null;
+  const activeCompanyId = (fallbackCompany?.id || "").trim();
+  const assignedCompanyIds = Array.isArray(user.assignedCompanyIds)
+    ? user.assignedCompanyIds.map((id) => id.trim()).filter(Boolean)
+    : [];
+  if (assignedCompanyIds.length > 0 && activeCompanyId && !assignedCompanyIds.includes(activeCompanyId)) {
+    return null;
+  }
+  if (Array.isArray(user.assignedCompanyIds) && assignedCompanyIds.length === 0) {
+    return null;
+  }
+
+  const first = (user.firstname || "").trim();
+  const last = (user.lastname || "").trim();
+  const name = (user.name || `${first} ${last}`.trim() || user.login || "").trim();
+  if (!name) return null;
+
+  const rawCategory = (user.employeeCategory || user.employee_category || "").trim().toLowerCase();
+  const role =
+    user.role === "salesperson" || rawCategory === "on_field"
+      ? "salesperson"
+      : user.role === "employee" || rawCategory === "fixed_location"
+        ? "employee"
+        : null;
+  if (!role) return null;
+
+  const idValue =
+    String(user.id || user.rowid || user.user_id || user.login || user.email || name).trim();
+  if (!idValue) return null;
+
+  const employee: Employee & { companyName?: string } = {
+    id: String(user.id || user.rowid || user.user_id || `user_${idValue}`),
+    companyId: (user.companyId || fallbackCompany?.id || "workspace_default").trim(),
+    companyName: (user.companyName || fallbackCompany?.name || "").trim(),
+    name,
+    role,
+    employeeCategory: role === "salesperson" ? "on_field" : "fixed_location",
+    department: role === "salesperson" ? "On Field Employees" : "Office Employees",
+    status: "active",
+    email: (user.email || "").trim().toLowerCase(),
+    phone: (user.phone || "").trim(),
+    branch: (user.branch || "Main Branch").trim(),
+    joinDate: new Date().toISOString().slice(0, 10),
+  };
+  return employee;
+}
+
+function mergeDashboardRoster(primary: Employee[], extra: Employee[]): Employee[] {
+  const merged: Employee[] = [];
+  const seenIds = new Set<string>();
+
+  for (const employee of [...primary, ...extra]) {
+    const role = employee.role || "employee";
+    if (role !== "employee" && role !== "salesperson") continue;
+    const idKey = (employee.id || "").trim().toLowerCase();
+    if (idKey && seenIds.has(idKey)) continue;
+    merged.push(employee);
+    if (idKey) seenIds.add(idKey);
+  }
+
+  return merged;
+}
+
 export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
-  const { user } = useAuth();
+  const { user, company } = useAuth();
   const scrollRef = useRef<ScrollView | null>(null);
   const [clockNow, setClockNow] = useState(() => new Date());
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -651,9 +724,34 @@ export default function DashboardScreen() {
 
       try {
         setClockNow(new Date());
+        const companyId = company?.id || user.companyId;
+        const isAdminUser = user?.role === "admin" || user?.role === "manager";
+
+        // Query employees roster dynamically for the selected company if administrator
+        const employeesPromise = isAdminUser
+          ? getUsersRemote({ companyId }).then(async (users) => {
+              const mapped = users
+                .map((entry) => mapUserToEmployee(entry, { id: companyId, name: company?.name || "" }))
+                .filter((entry): entry is Employee => Boolean(entry));
+              const local = await getEmployees().catch(() => [] as Employee[]);
+              const merged = mergeDashboardRoster(local, mapped);
+              return merged.filter((emp) => {
+                const empCompanyId = (emp.companyId || "").trim();
+                return empCompanyId === companyId || empCompanyId === "workspace_default" || empCompanyId === "company_default" || empCompanyId === "";
+              });
+            }).catch(async () => {
+              const local = await getEmployees().catch(() => [] as Employee[]);
+              return local.filter((emp) => {
+                const empCompanyId = (emp.companyId || "").trim();
+                return empCompanyId === companyId || empCompanyId === "workspace_default" || empCompanyId === "company_default" || empCompanyId === "";
+              });
+            })
+          : getEmployees();
+
         const [
           employeeData,
           attendanceData,
+          companyAttendanceData,
           taskData,
           expenseData,
           conversationData,
@@ -662,8 +760,9 @@ export default function DashboardScreen() {
           teamData,
           auditData,
         ] = await Promise.all([
-          getEmployees(),
+          employeesPromise,
           getAttendance(),
+          isAdminUser ? getCompanyAttendanceToday(companyId) : Promise.resolve([] as AttendanceRecord[]),
           getTasks(),
           getExpenses(),
           getConversations(),
@@ -673,10 +772,27 @@ export default function DashboardScreen() {
           getAuditLogs(),
         ]);
 
+        // Merge local attendance and company attendance today, prioritizing company records
+        const companyRecordMap = new Map(companyAttendanceData.map((r) => [r.id, r]));
+        const mergedAttendance = attendanceData.map((r) => companyRecordMap.get(r.id) || r);
+        for (const record of companyAttendanceData) {
+          if (!attendanceData.some((r) => r.id === record.id)) {
+            mergedAttendance.push(record);
+          }
+        }
+
+        // Re-filter tasks and expenses by selected companyId for safety
+        const filteredTasks = isAdminUser
+          ? taskData.filter((t) => (t.companyId || "").trim() === companyId)
+          : taskData;
+        const filteredExpenses = isAdminUser
+          ? expenseData.filter((e) => (e.companyId || "").trim() === companyId)
+          : expenseData;
+
         setEmployees(employeeData);
-        setAttendance(attendanceData);
-        setTasks(taskData);
-        setExpenses(expenseData);
+        setAttendance(mergedAttendance);
+        setTasks(filteredTasks);
+        setExpenses(filteredExpenses);
         setConversations(conversationData);
         setNotifications(notificationData);
         setSupportThreads(supportData);
@@ -694,11 +810,13 @@ export default function DashboardScreen() {
     } finally {
       inFlightLoadRef.current = null;
     }
-  }, [user]);
+  }, [user, company?.id]);
 
-  useEffect(() => {
-    void loadDashboard();
-  }, [loadDashboard]);
+  useFocusEffect(
+    useCallback(() => {
+      void loadDashboard();
+    }, [loadDashboard])
+  );
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -2925,6 +3043,10 @@ const styles = StyleSheet.create({
   emptyStateWrap: {
     flex: 1,
     paddingHorizontal: 20,
+  },
+  navToggleWrap: {
+    alignItems: "flex-start",
+    marginBottom: 8,
   },
   emptyStateCard: {
     marginTop: 16,
