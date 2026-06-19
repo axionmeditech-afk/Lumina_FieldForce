@@ -82,6 +82,7 @@
     "react-native-webview": "^13.16.1",
     "react-native-worklets": "0.5.1",
     "tsx": "^4.20.6",
+    "ws": "^8.21.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
@@ -90,6 +91,7 @@
     "@types/express": "^5.0.0",
     "@types/fs-extra": "^11.0.4",
     "@types/react": "~19.1.10",
+    "@types/ws": "^8.18.1",
     "babel-plugin-react-compiler": "^19.0.0-beta-e993439-20250117",
     "drizzle-kit": "^0.31.4",
     "eas-cli": "^18.1.0",

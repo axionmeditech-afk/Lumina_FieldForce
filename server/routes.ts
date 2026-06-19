@@ -2,6 +2,7 @@ import express, { type Express, type Request, type Response } from "express";
 import type { Pool, PoolConnection } from "mysql2/promise";
 import { createServer, type Server } from "node:http";
 import { createHash, randomUUID } from "crypto";
+import { WebSocketServer, WebSocket } from "ws";
 import type {
   AppNotification,
   AppUser,
@@ -57,6 +58,19 @@ import {
 import { analyzeConversationWithAI } from "@/lib/aiSalesAnalysis";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { isSalesRole } from "@/lib/role-access";
+
+
+const adminWsClients = new Set<WebSocket>();
+
+export function broadcastAttendanceUpdate(record: AttendanceRecord) {
+  const message = JSON.stringify({ type: "attendance_update", record });
+  for (const client of adminWsClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
 
 const MAX_LOCATION_ACCURACY_METERS = 120;
 const MAX_EVIDENCE_AGE_MS = 2 * 60 * 1000;
@@ -7206,7 +7220,7 @@ function buildUserFromRegistration(payload: {
 
 export async function registerRoutes(app: Express): Promise<Server> {
   await initAuthUsersStore();
-
+  
   const populateUser = async (req: Request, res: Response, next: any) => {
     if (req.auth && req.auth.email) {
       const email = req.auth.email;
@@ -7231,7 +7245,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       error instanceof Error ? error.message : error
     );
   });
-
+  app.post("/api/login", ...);
+  app.get("/api/users", ...);
   app.get("/api/health", (_req, res) => {
     res.json({
       ok: true,
@@ -7465,7 +7480,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     }
   });
-
+  
   app.post("/api/notifications", requireAuth, async (req, res) => {
     const { title, body, kind, audience, audienceUserIds } = req.body as {
       title?: string;
@@ -10687,6 +10702,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Failed to persist attendance check-in in MySQL", error);
     }
+    broadcastAttendanceUpdate(attendanceRecord);
     const checkInLocationLog: LocationLog = {
       id: randomUUID(),
       companyId: companyId ?? undefined,
@@ -10877,6 +10893,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Failed to persist attendance check-out in MySQL", error);
     }
+    broadcastAttendanceUpdate(checkoutRecord);
     const checkOutLocationLog: LocationLog = {
       id: randomUUID(),
       companyId: companyId ?? undefined,
@@ -11783,5 +11800,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   const httpServer = createServer(app);
+  const wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on("upgrade", async (request, socket, head) => {
+    try {
+      const url = new URL(request.url || "", `http://${request.headers.host}`);
+      
+      if (url.pathname === "/api/ws/attendance") {
+        const token = url.searchParams.get("token");
+        if (!token) {
+          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+
+        // JWT token verify karein
+        const payload = await verifyJwt(token);
+        // Sirf admin aur manager ko WebSocket connect karne ki permission
+        if (!payload || (payload.role !== "admin" && payload.role !== "manager")) {
+          socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+          socket.destroy();
+          return;
+        }
+
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit("connection", ws, request, payload);
+        });
+      } else {
+        socket.destroy();
+      }
+    } catch (err) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+    }
+  });
+
+  wss.on("connection", (ws) => {
+    adminWsClients.add(ws);
+
+    let isAlive = true;
+    ws.on("pong", () => { isAlive = true; });
+    
+    const pingInterval = setInterval(() => {
+      if (!isAlive) return ws.terminate();
+      isAlive = false;
+      ws.ping();
+    }, 30000);
+
+    ws.on("close", () => {
+      clearInterval(pingInterval);
+      adminWsClients.delete(ws);
+    });
+  });
   return httpServer;
 }

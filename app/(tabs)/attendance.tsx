@@ -24,6 +24,7 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNative";
 import { evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   addAttendance,
   addAttendanceAnomaly,
@@ -298,7 +299,6 @@ function buildAdminAttendanceStatuses(
   const employeeByName = new Map<string, Employee>();
 
   for (const employee of employees) {
-    if (employee.role === "admin" || employee.role === "manager") continue;
     employeeById.set(employee.id, employee);
     employeeByName.set(employee.name.trim().toLowerCase(), employee);
   }
@@ -361,7 +361,67 @@ function buildAdminAttendanceStatuses(
       a.name.localeCompare(b.name)
   );
 }
+// === WEBSOCKET HOOK DEFINITION ===
+function useAttendanceWebSocket(
+  isAdminOrManager: boolean, 
+  loadBaseData: () => Promise<void>
+) {
+  useEffect(() => {
+    if (!isAdminOrManager) return;
 
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
+    let attempt = 0;
+
+    const connect = async () => {
+      try {
+        // App ke local storage se token lena zaroori hai connection identify karne ke liye
+        const token = await AsyncStorage.getItem("token"); 
+        if (!token) return;
+
+        // Aapka direct backend domain WebSocket protocol (wss) ke sath
+        const wsUrl = `wss://api.axionmeditech.com/api/ws/attendance?token=${token}`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          console.log("Attendance WS Connected");
+          attempt = 0; 
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === "attendance_update") {
+              void loadBaseData();
+            }
+          } catch (e) {
+            console.error("WS parse error", e);
+          }
+        };
+
+        ws.onclose = () => {
+          console.log("Attendance WS Disconnected. Reconnecting...");
+          const delay = Math.min(1000 * 2 ** attempt, 30000);
+          attempt++;
+          reconnectTimeout = setTimeout(connect, delay);
+        };
+      } catch (error) {
+        console.error("WS connection setup failed", error);
+      }
+    };
+
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimeout);
+      if (ws) {
+        ws.onclose = null; 
+        ws.close();
+      }
+    };
+  }, [isAdminOrManager, loadBaseData]);
+}
+// === WEBSOCKET HOOK DEFINITION END ===
 export default function AttendanceScreen() {
   const { user, company, updateCompany } = useAuth();
   const insets = useSafeAreaInsets();
@@ -487,7 +547,10 @@ export default function AttendanceScreen() {
       await setCheckedIn(resolvedCheckIn);
     }
   }, [canReviewSignIns, isAdminAttendanceManager, user?.id, user?.name]);
-
+  // === WEBSOCKET HOOK CALL ===
+  // Note: user?.role 'admin' ya 'manager' dono ke liye check kiya hai
+  useAttendanceWebSocket(isAdminAttendanceManager || user?.role === "manager", loadBaseData);
+  // ============================
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
     try {
