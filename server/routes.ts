@@ -11509,27 +11509,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const requestUser = getRequestUser(req);
       const companyId = (await resolveRequestCompanyId(req)) || requestUser?.companyId || DEFAULT_COMPANY_ID;
       const companyName = requestUser?.companyName || DEFAULT_COMPANY_NAME;
-      const [rows] = await conn.query<any[]>(
-        `SELECT
-          u.rowid as id,
-          u.login,
-          u.firstname,
-          u.lastname,
-          u.email,
-          u.office_phone,
-          u.user_mobile,
-          u.admin,
-          u.employee,
-          u.job,
-          u.statut,
-          u.town,
-          u.address,
-          u.zip,
-          p.employee_category
-         FROM \`nmy5_user\` u
-         LEFT JOIN \`nmy5_hrm_employee_profile\` p ON p.fk_user = u.rowid
-         WHERE u.statut = 1`
-      );
+      let rows: any[] = [];
+      try {
+        [rows] = await conn.query<any[]>(
+          `SELECT
+            u.rowid as id,
+            u.login,
+            u.firstname,
+            u.lastname,
+            u.email,
+            u.office_phone,
+            u.user_mobile,
+            u.admin,
+            u.employee,
+            u.job,
+            u.statut,
+            p.employee_category
+           FROM \`nmy5_user\` u
+           LEFT JOIN \`nmy5_hrm_employee_profile\` p ON p.fk_user = u.rowid
+           WHERE u.statut = 1`
+        );
+      } catch {
+        [rows] = await conn.query<any[]>(
+          `SELECT
+            rowid as id,
+            login,
+            firstname,
+            lastname,
+            email,
+            office_phone,
+            user_mobile,
+            admin,
+            employee,
+            job,
+            statut,
+            NULL as employee_category
+           FROM \`nmy5_user\`
+           WHERE statut = 1`
+        );
+      }
       const mapped = rows.map((r: any) => ({
         id: String(r.id),
         rowid: String(r.id),
@@ -11540,9 +11558,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         name: `${r.firstname || ""} ${r.lastname || ""}`.trim() || r.login || "Employee",
         email: r.email || "",
         phone: r.user_mobile || r.office_phone || "",
-        town: r.town || "",
-        address: r.address || "",
-        zip: r.zip || "",
+        town: "",
+        address: "",
+        zip: "",
         statut: r.statut,
         status: r.statut,
         companyId,
@@ -11565,7 +11583,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           String(r.employee_category || "").toLowerCase() === "on_field"
             ? "On Field Employees"
             : "Office Employees",
-        branch: r.town || r.address || requestUser?.branch || "Main Branch",
+        branch: requestUser?.branch || "Main Branch",
       }));
       res.json({ items: mapped });
     } catch (e) {

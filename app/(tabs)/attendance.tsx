@@ -323,7 +323,6 @@ function buildAdminAttendanceStatuses(
   >();
 
   for (const employee of employees) {
-    if (employee.status && employee.status !== "active") continue;
     const employeeRole = employee.role || "employee";
     if (employeeRole !== "employee" && employeeRole !== "salesperson") continue;
     const nameKey = normalizeAttendanceIdentity(employee.name);
@@ -368,7 +367,10 @@ function buildAdminAttendanceStatuses(
     return {
       id: employee.id,
       companyId: employee.companyId || "workspace_default",
-      companyName: employee.companyId || "Workspace",
+      companyName:
+        typeof (employee as { companyName?: unknown }).companyName === "string"
+          ? ((employee as { companyName?: string }).companyName || "").trim() || employee.companyId || "Workspace"
+          : employee.companyId || "Workspace",
       name: employee.name,
       role: employee.role || "employee",
       status: latest ? (latest.type === "checkin" ? "checked_in" : "checked_out") : "no_activity",
@@ -626,7 +628,7 @@ export default function AttendanceScreen() {
             if (entry.userId === user.id) return false;
             const matchedEmployee =
               employeeById.get(entry.userId) ?? employeeByName.get(normalizeAttendanceIdentity(entry.userName));
-            if (!matchedEmployee || (matchedEmployee.status && matchedEmployee.status !== "active")) return false;
+            if (!matchedEmployee) return false;
             const recordRole = matchedEmployee.role;
             return recordRole !== "admin" && recordRole !== "manager";
           })

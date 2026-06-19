@@ -20,6 +20,8 @@ import {
 } from "@/lib/attendance-api";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
+const FALLBACK_COMPANY_IDS = new Set(["", "company_default", "default", "cmp_default"]);
+
 function normalizeText(value: string | null | undefined): string {
   return (value || "").trim();
 }
@@ -160,6 +162,21 @@ function filterEmployeesByActiveRoster(
   });
 }
 
+function isEmployeeInCurrentCompany(employee: Employee, companyId: string): boolean {
+  const employeeCompanyId = normalizeText(employee.companyId);
+  if (!companyId) return true;
+  return employeeCompanyId === companyId || FALLBACK_COMPANY_IDS.has(employeeCompanyId);
+}
+
+function scopeUsersToCurrentCompany(users: DolibarrUser[], currentUser: AppUser | null): DolibarrUser[] {
+  if (!currentUser?.companyId) return users;
+  return users.map((user) => ({
+    ...user,
+    companyId: currentUser.companyId,
+    companyName: currentUser.companyName,
+  }));
+}
+
 function getDepartmentForRole(role: AppUser["role"]): string {
   if (role === "admin") return "Management";
   if (role === "hr") return "Human Resources";
@@ -203,6 +220,23 @@ async function readRemoteArray<T>(key: string): Promise<T[] | null> {
     return null;
   }
   return null;
+}
+
+async function loadRosterUsers(currentUser: AppUser): Promise<DolibarrUser[]> {
+  try {
+    const scopedUsers = await getUsersRemote();
+    if (scopedUsers.length > 0) {
+      return scopeUsersToCurrentCompany(scopedUsers, currentUser);
+    }
+  } catch {
+    // Fall back to the generic Dolibarr proxy below.
+  }
+
+  try {
+    return await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
+  } catch {
+    return [];
+  }
 }
 
 function mergeEmployees(
@@ -304,6 +338,7 @@ function mapDolibarrUsersToEmployees(
       return {
         id: `dolibarr_${idValue}`,
         companyId: normalizeText(user.companyId) || companyId,
+        companyName: normalizeText(user.companyName) || currentUser?.companyName || "",
         name,
         role,
         employeeCategory: rawCategory === "on_field" || role === "salesperson" ? "on_field" : "fixed_location",
@@ -336,16 +371,8 @@ export async function getEmployees(): Promise<Employee[]> {
 
   let dolibarrEmployees: Employee[] = [];
   if (currentUser && ["admin", "hr", "manager"].includes(currentUser.role)) {
-    try {
-      const scopedUsers = await getUsersRemote();
-      const dolibarrUsers =
-        scopedUsers.length > 0
-          ? scopedUsers
-          : await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
-      dolibarrEmployees = mapDolibarrUsersToEmployees(dolibarrUsers, currentUser);
-    } catch {
-      dolibarrEmployees = [];
-    }
+    const dolibarrUsers = await loadRosterUsers(currentUser);
+    dolibarrEmployees = mapDolibarrUsersToEmployees(dolibarrUsers, currentUser);
   }
 
   const activeRoster = dedupeEmployees(dolibarrEmployees);
@@ -354,7 +381,7 @@ export async function getEmployees(): Promise<Employee[]> {
   const merged = mergeEmployees(filteredBase, activeRoster, companyId || "company_default", {
     includeUnmatchedExtras: activeRoster.length > 0,
   });
-  const scoped = companyId ? merged.filter((employee) => employee.companyId === companyId) : merged;
+  const scoped = companyId ? merged.filter((employee) => isEmployeeInCurrentCompany(employee, companyId)) : merged;
   const finalEmployees = dedupeEmployees(scoped);
 
   if (activeRoster.length > 0 && currentUser && ["admin", "hr", "manager"].includes(currentUser.role)) {
@@ -376,11 +403,7 @@ export async function getDolibarrEmployees(): Promise<Employee[]> {
     const scopedEmployees = approvedEmployees.filter(
       (employee) => employee.companyId === currentUser.companyId
     );
-    const scopedUsers = await getUsersRemote();
-    const dolibarrUsers =
-      scopedUsers.length > 0
-        ? scopedUsers
-        : await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
+    const dolibarrUsers = await loadRosterUsers(currentUser);
     const dolibarrEmployees = dedupeEmployees(mapDolibarrUsersToEmployees(dolibarrUsers, currentUser));
     const filteredLocal = filterEmployeesByActiveRoster(scopedEmployees, dolibarrEmployees, currentUser);
     return mergeEmployees(filteredLocal, dolibarrEmployees, currentUser.companyId, {
