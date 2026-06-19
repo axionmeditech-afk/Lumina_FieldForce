@@ -107,6 +107,8 @@ type OfficeLocationSearchResult = {
 
 type AdminAttendanceStatus = {
   id: string;
+  companyId: string;
+  companyName: string;
   name: string;
   role: string;
   status: "checked_in" | "checked_out" | "no_activity";
@@ -115,6 +117,13 @@ type AdminAttendanceStatus = {
   geofenceName: string | null;
   locationLabel: string | null;
   approvalStatus: AttendanceRecord["approvalStatus"] | null;
+};
+
+type AdminAttendanceGroup = {
+  id: string;
+  name: string;
+  entries: AdminAttendanceStatus[];
+  checkedInCount: number;
 };
 
 function getBannerConfig(
@@ -315,9 +324,10 @@ function buildAdminAttendanceStatuses(
 
   for (const employee of employees) {
     if (employee.status && employee.status !== "active") continue;
-    if (employee.role !== "employee" && employee.role !== "salesperson") continue;
+    const employeeRole = employee.role || "employee";
+    if (employeeRole !== "employee" && employeeRole !== "salesperson") continue;
     const nameKey = normalizeAttendanceIdentity(employee.name);
-    const roleKey = normalizeAttendanceIdentity(employee.role);
+    const roleKey = normalizeAttendanceIdentity(employeeRole);
     const groupKey = nameKey ? `name:${roleKey}:${nameKey}` : `id:${employee.id}`;
     const existing = employeeGroups.get(groupKey);
     if (existing) {
@@ -357,8 +367,10 @@ function buildAdminAttendanceStatuses(
 
     return {
       id: employee.id,
+      companyId: employee.companyId || "workspace_default",
+      companyName: employee.companyId || "Workspace",
       name: employee.name,
-      role: employee.role,
+      role: employee.role || "employee",
       status: latest ? (latest.type === "checkin" ? "checked_in" : "checked_out") : "no_activity",
       checkInAt: latestCheckIn?.timestamp ?? null,
       checkOutAt: latestCheckOut?.timestamp ?? null,
@@ -498,6 +510,7 @@ export default function AttendanceScreen() {
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [pendingSignIns, setPendingSignIns] = useState<AttendanceRecord[]>([]);
   const [adminAttendanceStatuses, setAdminAttendanceStatuses] = useState<AdminAttendanceStatus[]>([]);
+  const [expandedAttendanceCompanyIds, setExpandedAttendanceCompanyIds] = useState<Set<string>>(new Set());
   const [geofences, setGeofences] = useState<Geofence[]>([]);
   const [geofencesLoaded, setGeofencesLoaded] = useState(false);
   const [evaluation, setEvaluation] = useState<GeofenceEvaluation>({
@@ -1741,6 +1754,42 @@ setOfficeLocationName((current) => current.trim() || result.label);
   const adminCheckedInCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_in").length;
   const adminCheckedOutCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_out").length;
   const adminNoActivityCount = adminAttendanceStatuses.filter((entry) => entry.status === "no_activity").length;
+  const adminAttendanceGroups = useMemo<AdminAttendanceGroup[]>(() => {
+    const groupsByCompany = new Map<string, AdminAttendanceStatus[]>();
+    for (const entry of adminAttendanceStatuses) {
+      const groupId = entry.companyId || company?.id || "workspace_default";
+      const existing = groupsByCompany.get(groupId) || [];
+      existing.push({
+        ...entry,
+        companyId: groupId,
+        companyName:
+          groupId === company?.id
+            ? company?.name || entry.companyName || "Workspace"
+            : entry.companyName && entry.companyName !== entry.companyId
+              ? entry.companyName
+              : `Workspace ${groupsByCompany.size + 1}`,
+      });
+      groupsByCompany.set(groupId, existing);
+    }
+    return Array.from(groupsByCompany.entries()).map(([id, entries]) => ({
+      id,
+      name: entries[0]?.companyName || (id === company?.id ? company?.name : null) || "Workspace",
+      entries,
+      checkedInCount: entries.filter((entry) => entry.status === "checked_in").length,
+    }));
+  }, [adminAttendanceStatuses, company?.id, company?.name]);
+  const hasMultipleAttendanceGroups = adminAttendanceGroups.length > 1;
+  const toggleAttendanceGroup = useCallback((groupId: string) => {
+    setExpandedAttendanceCompanyIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }, []);
   const officeMapPlannedStops = useMemo<PlannedStopPoint[]>(() => {
     const stops: PlannedStopPoint[] = [];
     if (officeLocationDraft) {
@@ -1899,62 +1948,109 @@ setOfficeLocationName((current) => current.trim() || result.label);
                 <View style={styles.emptyLog}>
                   <Ionicons name="people-outline" size={20} color={colors.textTertiary} />
                   <Text style={[styles.emptyLogText, { color: colors.textSecondary }]}>
-                    No employee attendance data available yet.
+                    No employee or salesperson found for this company/workspace.
                   </Text>
                 </View>
               ) : (
-                adminAttendanceStatuses.map((entry, index) => {
-                  const isCheckedIn = entry.status === "checked_in";
-                  const isCheckedOut = entry.status === "checked_out";
-                  const statusColor = isCheckedIn
-                    ? colors.success
-                    : isCheckedOut
-                      ? colors.primary
-                      : colors.textTertiary;
-                  const statusLabel = isCheckedIn ? "Checked in" : isCheckedOut ? "Checked out" : "No activity";
-                  const statusIcon = isCheckedIn
-                    ? "log-in-outline"
-                    : isCheckedOut
-                      ? "log-out-outline"
-                      : "time-outline";
-                  const metaParts = [
-                    entry.checkInAt ? `In ${formatAttendanceTime(entry.checkInAt)}` : null,
-                    entry.checkOutAt ? `Out ${formatAttendanceTime(entry.checkOutAt)}` : null,
-                    entry.geofenceName ?? entry.locationLabel,
-                  ].filter(Boolean);
-                  const approvalLabel =
-                    entry.approvalStatus === "pending"
-                      ? "Pending approval"
-                      : entry.approvalStatus === "rejected"
-                        ? "Rejected"
-                        : null;
+                adminAttendanceGroups.map((group, groupIndex) => {
+                  const groupOpen =
+                    !hasMultipleAttendanceGroups || expandedAttendanceCompanyIds.has(group.id);
                   return (
                     <View
-                      key={`admin_attendance_${entry.id}_${index}`}
+                      key={`admin_attendance_group_${group.id}`}
                       style={[
-                        styles.adminAttendanceRow,
-                        index < adminAttendanceStatuses.length - 1 && {
+                        groupIndex < adminAttendanceGroups.length - 1 && {
                           borderBottomColor: colors.borderLight,
                           borderBottomWidth: 1,
                         },
                       ]}
                     >
-                      <View style={[styles.adminStatusIcon, { backgroundColor: statusColor + "18" }]}>
-                        <Ionicons name={statusIcon as never} size={18} color={statusColor} />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <View style={styles.adminAttendanceNameRow}>
-                          <Text style={[styles.logType, { color: colors.text }]}>{entry.name}</Text>
-                          <Text style={[styles.adminRolePill, { color: colors.textSecondary, borderColor: colors.border }]}>
-                            {entry.role.toUpperCase()}
+                      <Pressable
+                        onPress={() => {
+                          if (hasMultipleAttendanceGroups) toggleAttendanceGroup(group.id);
+                        }}
+                        disabled={!hasMultipleAttendanceGroups}
+                        style={({ pressed }) => [
+                          styles.companyAttendanceHeader,
+                          {
+                            backgroundColor: pressed ? colors.surfaceSecondary : "transparent",
+                          },
+                        ]}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.companyAttendanceTitle, { color: colors.text }]}>{group.name}</Text>
+                          <Text style={[styles.companyAttendanceMeta, { color: colors.textSecondary }]}>
+                            {group.checkedInCount} present out of {group.entries.length}
                           </Text>
                         </View>
-                        <Text style={[styles.logMeta, { color: colors.textSecondary }]}>
-                          {metaParts.length ? metaParts.join(" | ") : "No check-in or checkout today"}
-                          {approvalLabel ? ` | ${approvalLabel}` : ""}
+                        <Text style={[styles.companyAttendanceCount, { color: colors.success }]}>
+                          {group.checkedInCount}/{group.entries.length}
                         </Text>
-                      </View>
-                      <Text style={[styles.adminStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                        {hasMultipleAttendanceGroups ? (
+                          <Ionicons
+                            name={groupOpen ? "chevron-up-outline" : "chevron-down-outline"}
+                            size={18}
+                            color={colors.textSecondary}
+                          />
+                        ) : null}
+                      </Pressable>
+                      {groupOpen
+                        ? group.entries.map((entry, index) => {
+                            const isCheckedIn = entry.status === "checked_in";
+                            const isCheckedOut = entry.status === "checked_out";
+                            const statusColor = isCheckedIn
+                              ? colors.success
+                              : isCheckedOut
+                                ? colors.primary
+                                : colors.textTertiary;
+                            const statusLabel = isCheckedIn ? "Checked in" : isCheckedOut ? "Checked out" : "No activity";
+                            const statusIcon = isCheckedIn
+                              ? "log-in-outline"
+                              : isCheckedOut
+                                ? "log-out-outline"
+                                : "time-outline";
+                            const metaParts = [
+                              entry.checkInAt ? `In ${formatAttendanceTime(entry.checkInAt)}` : null,
+                              entry.checkOutAt ? `Out ${formatAttendanceTime(entry.checkOutAt)}` : null,
+                              entry.geofenceName ?? entry.locationLabel,
+                            ].filter(Boolean);
+                            const approvalLabel =
+                              entry.approvalStatus === "pending"
+                                ? "Pending approval"
+                                : entry.approvalStatus === "rejected"
+                                  ? "Rejected"
+                                  : null;
+                            return (
+                              <View
+                                key={`admin_attendance_${group.id}_${entry.id}_${index}`}
+                                style={[
+                                  styles.adminAttendanceRow,
+                                  index < group.entries.length - 1 && {
+                                    borderBottomColor: colors.borderLight,
+                                    borderBottomWidth: 1,
+                                  },
+                                ]}
+                              >
+                                <View style={[styles.adminStatusIcon, { backgroundColor: statusColor + "18" }]}>
+                                  <Ionicons name={statusIcon as never} size={18} color={statusColor} />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <View style={styles.adminAttendanceNameRow}>
+                                    <Text style={[styles.logType, { color: colors.text }]}>{entry.name}</Text>
+                                    <Text style={[styles.adminRolePill, { color: colors.textSecondary, borderColor: colors.border }]}>
+                                      {entry.role.toUpperCase()}
+                                    </Text>
+                                  </View>
+                                  <Text style={[styles.logMeta, { color: colors.textSecondary }]}>
+                                    {metaParts.length ? metaParts.join(" | ") : "No check-in or checkout today"}
+                                    {approvalLabel ? ` | ${approvalLabel}` : ""}
+                                  </Text>
+                                </View>
+                                <Text style={[styles.adminStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                              </View>
+                            );
+                          })
+                        : null}
                     </View>
                   );
                 })
@@ -2469,6 +2565,27 @@ const styles = StyleSheet.create({
     fontSize: 10,
     marginTop: 2,
     textTransform: "uppercase",
+  },
+  companyAttendanceHeader: {
+    minHeight: 58,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  companyAttendanceTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 14,
+  },
+  companyAttendanceMeta: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 11.5,
+    marginTop: 2,
+  },
+  companyAttendanceCount: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 14,
   },
   adminAttendanceRow: {
     paddingHorizontal: 12,
