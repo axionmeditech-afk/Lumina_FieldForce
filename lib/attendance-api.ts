@@ -26,7 +26,7 @@ import {
   setAttendanceQueue,
 } from "@/lib/storage";
 
-const FALLBACK_API_BASE = "http://localhost:5000/api";
+const FALLBACK_API_BASE = "https://api.axionmeditech.com/api";
 const RELEASE_FALLBACK_API_BASE = "https://api.axionmeditech.com/api";
 
 interface QueueItem {
