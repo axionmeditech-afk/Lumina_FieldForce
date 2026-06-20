@@ -8822,6 +8822,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post("/api/auth/reset-password", async (req, res) => {
+    const { email, password } = req.body as { email?: string; password?: string };
+    const normalizedEmail = normalizeEmail(email || "");
+    if (!normalizedEmail || !password) {
+      res.status(400).json({ message: "Email and new password are required" });
+      return;
+    }
+    if (password.length < 6) {
+      res.status(400).json({ message: "Password must be at least 6 characters" });
+      return;
+    }
+
+    await initAuthUsersStore();
+    const authRecord = getAuthUserByIdentifier(normalizedEmail);
+    if (!authRecord) {
+      res.status(404).json({ message: "User not found" });
+      return;
+    }
+
+    const newHash = hashPassword(password);
+    authRecord.passwordHash = newHash;
+    authRecord.updatedAt = new Date().toISOString();
+    setAuthUserRecord(authRecord);
+
+    try {
+      await upsertAuthUserInMySql(authRecord, authRecord.user.companyName || "");
+      res.json({ ok: true, message: "Password updated successfully" });
+    } catch (error) {
+      console.error("Failed to update password in MySQL", error);
+      res.status(500).json({ message: "Failed to update password in database" });
+    }
+  });
+
   app.post("/api/auth/token", async (req, res) => {
     const { email, login, username, identifier, password } = req.body as {
       email?: string;

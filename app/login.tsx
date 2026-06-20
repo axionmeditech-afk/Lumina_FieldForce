@@ -40,7 +40,7 @@ export default function LoginScreen() {
   const insets = useSafeAreaInsets();
   const { colors } = useAppTheme();
 
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin");
   const [fullName, setFullName] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [branch, setBranch] = useState("");
@@ -63,7 +63,39 @@ export default function LoginScreen() {
   const signInPlaceholder = mode === "signin" ? "email or username" : "name@enterprise.com";
   const signInKeyboardType = mode === "signin" ? "default" : "email-address";
 
+  const handleForgotPassword = async () => {
+    if (!email.trim() || !password.trim()) {
+      Alert.alert("Missing Fields", "Please enter your email and new password");
+      return;
+    }
+    setLoading(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    try {
+      const response = await fetch("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        Alert.alert("Failed", data.message || "Failed to reset password");
+        return;
+      }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert("Success", "Password updated successfully");
+      setMode("signin");
+    } catch (error) {
+      Alert.alert("Error", "An unexpected error occurred");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleAuthAction = async () => {
+    if (mode === "forgot") {
+      await handleForgotPassword();
+      return;
+    }
     if (!email.trim() || !password.trim()) {
       Alert.alert("Missing Fields", "Please enter your email/username and password");
       return;
@@ -203,10 +235,10 @@ export default function LoginScreen() {
           >
             <View style={styles.formHeader}>
               <Text style={[styles.formEyebrow, { color: colors.primary }]}>
-                {mode === "signin" ? "Welcome Back" : "Create Access Request"}
+                {mode === "signin" ? "Welcome Back" : mode === "signup" ? "Create Access Request" : "Reset Password"}
               </Text>
               <Text style={[styles.formTitle, { color: colors.text }]}>
-                {mode === "signin" ? "Access your workspace" : "Request your company workspace"}
+                {mode === "signin" ? "Access your workspace" : mode === "signup" ? "Request your company workspace" : "Set a new password"}
               </Text>
             </View>
 
@@ -254,6 +286,17 @@ export default function LoginScreen() {
                 </Text>
               </Pressable>
             </View>
+
+            {mode === "signin" && (
+              <Pressable
+                onPress={() => setMode("forgot")}
+                style={{ alignSelf: "flex-end", marginBottom: 10, marginTop: -4 }}
+              >
+                <Text style={{ color: colors.primary, fontSize: 13, fontFamily: "Inter_500Medium" }}>
+                  Forgot Password?
+                </Text>
+              </Pressable>
+            )}
 
             {mode === "signup" ? (
               <>
@@ -369,7 +412,9 @@ export default function LoginScreen() {
             />
 
             <View style={styles.inputWrapper}>
-              <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>Security Password</Text>
+              <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>
+                {mode === "forgot" ? "New Password" : "Security Password"}
+              </Text>
               <View
                 style={[
                   styles.inputContainer,
@@ -415,7 +460,7 @@ export default function LoginScreen() {
                   <ActivityIndicator color="#FFFFFF" />
                 ) : (
                   <Text style={styles.loginButtonText}>
-                    {mode === "signin" ? "Authenticate" : "Request Access"}
+                    {mode === "signin" ? "Authenticate" : mode === "signup" ? "Request Access" : "Update Password"}
                   </Text>
                 )}
               </LinearGradient>
@@ -426,7 +471,9 @@ export default function LoginScreen() {
               <Text style={[styles.formFooterText, { color: colors.textSecondary }]}>
                 {mode === "signin"
                   ? "Use your approved company credentials to continue."
-                  : "New accounts stay pending until admin approval."}
+                  : mode === "signup"
+                  ? "New accounts stay pending until admin approval."
+                  : "Change your password without verification."}
               </Text>
             </View>
           </Animated.View>

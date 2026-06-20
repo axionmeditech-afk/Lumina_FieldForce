@@ -69,6 +69,7 @@ type ActivityEntry = {
 };
 
 type DashboardSnapshot = DashboardStats & {
+  checkedInNow: number;
   userHasOpenSession: boolean;
   openTasks: number;
   assignedTasks: number;
@@ -838,6 +839,13 @@ export default function DashboardScreen() {
       (record) => toLocalDateKey(new Date(record.timestamp)) === todayKey
     );
     const todayCheckins = todayRecords.filter((record) => record.type === "checkin");
+    const uniqueCheckedInTodayUsers = new Set<string>();
+    todayCheckins.forEach(record => {
+      const key = record.userId || record.userName;
+      if (key) uniqueCheckedInTodayUsers.add(key);
+    });
+    const uniqueCheckedInTodayCount = uniqueCheckedInTodayUsers.size;
+
     const lateToday = todayCheckins.filter((record) => {
       const parsed = new Date(record.timestamp);
       if (Number.isNaN(parsed.getTime())) return false;
@@ -876,9 +884,10 @@ export default function DashboardScreen() {
           );
 
     return {
+      checkedInNow: checkedInNowCount,
       userHasOpenSession,
       totalEmployees: employeeRoster.length,
-      presentToday: checkedInNowCount,
+      presentToday: uniqueCheckedInTodayCount,
       lateToday,
       onLeave: Math.max(employeeRoster.length - checkedInNowCount, 0),
       activeNow: employeeRoster.filter((employee) => employee.status === "active").length,
@@ -1173,8 +1182,8 @@ export default function DashboardScreen() {
         return [
             {
               id: "team_presence",
-              label: "Team Presence",
-              value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
+              label: "Checked In",
+              value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
               icon: "people-circle-outline",
               tone: colors.success,
             },
