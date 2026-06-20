@@ -1213,9 +1213,17 @@ export default function DashboardScreen() {
       if (isSalesperson) {
         return [
               {
+                id: "team_presence",
+                label: "Checked In",
+                value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
+                icon: "people-circle-outline",
+                tone: colors.success,
+              },
+              {
                 id: "visits_total",
                 label: "Visits Today",
                 value: `${todaysVisits.length}`,
+
                 icon: "navigate-outline",
                 tone: colors.primary,
               },
@@ -1244,6 +1252,13 @@ export default function DashboardScreen() {
       }
       return [
             {
+              id: "team_presence",
+              label: "Checked In",
+              value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
+              icon: "people-circle-outline",
+              tone: colors.success,
+            },
+            {
               id: "tasks_completion",
               label: "Task Done",
               value: `${userCompletedTasks}/${userAssignedTasks}`,
@@ -1270,6 +1285,7 @@ export default function DashboardScreen() {
       snapshot.pendingExpenses,
       snapshot.pendingSignIns,
       snapshot.presentToday,
+      snapshot.checkedInNow,
       snapshot.totalEmployees,
       snapshot.unreadNotifications,
       todaysVisits.length,
