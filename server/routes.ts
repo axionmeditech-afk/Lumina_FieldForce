@@ -5704,7 +5704,8 @@ async function writeNormalizedState(
   }
   const entries = Array.isArray(parsed) ? parsed : [];
   if (key === "@trackforce_companies") {
-    await replaceCompaniesInMySql(entries);
+    // Companies are now managed exclusively via backend APIs / DB.
+    // We ignore incoming client syncs for this key to prevent stale cache overwrites.
     return true;
   }
   if (key === "@trackforce_attendance") {
