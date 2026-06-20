@@ -1090,9 +1090,18 @@ export default function DashboardScreen() {
             },
         ];
       }
+      const employeeAttendanceCard = {
+        id: "present",
+        label: "Attendance",
+        value: `${snapshot.presentToday}/${snapshot.totalEmployees || 0}`,
+        hint: `${snapshot.checkedInNow} currently checked in`,
+        icon: "person-add-outline",
+        tone: colors.success,
+      };
+
       if (isSalesperson) {
         return [
-            attendanceCard,
+            employeeAttendanceCard,
             {
               id: "visits",
               label: "Visits",
@@ -1128,7 +1137,7 @@ export default function DashboardScreen() {
         ];
       }
       return [
-            attendanceCard,
+            employeeAttendanceCard,
             {
               id: "alerts",
               label: "My Alerts",
@@ -1211,7 +1220,7 @@ export default function DashboardScreen() {
               {
                 id: "team_presence",
                 label: "Checked In",
-                value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
+                value: `${snapshot.checkedInNow}/${snapshot.presentToday || 0}`,
                 icon: "people-circle-outline",
                 tone: colors.success,
               },
@@ -1250,7 +1259,7 @@ export default function DashboardScreen() {
             {
               id: "team_presence",
               label: "Checked In",
-              value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
+              value: `${snapshot.checkedInNow}/${snapshot.presentToday || 0}`,
               icon: "people-circle-outline",
               tone: colors.success,
             },
