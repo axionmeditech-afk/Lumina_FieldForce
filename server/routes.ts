@@ -105,7 +105,7 @@ const DOLIBARR_PROXY_RULES: Array<{
   prefix: string;
   roles: UserRole[];
 }> = [
-  { prefix: "/users", roles: ["admin", "hr", "manager", "salesperson", "employee"] },
+  { prefix: "/users", roles: ["admin", "hr", "manager"] },
   { prefix: "/salaries", roles: ["admin", "hr", "manager"] },
   { prefix: "/salary", roles: ["admin", "hr", "manager"] },
   { prefix: "/products", roles: ["admin", "hr", "manager", "salesperson", "employee"] },

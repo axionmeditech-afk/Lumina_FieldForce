@@ -370,7 +370,7 @@ export async function getEmployees(): Promise<Employee[]> {
   }
 
   let dolibarrEmployees: Employee[] = [];
-  if (currentUser) {
+  if (currentUser && ["admin", "hr", "manager"].includes(currentUser.role)) {
     const dolibarrUsers = await loadRosterUsers(currentUser);
     dolibarrEmployees = mapDolibarrUsersToEmployees(dolibarrUsers, currentUser);
   }
@@ -384,7 +384,7 @@ export async function getEmployees(): Promise<Employee[]> {
   const scoped = companyId ? merged.filter((employee) => isEmployeeInCurrentCompany(employee, companyId)) : merged;
   const finalEmployees = dedupeEmployees(scoped);
 
-  if (activeRoster.length > 0 && currentUser) {
+  if (activeRoster.length > 0 && currentUser && ["admin", "hr", "manager"].includes(currentUser.role)) {
     void setRemoteState(EMPLOYEE_STATE_KEY, finalEmployees).catch(() => {
       // Best-effort cleanup: UI should still use the deduped in-memory roster.
     });
