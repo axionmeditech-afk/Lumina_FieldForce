@@ -1037,31 +1037,33 @@ export default function DashboardScreen() {
 
   const metricCards = useMemo<MetricCard[]>(
     () => {
+      let expectedDays = 1;
+      if (selectedMetricRange.id === "week") expectedDays = 6;
+      else if (selectedMetricRange.id === "month") expectedDays = 26;
+      else if (selectedMetricRange.id === "all") expectedDays = 300;
+      
+      let approxAttendanceRate = presentRatio;
+      if (selectedMetricRange.id !== "today" && snapshot.totalEmployees > 0) {
+          const expectedCheckins = snapshot.totalEmployees * expectedDays;
+          approxAttendanceRate = Math.min(Math.round((rangedMetricData.checkins / expectedCheckins) * 100), 100);
+      }
+
+      const attendanceCard = {
+        id: "present",
+        label: "Attendance",
+        value: selectedMetricRange.id === "today" 
+           ? `${snapshot.presentToday}/${snapshot.totalEmployees}`
+           : `${approxAttendanceRate}%`,
+        hint: selectedMetricRange.id === "today"
+           ? `${presentRatio}% attendance today`
+           : `Approx. attendance over ${selectedMetricRange.shortLabel}`,
+        icon: "person-add-outline",
+        tone: colors.success,
+      };
+
       if (isAdmin) {
-        let expectedDays = 1;
-        if (selectedMetricRange.id === "week") expectedDays = 6;
-        else if (selectedMetricRange.id === "month") expectedDays = 26;
-        else if (selectedMetricRange.id === "all") expectedDays = 300;
-        
-        let approxAttendanceRate = presentRatio;
-        if (selectedMetricRange.id !== "today" && snapshot.totalEmployees > 0) {
-            const expectedCheckins = snapshot.totalEmployees * expectedDays;
-            approxAttendanceRate = Math.min(Math.round((rangedMetricData.checkins / expectedCheckins) * 100), 100);
-        }
-        
         return [
-            {
-              id: "present",
-              label: "Attendance",
-              value: selectedMetricRange.id === "today" 
-                 ? `${snapshot.presentToday}/${snapshot.totalEmployees}`
-                 : `${approxAttendanceRate}%`,
-              hint: selectedMetricRange.id === "today"
-                 ? `${presentRatio}% attendance today`
-                 : `Approx. attendance over ${selectedMetricRange.shortLabel}`,
-              icon: "person-add-outline",
-              tone: colors.success,
-            },
+            attendanceCard,
             {
               id: "tasks",
               label: "Execution Rate",
@@ -1090,6 +1092,7 @@ export default function DashboardScreen() {
       }
       if (isSalesperson) {
         return [
+            attendanceCard,
             {
               id: "visits",
               label: "Visits",
@@ -1125,14 +1128,7 @@ export default function DashboardScreen() {
         ];
       }
       return [
-            {
-              id: "present",
-              label: "Check-ins",
-              value: `${rangedMetricData.checkinUsers}/${snapshot.totalEmployees || 0}`,
-              hint: `${rangedMetricData.checkins} check-ins · ${selectedMetricRange.shortLabel}`,
-              icon: "person-add-outline",
-              tone: colors.success,
-            },
+            attendanceCard,
             {
               id: "alerts",
               label: "My Alerts",
