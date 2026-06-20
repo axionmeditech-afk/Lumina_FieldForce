@@ -7213,16 +7213,7 @@ function buildLoginFromEmailAndName(email: string, name: string): string {
 
 async function authenticateCredentials(identifier: string, password: string): Promise<AppUser | null> {
   await initAuthUsersStore();
-  const cachedRecord = getAuthUserByIdentifier(identifier);
-  const syncEmail = identifier.includes("@")
-    ? normalizeEmail(identifier)
-    : cachedRecord?.user.email
-      ? normalizeEmail(cachedRecord.user.email)
-      : "";
-  const record =
-    syncEmail && isMySqlStateEnabled()
-      ? (await syncAuthUserCacheForEmail(syncEmail)) || getAuthUserByIdentifier(identifier)
-      : cachedRecord;
+  const record = getAuthUserByIdentifier(identifier);
   if (!record) return null;
   if (!matchesStoredPasswordHash(record.passwordHash, password)) return null;
   if (resolveApprovalStatus(record) !== "approved") return null;
@@ -8819,39 +8810,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       console.error("Failed to issue login token", error);
       res.status(500).json({ message: "Unable to issue login token right now." });
-    }
-  });
-
-  app.post("/api/auth/reset-password", async (req, res) => {
-    const { email, password } = req.body as { email?: string; password?: string };
-    const normalizedEmail = normalizeEmail(email || "");
-    if (!normalizedEmail || !password) {
-      res.status(400).json({ message: "Email and new password are required" });
-      return;
-    }
-    if (password.length < 6) {
-      res.status(400).json({ message: "Password must be at least 6 characters" });
-      return;
-    }
-
-    await initAuthUsersStore();
-    const authRecord = getAuthUserByIdentifier(normalizedEmail);
-    if (!authRecord) {
-      res.status(404).json({ message: "User not found" });
-      return;
-    }
-
-    const newHash = hashPassword(password);
-    authRecord.passwordHash = newHash;
-    authRecord.updatedAt = new Date().toISOString();
-    setAuthUserRecord(authRecord);
-
-    try {
-      await upsertAuthUserInMySql(authRecord, authRecord.user.companyName || "");
-      res.json({ ok: true, message: "Password updated successfully" });
-    } catch (error) {
-      console.error("Failed to update password in MySQL", error);
-      res.status(500).json({ message: "Failed to update password in database" });
     }
   });
 

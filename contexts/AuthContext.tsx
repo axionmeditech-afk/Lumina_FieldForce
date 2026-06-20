@@ -39,7 +39,7 @@ interface AuthContextValue {
   user: AppUser | null;
   company: CompanyProfile | null;
   isLoading: boolean;
-  login: (identifier: string, password: string) => Promise<boolean>;
+  login: (identifier: string, password: string) => Promise<{ ok: boolean; message?: string }>;
   signup: (input: SignupInput) => Promise<{ ok: boolean; message?: string; authenticated?: boolean }>;
   updateCompany: (
     updates: Partial<Omit<CompanyProfile, "id" | "createdAt" | "updatedAt">>
@@ -124,7 +124,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void bootstrap();
   }, [refreshSession]);
 
-  const login = async (identifier: string, password: string): Promise<boolean> => {
+  const login = async (identifier: string, password: string): Promise<{ ok: boolean; message?: string }> => {
     const rawIdentifier = identifier.trim();
     const normalizedIdentifier = rawIdentifier.includes("@")
       ? rawIdentifier.toLowerCase()
@@ -133,6 +133,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const tokenTimeoutMs = isStandaloneRuntime ? 9000 : 4200;
     const remoteUserTimeoutMs = isStandaloneRuntime ? 7000 : 3200;
     let blockedByActiveDeviceSession = false;
+    let lastErrorMessage = "Invalid email/username or password. Please try again or create an account.";
+    
     const attemptToken = async (value: string): Promise<string | null> => {
       if (!value) return null;
       if (blockedByActiveDeviceSession) return null;
@@ -144,6 +146,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             throwOnDeviceLock: true,
           });
         } catch (error) {
+          if (error instanceof Error && error.message) {
+            if (!/network request failed|failed to fetch|econn|enotfound|timed out/i.test(error.message)) {
+              lastErrorMessage = error.message;
+            }
+          }
           if (isDeviceSessionLockedError(error)) {
             blockedByActiveDeviceSession = true;
             return null;
@@ -175,7 +182,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token = await attemptToken(rawIdentifier.toLowerCase());
     }
     if (blockedByActiveDeviceSession) {
-      return false;
+      return { ok: false, message: "This account is already active on another device. Please logout there first." };
     }
     if (token) {
       let remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });
@@ -188,7 +195,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(hydrated);
         const activeCompany = await getCurrentCompanyProfile();
         setCompany(activeCompany);
-        return true;
+        return { ok: true };
       }
     }
 
@@ -203,7 +210,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setUser(hydrated);
             const activeCompany = await getCurrentCompanyProfile();
             setCompany(activeCompany);
-            return true;
+            return { ok: true };
           }
         }
       }
@@ -211,9 +218,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const activeCompany = await getCurrentCompanyProfile();
       setCompany(activeCompany);
       void hydrateApiSession(u, rawIdentifier, password, true);
-      return true;
+      return { ok: true };
     }
-    return false;
+    return { ok: false, message: lastErrorMessage };
   };
 
   const signup = async (
