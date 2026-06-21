@@ -83,6 +83,10 @@ import { toMumbaiDateKey } from "@/lib/ist-time";
 import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
+import {
+  isAttendanceRosterMember,
+  isSystemAdministratorAccount,
+} from "@/lib/attendance-roster";
 
 const LOCATION_REFRESH_MS = 15 * 1000;
 const STRICT_LOCATION_ACCURACY_METERS = 180;
@@ -320,6 +324,7 @@ function normalizeRosterStatus(value: unknown): boolean {
 
 function mapAttendanceUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?: string; name?: string }): Employee | null {
   if (!normalizeRosterStatus(user.statut ?? user.status)) return null;
+  if (isSystemAdministratorAccount(user)) return null;
   const activeCompanyId = (fallbackCompany?.id || "").trim();
   const assignedCompanyIds = Array.isArray(user.assignedCompanyIds)
     ? user.assignedCompanyIds.map((id) => id.trim()).filter(Boolean)
@@ -371,8 +376,7 @@ function mergeAttendanceRoster(primary: Employee[], extra: Employee[]): Employee
   const seenIds = new Set<string>();
 
   for (const employee of [...primary, ...extra]) {
-    const role = employee.role || "employee";
-    if (role !== "employee" && role !== "salesperson") continue;
+    if (!isAttendanceRosterMember(employee)) continue;
     const idKey = normalizeAttendanceIdentity(employee.id);
     if (idKey && seenIds.has(idKey)) continue;
     merged.push(employee);
@@ -409,8 +413,8 @@ function buildAdminAttendanceStatuses(
   >();
 
   for (const employee of employees) {
-    const employeeRole = employee.role || "employee";
-    if (employeeRole !== "employee" && employeeRole !== "salesperson") continue;
+    if (!isAttendanceRosterMember(employee)) continue;
+    const employeeRole = employee.role;
     if (!employee.companyId || employee.companyId === "workspace_default") continue;
     const nameKey = normalizeAttendanceIdentity(employee.name);
     const roleKey = normalizeAttendanceIdentity(employeeRole);

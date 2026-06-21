@@ -11671,15 +11671,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           "Employee";
         if (isLegacyDemoProfileName(displayName)) continue;
 
-        // Check whether they are employee or salesperson using the employee profile table
-        let role: string = "employee";
-        if (row.employee_category === "on_field") {
+        // Dolibarr's admin flag is authoritative. Employee profile metadata must
+        // never downgrade an administrator into the attendance roster.
+        let role: string = Number(row.admin || 0) === 1 ? "admin" : "employee";
+        if (role !== "admin" && row.employee_category === "on_field") {
           role = "salesperson";
-        } else if (row.employee_category === "fixed_location") {
+        } else if (role !== "admin" && row.employee_category === "fixed_location") {
           role = "employee";
-        } else {
-          // Fallback: decide from admin flag, job title, or request
-          let mappedRole = Number(row.admin || 0) === 1 ? "admin" : null;
+        } else if (role !== "admin") {
+          // Fallback: decide from job title or the approved access request.
+          let mappedRole: string | null = null;
           if (!mappedRole && row.job) {
             const jobStr = String(row.job).toLowerCase();
             if (jobStr.includes("on field") || jobStr.includes("sales")) {
@@ -11691,7 +11692,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           role = mappedRole || request.approvedRole || request.requestedRole || "salesperson";
         }
         const finalRole = normalizeRole(role);
-        const employeeCategory = isSalesRole(finalRole) ? "on_field" : "fixed_location";
+        const employeeCategory =
+          finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
 
         const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
         for (const assignedCompanyId of targetCompanyIds) {
@@ -11720,6 +11722,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
               request.requestedCompanyName ||
               assignedCompanyId,
             assignedCompanyIds,
+            admin: Number(row.admin || 0),
+            employee: Number(row.employee || 0),
             employeeCategory,
             employee_category: employeeCategory,
             role: finalRole,

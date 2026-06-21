@@ -57,6 +57,10 @@ import type {
   UserRole,
 } from "@/lib/types";
 import { canAccessSalesModule, isSalesRole } from "@/lib/role-access";
+import {
+  isAttendanceRosterMember,
+  isSystemAdministratorAccount,
+} from "@/lib/attendance-roster";
 
 type ActivityEntry = {
   id: string;
@@ -309,15 +313,25 @@ function hasOpenAttendanceSession(
   userId?: string | null,
   userName?: string | null
 ): boolean {
+  const normalizedUserId = normalizeIdentity(userId);
   const normalizedUserName = normalizeIdentity(userName);
   const latest = records
-    .filter(
-      (entry) =>
-        (userId && entry.userId === userId) ||
-        (normalizedUserName.length > 0 && normalizeIdentity(entry.userName) === normalizedUserName)
-    )
+    .filter((entry) => attendanceRecordMatchesEmployee(entry, normalizedUserId, normalizedUserName))
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
   return latest?.type === "checkin";
+}
+
+function attendanceRecordMatchesEmployee(
+  record: AttendanceRecord,
+  employeeId?: string | null,
+  employeeName?: string | null
+): boolean {
+  const normalizedEmployeeId = normalizeIdentity(employeeId);
+  const normalizedEmployeeName = normalizeIdentity(employeeName);
+  return Boolean(
+    (normalizedEmployeeId && normalizeIdentity(record.userId) === normalizedEmployeeId) ||
+      (normalizedEmployeeName && normalizeIdentity(record.userName) === normalizedEmployeeName)
+  );
 }
 
 function getTaskLabel(task: Task): string {
@@ -598,6 +612,7 @@ function normalizeRosterStatus(value: unknown): boolean {
 
 function mapUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?: string; name?: string }): Employee | null {
   if (!normalizeRosterStatus(user.statut ?? user.status)) return null;
+  if (isSystemAdministratorAccount(user)) return null;
   const activeCompanyId = (fallbackCompany?.id || "").trim();
   const assignedCompanyIds = Array.isArray(user.assignedCompanyIds)
     ? user.assignedCompanyIds.map((id) => id.trim()).filter(Boolean)
@@ -649,8 +664,7 @@ function mergeDashboardRoster(primary: Employee[], extra: Employee[]): Employee[
   const seenIds = new Set<string>();
 
   for (const employee of [...primary, ...extra]) {
-    const role = employee.role || "employee";
-    if (role !== "employee" && role !== "salesperson") continue;
+    if (!isAttendanceRosterMember(employee)) continue;
     const idKey = (employee.id || "").trim().toLowerCase();
     if (idKey && seenIds.has(idKey)) continue;
     merged.push(employee);
@@ -830,8 +844,15 @@ export default function DashboardScreen() {
 
   const snapshot = useMemo<DashboardSnapshot>(() => {
     const todayKey = toLocalDateKey(clockNow);
-    const employeeRoster = employees.filter((employee) => employee.role !== "admin");
-    const validAttendance = attendance.filter((record) => record.approvalStatus !== "rejected");
+    const employeeRoster = employees.filter(isAttendanceRosterMember);
+    const rosterIds = new Set(employeeRoster.map((employee) => normalizeIdentity(employee.id)).filter(Boolean));
+    const rosterNames = new Set(employeeRoster.map((employee) => normalizeIdentity(employee.name)).filter(Boolean));
+    const validAttendance = attendance.filter(
+      (record) =>
+        record.approvalStatus !== "rejected" &&
+        (rosterIds.has(normalizeIdentity(record.userId)) ||
+          rosterNames.has(normalizeIdentity(record.userName)))
+    );
     const checkedInNowCount = employeeRoster.filter((employee) =>
       hasOpenAttendanceSession(validAttendance, employee.id, employee.name)
     ).length;
@@ -839,15 +860,16 @@ export default function DashboardScreen() {
       (record) => toLocalDateKey(new Date(record.timestamp)) === todayKey
     );
     const todayCheckins = todayRecords.filter((record) => record.type === "checkin");
-    const uniqueCheckedInTodayUsers = new Set<string>();
-    todayCheckins.forEach(record => {
-      const key = record.userId || record.userName;
-      if (key) uniqueCheckedInTodayUsers.add(key);
-    });
-    const uniqueCheckedInTodayCount = uniqueCheckedInTodayUsers.size;
+    const uniqueCheckedInTodayCount = employeeRoster.filter((employee) =>
+      todayCheckins.some((record) => attendanceRecordMatchesEmployee(record, employee.id, employee.name))
+    ).length;
 
-    const lateToday = todayCheckins.filter((record) => {
-      const parsed = new Date(record.timestamp);
+    const lateToday = employeeRoster.filter((employee) => {
+      const firstCheckIn = todayCheckins
+        .filter((record) => attendanceRecordMatchesEmployee(record, employee.id, employee.name))
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp))[0];
+      if (!firstCheckIn) return false;
+      const parsed = new Date(firstCheckIn.timestamp);
       if (Number.isNaN(parsed.getTime())) return false;
       return (
         parsed.getHours() > LATE_THRESHOLD_HOUR ||
@@ -855,11 +877,20 @@ export default function DashboardScreen() {
           parsed.getMinutes() > LATE_THRESHOLD_MINUTE)
       );
     }).length;
-    const todayCheckouts = todayRecords.filter((record) => record.type === "checkout").length;
-    const pendingSignIns = attendance.filter(
-      (record) =>
-        record.type === "checkin" &&
-        record.approvalStatus === "pending"
+    const todayCheckouts = employeeRoster.filter((employee) =>
+      todayRecords.some(
+        (record) =>
+          record.type === "checkout" &&
+          attendanceRecordMatchesEmployee(record, employee.id, employee.name)
+      )
+    ).length;
+    const pendingSignIns = employeeRoster.filter((employee) =>
+      validAttendance.some(
+        (record) =>
+          record.type === "checkin" &&
+          record.approvalStatus === "pending" &&
+          attendanceRecordMatchesEmployee(record, employee.id, employee.name)
+      )
     ).length;
     const assignedTaskList = tasks.filter(
       (task) =>

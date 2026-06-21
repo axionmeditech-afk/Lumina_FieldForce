@@ -18,6 +18,7 @@ import {
   saveSalaryRecordRemote,
   updateSalaryStatusRemote,
 } from "@/lib/attendance-api";
+import { isSystemAdministratorAccount } from "@/lib/attendance-roster";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
 const FALLBACK_COMPANY_IDS = new Set(["", "company_default", "default", "cmp_default"]);
@@ -308,6 +309,7 @@ function mapDolibarrUsersToEmployees(
 
   return users
     .filter((user) => isUserActive(user))
+    .filter((user) => !isSystemAdministratorAccount(user))
     .map((user) => {
       const first = normalizeText(user.firstname);
       const last = normalizeText(user.lastname);

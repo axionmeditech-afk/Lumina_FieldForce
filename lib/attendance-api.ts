@@ -107,6 +107,8 @@ export interface DolibarrUser {
   companyId?: string;
   companyName?: string;
   assignedCompanyIds?: string[];
+  admin?: boolean | number | string | null;
+  employee?: boolean | number | string | null;
   role?: UserRole;
   employeeCategory?: "on_field" | "fixed_location" | string | null;
   employee_category?: "on_field" | "fixed_location" | string | null;
