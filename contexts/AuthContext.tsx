@@ -182,7 +182,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token = await attemptToken(rawIdentifier.toLowerCase());
     }
     if (blockedByActiveDeviceSession) {
-      return { ok: false, message: "This account is already active on another device. Please logout there first." };
+      return {
+        ok: false,
+        message:
+          "This account is already signed in on another device. Sign out from the previous device before signing in here.",
+      };
     }
     if (token) {
       let remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });

@@ -8,6 +8,7 @@ type AttendanceRosterIdentity = {
   role?: UserRole | string | null;
   admin?: boolean | number | string | null;
   isAdmin?: boolean | number | string | null;
+  companyId?: string | null;
 };
 
 function normalizeIdentity(value: unknown): string {
@@ -50,3 +51,50 @@ export function isAttendanceRosterMember(identity: AttendanceRosterIdentity): bo
   return (role === "employee" || role === "salesperson") && !isSystemAdministratorAccount(identity);
 }
 
+function getRosterIdentityKeys(identity: AttendanceRosterIdentity): string[] {
+  const role = normalizeIdentity(identity.role);
+  const keys: string[] = [];
+
+  const rawId = normalizeIdentity(identity.id == null ? "" : String(identity.id));
+  if (rawId) {
+    keys.push(`id:${rawId}`);
+    const unprefixedId = rawId.replace(/^dolibarr_/, "");
+    if (unprefixedId !== rawId) keys.push(`id:${unprefixedId}`);
+  }
+
+  const email = normalizeIdentity(identity.email);
+  if (email && !email.endsWith("@dolibarr.local")) {
+    keys.push(`email:${email}`);
+  }
+
+  const name = normalizeIdentity(identity.name).replace(/\s+/g, " ");
+  if (name) keys.push(`name:${role}:${name}`);
+  return keys;
+}
+
+export function dedupeAttendanceRosterMembers<T extends AttendanceRosterIdentity>(identities: T[]): T[] {
+  const deduped: T[] = [];
+  const keyToIndex = new Map<string, number>();
+
+  for (const identity of identities) {
+    if (!isAttendanceRosterMember(identity)) continue;
+    const keys = getRosterIdentityKeys(identity);
+    const existingIndex = keys
+      .map((key) => keyToIndex.get(key))
+      .find((index): index is number => typeof index === "number");
+
+    if (typeof existingIndex === "number") {
+      // Inputs are ordered cache-first/API-last, so the authoritative API row
+      // replaces its cached duplicate while all known aliases keep pointing to it.
+      deduped[existingIndex] = identity;
+      for (const key of keys) keyToIndex.set(key, existingIndex);
+      continue;
+    }
+
+    const nextIndex = deduped.length;
+    deduped.push(identity);
+    for (const key of keys) keyToIndex.set(key, nextIndex);
+  }
+
+  return deduped;
+}

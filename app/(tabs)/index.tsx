@@ -41,7 +41,7 @@ import {
   getTeams,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import { getTodayAttendance, getCompanyAttendanceToday, getUsersRemote } from "@/lib/attendance-api";
+import { getCompanyAttendanceToday, getUsersRemote } from "@/lib/attendance-api";
 import type { DolibarrUser } from "@/lib/attendance-api";
 import type {
   AppNotification,
@@ -58,7 +58,7 @@ import type {
 } from "@/lib/types";
 import { canAccessSalesModule, isSalesRole } from "@/lib/role-access";
 import {
-  isAttendanceRosterMember,
+  dedupeAttendanceRosterMembers,
   isSystemAdministratorAccount,
 } from "@/lib/attendance-roster";
 
@@ -660,18 +660,7 @@ function mapUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?: string; 
 }
 
 function mergeDashboardRoster(primary: Employee[], extra: Employee[]): Employee[] {
-  const merged: Employee[] = [];
-  const seenIds = new Set<string>();
-
-  for (const employee of [...primary, ...extra]) {
-    if (!isAttendanceRosterMember(employee)) continue;
-    const idKey = (employee.id || "").trim().toLowerCase();
-    if (idKey && seenIds.has(idKey)) continue;
-    merged.push(employee);
-    if (idKey) seenIds.add(idKey);
-  }
-
-  return merged;
+  return dedupeAttendanceRosterMembers([...primary, ...extra]);
 }
 
 export default function DashboardScreen() {
@@ -742,26 +731,25 @@ export default function DashboardScreen() {
         const companyId = company?.id || user.companyId;
         const isAdminUser = user?.role === "admin" || user?.role === "manager";
 
-        // Query employees roster dynamically for the selected company if administrator
-        const employeesPromise = isAdminUser
-          ? getUsersRemote({ companyId }).then(async (users) => {
-              const mapped = users
-                .map((entry) => mapUserToEmployee(entry, { id: companyId, name: company?.name || "" }))
-                .filter((entry): entry is Employee => Boolean(entry));
-              const local = await getEmployees().catch(() => [] as Employee[]);
-              const merged = mergeDashboardRoster(local, mapped);
-              return merged.filter((emp) => {
-                const empCompanyId = (emp.companyId || "").trim();
-                return empCompanyId === companyId || empCompanyId === "workspace_default" || empCompanyId === "company_default" || empCompanyId === "";
-              });
-            }).catch(async () => {
-              const local = await getEmployees().catch(() => [] as Employee[]);
-              return local.filter((emp) => {
-                const empCompanyId = (emp.companyId || "").trim();
-                return empCompanyId === companyId || empCompanyId === "workspace_default" || empCompanyId === "company_default" || empCompanyId === "";
-              });
-            })
-          : getEmployees();
+        // Every role needs the same authoritative company roster for attendance
+        // metrics. The API scopes this request to the authenticated user's company.
+        const employeesPromise = Promise.all([
+          getUsersRemote({ companyId }).catch(() => [] as DolibarrUser[]),
+          getEmployees().catch(() => [] as Employee[]),
+        ]).then(([users, local]) => {
+          const mapped = users
+            .map((entry) => mapUserToEmployee(entry, { id: companyId, name: company?.name || "" }))
+            .filter((entry): entry is Employee => Boolean(entry));
+          if (mapped.length > 0) {
+            // Assigned API users are authoritative. Cached rows may include
+            // employees removed from this company and must not affect totals.
+            return dedupeAttendanceRosterMembers(mapped);
+          }
+          const exactCompanyLocal = local.filter(
+            (employee) => (employee.companyId || "").trim() === companyId
+          );
+          return dedupeAttendanceRosterMembers(exactCompanyLocal);
+        });
 
         const [
           employeeData,
@@ -777,7 +765,7 @@ export default function DashboardScreen() {
         ] = await Promise.all([
           employeesPromise,
           getAttendance(),
-          isAdminUser ? getCompanyAttendanceToday(companyId) : Promise.resolve([] as AttendanceRecord[]),
+          getCompanyAttendanceToday(companyId),
           getTasks(),
           getExpenses(),
           getConversations(),
@@ -805,7 +793,12 @@ export default function DashboardScreen() {
           : expenseData;
 
         setEmployees(employeeData);
-        setAttendance(mergedAttendance);
+        setAttendance(
+          mergedAttendance.filter((record) => {
+            const recordCompanyId = (record.companyId || "").trim();
+            return !recordCompanyId || recordCompanyId === companyId;
+          })
+        );
         setTasks(filteredTasks);
         setExpenses(filteredExpenses);
         setConversations(conversationData);
@@ -825,7 +818,7 @@ export default function DashboardScreen() {
     } finally {
       inFlightLoadRef.current = null;
     }
-  }, [user, company?.id]);
+  }, [user, company?.id, company?.name]);
 
   useFocusEffect(
     useCallback(() => {
@@ -844,7 +837,7 @@ export default function DashboardScreen() {
 
   const snapshot = useMemo<DashboardSnapshot>(() => {
     const todayKey = toLocalDateKey(clockNow);
-    const employeeRoster = employees.filter(isAttendanceRosterMember);
+    const employeeRoster = dedupeAttendanceRosterMembers(employees);
     const rosterIds = new Set(employeeRoster.map((employee) => normalizeIdentity(employee.id)).filter(Boolean));
     const rosterNames = new Set(employeeRoster.map((employee) => normalizeIdentity(employee.name)).filter(Boolean));
     const validAttendance = attendance.filter(
@@ -853,12 +846,12 @@ export default function DashboardScreen() {
         (rosterIds.has(normalizeIdentity(record.userId)) ||
           rosterNames.has(normalizeIdentity(record.userName)))
     );
-    const checkedInNowCount = employeeRoster.filter((employee) =>
-      hasOpenAttendanceSession(validAttendance, employee.id, employee.name)
-    ).length;
     const todayRecords = validAttendance.filter(
       (record) => toLocalDateKey(new Date(record.timestamp)) === todayKey
     );
+    const checkedInNowCount = employeeRoster.filter((employee) =>
+      hasOpenAttendanceSession(todayRecords, employee.id, employee.name)
+    ).length;
     const todayCheckins = todayRecords.filter((record) => record.type === "checkin");
     const uniqueCheckedInTodayCount = employeeRoster.filter((employee) =>
       todayCheckins.some((record) => attendanceRecordMatchesEmployee(record, employee.id, employee.name))
@@ -1006,8 +999,6 @@ export default function DashboardScreen() {
     const userCompletedVisits = userRangeVisits.filter((task) => task.status === "completed").length;
     const userActiveVisits = userRangeVisits.filter((task) => task.status === "in_progress").length;
     const userPendingVisits = userRangeVisits.filter((task) => task.status === "pending").length;
-    const rangeVisits = assignedTaskList.filter((task) => task.taskType === "field_visit");
-    const rangeCompletedVisits = rangeVisits.filter((task) => task.status === "completed").length;
     const rangeConversations = conversations.filter((entry) =>
       isMetricDateInRange(entry.date, metricRange, clockNow)
     );
@@ -1122,12 +1113,12 @@ export default function DashboardScreen() {
       if (isSalesperson) {
         return [
             {
-              id: "visits",
-              label: "Visits",
-              value: `${rangedMetricData.userCompletedVisits}/${rangedMetricData.userVisits}`,
-              hint: `${rangedMetricData.userPendingVisits} pending · ${rangedMetricData.userActiveVisits} active`,
-              icon: "navigate-outline",
-              tone: colors.primary,
+              id: "present",
+              label: "Attendance",
+              value: `${snapshot.presentToday}/${snapshot.totalEmployees}`,
+              hint: `${presentRatio}% of company present today`,
+              icon: "people-outline",
+              tone: colors.success,
             },
             {
               id: "tasks",
@@ -1158,10 +1149,10 @@ export default function DashboardScreen() {
       return [
             {
               id: "present",
-              label: "Check-ins",
-              value: `${rangedMetricData.checkinUsers}/${snapshot.totalEmployees || 0}`,
-              hint: `${rangedMetricData.checkins} check-ins · ${selectedMetricRange.shortLabel}`,
-              icon: "person-add-outline",
+              label: "Attendance",
+              value: `${snapshot.presentToday}/${snapshot.totalEmployees}`,
+              hint: `${presentRatio}% of company present today`,
+              icon: "people-outline",
               tone: colors.success,
             },
             {
@@ -1246,7 +1237,7 @@ export default function DashboardScreen() {
               {
                 id: "team_presence",
                 label: "Checked In",
-                value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
+                value: `${snapshot.checkedInNow}/${snapshot.presentToday || 0}`,
                 icon: "people-circle-outline",
                 tone: colors.success,
               },
@@ -1285,7 +1276,7 @@ export default function DashboardScreen() {
             {
               id: "team_presence",
               label: "Checked In",
-              value: `${snapshot.checkedInNow}/${snapshot.totalEmployees || 0}`,
+              value: `${snapshot.checkedInNow}/${snapshot.presentToday || 0}`,
               icon: "people-circle-outline",
               tone: colors.success,
             },

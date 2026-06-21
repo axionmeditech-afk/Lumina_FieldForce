@@ -7024,7 +7024,7 @@ type ActiveAuthSessionRecord = {
 let authSessionsTableEnsured = false;
 const inMemoryActiveAuthSessions = new Map<string, ActiveAuthSessionRecord>();
 const SINGLE_DEVICE_SESSION_LOCK_MESSAGE =
-  "This account is already active on another device. Please logout from that device first.";
+  "This account is already signed in on another device. Sign out from the previous device before signing in here.";
 
 function normalizeDeviceIdInput(value: unknown): string {
   const raw = typeof value === "string" ? value.trim() : "";
@@ -7182,7 +7182,7 @@ function extractBearerTokenFromRequest(req: Request): string {
 
 function isSingleDeviceSessionLockError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return /already active on another device/i.test(error.message || "");
+  return /already (?:active|signed in) on another device/i.test(error.message || "");
 }
 
 function createAuthToken(user: AppUser, deviceId: string): string {

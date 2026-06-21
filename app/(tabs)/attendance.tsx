@@ -84,6 +84,7 @@ import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 import {
+  dedupeAttendanceRosterMembers,
   isAttendanceRosterMember,
   isSystemAdministratorAccount,
 } from "@/lib/attendance-roster";
@@ -372,18 +373,7 @@ function mapAttendanceUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?
 }
 
 function mergeAttendanceRoster(primary: Employee[], extra: Employee[]): Employee[] {
-  const merged: Employee[] = [];
-  const seenIds = new Set<string>();
-
-  for (const employee of [...primary, ...extra]) {
-    if (!isAttendanceRosterMember(employee)) continue;
-    const idKey = normalizeAttendanceIdentity(employee.id);
-    if (idKey && seenIds.has(idKey)) continue;
-    merged.push(employee);
-    if (idKey) seenIds.add(idKey);
-  }
-
-  return merged;
+  return dedupeAttendanceRosterMembers([...primary, ...extra]);
 }
 
 async function loadAttendanceRoster(fallbackCompany?: { id?: string; name?: string }): Promise<Employee[]> {
@@ -394,7 +384,17 @@ async function loadAttendanceRoster(fallbackCompany?: { id?: string; name?: stri
   const userEmployees = users
     .map((entry) => mapAttendanceUserToEmployee(entry, fallbackCompany))
     .filter((entry): entry is Employee => Boolean(entry));
-  return mergeAttendanceRoster(employees, userEmployees);
+  if (userEmployees.length > 0) {
+    // The backend list is the authoritative set of users currently assigned to
+    // this company. Do not let stale cached employees inflate the denominator.
+    return dedupeAttendanceRosterMembers(userEmployees);
+  }
+
+  const companyId = (fallbackCompany?.id || "").trim();
+  const scopedFallback = companyId
+    ? employees.filter((employee) => (employee.companyId || "").trim() === companyId)
+    : employees;
+  return dedupeAttendanceRosterMembers(scopedFallback);
 }
 
 function buildAdminAttendanceStatuses(

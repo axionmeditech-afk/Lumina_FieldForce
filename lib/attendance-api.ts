@@ -308,7 +308,7 @@ export function isApiAuthRequiredError(error: unknown): error is ApiAuthRequired
 export class DeviceSessionLockedError extends Error {
   readonly code = "device_session_locked" as const;
 
-  constructor(message = "This account is already active on another device. Please logout there first.") {
+  constructor(message = "This account is already signed in on another device. Sign out from the previous device before signing in here.") {
     super(message);
     this.name = "DeviceSessionLockedError";
   }
@@ -325,7 +325,7 @@ export function isDeviceSessionLockedError(error: unknown): error is DeviceSessi
 }
 
 function isDeviceSessionLockedMessage(message: string): boolean {
-  return /already active on another device|logout from that device first/i.test(message);
+  return /already (?:active|signed in) on another device|(?:log|sign) ?out from (?:that|the previous) device/i.test(message);
 }
 
 function isPublicApiPath(path: string): boolean {

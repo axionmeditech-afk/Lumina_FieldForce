@@ -84,12 +84,15 @@ export default function LoginScreen() {
 
     try {
       if (mode === "signin") {
-        const success = await login(email.trim(), password);
-        if (!success) {
+        const loginResult = await login(email.trim(), password);
+        if (!loginResult.ok) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           Alert.alert(
-            "Login Failed",
-            "Invalid email/username or password. Please try again or create an account."
+            loginResult.message?.toLowerCase().includes("another device")
+              ? "Already Signed In"
+              : "Login Failed",
+            loginResult.message ||
+              "Invalid email/username or password. Please try again or create an account."
           );
           return;
         }
