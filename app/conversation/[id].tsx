@@ -67,13 +67,208 @@ function normalizePlayableFileUri(value: string): string {
   return trimmed;
 }
 
-async function resolveConversationAudioPlaybackUri(audioUri: string): Promise<string> {
+function apiBaseToAssetRoots(apiBase: string): string[] {
+  try {
+    const parsed = new URL(apiBase);
+    const pathWithoutApi = parsed.pathname.replace(/\/api\/?$/i, "").replace(/\/+$/, "");
+    const roots = new Set<string>([parsed.origin]);
+    if (pathWithoutApi) {
+      roots.add(`${parsed.origin}${pathWithoutApi}`);
+    }
+    return Array.from(roots);
+  } catch {
+    return [];
+  }
+}
+
+function supportAttachmentPathFromUri(uri: string): string | null {
+  const trimmed = uri.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("/api/support-attachments/")) {
+    return trimmed.replace(/^\/api/i, "");
+  }
+  if (trimmed.startsWith("/support-attachments/")) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.pathname.startsWith("/api/support-attachments/")) {
+      return `${parsed.pathname.replace(/^\/api/i, "")}${parsed.search}`;
+    }
+    if (!parsed.pathname.startsWith("/support-attachments/")) return null;
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return null;
+  }
+}
+
+function extractAudioUriTimestamps(uri: string): number[] {
+  const timestamps = new Set<number>();
+  const matches = uri.matchAll(/(?:conversation|conv|recording)[_\-](\d{10,13})/gi);
+  for (const match of matches) {
+    const raw = Number(match[1]);
+    if (!Number.isFinite(raw) || raw <= 0) continue;
+    timestamps.add(raw < 10_000_000_000 ? raw * 1000 : raw);
+  }
+  return Array.from(timestamps);
+}
+
+function isAudioFileName(name: string): boolean {
+  return /\.(m4a|mp4|mp3|wav|aac|3gp|webm|ogg|flac)$/i.test(name);
+}
+
+async function listExistingAudioFilesInDirectory(directoryUri: string, maxDepth = 3, currentDepth = 0): Promise<string[]> {
+  try {
+    if (currentDepth > maxDepth) return [];
+    const info = await FileSystem.getInfoAsync(directoryUri);
+    if (!info.exists || !(info as { isDirectory?: boolean }).isDirectory) return [];
+    
+    const names = await FileSystem.readDirectoryAsync(directoryUri);
+    const files: string[] = [];
+    
+    for (const name of names) {
+      const fullUri = `${ensureTrailingSlash(directoryUri)}${name}`;
+      if (isAudioFileName(name)) {
+        files.push(fullUri);
+      } else if (currentDepth < maxDepth) {
+        // Safely recurse into directories, avoiding obvious files
+        if (!name.includes(".") || name.includes("%40") || name.includes("%2540")) {
+          const subFiles = await listExistingAudioFilesInDirectory(fullUri, maxDepth, currentDepth + 1);
+          for (const sub of subFiles) files.push(sub);
+        }
+      }
+    }
+    return files;
+  } catch {
+    return [];
+  }
+}
+
+async function findLocalConversationAudioFallback({
+  audioUri,
+  conversationDate,
+}: {
+  audioUri: string;
+  conversationDate?: string | null;
+}): Promise<string | null> {
+  const roots = [FileSystem.documentDirectory, FileSystem.cacheDirectory]
+    .filter((value): value is string => Boolean(value))
+    .map(ensureTrailingSlash);
+  const directories = new Set<string>();
+  for (const root of roots) {
+    directories.add(`${root}conversation-audio`);
+    directories.add(`${root}Audio`);
+    directories.add(`${root}ExperienceData`);
+  }
+
+  const targetTimes = extractAudioUriTimestamps(audioUri);
+  const parsedDateTime = conversationDate ? new Date(conversationDate).getTime() : Number.NaN;
+  if (Number.isFinite(parsedDateTime)) {
+    targetTimes.push(parsedDateTime);
+  }
+
+  const files = (
+    await Promise.all(Array.from(directories).map(listExistingAudioFilesInDirectory))
+  ).flat();
+  let best: { uri: string; score: number } | null = null;
+
+  for (const uri of files) {
+    const info = await FileSystem.getInfoAsync(uri).catch(() => null);
+    if (!info?.exists) continue;
+    const fileTimes = extractAudioUriTimestamps(uri);
+    const modificationTime = (info as { modificationTime?: number }).modificationTime;
+    if (typeof modificationTime === "number" && modificationTime > 0) {
+      fileTimes.push(modificationTime * 1000);
+    }
+    if (targetTimes.length === 0 || fileTimes.length === 0) continue;
+
+    const score = Math.min(
+      ...targetTimes.flatMap((targetTime) =>
+        fileTimes.map((fileTime) => Math.abs(fileTime - targetTime))
+      )
+    );
+    if (!best || score < best.score) {
+      best = { uri, score };
+    }
+  }
+
+  return best && best.score <= 2 * 60 * 60 * 1000 ? best.uri : null;
+}
+
+async function probeRemoteAudioUri(uri: string): Promise<"reachable" | "missing" | "unknown"> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const response = await fetch(uri, {
+      method: "HEAD",
+      signal: controller.signal,
+    });
+    if (response.ok) return "reachable";
+    if (response.status === 404 || response.status === 410) return "missing";
+    if (response.status === 405) return "unknown";
+    return response.status >= 500 ? "unknown" : "missing";
+  } catch {
+    return "unknown";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveRemoteConversationAudioPlaybackUri(audioUri: string): Promise<string> {
+  const candidates = new Set<string>([audioUri]);
+  const attachmentPath = supportAttachmentPathFromUri(audioUri);
+
+  if (attachmentPath) {
+    const apiBases = await getApiBaseUrlCandidates().catch(() => []);
+    for (const apiBase of apiBases) {
+      candidates.add(`${apiBase}${attachmentPath}`);
+      for (const assetRoot of apiBaseToAssetRoots(apiBase)) {
+        candidates.add(`${assetRoot}${attachmentPath}`);
+        candidates.add(`${assetRoot}/api${attachmentPath}`);
+      }
+    }
+  }
+
+  let sawMissing = false;
+  let firstUnknownCandidate: string | null = null;
+  for (const candidate of candidates) {
+    const result = await probeRemoteAudioUri(candidate);
+    if (result === "reachable") return candidate;
+    if (result === "unknown") {
+      firstUnknownCandidate = firstUnknownCandidate || candidate;
+      continue;
+    }
+    sawMissing = true;
+  }
+
+  if (firstUnknownCandidate) {
+    return firstUnknownCandidate;
+  }
+  if (sawMissing) {
+    throw new Error("Audio file was uploaded earlier, but the server is returning 404 for it. Please re-sync or re-record this conversation audio.");
+  }
+  return audioUri;
+}
+
+async function resolveConversationAudioPlaybackUri(
+  audioUri: string,
+  context?: { conversationDate?: string | null }
+): Promise<string> {
   const normalizedUri = normalizePlayableFileUri(audioUri);
   if (!normalizedUri) {
     throw new Error("Audio file is not available for this conversation.");
   }
   if (!normalizedUri.startsWith("file://")) {
-    return normalizedUri;
+    try {
+      return await resolveRemoteConversationAudioPlaybackUri(normalizedUri);
+    } catch (error) {
+      const localFallback = await findLocalConversationAudioFallback({
+        audioUri: normalizedUri,
+        conversationDate: context?.conversationDate,
+      });
+      if (localFallback) return localFallback;
+      throw error;
+    }
   }
 
   const info = await FileSystem.getInfoAsync(normalizedUri);
@@ -1115,7 +1310,9 @@ export default function ConversationDetailScreen() {
         return;
       }
 
-      const playbackUri = await resolveConversationAudioPlaybackUri(convo.audioUri);
+      const playbackUri = await resolveConversationAudioPlaybackUri(convo.audioUri, {
+        conversationDate: convo.date,
+      });
       const { sound, status } = await Audio.Sound.createAsync(
         { uri: playbackUri },
         {

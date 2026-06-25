@@ -2,6 +2,8 @@ import fs from "fs-extra";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import speech from "@google-cloud/speech";
+import { Storage } from "@google-cloud/storage";
 
 const HF_INFERENCE_BASE_URL = (
   process.env.HF_INFERENCE_BASE_URL?.trim() ||
@@ -70,8 +72,12 @@ const GEMINI_TIMEOUT_MS = Math.max(
   20_000,
   Number(process.env.GEMINI_TIMEOUT_MS || 120_000)
 );
+const GOOGLE_TIMEOUT_MS = Math.max(
+  20_000,
+  Number(process.env.GOOGLE_TIMEOUT_MS || 120_000)
+);
 
-type SpeechProvider = "groq" | "gemini" | "revup" | "local_python" | "huggingface";
+type SpeechProvider = "google" | "groq" | "gemini" | "revup" | "local_python" | "huggingface";
 
 export interface DiarizedTranscriptEntry {
   transcript: string;
@@ -199,6 +205,10 @@ function parseProviderOrder(input: string): SpeechProvider[] {
       !providers.includes("groq")
     ) {
       providers.push("groq");
+      continue;
+    }
+    if (chunk === "google" && !providers.includes("google")) {
+      providers.push("google");
       continue;
     }
   }
@@ -463,6 +473,9 @@ function combineWarnings(...warnings: (string | undefined | null)[]): string | u
 }
 
 function getModelWarning(provider: SpeechProvider, model: string): string | undefined {
+  if (provider === "google") {
+    return "Google Cloud Speech-to-Text accuracy depends on audio quality and language code.";
+  }
   if (provider === "groq") {
     return "Groq Whisper transcription is optimized for fast speech-to-text. Speaker separation quality still depends on the audio.";
   }
@@ -1041,6 +1054,181 @@ async function callGroqModel(params: {
   throw new Speech2TextError("Groq speech-to-text request timed out.", 504);
 }
 
+async function callGoogleSpeechModel(params: {
+  audio: Buffer;
+  mimeType: string;
+  languageCode?: string;
+  withDiarization?: boolean;
+  numSpeakers?: number;
+}): Promise<{
+  transcript: string;
+  latencyMs: number;
+  diarizedTranscript?: { entries: DiarizedTranscriptEntry[] };
+}> {
+  const startedAt = Date.now();
+  let credentials;
+  try {
+    if (process.env.GOOGLE_CREDENTIALS) {
+      credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+    } else {
+      throw new Error("GOOGLE_CREDENTIALS environment variable is not set.");
+    }
+  } catch (err) {
+    throw new Speech2TextError("Failed to parse GOOGLE_CREDENTIALS JSON.", 500);
+  }
+
+  const client = new speech.SpeechClient({ credentials });
+
+  const audio = {
+    content: params.audio.toString("base64"),
+  };
+
+  const config: any = {
+    languageCode: params.languageCode?.trim() || "en-US",
+  };
+
+  const lowerMime = params.mimeType.toLowerCase();
+  if (lowerMime.includes("webm")) {
+    config.encoding = "WEBM_OPUS";
+  } else if (lowerMime.includes("mp3") || lowerMime.includes("mpeg")) {
+    config.encoding = "MP3";
+  }
+
+  if (params.withDiarization) {
+    config.diarizationConfig = {
+      enableSpeakerDiarization: true,
+      minSpeakerCount: 1,
+      maxSpeakerCount: params.numSpeakers || 6,
+    };
+  }
+
+  const request = {
+    config: config,
+  } as any;
+
+  let gcsUri: string | null = null;
+  const storage = new Storage({ credentials });
+  const GCS_BUCKET = process.env.GOOGLE_CLOUD_STORAGE_BUCKET || "lumina-audio-123";
+  const fileName = `audio_${Date.now()}_${Math.random().toString(36).substring(7)}${lowerMime.includes("mp3") ? ".mp3" : ".webm"}`;
+  
+  if (params.audio.length > 5 * 1024 * 1024) {
+    // If audio is > 5MB, upload to GCS and use longRunningRecognize
+    const bucket = storage.bucket(GCS_BUCKET);
+    const file = bucket.file(fileName);
+    await file.save(params.audio, { resumable: false });
+    gcsUri = `gs://${GCS_BUCKET}/${fileName}`;
+    request.audio = { uri: gcsUri };
+  } else {
+    request.audio = { content: params.audio.toString("base64") };
+  }
+
+  try {
+    let response;
+    if (gcsUri) {
+      // For large files, use longRunningRecognize and wait for completion.
+      // This will take time but bypasses the 1-minute synchronous limit.
+      const [operation] = await client.longRunningRecognize(request);
+      [response] = await operation.promise();
+      
+      // Cleanup the temporary file from GCS
+      try {
+        await storage.bucket(GCS_BUCKET).file(fileName).delete();
+      } catch (cleanupErr) {
+        console.error("Failed to cleanup GCS file:", cleanupErr);
+      }
+    } else {
+      [response] = await client.recognize(request, { timeout: GOOGLE_TIMEOUT_MS });
+    }
+    
+    if (!response.results || response.results.length === 0) {
+      throw new Speech2TextError("Google STT returned empty transcript.", 422);
+    }
+
+    const transcript = response.results
+      .map(result => result.alternatives?.[0]?.transcript || "")
+      .join("\n")
+      .trim();
+
+    if (!transcript) {
+      throw new Speech2TextError("Google STT returned empty transcript.", 422);
+    }
+
+    let diarizedEntries: DiarizedTranscriptEntry[] = [];
+    if (params.withDiarization) {
+      const lastResult = response.results[response.results.length - 1];
+      const wordsInfo = lastResult?.alternatives?.[0]?.words || [];
+      
+      let currentSpeaker = -1;
+      let currentPhrase = "";
+      let currentStart: number | null = null;
+      let currentEnd: number | null = null;
+
+      for (const wordInfo of wordsInfo) {
+        const speaker = wordInfo.speakerTag || 0;
+        const word = wordInfo.word || "";
+        let wordStart: number | null = null;
+        let wordEnd: number | null = null;
+
+        if (wordInfo.startTime) {
+          const secs = typeof wordInfo.startTime.seconds === 'string' ? parseInt(wordInfo.startTime.seconds, 10) : Number(wordInfo.startTime.seconds || 0);
+          const nanos = wordInfo.startTime.nanos || 0;
+          wordStart = secs + nanos / 1e9;
+        }
+
+        if (wordInfo.endTime) {
+          const secs = typeof wordInfo.endTime.seconds === 'string' ? parseInt(wordInfo.endTime.seconds, 10) : Number(wordInfo.endTime.seconds || 0);
+          const nanos = wordInfo.endTime.nanos || 0;
+          wordEnd = secs + nanos / 1e9;
+        }
+
+        if (currentSpeaker === -1) {
+          currentSpeaker = speaker;
+          currentPhrase = word;
+          currentStart = wordStart;
+          currentEnd = wordEnd;
+        } else if (currentSpeaker === speaker) {
+          currentPhrase += " " + word;
+          currentEnd = wordEnd;
+        } else {
+          diarizedEntries.push({
+            transcript: currentPhrase.trim(),
+            speakerId: String(currentSpeaker),
+            startTimeSeconds: currentStart,
+            endTimeSeconds: currentEnd,
+          });
+          currentSpeaker = speaker;
+          currentPhrase = word;
+          currentStart = wordStart;
+          currentEnd = wordEnd;
+        }
+      }
+      if (currentPhrase) {
+        diarizedEntries.push({
+          transcript: currentPhrase.trim(),
+          speakerId: String(currentSpeaker),
+          startTimeSeconds: currentStart,
+          endTimeSeconds: currentEnd,
+        });
+      }
+    }
+
+    return {
+      transcript,
+      latencyMs: Date.now() - startedAt,
+      ...(diarizedEntries.length > 0
+        ? { diarizedTranscript: { entries: diarizedEntries } }
+        : { diarizedTranscript: { entries: [{ transcript, speakerId: null, startTimeSeconds: null, endTimeSeconds: null }] } }),
+    };
+
+  } catch (error) {
+    if (error instanceof Speech2TextError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : "Google STT request failed.";
+    throw new Speech2TextError(message, 502);
+  }
+}
+
 function shouldRotateGroqKey(error: unknown): boolean {
   if (!(error instanceof Speech2TextError)) return false;
   const message = error.message.toLowerCase();
@@ -1217,6 +1405,7 @@ export async function transcribeSpeechWithFairseqS2T(
   const hfFallbackModel = toModelId(request.fallbackModel, DEFAULT_FALLBACK_MODEL);
   const providerOrder = parseProviderOrder(request.provider?.trim() || DEFAULT_PROVIDER_ORDER);
 
+  let googleFailure: string | null = null;
   let groqFailure: string | null = null;
   let geminiFailure: string | null = null;
   let revupFailure: string | null = null;
@@ -1224,6 +1413,42 @@ export async function transcribeSpeechWithFairseqS2T(
   let huggingFaceFailure: string | null = null;
 
   for (const provider of providerOrder) {
+    if (provider === "google") {
+      if (!process.env.GOOGLE_CREDENTIALS) {
+        googleFailure = "Google credentials missing.";
+        continue;
+      }
+      try {
+        const result = await callGoogleSpeechModel({
+          audio: request.audio,
+          mimeType,
+          languageCode: request.languageCode?.trim() || "",
+          withDiarization: Boolean(request.withDiarization),
+          numSpeakers: request.numSpeakers || undefined,
+        });
+        return {
+          transcript: result.transcript,
+          provider: "google",
+          model: "google-cloud-speech",
+          fallbackUsed: false,
+          warning: combineWarnings(
+            googleFailure,
+            groqFailure,
+            geminiFailure,
+            revupFailure,
+            localFailure,
+            huggingFaceFailure,
+            getModelWarning("google", "google-cloud-speech")
+          ),
+          latencyMs: result.latencyMs,
+          ...(result.diarizedTranscript ? { diarizedTranscript: result.diarizedTranscript } : {}),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Google STT failed unexpectedly.";
+        googleFailure = message;
+      }
+      continue;
+    }
     if (provider === "groq") {
       if (!groqApiKeys.length) {
         groqFailure = "Groq API key missing.";
@@ -1243,6 +1468,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: result.model,
           fallbackUsed: result.fallbackUsed,
           warning: combineWarnings(
+            googleFailure,
             revupFailure,
             localFailure,
             huggingFaceFailure,
@@ -1281,6 +1507,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: result.model,
           fallbackUsed: result.fallbackUsed,
           warning: combineWarnings(
+            googleFailure,
             groqFailure,
             revupFailure,
             localFailure,
@@ -1319,6 +1546,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: REVUP_APP_NAME,
           fallbackUsed: false,
           warning: combineWarnings(
+            googleFailure,
             groqFailure,
             geminiFailure,
             localFailure,
@@ -1356,6 +1584,7 @@ export async function transcribeSpeechWithFairseqS2T(
           model: localModel,
           fallbackUsed: false,
           warning: combineWarnings(
+            googleFailure,
             groqFailure,
             geminiFailure,
             revupFailure,
@@ -1385,6 +1614,7 @@ export async function transcribeSpeechWithFairseqS2T(
       return {
         ...hfResult,
         warning: combineWarnings(
+          googleFailure,
           groqFailure,
           geminiFailure,
           revupFailure,
@@ -1400,7 +1630,7 @@ export async function transcribeSpeechWithFairseqS2T(
   }
 
   throw new Speech2TextError(
-    combineWarnings(groqFailure, geminiFailure, revupFailure, localFailure, huggingFaceFailure) ||
+    combineWarnings(googleFailure, groqFailure, geminiFailure, revupFailure, localFailure, huggingFaceFailure) ||
       "All speech-to-text providers failed.",
     502
   );

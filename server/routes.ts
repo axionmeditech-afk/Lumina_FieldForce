@@ -76,7 +76,7 @@ const MAX_LOCATION_ACCURACY_METERS = 120;
 const MAX_EVIDENCE_AGE_MS = 2 * 60 * 1000;
 const MAX_CAPTURE_DRIFT_MS = 2 * 60 * 1000;
 const MIN_LOCATION_SAMPLE_COUNT = 2;
-const MAX_TRANSCRIBE_AUDIO_BYTES = 12 * 1024 * 1024;
+const MAX_TRANSCRIBE_AUDIO_BYTES = 350 * 1024 * 1024;
 const DEFAULT_GROQ_API_KEY =
   (
     process.env.GROQ_API_KEY ||
@@ -5130,6 +5130,97 @@ function normalizeSupportAttachmentType(
   return "other";
 }
 
+let supportAttachmentBlobsEnsured = false;
+
+async function ensureSupportAttachmentBlobsTable(): Promise<void> {
+  if (supportAttachmentBlobsEnsured || !isMySqlStateEnabled()) return;
+  const pool = await getMySqlPool();
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_support_attachment_blobs\` (
+      \`id\` VARCHAR(64) NOT NULL,
+      \`url_path\` VARCHAR(700) NOT NULL,
+      \`file_name\` VARCHAR(255) NOT NULL,
+      \`mime_type\` VARCHAR(127) NOT NULL,
+      \`file_size_bytes\` BIGINT NOT NULL,
+      \`content\` LONGBLOB NOT NULL,
+      \`created_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`id\`),
+      UNIQUE KEY \`idx_lff_support_attachment_blobs_url_path\` (\`url_path\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  supportAttachmentBlobsEnsured = true;
+}
+
+async function storeSupportAttachmentBlobInMySql({
+  id,
+  urlPath,
+  fileName,
+  mimeType,
+  content,
+  createdAt,
+}: {
+  id: string;
+  urlPath: string;
+  fileName: string;
+  mimeType: string;
+  content: Buffer;
+  createdAt: string;
+}): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureSupportAttachmentBlobsTable();
+  const pool = await getMySqlPool();
+  await pool.execute(
+    `INSERT INTO \`lff_support_attachment_blobs\`
+      (id, url_path, file_name, mime_type, file_size_bytes, content, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+      url_path = VALUES(url_path),
+      file_name = VALUES(file_name),
+      mime_type = VALUES(mime_type),
+      file_size_bytes = VALUES(file_size_bytes),
+      content = VALUES(content)`,
+    [
+      id,
+      urlPath,
+      fileName,
+      mimeType,
+      content.length,
+      content,
+      toSqlTimestamp(createdAt),
+    ]
+  );
+}
+
+async function getSupportAttachmentBlobByPath(urlPath: string): Promise<{
+  fileName: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  content: Buffer;
+} | null> {
+  if (!isMySqlStateEnabled()) return null;
+  await ensureSupportAttachmentBlobsTable();
+  const pool = await getMySqlPool();
+  const [rows] = await pool.execute(
+    `SELECT file_name, mime_type, file_size_bytes, content
+     FROM \`lff_support_attachment_blobs\`
+     WHERE url_path = ?
+     LIMIT 1`,
+    [urlPath]
+  );
+  const first = Array.isArray(rows) ? rows[0] as Record<string, unknown> | undefined : undefined;
+  const content = first?.content;
+  if (!first || !Buffer.isBuffer(content)) return null;
+  return {
+    fileName: toRequiredText(first.file_name, "attachment"),
+    mimeType: toRequiredText(first.mime_type, "application/octet-stream"),
+    fileSizeBytes:
+      typeof first.file_size_bytes === "number"
+        ? first.file_size_bytes
+        : Number(first.file_size_bytes) || content.length,
+    content,
+  };
+}
+
 async function ensureSupportTables(): Promise<void> {
   if (supportTablesEnsured || !isMySqlStateEnabled()) return;
   const conn = await getMySqlPool();
@@ -7835,9 +7926,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         const forwardedProto = firstString(req.header("x-forwarded-proto")) || req.protocol || "https";
         const forwardedHost = firstString(req.header("x-forwarded-host")) || req.get("host") || "";
+        const routedUrlPath = `/api${stored.urlPath}`;
         const absoluteUrl = forwardedHost
-          ? `${forwardedProto}://${forwardedHost}${stored.urlPath}`
-          : stored.urlPath;
+          ? `${forwardedProto}://${forwardedHost}${routedUrlPath}`
+          : routedUrlPath;
         res.status(201).json({
           id: stored.id,
           url: absoluteUrl,

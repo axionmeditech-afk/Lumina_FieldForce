@@ -40,6 +40,12 @@ function extensionFromMime(mimeType: string): string {
   if (mime === "video/quicktime") return ".mov";
   if (mime === "audio/mpeg") return ".mp3";
   if (mime === "audio/wav") return ".wav";
+  if (mime === "audio/m4a" || mime === "audio/x-m4a" || mime === "audio/mp4") return ".m4a";
+  if (mime === "audio/aac") return ".aac";
+  if (mime === "audio/3gpp") return ".3gp";
+  if (mime === "audio/webm") return ".webm";
+  if (mime === "audio/ogg") return ".ogg";
+  if (mime === "audio/flac") return ".flac";
   if (mime === "application/pdf") return ".pdf";
   if (mime === "text/plain") return ".txt";
   return "";
@@ -70,7 +76,7 @@ export async function storeSupportAttachmentBinary(
 
   return {
     id,
-    urlPath: `/support-attachments/${y}/${m}/${d}/${fileName}`,
+    urlPath: `/api/support-attachments/${y}/${m}/${d}/${fileName}`,
     fileName: safeName,
     mimeType: input.mimeType,
     fileSizeBytes: input.content.length,

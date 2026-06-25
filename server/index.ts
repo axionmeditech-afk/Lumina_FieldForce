@@ -238,6 +238,13 @@ function configureExpoAndLanding(app: express.Application) {
 
   app.use("/assets", express.static(path.resolve(process.cwd(), "assets")));
   app.use(
+    "/api/support-attachments",
+    express.static(path.resolve(process.cwd(), "server_uploads", "support"), {
+      maxAge: "30d",
+      etag: true,
+    })
+  );
+  app.use(
     "/support-attachments",
     express.static(path.resolve(process.cwd(), "server_uploads", "support"), {
       maxAge: "30d",

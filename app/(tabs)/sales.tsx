@@ -1078,7 +1078,7 @@ const DEFAULT_S2T_MODEL =
   ).trim();
 let preferredSpeechApiBase: string | null = null;
 const DEFAULT_STT_PROVIDER_ORDER = "gemini";
-const FORCE_SERVER_TRANSCRIPTION = true;
+const FORCE_SERVER_TRANSCRIPTION = false;
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
 const SPEECH_API_HEALTH_CACHE_TTL_MS = 45_000;
 const speechApiHealthCache = new Map<string, { ok: boolean; checkedAt: number }>();
@@ -1171,6 +1171,25 @@ function detectAudioMimeType(audioUri: string): string {
   return "application/octet-stream";
 }
 
+async function probeUploadedAudioUrl(url: string): Promise<"reachable" | "missing" | "unknown"> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: controller.signal,
+    });
+    if (response.ok) return "reachable";
+    if (response.status === 404 || response.status === 410) return "missing";
+    if (response.status === 405) return "unknown";
+    return response.status >= 500 ? "unknown" : "missing";
+  } catch {
+    return "unknown";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function persistConversationAudioUri(audioUri: string | null): Promise<string | null> {
   if (!audioUri) return null;
   try {
@@ -1230,7 +1249,11 @@ async function uploadConversationAudioToRemote(audioUri: string | null): Promise
       }
       const payload = JSON.parse(uploadResult.body || "{}") as { url?: unknown };
       if (typeof payload.url === "string" && payload.url.trim()) {
-        return payload.url.trim();
+        const uploadedUrl = payload.url.trim();
+        const probeResult = await probeUploadedAudioUrl(uploadedUrl);
+        if (probeResult !== "missing") {
+          return uploadedUrl;
+        }
       }
     } catch {
       // Try the next configured backend URL.
