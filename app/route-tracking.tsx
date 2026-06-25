@@ -512,7 +512,7 @@ export default function RouteTrackingScreen() {
   const visibleEmployees = useMemo(() => {
     if (!user) return [];
     if (isPrivilegedViewer) {
-      return employees.filter((entry) => isSalesRole(entry.role));
+      return employees.filter((entry) => isSalesRole(entry.role) || entry.employeeCategory === "on_field");
     }
 
     const selfById = employees.find((entry) => entry.id === user.id);

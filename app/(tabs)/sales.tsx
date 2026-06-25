@@ -2274,7 +2274,7 @@ export default function SalesScreen() {
     setQuickSaleLocationLogs(quickSaleLogs);
     setAttendanceRecords(dedupeById([...remoteAttendance, ...attendance]));
 
-    const salesEmployees = employeeData.filter((entry) => isSalesRole(entry.role));
+    const salesEmployees = employeeData.filter((entry) => isSalesRole(entry.role) || entry.employeeCategory === "on_field");
     if (isAdminViewer) {
       setSelectedSalespersonId((current) =>
         salesEmployees.some((entry) => entry.id === current) ? current : salesEmployees[0]?.id ?? ""
@@ -2974,7 +2974,7 @@ export default function SalesScreen() {
   const selectableSalespeople = useMemo(() => {
     if (!user) return [] as Employee[];
     if (isAdminViewer) {
-      return employees.filter((entry) => isSalesRole(entry.role));
+      return employees.filter((entry) => isSalesRole(entry.role) || entry.employeeCategory === "on_field");
     }
     const selfEmployee =
       employees.find((entry) => entry.id === selectedSalespersonId) ||

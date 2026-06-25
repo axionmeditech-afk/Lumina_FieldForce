@@ -10152,8 +10152,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const checkInTime = new Date(activeAttendance.timestamp).getTime();
           if (logTime > checkInTime) {
             // If checked in but now outside > 500m and GPS is accurate
-            if (!status.inside && status.distanceMeters > 500 && (entry.accuracy ?? 1000) <= 100) {
-              const now = entry.capturedAt ?? new Date().toISOString();
+            if (!status.inside && status.distanceMeters > 500 && (entry.accuracy ?? 2500) <= 2500) {
+              let now = entry.capturedAt ?? new Date().toISOString();
+              const checkInDate = activeAttendance.timestamp.split("T")[0];
+              const logDate = now.split("T")[0];
+              if (checkInDate !== logDate) {
+                now = `${checkInDate}T23:59:59.000Z`;
+              }
               const checkoutRecord: AttendanceRecord = {
                 id: randomUUID(),
                 userId: entry.userId,
@@ -10976,7 +10981,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       role: req.auth?.role ?? null,
     });
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
-    const now = new Date().toISOString();
+    let now = new Date().toISOString();
 
     if (!zoneStatus.inside) {
       await recordAnomaly({
@@ -10986,6 +10991,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         severity: "medium",
         details: `Checkout performed outside zone at distance ${Math.round(zoneStatus.distanceMeters)}m`,
       });
+    }
+
+    const checkInDate = active.timestamp.split("T")[0];
+    const logDate = now.split("T")[0];
+    if (checkInDate !== logDate) {
+      now = `${checkInDate}T23:59:59.000Z`;
     }
 
     const photoUrl = payload.photoBase64
