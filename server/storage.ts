@@ -35,6 +35,7 @@ export interface IStorage {
   getAttendanceById(id: string): Promise<AttendanceRecord | null>;
   getAttendanceToday(userId: string): Promise<AttendanceRecord[]>;
   getAttendanceHistory(userId: string): Promise<AttendanceRecord[]>;
+  getCompanyAttendanceForDate(companyId: string, date: string): Promise<AttendanceRecord[]>;
   addAttendancePhoto(photo: AttendancePhoto): Promise<void>;
   addAnomaly(anomaly: AttendanceAnomaly): Promise<void>;
   addLocationLog(log: LocationLog): Promise<void>;
@@ -147,6 +148,12 @@ class MemStorage implements IStorage {
   async getAttendanceHistory(userId: string): Promise<AttendanceRecord[]> {
     return Array.from(this.attendance.values())
       .filter((record) => record.userId === userId)
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }
+
+  async getCompanyAttendanceForDate(companyId: string, date: string): Promise<AttendanceRecord[]> {
+    return Array.from(this.attendance.values())
+      .filter((record) => record.companyId === companyId && isMumbaiDateKey(record.timestamp, date))
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
 

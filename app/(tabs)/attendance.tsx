@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import * as ExpoLocation from "expo-location";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { LocationObject } from "expo-location";
 import { LinearGradient } from "expo-linear-gradient";
 import { useAuth } from "@/contexts/AuthContext";
@@ -79,7 +80,7 @@ import {
   recordGpsDisabledDuringCheckIn,
   recordGpsRestoredDuringCheckIn,
 } from "@/lib/gps-tracking-alerts";
-import { toMumbaiDateKey } from "@/lib/ist-time";
+import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
 import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
@@ -400,9 +401,10 @@ async function loadAttendanceRoster(fallbackCompany?: { id?: string; name?: stri
 function buildAdminAttendanceStatuses(
   attendance: AttendanceRecord[],
   employees: Employee[],
-  currentUserId?: string
+  currentUserId?: string,
+  selectedDateKey?: string
 ): AdminAttendanceStatus[] {
-  const today = toMumbaiDateKey(new Date());
+  const today = selectedDateKey || toMumbaiDateKey(new Date());
   const employeeGroups = new Map<
     string,
     {
@@ -598,6 +600,7 @@ function useAttendanceWebSocket(
 // === WEBSOCKET HOOK DEFINITION END ===
 export default function AttendanceScreen() {
   const { user, company, updateCompany } = useAuth();
+  const [selectedDate, setSelectedDate] = useState(() => toMumbaiDateKey(new Date()));
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
@@ -688,10 +691,34 @@ export default function AttendanceScreen() {
     if (!user?.id) return;
     const requestId = ++loadBaseDataRequestRef.current;
     const shouldLoadRoster = canReviewSignIns || isAdminAttendanceManager;
+
+    // SVR Cache Phase
+    if (isAdminAttendanceManager) {
+      try {
+        const cacheKey = `@attendance_cache_status_${company?.id}_${selectedDate}`;
+        const rosterKey = `@attendance_cache_roster_${company?.id}`;
+        const [cachedStatusRaw, cachedRosterRaw] = await Promise.all([
+          AsyncStorage.getItem(cacheKey),
+          AsyncStorage.getItem(rosterKey),
+        ]);
+        if (requestId === loadBaseDataRequestRef.current) {
+          let cachedRecords = [];
+          let cachedEmployees = [];
+          if (cachedStatusRaw) cachedRecords = JSON.parse(cachedStatusRaw);
+          if (cachedRosterRaw) cachedEmployees = JSON.parse(cachedRosterRaw);
+          if (cachedRecords.length > 0 || cachedEmployees.length > 0) {
+            setAdminAttendanceStatuses(buildAdminAttendanceStatuses(cachedRecords, cachedEmployees, user.id, selectedDate));
+          }
+        }
+      } catch (e) {
+        console.warn("AsyncStorage get cache failed", e);
+      }
+    }
+
     const [localAttendance, companyAttendance, currentCheckIn, employees] = await Promise.all([
       getAttendance(),
       isAdminAttendanceManager
-        ? getCompanyAttendanceToday(company?.id || undefined).catch(() => [] as AttendanceRecord[])
+        ? getCompanyAttendanceToday(company?.id || undefined, selectedDate).catch(() => [] as AttendanceRecord[])
         : Promise.resolve([] as AttendanceRecord[]),
       isCheckedIn(),
       shouldLoadRoster
@@ -700,15 +727,27 @@ export default function AttendanceScreen() {
     ]);
     if (requestId !== loadBaseDataRequestRef.current) return;
 
+    // Filter local user records to match selected date
     const userRecords = localAttendance.filter(
       (entry) =>
-        entry.userId === user.id ||
-        normalizeAttendanceIdentity(entry.userName) === normalizeAttendanceIdentity(user.name)
+        (entry.userId === user.id ||
+        normalizeAttendanceIdentity(entry.userName) === normalizeAttendanceIdentity(user.name)) &&
+        toMumbaiDateKey(entry.timestamp) === selectedDate
     );
     setRecords(userRecords);
+
     if (shouldLoadRoster) {
       if (isAdminAttendanceManager) {
-        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id));
+        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id, selectedDate));
+        // Save SVR Cache
+        try {
+          const cacheKey = `@attendance_cache_status_${company?.id}_${selectedDate}`;
+          const rosterKey = `@attendance_cache_roster_${company?.id}`;
+          await Promise.all([
+            AsyncStorage.setItem(cacheKey, JSON.stringify(companyAttendance)),
+            AsyncStorage.setItem(rosterKey, JSON.stringify(employees)),
+          ]);
+        } catch (e) {}
       }
       if (!canReviewSignIns) {
         setPendingSignIns([]);
@@ -741,7 +780,7 @@ export default function AttendanceScreen() {
     if (resolvedCheckIn !== currentCheckIn) {
       await setCheckedIn(resolvedCheckIn);
     }
-  }, [canReviewSignIns, company?.id, company?.name, isAdminAttendanceManager, user?.id, user?.name]);
+  }, [canReviewSignIns, company?.id, company?.name, isAdminAttendanceManager, user?.id, user?.name, selectedDate]);
   // === WEBSOCKET HOOK CALL ===
   // Note: user?.role 'admin' ya 'manager' dono ke liye check kiya hai
   useAttendanceWebSocket(isAdminAttendanceManager || user?.role === "manager", loadBaseData);
@@ -761,6 +800,10 @@ export default function AttendanceScreen() {
     }, ADMIN_ATTENDANCE_REFRESH_MS);
     return () => clearInterval(interval);
   }, [canReviewSignIns, isAdminAttendanceManager, loadBaseData, user?.id]);
+
+  useEffect(() => {
+    void loadBaseData();
+  }, [selectedDate, loadBaseData]);
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
@@ -1840,7 +1883,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
     ? "Field Route Tracking"
     : evaluation.activeZone?.name ?? (isOfficeGeofenceAttendance ? "Office not set" : "No zone");
   const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
-  const canSubmitAction = checkedInState ? locationReady : canCheckIn;
+  const canSubmitAction = (selectedDate === toMumbaiDateKey(new Date())) && (checkedInState ? locationReady : canCheckIn);
   const employeeDistanceLabel =
     isOfficeGeofenceAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
       ? formatDistance(evaluation.nearestDistanceMeters)
@@ -2019,6 +2062,82 @@ setOfficeLocationName((current) => current.trim() || result.label);
             : `${company?.name || "Company"} device-authenticated secure check-in with live location tracking`}
         </Text>
 
+        {/* Date Selector UI */}
+        <View style={[styles.dateNavContainer, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+          <Pressable
+            style={({ pressed }) => [styles.dateNavButton, pressed && { opacity: 0.7 }]}
+            onPress={() => {
+              const parts = selectedDate.split("-");
+              const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+              d.setDate(d.getDate() - 1);
+              const yyyy = d.getFullYear();
+              const mm = String(d.getMonth() + 1).padStart(2, "0");
+              const dd = String(d.getDate()).padStart(2, "0");
+              setSelectedDate(yyyy + "-" + mm + "-" + dd);
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            }}
+          >
+            <Ionicons name="chevron-back" size={20} color={colors.primary} />
+          </Pressable>
+
+          <View style={styles.dateNavLabelContainer}>
+            <Text style={[styles.dateNavLabel, { color: colors.text }]}>
+              {(() => {
+                const todayKey = toMumbaiDateKey(new Date());
+                const yesterdayKey = getMumbaiDateKeyByOffset(-1);
+                if (selectedDate === todayKey) return "Today, " + formatMumbaiDateKey(selectedDate);
+                if (selectedDate === yesterdayKey) return "Yesterday, " + formatMumbaiDateKey(selectedDate);
+                return formatMumbaiDateKey(selectedDate);
+              })()}
+            </Text>
+          </View>
+
+          <Pressable
+            disabled={selectedDate >= toMumbaiDateKey(new Date())}
+            style={({ pressed }) => [
+              styles.dateNavButton,
+              pressed && { opacity: 0.7 },
+              selectedDate >= toMumbaiDateKey(new Date()) && { opacity: 0.3 }
+            ]}
+            onPress={() => {
+              const parts = selectedDate.split("-");
+              const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+              d.setDate(d.getDate() + 1);
+              const yyyy = d.getFullYear();
+              const mm = String(d.getMonth() + 1).padStart(2, "0");
+              const dd = String(d.getDate()).padStart(2, "0");
+              const nextKey = yyyy + "-" + mm + "-" + dd;
+              if (nextKey <= toMumbaiDateKey(new Date())) {
+                setSelectedDate(nextKey);
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }
+            }}
+          >
+            <Ionicons name="chevron-forward" size={20} color={colors.primary} />
+          </Pressable>
+        </View>
+
+        {/* Past Date Notice for check-in action */}
+        {selectedDate !== toMumbaiDateKey(new Date()) && !isAdminAttendanceManager ? (
+          <View style={[styles.pastDateNotice, { backgroundColor: colors.warning + "15", borderColor: colors.warning + "44" }]}>
+            <Ionicons name="warning-outline" size={18} color={colors.warning} />
+            <View style={{ flex: 1, marginLeft: 8 }}>
+              <Text style={[styles.pastDateNoticeText, { color: colors.text }]}>
+                Viewing logs for {formatMumbaiDateKey(selectedDate)}. Check-in is disabled.
+              </Text>
+            </View>
+            <Pressable
+              style={[styles.pastDateReturnButton, { backgroundColor: colors.primary }]}
+              onPress={() => {
+                setSelectedDate(toMumbaiDateKey(new Date()));
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              }}
+            >
+              <Text style={styles.pastDateReturnButtonText}>Go to Today</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {isAdminAttendanceManager ? (
           <>
           <View style={[styles.adminNoticePanel, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
@@ -2035,7 +2154,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
           <View style={styles.adminAttendanceSection}>
             <View style={styles.adminAttendanceHeader}>
               <Text style={[styles.logsTitle, { color: colors.text, marginTop: 0, marginBottom: 0 }]}>
-                Team Attendance Today
+                {selectedDate === toMumbaiDateKey(new Date()) ? "Team Attendance Today" : "Team Attendance for " + formatMumbaiDateKey(selectedDate)}
               </Text>
               <Pressable
                 style={[styles.refreshButton, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
@@ -2501,7 +2620,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
         {!isAdminAttendanceManager ? (
           <>
-        <Text style={[styles.logsTitle, { color: colors.text }]}>{todayHeading}</Text>
+        <Text style={[styles.logsTitle, { color: colors.text }]}>{selectedDate === toMumbaiDateKey(new Date()) ? "Today's Log" : "Log for " + formatMumbaiDateKey(selectedDate)}</Text>
         <View style={[styles.logList, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
           {records.length === 0 ? (
             <View style={styles.emptyLog}>
@@ -2572,6 +2691,51 @@ setOfficeLocationName((current) => current.trim() || result.label);
 }
 
 const styles = StyleSheet.create({
+  dateNavContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginTop: 12,
+    marginBottom: 16,
+  },
+  dateNavButton: {
+    padding: 8,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  dateNavLabelContainer: {
+    flex: 1,
+    alignItems: "center",
+  },
+  dateNavLabel: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  pastDateNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 16,
+  },
+  pastDateNoticeText: {
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  pastDateReturnButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+  },
+  pastDateReturnButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "600",
+  },
   scrollContent: {
     paddingHorizontal: 20,
   },

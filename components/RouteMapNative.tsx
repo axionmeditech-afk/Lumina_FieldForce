@@ -3,6 +3,7 @@ import { Animated, Easing, Modal, Platform, Pressable, ScrollView, StyleSheet, T
 import MapView, {
   Marker,
   Polyline,
+  PROVIDER_GOOGLE,
   type LatLng,
   type Region,
 } from "react-native-maps";
@@ -2100,11 +2101,9 @@ export function RouteMapNative({
     <View style={[styles.container, { height, borderColor: colors.border }]}> 
       <MapView
         ref={mapRef}
+        provider={mapProvider === "google" ? PROVIDER_GOOGLE : undefined}
         style={StyleSheet.absoluteFill}
         initialRegion={region}
-        showsUserLocation={false}
-        showsCompass
-        rotateEnabled={false}
       >
         {hasMultiRoutes
           ? multiRouteDefs.map((route) => (

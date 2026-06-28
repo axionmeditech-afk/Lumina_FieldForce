@@ -241,13 +241,10 @@ export async function ensureBackgroundLocationTracking(): Promise<{
   const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
   if (!alreadyStarted) {
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
-      accuracy: Location.Accuracy.Balanced,
+      accuracy: Location.Accuracy.BestForNavigation,
       timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
-      distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
-      deferredUpdatesInterval: BACKGROUND_LOCATION_INTERVAL_MS,
-      deferredUpdatesDistance: BACKGROUND_LOCATION_DISTANCE_METERS,
       pausesUpdatesAutomatically: false,
-      showsBackgroundLocationIndicator: false,
+      showsBackgroundLocationIndicator: true,
       activityType: Location.ActivityType.OtherNavigation,
       foregroundService: {
         notificationTitle: "Lumina FieldForce",

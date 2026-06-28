@@ -554,8 +554,13 @@ function buildBodyPreview(text: string): string {
   return trimmed.length > 140 ? `${trimmed.slice(0, 140)}...` : trimmed;
 }
 
+let cachedLastWorkingApiBase: string | null = null;
+
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const apiBases = await getApiBaseUrlCandidates();
+  let apiBases = await getApiBaseUrlCandidates();
+  if (cachedLastWorkingApiBase && apiBases.includes(cachedLastWorkingApiBase)) {
+    apiBases = [cachedLastWorkingApiBase, ...apiBases.filter((b) => b !== cachedLastWorkingApiBase)];
+  }
   const token = await getApiToken();
   const headers = buildHeaders(token, init.headers);
   const networkFailures: string[] = [];
@@ -624,6 +629,7 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
         );
         continue;
       }
+      cachedLastWorkingApiBase = apiBase;
       return (parsed ?? null) as T;
     } catch (error) {
       if (init.signal?.aborted) {
@@ -1023,8 +1029,11 @@ export async function getTodayAttendance(userId: string): Promise<AttendanceReco
   });
 }
 
-export async function getCompanyAttendanceToday(companyId?: string): Promise<AttendanceRecord[]> {
-  const query = companyId ? `?company_id=${encodeURIComponent(companyId)}` : "";
+export async function getCompanyAttendanceToday(companyId?: string, date?: string): Promise<AttendanceRecord[]> {
+  const params: string[] = [];
+  if (companyId) params.push(`company_id=${encodeURIComponent(companyId)}`);
+  if (date) params.push(`date=${encodeURIComponent(date)}`);
+  const query = params.length > 0 ? `?${params.join("&")}` : "";
   return fetchJson<AttendanceRecord[]>(`/attendance/company/today${query}`, {
     method: "GET",
   });
