@@ -453,14 +453,6 @@ function getVisitLabel(task: Task): string {
 type TimelineRow =
   | {
       id: string;
-      type: "attendance";
-      at: string;
-      text: string;
-      icon: keyof typeof Ionicons.glyphMap;
-      iconColor: string;
-    }
-  | {
-      id: string;
       type: "moving" | "halt";
       startAt: string;
       endAt: string;
@@ -1095,16 +1087,7 @@ export default function RouteTrackingScreen() {
     if (!timeline) return [];
     const halts = timeline.halts ?? [];
     const segments = timeline.segments ?? [];
-    const attendanceEvents = timeline.attendanceEvents ?? [];
     const haltById = new Map(halts.map((halt) => [halt.id, halt]));
-    const attendanceRows: TimelineRow[] = attendanceEvents.map((event) => ({
-      id: `att_${event.id}`,
-      type: "attendance",
-      at: event.at,
-      icon: event.type === "checkin" ? "log-in-outline" : "log-out-outline",
-      iconColor: event.type === "checkin" ? colors.success : colors.danger,
-      text: `${event.type === "checkin" ? "Checked In" : "Checked Out"} at ${event.geofenceName || "Unknown Zone"}`,
-    }));
 
     const segmentRows: TimelineRow[] = segments.map((segment) => {
       if (segment.type === "halt") {
@@ -1155,13 +1138,13 @@ export default function RouteTrackingScreen() {
       };
     });
 
-    const merged = [...attendanceRows, ...segmentRows, ...gpsRows];
+    const merged = [...segmentRows, ...gpsRows];
     return merged.sort((a, b) => {
-      const aStart = a.type === "attendance" ? a.at : a.startAt;
-      const bStart = b.type === "attendance" ? b.at : b.startAt;
+      const aStart = a.startAt;
+      const bStart = b.startAt;
       return aStart.localeCompare(bStart);
     });
-  }, [colors.danger, colors.primary, colors.success, colors.warning, gpsDisabledWindows, timeline]);
+  }, [colors.danger, colors.primary, colors.warning, gpsDisabledWindows, timeline]);
 
   const summary = useMemo(() => {
     const raw = timeline?.summary;
@@ -1185,14 +1168,23 @@ export default function RouteTrackingScreen() {
       typeof raw?.pointCount === "number" && Number.isFinite(raw.pointCount)
         ? raw.pointCount
         : 0;
+    const rawPointCount =
+      typeof raw?.rawPointCount === "number" && Number.isFinite(raw.rawPointCount)
+        ? raw.rawPointCount
+        : pointCount;
     return {
       totalDistanceKm,
       totalMovingMinutes,
       totalHaltMinutes,
       haltCount,
       pointCount,
+      rawPointCount,
     };
   }, [timeline?.summary]);
+
+  const attendanceStatusEvents = useMemo(() => {
+    return [...(timeline?.attendanceEvents ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+  }, [timeline?.attendanceEvents]);
 
   const routePointRows = useMemo(() => {
     if (!timeline?.points?.length) return [];
@@ -1506,6 +1498,23 @@ export default function RouteTrackingScreen() {
           </View>
         ) : null}
 
+        {timeline?.source === "daily_summary" ? (
+          <View style={[styles.infoWrap, { backgroundColor: colors.primary + "12", borderColor: colors.primary + "44" }]}>
+            <Ionicons name="archive-outline" size={16} color={colors.primary} />
+            <Text style={[styles.infoText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+              Historical route loaded from daily summary. Raw GPS rows are pruned, but distance, halts,
+              path, and attendance window are preserved.
+            </Text>
+          </View>
+        ) : timeline ? (
+          <View style={[styles.infoWrap, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <Ionicons name="pulse-outline" size={16} color={colors.secondary} />
+            <Text style={[styles.infoText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+              Live log view: {summary.rawPointCount} GPS samples processed into {summary.pointCount} map points.
+            </Text>
+          </View>
+        ) : null}
+
         <Animated.View entering={FadeInDown.duration(350).delay(50)} style={styles.mapShell}>
           <RouteMapNative
             points={timeline?.points ?? []}
@@ -1570,6 +1579,14 @@ export default function RouteTrackingScreen() {
               Halts
             </Text>
           </View>
+          <View style={[styles.summaryCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
+            <Text style={[styles.summaryValue, { color: colors.text, fontFamily: "Inter_700Bold" }]}>
+              {summary.totalMovingMinutes} mins
+            </Text>
+            <Text style={[styles.summaryLabel, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+              Active
+            </Text>
+          </View>
         </Animated.View>
 
         <Animated.View
@@ -1593,6 +1610,55 @@ export default function RouteTrackingScreen() {
                 : "Waiting for live GPS point..."}
             </Text>
           </View>
+        </Animated.View>
+
+        <Animated.View
+          entering={FadeInDown.duration(350).delay(105)}
+          style={[styles.attendanceWindowCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
+        >
+          <View style={styles.attendanceWindowHeader}>
+            <View style={[styles.currentLocationIcon, { backgroundColor: `${colors.success}18` }]}>
+              <Ionicons name="time-outline" size={16} color={colors.success} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.currentLocationTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                Attendance Window
+              </Text>
+              <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                Kept separate from route movement so historical tracking stays clean.
+              </Text>
+            </View>
+          </View>
+          {attendanceStatusEvents.length ? (
+            <View style={styles.attendancePills}>
+              {attendanceStatusEvents.map((event) => {
+                const isCheckIn = event.type === "checkin";
+                const eventColor = isCheckIn ? colors.success : colors.danger;
+                return (
+                  <View
+                    key={`status_${event.id}_${event.at}`}
+                    style={[styles.attendancePill, { borderColor: eventColor + "55", backgroundColor: eventColor + "12" }]}
+                  >
+                    <Ionicons
+                      name={isCheckIn ? "log-in-outline" : "log-out-outline"}
+                      size={14}
+                      color={eventColor}
+                    />
+                    <Text style={[styles.attendancePillText, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                      {isCheckIn ? "Check In" : "Check Out"} {toTime(event.at)}
+                    </Text>
+                    <Text style={[styles.attendancePillMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                      {event.geofenceName || "Unknown Zone"}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+              No check-in or check-out event recorded for this date.
+            </Text>
+          )}
         </Animated.View>
 
         <Animated.View entering={FadeInDown.duration(350).delay(120)}>
@@ -1656,9 +1722,7 @@ export default function RouteTrackingScreen() {
               >
                 {rows.map((row, idx) => {
                   const startLabel =
-                    row.type === "attendance"
-                      ? toTime(row.at)
-                      : row.type === "gps_gap"
+                    row.type === "gps_gap"
                       ? `${toTime(row.startAt)} - ${row.endAt ? toTime(row.endAt) : "Open"}`
                       : `${toTime(row.startAt)} - ${toTime(row.endAt)}`;
                   return (
@@ -1907,6 +1971,43 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontSize: 11.8,
     lineHeight: 17,
+  },
+  attendanceWindowCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  attendanceWindowHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  attendancePills: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  attendancePill: {
+    minHeight: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    maxWidth: "100%",
+  },
+  attendancePillText: {
+    fontSize: 12,
+    flexShrink: 0,
+  },
+  attendancePillMeta: {
+    fontSize: 11,
+    maxWidth: 150,
+    flexShrink: 1,
   },
   sectionTitle: {
     fontSize: 15,

@@ -546,6 +546,7 @@ export interface RouteTimelineSummary {
   totalHaltMinutes: number;
   haltCount: number;
   pointCount: number;
+  rawPointCount?: number;
 }
 
 export interface RoutePathPoint {
@@ -589,6 +590,9 @@ export interface RouteTimeline {
   segments: RouteSegment[];
   summary: RouteTimelineSummary;
   directions?: RouteDirections | null;
+  encodedPolyline?: string | null;
+  source?: "raw_logs" | "daily_summary";
+  summaryUpdatedAt?: string | null;
 }
 
 export interface DolibarrSyncLog {

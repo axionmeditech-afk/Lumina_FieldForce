@@ -1039,9 +1039,14 @@ export async function getCompanyAttendanceToday(companyId?: string, date?: strin
   });
 }
 
-export async function getAttendanceHistory(userId: string): Promise<AttendanceRecord[]> {
+export async function getAttendanceHistory(userId: string, date?: string, limit?: number): Promise<AttendanceRecord[]> {
+  const params = [`user_id=${encodeURIComponent(userId)}`];
+  if (date) params.push(`date=${encodeURIComponent(date)}`);
+  if (typeof limit === "number" && Number.isFinite(limit)) {
+    params.push(`limit=${encodeURIComponent(String(Math.max(1, Math.trunc(limit))))}`);
+  }
   return fetchJson<AttendanceRecord[]>(
-    `/attendance/history?user_id=${encodeURIComponent(userId)}`,
+    `/attendance/history?${params.join("&")}`,
     {
       method: "GET",
     }
@@ -1157,6 +1162,9 @@ export interface RouteAttendanceEvent {
 
 export interface AdminRouteTimelineResponse extends RouteTimeline {
   attendanceEvents: RouteAttendanceEvent[];
+  source?: "raw_logs" | "daily_summary";
+  encodedPolyline?: string | null;
+  summaryUpdatedAt?: string | null;
 }
 
 export interface AdminRouteDistanceMatrixResponse {

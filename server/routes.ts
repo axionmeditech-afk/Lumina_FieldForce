@@ -14,6 +14,7 @@ import type {
   Geofence,
   LocationLog,
   NotificationAudience,
+  RouteTimeline,
   SalaryRecord,
   Task,
   UserAccessRequest,
@@ -58,6 +59,27 @@ import {
 import { analyzeConversationWithAI } from "@/lib/aiSalesAnalysis";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { isSalesRole } from "@/lib/role-access";
+import { registerAiAnalysisRoutes } from "@/server/routes/ai.routes";
+import { registerDolibarrSettingsRoutes } from "@/server/routes/settings.routes";
+import { registerHealthRoutes } from "@/server/routes/health.routes";
+import { registerNotificationRoutes } from "@/server/routes/notifications.routes";
+import { registerSalaryRoutes } from "@/server/routes/salary.routes";
+import { registerAttendanceRoutes } from "@/server/routes/attendance.routes";
+import { registerLocationRoutes } from "@/server/routes/location.routes";
+import { registerLeaveRoutes } from "@/server/routes/leave.routes";
+import { registerMapplsRoutes } from "@/server/routes/mappls.routes";
+import { registerStockRoutes } from "@/server/routes/stock.routes";
+import { registerDolibarrRoutes } from "@/server/routes/dolibarr.routes";
+import { registerSupportRoutes } from "@/server/routes/support.routes";
+import { registerCompanyRoutes } from "@/server/routes/companies.routes";
+import { registerAuthRoutes } from "@/server/routes/auth.routes";
+import { registerSpeechRoutes } from "@/server/routes/speech.routes";
+import { registerVisitRoutes } from "@/server/routes/visit-notes.routes";
+import { registerStateRoutes } from "@/server/routes/state.routes";
+import { registerLocationSyncRoutes } from "@/server/routes/location-sync.routes";
+import { registerAttendanceActionRoutes } from "@/server/routes/attendance-actions.routes";
+import { registerBankAccountRoutes } from "@/server/routes/bank-accounts.routes";
+import { registerGeofenceRoutes } from "@/server/routes/geofences.routes";
 
 
 const adminWsClients = new Set<WebSocket>();
@@ -1130,6 +1152,7 @@ let taskVisitNotesColumnsEnsured = false;
 let visitHistoryTableEnsured = false;
 let conversationsTableEnsured = false;
 let legacyConversationsMigrated = false;
+let legacyConversationsMigrationPromise: Promise<void> | null = null;
 const ENV_DOLIBARR_SUPERUSER_EMAILS = String(process.env.DOLIBARR_SUPERUSER_EMAILS || "")
   .split(",")
   .map((entry) => normalizeEmailKey(entry))
@@ -1685,7 +1708,8 @@ async function ensureConversationsTable(): Promise<void> {
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
       KEY idx_lff_conversations_company_date (company_id, conversation_date),
-      KEY idx_lff_conversations_salesperson_date (salesperson_id, conversation_date)
+      KEY idx_lff_conversations_salesperson_date (salesperson_id, conversation_date),
+      KEY idx_lff_conversations_company_salesperson_date (company_id, salesperson_id, conversation_date)
     )
   `);
   await conn.execute(`
@@ -2138,6 +2162,18 @@ async function upsertConversationInMySql(
 async function migrateLegacyConversationsStateToMySql(): Promise<void> {
   if (legacyConversationsMigrated) return;
   if (!isMySqlStateEnabled()) return;
+  if (legacyConversationsMigrationPromise) {
+    await legacyConversationsMigrationPromise;
+    return;
+  }
+  legacyConversationsMigrationPromise = migrateLegacyConversationsStateToMySqlOnce().finally(() => {
+    legacyConversationsMigrationPromise = null;
+  });
+  await legacyConversationsMigrationPromise;
+}
+
+async function migrateLegacyConversationsStateToMySqlOnce(): Promise<void> {
+  if (legacyConversationsMigrated) return;
   await ensureConversationsTable();
   let raw: string | null = null;
   try {
@@ -2665,7 +2701,363 @@ function getLatestAccessRequestByEmail(email: string): AccessRequestRecord | nul
 let attendanceTableEnsured = false;
 let attendanceLegacyStateHydrated = false;
 let locationLogLegacyStateHydrated = false;
+let locationLogIndexesEnsured = false;
+let routeDailySummaryTableEnsured = false;
+let lastLocationLogPruneAt = 0;
 let geofenceTableEnsured = false;
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
+const LOCATION_LOG_RETENTION_DAYS = readPositiveIntegerEnv("LOCATION_LOG_RETENTION_DAYS", 14);
+const LOCATION_LOG_MAX_ROWS = readPositiveIntegerEnv("LOCATION_LOG_MAX_ROWS", 50000);
+const LOCATION_LOG_PRUNE_INTERVAL_MS = readPositiveIntegerEnv(
+  "LOCATION_LOG_PRUNE_INTERVAL_MS",
+  60 * 60 * 1000
+);
+
+async function ensureMySqlIndex(
+  tableName: string,
+  indexName: string,
+  columns: string[]
+): Promise<void> {
+  if (!isMySqlStateEnabled() || !columns.length) return;
+  try {
+    const conn = await getMySqlPool();
+    const [rows] = await conn.query<any[]>(
+      `SHOW INDEX FROM \`${tableName}\` WHERE Key_name = ?`,
+      [indexName]
+    );
+    if (rows && rows.length > 0) return;
+    const columnList = columns.map((column) => `\`${column}\``).join(", ");
+    await conn.execute(`ALTER TABLE \`${tableName}\` ADD INDEX \`${indexName}\` (${columnList})`);
+  } catch (error) {
+    console.warn(
+      `Unable to ensure MySQL index ${indexName} on ${tableName}:`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+async function ensureLocationLogIndexes(): Promise<void> {
+  if (locationLogIndexesEnsured || !isMySqlStateEnabled()) return;
+  await ensureMySqlIndex("lff_location_logs", "idx_lff_location_user_captured", [
+    "user_id",
+    "captured_at",
+  ]);
+  await ensureMySqlIndex("lff_location_logs", "idx_lff_location_captured_user", [
+    "captured_at",
+    "user_id",
+  ]);
+  locationLogIndexesEnsured = true;
+}
+
+async function pruneLocationLogsIfNeeded(force = false): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const now = Date.now();
+  if (!force && now - lastLocationLogPruneAt < LOCATION_LOG_PRUNE_INTERVAL_MS) return;
+  lastLocationLogPruneAt = now;
+
+  try {
+    await ensureLocationLogIndexes();
+    const conn = await getMySqlPool();
+    const retentionCutoff = new Date(now - LOCATION_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 19)
+      .replace("T", " ");
+    const [staleRouteRows] = await conn.query<any[]>(
+      `SELECT DISTINCT user_id, DATE_FORMAT(CONVERT_TZ(captured_at, '+00:00', '+05:30'), '%Y-%m-%d') AS route_date
+       FROM lff_location_logs
+       WHERE captured_at < ?
+       ORDER BY route_date ASC
+       LIMIT 500`,
+      [retentionCutoff]
+    );
+    for (const row of staleRouteRows ?? []) {
+      const userId = row.user_id ? String(row.user_id) : "";
+      const routeDate = row.route_date ? toSqlDateOnly(row.route_date) : "";
+      if (!userId || !isIsoDateString(routeDate)) continue;
+      await summarizeRawRouteDateForMySql(userId, routeDate);
+    }
+    await conn.execute(
+      `DELETE FROM lff_location_logs WHERE captured_at < ?`,
+      [retentionCutoff]
+    );
+
+    const [countRows] = await conn.query<any[]>(
+      `SELECT COUNT(*) AS count FROM lff_location_logs`
+    );
+    const count = Number(countRows?.[0]?.count ?? 0);
+    if (count <= LOCATION_LOG_MAX_ROWS) return;
+
+    const overflow = count - LOCATION_LOG_MAX_ROWS;
+    await conn.execute(
+      `DELETE FROM lff_location_logs
+       ORDER BY captured_at ASC, id ASC
+       LIMIT ${Math.max(1, Math.trunc(overflow))}`
+    );
+  } catch (error) {
+    console.warn(
+      "Unable to prune location logs:",
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+type RouteAttendanceSummaryEvent = {
+  id: string;
+  type: "checkin" | "checkout";
+  at: string;
+  geofenceName: string | null;
+  latitude: number | null;
+  longitude: number | null;
+};
+
+function parseJsonArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function roundCoordinate(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function encodePolylineCoordinate(value: number): string {
+  let coordinate = value < 0 ? ~(value << 1) : value << 1;
+  let encoded = "";
+  while (coordinate >= 0x20) {
+    encoded += String.fromCharCode((0x20 | (coordinate & 0x1f)) + 63);
+    coordinate >>= 5;
+  }
+  return encoded + String.fromCharCode(coordinate + 63);
+}
+
+function encodeLocationPolyline(points: LocationLog[]): string {
+  let previousLat = 0;
+  let previousLng = 0;
+  let encoded = "";
+  for (const point of points) {
+    if (!Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) continue;
+    const lat = Math.round(point.latitude * 100000);
+    const lng = Math.round(point.longitude * 100000);
+    encoded += encodePolylineCoordinate(lat - previousLat);
+    encoded += encodePolylineCoordinate(lng - previousLng);
+    previousLat = lat;
+    previousLng = lng;
+  }
+  return encoded;
+}
+
+function compressRouteSummaryPoints(points: LocationLog[], maxPoints = 720): LocationLog[] {
+  const ordered = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  if (ordered.length <= maxPoints) return ordered;
+  const sampled: LocationLog[] = [];
+  const lastIndex = ordered.length - 1;
+  for (let i = 0; i < maxPoints; i++) {
+    const index = Math.round((i / (maxPoints - 1)) * lastIndex);
+    const point = ordered[index];
+    if (!sampled.length || sampled[sampled.length - 1].id !== point.id) {
+      sampled.push(point);
+    }
+  }
+  return sampled;
+}
+
+function serializeSummaryPoints(points: LocationLog[]): LocationLog[] {
+  return points.map((point) => ({
+    id: point.id,
+    companyId: point.companyId,
+    userId: point.userId,
+    latitude: roundCoordinate(point.latitude),
+    longitude: roundCoordinate(point.longitude),
+    accuracy: point.accuracy ?? null,
+    speed: point.speed ?? null,
+    heading: point.heading ?? null,
+    batteryLevel: point.batteryLevel ?? null,
+    geofenceId: point.geofenceId ?? null,
+    geofenceName: point.geofenceName ?? null,
+    isInsideGeofence: Boolean(point.isInsideGeofence),
+    capturedAt: point.capturedAt,
+  }));
+}
+
+async function ensureRouteDailySummaryTable(): Promise<void> {
+  if (routeDailySummaryTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_route_daily_summaries\` (
+      \`user_id\` VARCHAR(64) NOT NULL,
+      \`route_date\` DATE NOT NULL,
+      \`company_id\` VARCHAR(64) NULL,
+      \`first_captured_at\` DATETIME NULL,
+      \`last_captured_at\` DATETIME NULL,
+      \`first_latitude\` DECIMAL(10,7) NULL,
+      \`first_longitude\` DECIMAL(10,7) NULL,
+      \`last_latitude\` DECIMAL(10,7) NULL,
+      \`last_longitude\` DECIMAL(10,7) NULL,
+      \`total_distance_km\` DECIMAL(10,2) NOT NULL DEFAULT 0,
+      \`total_moving_minutes\` INT NOT NULL DEFAULT 0,
+      \`total_halt_minutes\` INT NOT NULL DEFAULT 0,
+      \`halt_count\` INT NOT NULL DEFAULT 0,
+      \`point_count\` INT NOT NULL DEFAULT 0,
+      \`raw_point_count\` INT NOT NULL DEFAULT 0,
+      \`encoded_polyline\` LONGTEXT NULL,
+      \`points_json\` LONGTEXT NOT NULL,
+      \`halts_json\` LONGTEXT NOT NULL,
+      \`segments_json\` LONGTEXT NOT NULL,
+      \`attendance_events_json\` LONGTEXT NOT NULL,
+      \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`user_id\`, \`route_date\`),
+      KEY \`idx_lff_route_summary_company_date\` (\`company_id\`, \`route_date\`),
+      KEY \`idx_lff_route_summary_date\` (\`route_date\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+  routeDailySummaryTableEnsured = true;
+}
+
+async function upsertRouteDailySummaryInMySql(
+  userId: string,
+  dateKey: string,
+  timeline: RouteTimeline,
+  attendanceEvents: RouteAttendanceSummaryEvent[] = [],
+  rawPointCount = timeline.points.length
+): Promise<void> {
+  if (!isMySqlStateEnabled() || !timeline.points.length) return;
+  await ensureRouteDailySummaryTable();
+  const conn = await getMySqlPool();
+  const orderedPoints = [...timeline.points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  const firstPoint = orderedPoints[0];
+  const lastPoint = orderedPoints[orderedPoints.length - 1];
+  const summaryPoints = serializeSummaryPoints(compressRouteSummaryPoints(orderedPoints));
+  await conn.execute(
+    `INSERT INTO lff_route_daily_summaries (
+      user_id, route_date, company_id, first_captured_at, last_captured_at,
+      first_latitude, first_longitude, last_latitude, last_longitude,
+      total_distance_km, total_moving_minutes, total_halt_minutes, halt_count,
+      point_count, raw_point_count, encoded_polyline, points_json, halts_json,
+      segments_json, attendance_events_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    ON DUPLICATE KEY UPDATE
+      company_id = VALUES(company_id),
+      first_captured_at = VALUES(first_captured_at),
+      last_captured_at = VALUES(last_captured_at),
+      first_latitude = VALUES(first_latitude),
+      first_longitude = VALUES(first_longitude),
+      last_latitude = VALUES(last_latitude),
+      last_longitude = VALUES(last_longitude),
+      total_distance_km = VALUES(total_distance_km),
+      total_moving_minutes = VALUES(total_moving_minutes),
+      total_halt_minutes = VALUES(total_halt_minutes),
+      halt_count = VALUES(halt_count),
+      point_count = VALUES(point_count),
+      raw_point_count = VALUES(raw_point_count),
+      encoded_polyline = VALUES(encoded_polyline),
+      points_json = VALUES(points_json),
+      halts_json = VALUES(halts_json),
+      segments_json = VALUES(segments_json),
+      attendance_events_json = VALUES(attendance_events_json),
+      updated_at = NOW()`,
+    [
+      userId,
+      dateKey,
+      firstPoint.companyId || null,
+      toSqlTimestamp(firstPoint.capturedAt),
+      toSqlTimestamp(lastPoint.capturedAt),
+      firstPoint.latitude,
+      firstPoint.longitude,
+      lastPoint.latitude,
+      lastPoint.longitude,
+      timeline.summary.totalDistanceKm,
+      timeline.summary.totalMovingMinutes,
+      timeline.summary.totalHaltMinutes,
+      timeline.summary.haltCount,
+      summaryPoints.length,
+      Math.max(rawPointCount, orderedPoints.length),
+      encodeLocationPolyline(summaryPoints),
+      JSON.stringify(summaryPoints),
+      JSON.stringify(timeline.halts ?? []),
+      JSON.stringify(timeline.segments ?? []),
+      JSON.stringify(attendanceEvents),
+    ]
+  );
+}
+
+async function getRouteDailySummaryFromMySql(
+  userId: string,
+  dateKey: string
+): Promise<(RouteTimeline & { attendanceEvents: RouteAttendanceSummaryEvent[] }) | null> {
+  if (!isMySqlStateEnabled()) return null;
+  await ensureRouteDailySummaryTable();
+  const conn = await getMySqlPool();
+  const [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_route_daily_summaries
+     WHERE user_id = ? AND route_date = ?
+     LIMIT 1`,
+    [userId, dateKey]
+  );
+  const row = rows?.[0];
+  if (!row) return null;
+  const points = parseJsonArray<LocationLog>(row.points_json);
+  return {
+    userId,
+    date: dateKey,
+    points,
+    halts: parseJsonArray(row.halts_json),
+    segments: parseJsonArray(row.segments_json),
+    summary: {
+      totalDistanceKm: Number(row.total_distance_km || 0),
+      totalMovingMinutes: Number(row.total_moving_minutes || 0),
+      totalHaltMinutes: Number(row.total_halt_minutes || 0),
+      haltCount: Number(row.halt_count || 0),
+      pointCount: Number(row.point_count || points.length),
+      rawPointCount: Number(row.raw_point_count || points.length),
+    },
+    directions: null,
+    encodedPolyline: row.encoded_polyline ? String(row.encoded_polyline) : null,
+    source: "daily_summary",
+    summaryUpdatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    attendanceEvents: parseJsonArray<RouteAttendanceSummaryEvent>(row.attendance_events_json),
+  };
+}
+
+async function summarizeRawRouteDateForMySql(userId: string, dateKey: string): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  const rawLocationPoints = await listLocationLogsForUserDateFromMySql(userId, dateKey);
+  if (!rawLocationPoints.length) return;
+  const attendance = await listAttendanceForUserDateFromMySql(userId, dateKey).catch(() => []);
+  const attendanceEvents: RouteAttendanceSummaryEvent[] = attendance
+    .filter((record) => isMumbaiDateKey(record.timestamp, dateKey))
+    .map((record) => ({
+      id: record.id,
+      type: record.type,
+      at: record.timestamp,
+      geofenceName: record.geofenceName ?? null,
+      latitude: record.location?.lat ?? null,
+      longitude: record.location?.lng ?? null,
+    }))
+    .sort((a, b) => a.at.localeCompare(b.at));
+  const sessionWindow = resolveRouteSessionWindow(attendanceEvents);
+  const windowedPoints = filterLocationLogsToSessionWindow(rawLocationPoints, sessionWindow);
+  const points = downsampleLocationLogsByInterval(windowedPoints, 1);
+  if (!points.length) return;
+  const timeline = buildRouteTimeline(userId, dateKey, points);
+  await upsertRouteDailySummaryInMySql(
+    userId,
+    dateKey,
+    { ...timeline, source: "raw_logs" },
+    attendanceEvents,
+    rawLocationPoints.length
+  );
+}
 
 function parseAssignedEmployeeIdsJson(value: unknown): string[] {
   if (typeof value !== "string" || !value.trim()) return [];
@@ -2868,10 +3260,21 @@ async function ensureAttendanceTable(): Promise<void> {
       \`approval_comment\` LONGTEXT NULL,
       PRIMARY KEY (\`id\`),
       KEY \`idx_lff_attendance_user_timestamp\` (\`user_id\`, \`timestamp\`),
+      KEY \`idx_lff_attendance_user_type_timestamp\` (\`user_id\`, \`type\`, \`timestamp\`),
+      KEY \`idx_lff_attendance_company_timestamp\` (\`company_id\`, \`timestamp\`),
       KEY \`idx_lff_attendance_company\` (\`company_id\`),
       KEY \`idx_lff_attendance_approval\` (\`approval_status\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  await ensureMySqlIndex("lff_attendance", "idx_lff_attendance_user_type_timestamp", [
+    "user_id",
+    "type",
+    "timestamp",
+  ]);
+  await ensureMySqlIndex("lff_attendance", "idx_lff_attendance_company_timestamp", [
+    "company_id",
+    "timestamp",
+  ]);
   attendanceTableEnsured = true;
 }
 
@@ -3008,6 +3411,33 @@ async function listAttendanceHistoryFromMySql(userId: string): Promise<Attendanc
   return rows.map(mapAttendanceRow);
 }
 
+async function listAttendanceForUserDateFromMySql(
+  userId: string,
+  dateKey: string
+): Promise<AttendanceRecord[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureAttendanceTable();
+  const range = parseDateKeyToUtcRange(dateKey);
+  if (!range) return [];
+  const conn = await getMySqlPool();
+  let [rows] = await conn.query<any[]>(
+    `SELECT * FROM lff_attendance
+     WHERE user_id = ? AND \`timestamp\` BETWEEN ? AND ?
+     ORDER BY \`timestamp\` ASC`,
+    [userId, range.start, range.end]
+  );
+  if ((!rows || rows.length === 0) && !attendanceLegacyStateHydrated) {
+    await hydrateAttendanceFromLegacyStateIfNeeded();
+    [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_attendance
+       WHERE user_id = ? AND \`timestamp\` BETWEEN ? AND ?
+       ORDER BY \`timestamp\` ASC`,
+      [userId, range.start, range.end]
+    );
+  }
+  return rows.map(mapAttendanceRow);
+}
+
 async function listAttendanceTodayFromMySql(userId: string): Promise<AttendanceRecord[]> {
   if (!isMySqlStateEnabled()) return [];
   await ensureAttendanceTable();
@@ -3032,10 +3462,13 @@ async function listAttendanceTodayFromMySql(userId: string): Promise<AttendanceR
   return rows.map(mapAttendanceRow);
 }
 
-async function listAttendanceTodayFromMySqlAll(companyId?: string): Promise<AttendanceRecord[]> {
+async function listAttendanceTodayFromMySqlAll(
+  companyId?: string,
+  dateKey = toMumbaiDateKey(new Date())
+): Promise<AttendanceRecord[]> {
   if (!isMySqlStateEnabled()) return [];
   await ensureAttendanceTable();
-  const range = parseDateKeyToUtcRange(toMumbaiDateKey(new Date()));
+  const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
   const conn = await getMySqlPool();
   const cleanCompanyId = companyId ? String(companyId).trim() : "";
@@ -3072,13 +3505,36 @@ async function listAttendanceFromMySql(limit = 10000): Promise<AttendanceRecord[
 }
 
 async function findActiveAttendanceInMySql(userId: string): Promise<AttendanceRecord | null> {
-  const history = await listAttendanceHistoryFromMySql(userId);
-  const latestCheckIn = history.find((entry) => entry.type === "checkin");
-  if (!latestCheckIn) return null;
-  const checkedOutAfter = history.some(
-    (entry) => entry.type === "checkout" && entry.timestamp >= latestCheckIn.timestamp
+  if (!isMySqlStateEnabled()) return null;
+  await ensureAttendanceTable();
+  const conn = await getMySqlPool();
+  let [checkInRows] = await conn.query<any[]>(
+    `SELECT * FROM lff_attendance
+     WHERE user_id = ? AND type = 'checkin'
+     ORDER BY \`timestamp\` DESC
+     LIMIT 1`,
+    [userId]
   );
-  return checkedOutAfter ? null : latestCheckIn;
+  if ((!checkInRows || checkInRows.length === 0) && !attendanceLegacyStateHydrated) {
+    await hydrateAttendanceFromLegacyStateIfNeeded();
+    [checkInRows] = await conn.query<any[]>(
+      `SELECT * FROM lff_attendance
+       WHERE user_id = ? AND type = 'checkin'
+       ORDER BY \`timestamp\` DESC
+       LIMIT 1`,
+      [userId]
+    );
+  }
+  if (!checkInRows || checkInRows.length === 0) return null;
+  const latestCheckIn = mapAttendanceRow(checkInRows[0]);
+  const [checkoutRows] = await conn.query<any[]>(
+    `SELECT id FROM lff_attendance
+     WHERE user_id = ? AND type = 'checkout' AND \`timestamp\` >= ?
+     ORDER BY \`timestamp\` DESC
+     LIMIT 1`,
+    [userId, toSqlTimestamp(latestCheckIn.timestamp)]
+  );
+  return checkoutRows && checkoutRows.length > 0 ? null : latestCheckIn;
 }
 
 function mapLocationLogRow(row: any): LocationLog {
@@ -3104,6 +3560,7 @@ function mapLocationLogRow(row: any): LocationLog {
 
 async function listLocationLogsFromMySql(limit = 10000): Promise<LocationLog[]> {
   if (!isMySqlStateEnabled()) return [];
+  await ensureLocationLogIndexes();
   const conn = await getMySqlPool();
   const safeLimit = Math.max(1, Math.min(50000, Math.trunc(limit)));
   let [rows] = await conn.query<any[]>(
@@ -3120,6 +3577,8 @@ async function listLocationLogsFromMySql(limit = 10000): Promise<LocationLog[]> 
 
 async function insertLocationLogInMySql(log: LocationLog): Promise<void> {
   if (!isMySqlStateEnabled()) return;
+  await ensureLocationLogIndexes();
+  void pruneLocationLogsIfNeeded();
   const conn = await getMySqlPool();
   await conn.execute(
     `INSERT INTO lff_location_logs (
@@ -3155,30 +3614,90 @@ async function insertLocationLogInMySql(log: LocationLog): Promise<void> {
   );
 }
 
+async function insertLocationLogsInMySql(logs: LocationLog[]): Promise<void> {
+  if (!isMySqlStateEnabled() || logs.length === 0) return;
+  await ensureLocationLogIndexes();
+  void pruneLocationLogsIfNeeded();
+  const conn = await getMySqlPool();
+  const chunkSize = 250;
+  for (let index = 0; index < logs.length; index += chunkSize) {
+    const chunk = logs.slice(index, index + chunkSize);
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const values = chunk.flatMap((log) => [
+      log.id,
+      log.companyId ?? null,
+      log.userId,
+      log.latitude,
+      log.longitude,
+      log.accuracy ?? null,
+      log.speed ?? null,
+      log.heading ?? null,
+      log.batteryLevel ?? null,
+      log.geofenceId ?? null,
+      log.geofenceName ?? null,
+      log.isInsideGeofence ? 1 : 0,
+      new Date(log.capturedAt).toISOString().slice(0, 19).replace("T", " "),
+    ]);
+    await conn.execute(
+      `INSERT INTO lff_location_logs (
+        id, company_id, user_id, latitude, longitude, accuracy, speed, heading, battery_level,
+        geofence_id, geofence_name, is_inside_geofence, captured_at
+      ) VALUES ${placeholders}
+      ON DUPLICATE KEY UPDATE
+        latitude = VALUES(latitude),
+        longitude = VALUES(longitude),
+        accuracy = VALUES(accuracy),
+        speed = VALUES(speed),
+        heading = VALUES(heading),
+        battery_level = VALUES(battery_level),
+        geofence_id = VALUES(geofence_id),
+        geofence_name = VALUES(geofence_name),
+        is_inside_geofence = VALUES(is_inside_geofence),
+        captured_at = VALUES(captured_at)`,
+      values
+    );
+  }
+}
+
 async function listLocationLogsLatestFromMySql(): Promise<LocationLog[]> {
+  await ensureLocationLogIndexes();
   const conn = await getMySqlPool();
   let [rows] = await conn.query<any[]>(
-    `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT 5000`
+    `SELECT logs.*
+     FROM lff_location_logs logs
+     INNER JOIN (
+       SELECT user_id, MAX(captured_at) AS captured_at
+       FROM lff_location_logs
+       GROUP BY user_id
+     ) latest
+       ON latest.user_id = logs.user_id
+      AND latest.captured_at = logs.captured_at
+     ORDER BY logs.captured_at DESC
+     LIMIT 5000`
   );
   if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
     await hydrateLocationLogsFromLegacyStateIfNeeded();
     [rows] = await conn.query<any[]>(
-      `SELECT * FROM lff_location_logs ORDER BY captured_at DESC LIMIT 5000`
+      `SELECT logs.*
+       FROM lff_location_logs logs
+       INNER JOIN (
+         SELECT user_id, MAX(captured_at) AS captured_at
+         FROM lff_location_logs
+         GROUP BY user_id
+       ) latest
+         ON latest.user_id = logs.user_id
+        AND latest.captured_at = logs.captured_at
+       ORDER BY logs.captured_at DESC
+       LIMIT 5000`
     );
   }
-  const latestByUser = new Map<string, LocationLog>();
-  for (const row of rows) {
-    const log = mapLocationLogRow(row);
-    if (!latestByUser.has(log.userId)) {
-      latestByUser.set(log.userId, log);
-    }
-  }
-  return Array.from(latestByUser.values());
+  return rows.map(mapLocationLogRow);
 }
 
 async function listLocationLogsForDateFromMySql(dateKey: string): Promise<LocationLog[]> {
   const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
+  await ensureLocationLogIndexes();
   const conn = await getMySqlPool();
   let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs
@@ -3204,6 +3723,7 @@ async function listLocationLogsForUserDateFromMySql(
 ): Promise<LocationLog[]> {
   const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
+  await ensureLocationLogIndexes();
   const conn = await getMySqlPool();
   let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs
@@ -7370,4765 +7890,381 @@ export async function registerRoutes(app: Express): Promise<Server> {
       error instanceof Error ? error.message : error
     );
   });
-  app.get("/api/health", (_req, res) => {
-    res.json({
-      ok: true,
-      ts: new Date().toISOString(),
-      mysqlStateEnabled: isMySqlStateEnabled(),
-    });
+  registerHealthRoutes(app, {
+    isMySqlStateEnabled,
   });
-
-  app.post("/api/ai/analyze", async (req, res) => {
-    const body = req.body as {
-      transcript?: unknown;
-      customerName?: unknown;
-      salespersonName?: unknown;
-      model?: unknown;
-    };
-    const transcript =
-      typeof body?.transcript === "string" ? body.transcript.trim() : "";
-    const customerName =
-      typeof body?.customerName === "string" ? body.customerName.trim() : "Customer";
-    const salespersonName =
-      typeof body?.salespersonName === "string" ? body.salespersonName.trim() : "Sales Rep";
-    const requestedModel =
-      typeof body?.model === "string" ? body.model.trim() : "";
-    const model = requestedModel || DEFAULT_AI_MODEL;
-
-    if (!transcript || transcript.length < 20) {
-      res.status(400).json({ message: "Transcript is too short for AI analysis." });
-      return;
-    }
-
-    const apiKey = normalizeApiSecret(DEFAULT_GROQ_API_KEY);
-    if (!apiKey) {
-      res.status(500).json({ message: "AI key not configured on server." });
-      return;
-    }
-
-    try {
-      const result = await analyzeConversationWithAI({
-        apiKey,
-        model,
-        transcript,
-        customerName,
-        salespersonName,
-      });
-      res.json({
-        provider: "groq",
-        model,
-        result,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "AI analysis failed.";
-      const kind = typeof (error as any)?.kind === "string" ? String((error as any).kind) : "";
-      const statusFromError =
-        typeof (error as any)?.status === "number" ? Number((error as any).status) : 0;
-      const status =
-        statusFromError >= 400
-          ? statusFromError
-          : kind === "invalid_api_key"
-            ? 401
-            : kind === "quota_exhausted" || kind === "rate_limited"
-              ? 429
-              : kind === "model_not_available"
-                ? 404
-                : 500;
-      res.status(status).json({
-        message,
-        kind: kind || "unknown",
-      });
-    }
+  registerAiAnalysisRoutes(app, {
+    defaultGroqApiKey: DEFAULT_GROQ_API_KEY,
+    defaultAiModel: DEFAULT_AI_MODEL,
+    normalizeApiSecret,
+    analyzeConversationWithAI,
   });
-
-  app.get("/api/settings/integrations/dolibarr", requireAuth, async (req, res) => {
-    const userId = req.auth?.sub;
-    if (!userId) {
-      res.status(401).json({ message: "Not authenticated" });
-      return;
-    }
-    const config = await resolveDolibarrConfigForUser(userId);
-    res.json({
-      enabled: config.enabled,
-      endpoint: config.endpoint,
-      apiKeyMasked: maskApiKey(config.apiKey),
-      configured: config.configured,
-      source: config.source,
-    });
-  });
-
-  app.put("/api/settings/integrations/dolibarr", requireAuth, async (req, res) => {
-    const userId = req.auth?.sub;
-    if (!userId) {
-      res.status(401).json({ message: "Not authenticated" });
-      return;
-    }
-    const body = req.body as {
-      enabled?: unknown;
-      endpoint?: unknown;
-      apiKey?: unknown;
-    };
-    if (typeof body.enabled !== "boolean") {
-      res.status(400).json({ message: "enabled must be a boolean." });
-      return;
-    }
-
-    const updated = await storage.setDolibarrConfigForUser(userId, {
-      enabled: body.enabled,
-      endpoint: typeof body.endpoint === "string" ? body.endpoint : undefined,
-      apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
-    });
-    const resolved = await resolveDolibarrConfigForUser(userId, {
-      enabled: updated.enabled,
-      endpoint: updated.endpoint,
-      apiKey: updated.apiKey,
-    });
-    res.json({
-      enabled: resolved.enabled,
-      endpoint: resolved.endpoint,
-      apiKeyMasked: maskApiKey(resolved.apiKey),
-      configured: resolved.configured,
-      source: "settings",
-    });
-  });
-
-  app.post("/api/settings/integrations/dolibarr/test", requireAuth, async (req, res) => {
-    const userId = req.auth?.sub;
-    if (!userId) {
-      res.status(401).json({ message: "Not authenticated" });
-      return;
-    }
-    const body = req.body as {
-      enabled?: unknown;
-      endpoint?: unknown;
-      apiKey?: unknown;
-    };
-
-    const config = await resolveDolibarrConfigForUser(userId, {
-      enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
-      endpoint: typeof body.endpoint === "string" ? body.endpoint : undefined,
-      apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
-    });
-
-    const endpointCandidates = buildDolibarrEndpointCandidates(config.endpoint);
-
-    if (!endpointCandidates.length || !config.apiKey) {
-      res.json({
-        ok: false,
-        status: null,
-        message: "Dolibarr endpoint and API key are required.",
-      });
-      return;
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    try {
-      const failures: string[] = [];
-      for (const endpointCandidate of endpointCandidates) {
-        const response = await fetch(endpointCandidate, {
-          method: "GET",
-          headers: buildDolibarrProxyHeaders(config.apiKey, false),
-          signal: controller.signal,
-        });
-        const text = await response.text();
-        const contentType = response.headers.get("content-type") || "";
-        const parsedBody = parseJsonText(text);
-        const protectionBlockMessage = getDolibarrProtectionBlockMessage(text, parsedBody);
-        if (protectionBlockMessage) {
-          failures.push(`${endpointCandidate} -> blocked by Dolibarr host protection: ${protectionBlockMessage}`);
-          continue;
-        }
-        const looksLikeHtml =
-          !parsedBody &&
-          (contentType.toLowerCase().includes("text/html") ||
-            /^\s*<!doctype html/i.test(text) ||
-            /^\s*<html\b/i.test(text));
-
-        if (response.ok && !looksLikeHtml) {
-          res.json({
-            ok: true,
-            status: response.status,
-            message: `Dolibarr endpoint reachable: ${endpointCandidate}`,
-          });
-          return;
-        }
-
-        failures.push(
-          `${endpointCandidate} -> HTTP ${response.status}${looksLikeHtml ? ": returned HTML" : ""}`
-        );
-      }
-
-      res.json({
-        ok: false,
-        status: null,
-        message: `Dolibarr endpoint test failed. Tried: ${failures.join(" | ")}`,
-      });
-    } catch (error) {
-      res.json({
-        ok: false,
-        status: null,
-        message:
-          error instanceof Error ? error.message : "Unable to reach Dolibarr endpoint.",
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  });
-
-  app.get("/api/notifications", requireAuth, async (req, res) => {
-    const role = req.auth?.role || "salesperson";
-    await initAuthUsersStore();
-    const authRecord = req.auth?.email
-      ? getAuthUserByIdentifier(req.auth.email)
-      : null;
-    const companyId = authRecord?.user.companyId ?? null;
-
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({
-        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
-      });
-      return;
-    }
-
-    try {
-      const notifications = await listNotificationsFromMySql(role, req.auth?.sub || "", companyId);
-      res.json(notifications);
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to load notifications: ${error.message}`
-            : "Unable to load notifications.",
-      });
-    }
-  });
-  
-  app.post("/api/notifications", requireAuth, async (req, res) => {
-    const { title, body, kind, audience, audienceUserIds } = req.body as {
-      title?: string;
-      body?: string;
-      kind?: AppNotification["kind"];
-      audience?: NotificationAudience;
-      audienceUserIds?: string[];
-    };
-    if (!title || !body) {
-      res.status(400).json({ message: "Notification title and body are required." });
-      return;
-    }
-
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({
-        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
-      });
-      return;
-    }
-
-    await initAuthUsersStore();
-    const authRecord = req.auth?.email
-      ? getAuthUserByIdentifier(req.auth.email)
-      : null;
-    const companyId = authRecord?.user.companyId ?? null;
-    const createdAt = new Date().toISOString();
-    const normalizedTitle = normalizeWhitespace(title);
-    const normalizedBody = normalizeWhitespace(body);
-    const hasGenericTitle = isGenericNotificationTitle(normalizedTitle);
-    const safeTitle =
-      hasGenericTitle
-        ? normalizedBody.slice(0, 90) || "New update"
-        : normalizedTitle;
-    const safeBody =
-      normalizedBody || (!hasGenericTitle && normalizedTitle ? normalizedTitle : "You have a new notification.");
-    const notification: AppNotification = {
-      id: `notif_${randomUUID()}`,
-      companyId: companyId || undefined,
-      title: safeTitle,
-      body: safeBody,
-      kind: normalizeNotificationKind(kind),
-      audience: normalizeNotificationAudience(audience),
-      createdById: req.auth?.sub || "system",
-      createdByName: req.auth?.email || "System",
-      createdAt,
-      readByIds: [],
-      audienceUserIds: parseNotificationUserIds(audienceUserIds),
-    };
-
-    try {
-      await insertNotificationInMySql(notification);
-      res.status(201).json(notification);
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to save notification: ${error.message}`
-            : "Unable to save notification.",
-      });
-    }
-  });
-
-  app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
-    const notificationId = firstString(req.params.id);
-    if (!notificationId) {
-      res.status(400).json({ message: "Notification id is required." });
-      return;
-    }
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({
-        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
-      });
-      return;
-    }
-    try {
-      await markNotificationReadInMySql(notificationId, req.auth?.sub || "");
-      res.json({ ok: true });
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to mark notification read: ${error.message}`
-            : "Unable to mark notification read.",
-      });
-    }
-  });
-
-  app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({
-        message: "Notifications storage is unavailable. Configure MySQL for lff_notifications.",
-      });
-      return;
-    }
-    try {
-      const role = req.auth?.role || "salesperson";
-      await initAuthUsersStore();
-      const authRecord = req.auth?.email
-        ? getAuthUserByIdentifier(req.auth.email)
-        : null;
-      const companyId = authRecord?.user.companyId ?? null;
-      await markAllNotificationsReadInMySql(role, req.auth?.sub || "", companyId);
-      res.json({ ok: true });
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to mark notifications read: ${error.message}`
-            : "Unable to mark notifications read.",
-      });
-    }
-  });
-
-  app.get("/api/companies", requireAuth, async (_req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "Company database storage is not configured." });
-      return;
-    }
-    try {
-      res.json(await listCompaniesFromMySql());
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to load companies: ${error.message}`
-            : "Unable to load companies.",
-      });
-    }
-  });
-
-  app.post("/api/companies", requireAuth, requireRoles("admin"), async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "Company database storage is not configured." });
-      return;
-    }
-    const body = (req.body || {}) as Partial<CompanyProfile>;
-    const requestedName = normalizeWhitespace(typeof body.name === "string" ? body.name : "");
-    if (!requestedName) {
-      res.status(400).json({ message: "Company name is required." });
-      return;
-    }
-    try {
-      await ensureCompaniesTableInMySql();
-      const conn = await getMySqlPool();
-      const [existingRows] = await conn.query<any[]>(
-        `SELECT id, name, legal_name, industry, headquarters, primary_branch, support_email,
-                support_phone, attendance_zone_label, created_at, updated_at
-         FROM lff_companies
-         WHERE LOWER(TRIM(name)) = ?
-         LIMIT 1`,
-        [requestedName.toLowerCase()]
-      );
-      if (existingRows && existingRows.length > 0) {
-        res.status(200).json(companyProfileFromRow(existingRows[0]));
-        return;
-      }
-      const nowIso = new Date().toISOString();
-      const created = await upsertCompanyProfileInMySql(
-        normalizeCompanyProfilePayload({
-          ...body,
-          id: `${getCompanyIdFromName(requestedName)}_${randomUUID().slice(0, 8)}`,
-          name: requestedName,
-          createdAt: nowIso,
-          updatedAt: nowIso,
-        })
-      );
-      await persistCompaniesLegacyStateFromMySql();
-      res.status(201).json(created);
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to create company: ${error.message}`
-            : "Unable to create company.",
-      });
-    }
-  });
-
-  app.post("/api/companies/:id/rehome-legacy-data", requireAuth, requireRoles("admin"), async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "Company database storage is not configured." });
-      return;
-    }
-    const companyId = normalizeWhitespace(firstString(req.params.id));
-    if (!companyId) {
-      res.status(400).json({ message: "Company id is required." });
-      return;
-    }
-    try {
-      const companies = await listCompanyProfilesFromMySqlRaw();
-      const targetCompany = companies.find((company) => company.id === companyId);
-      if (!targetCompany) {
-        res.status(404).json({ message: "Company not found." });
-        return;
-      }
-      await rehomeLegacyCompanyDataToMySql(targetCompany, companies);
-      await persistCompaniesLegacyStateFromMySql();
-      res.json({
-        ok: true,
-        companyId: targetCompany.id,
-        companyName: targetCompany.name,
-      });
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to assign legacy data to company: ${error.message}`
-            : "Unable to assign legacy data to company.",
-      });
-    }
-  });
-
-  app.put("/api/companies/:id", requireAuth, requireRoles("admin"), async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "Company database storage is not configured." });
-      return;
-    }
-    const companyId = normalizeWhitespace(firstString(req.params.id));
-    if (!companyId) {
-      res.status(400).json({ message: "Company id is required." });
-      return;
-    }
-    try {
-      const companies = await listCompaniesFromMySql();
-      const current = companies.find((company) => company.id === companyId);
-      if (!current) {
-        res.status(404).json({ message: "Company not found." });
-        return;
-      }
-      const updated = await upsertCompanyProfileInMySql(
-        normalizeCompanyProfilePayload({
-          ...current,
-          ...((req.body || {}) as Partial<CompanyProfile>),
-          id: current.id,
-          createdAt: current.createdAt,
-          updatedAt: new Date().toISOString(),
-        })
-      );
-      await persistCompaniesLegacyStateFromMySql();
-      res.json(updated);
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to update company: ${error.message}`
-            : "Unable to update company.",
-      });
-    }
-  });
-
-  app.delete("/api/companies/:id", requireAuth, requireRoles("admin"), async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "Company database storage is not configured." });
-      return;
-    }
-    const companyId = normalizeWhitespace(firstString(req.params.id));
-    if (!companyId) {
-      res.status(400).json({ message: "Company id is required." });
-      return;
-    }
-    try {
-      const companies = await listCompaniesFromMySql();
-      if (!companies.some((company) => company.id === companyId)) {
-        res.status(404).json({ message: "Company not found." });
-        return;
-      }
-      if (companies.length <= 1) {
-        res.status(400).json({ message: "At least one company environment is required." });
-        return;
-      }
-      const fallbackCompany = companies.find((company) => company.id !== companyId);
-      if (!fallbackCompany) {
-        res.status(400).json({ message: "A fallback company is required before deletion." });
-        return;
-      }
-      await deleteCompanyScopedRowsInMySql(companyId, fallbackCompany);
-      const conn = await getMySqlPool();
-      await conn.execute(`DELETE FROM lff_companies WHERE id = ?`, [companyId]);
-      await persistCompaniesLegacyStateFromMySql();
-      res.json({ ok: true });
-    } catch (error) {
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Unable to delete company: ${error.message}`
-            : "Unable to delete company.",
-      });
-    }
-  });
-
-  app.post(
-    "/api/support/attachments/upload",
+  registerDolibarrSettingsRoutes(app, {
     requireAuth,
-    express.raw({ type: "*/*", limit: "20mb" }),
-    async (req, res) => {
-      const uploaderId = req.auth?.sub;
-      if (!uploaderId) {
-        res.status(401).json({ message: "Not authenticated" });
-        return;
-      }
-
-      const body = req.body;
-      const fileBuffer = Buffer.isBuffer(body) ? body : null;
-      if (!fileBuffer || fileBuffer.length === 0) {
-        res.status(400).json({ message: "Attachment payload is required." });
-        return;
-      }
-
-      const rawFileName = decodeURIComponent(firstString(req.header("x-file-name")) || "attachment");
-      const mimeType = firstString(req.header("content-type")) || "application/octet-stream";
-      const attachmentType = normalizeSupportAttachmentType(firstString(req.header("x-attachment-type")));
-
-      try {
-        const stored = await storeSupportAttachmentBinary({
-          content: fileBuffer,
-          originalFileName: rawFileName,
-          mimeType,
-          attachmentType,
-          uploadedById: uploaderId,
-        });
-        const forwardedProto = firstString(req.header("x-forwarded-proto")) || req.protocol || "https";
-        const forwardedHost = firstString(req.header("x-forwarded-host")) || req.get("host") || "";
-        const routedUrlPath = `/api${stored.urlPath}`;
-        const absoluteUrl = forwardedHost
-          ? `${forwardedProto}://${forwardedHost}${routedUrlPath}`
-          : routedUrlPath;
-        res.status(201).json({
-          id: stored.id,
-          url: absoluteUrl,
-          name: stored.fileName,
-          mimeType: stored.mimeType,
-          sizeBytes: stored.fileSizeBytes,
-          attachmentType: stored.attachmentType,
-          uploadedById: stored.uploadedById,
-          createdAt: stored.createdAt,
-        });
-      } catch (error) {
-        res.status(500).json({
-          message:
-            error instanceof Error
-              ? `Unable to store support attachment: ${error.message}`
-              : "Unable to store support attachment.",
-        });
-      }
-    }
-  );
-
-  app.all(/^\/api\/dolibarr\/proxy(\/.*)?$/, requireAuth, async (req, res) => {
-    const userId = req.auth?.sub;
-    if (!userId) {
-      res.status(401).json({ message: "Not authenticated" });
-      return;
-    }
-
-    const forwardPath = req.path.replace(/^\/api\/dolibarr\/proxy/, "");
-    const ruleError = resolveDolibarrProxyRule(forwardPath, req.auth?.role);
-    if (ruleError) {
-      res.status(403).json({ message: ruleError });
-      return;
-    }
-
-    await forwardDolibarrRequest(req, res, {
-      userId,
-      forwardPath,
-    });
+    resolveDolibarrConfigForUser,
+    setDolibarrConfigForUser: storage.setDolibarrConfigForUser.bind(storage),
+    maskApiKey,
+    buildDolibarrEndpointCandidates,
+    buildDolibarrProxyHeaders,
+    parseJsonText,
+    getDolibarrProtectionBlockMessage,
   });
 
-  app.post(
-    "/api/integrations/dolibarr/hrm/sync-employee",
+  registerNotificationRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      const requesterId = req.auth?.sub;
-      if (!requesterId) {
-        res.status(401).json({ message: "Not authenticated" });
-        return;
-      }
-
-      const body = req.body as {
-        name?: unknown;
-        email?: unknown;
-        role?: unknown;
-        employeeCategory?: unknown;
-        department?: unknown;
-        branch?: unknown;
-        phone?: unknown;
-        enabled?: unknown;
-        endpoint?: unknown;
-        apiKey?: unknown;
-      };
-
-      const name = firstString(body.name);
-      const email = firstString(body.email).toLowerCase();
-      const role = firstString(body.role) || null;
-      const employeeCategory = firstString(body.employeeCategory);
-      if (!name || !email) {
-        res.status(400).json({ message: "name and email are required." });
-        return;
-      }
-
-      const endpointOverride =
-        typeof body.endpoint === "string"
-          ? body.endpoint
-          : body.endpoint === null
-            ? null
-            : undefined;
-      const apiKeyOverride =
-        typeof body.apiKey === "string"
-          ? body.apiKey
-          : body.apiKey === null
-            ? null
-            : undefined;
-      const config = await resolveDolibarrConfigForUser(requesterId, {
-        enabled: parseOptionalBoolean(body.enabled),
-        endpoint: endpointOverride,
-        apiKey: apiKeyOverride,
-      });
-      try {
-        const result = await syncApprovedUserToDolibarrEmployee(
-          {
-            name,
-            email,
-            role,
-            employeeCategory:
-              employeeCategory === "on_field" || role === "salesperson" ? "on_field" : "fixed_location",
-            department: firstString(body.department) || null,
-            branch: firstString(body.branch) || null,
-            phone: firstString(body.phone) || null,
-          },
-          {
-            enabled: config.enabled,
-            endpoint: config.endpoint,
-            apiKey: config.apiKey,
-          }
-        );
-        res.json(result);
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Unexpected failure while syncing employee to Dolibarr.";
-        res.json({
-          ok: false,
-          status: "failed",
-          message,
-          dolibarrUserId: null,
-          endpointUsed: null,
-        });
-      }
-    }
-  );
-
-  app.post(
-    "/api/speech/transcribe",
-    express.raw({ type: "*/*", limit: `${MAX_TRANSCRIBE_AUDIO_BYTES}b` }),
-    async (req, res) => {
-      const rawBody = req.body;
-      const audioBuffer = Buffer.isBuffer(rawBody) ? rawBody : null;
-      if (!audioBuffer || audioBuffer.length === 0) {
-        res.status(400).json({ message: "Audio payload is required." });
-        return;
-      }
-      if (audioBuffer.length > MAX_TRANSCRIBE_AUDIO_BYTES) {
-        res.status(413).json({ message: "Audio payload too large." });
-        return;
-      }
-
-      const mimeTypeHeader = firstString(req.header("content-type"));
-      const mimeType = mimeTypeHeader.split(";")[0]?.trim() || "audio/webm";
-      const model = firstString(req.query.model) || null;
-      const fallbackModel = firstString(req.query.fallback_model) || null;
-      const provider = firstString(req.query.provider) || null;
-      const mode = firstString(req.query.mode) || null;
-      const languageCode = firstString(req.query.language_code) || null;
-      const withDiarizationRaw = firstString(req.query.with_diarization) || null;
-      const withTimestampsRaw = firstString(req.query.with_timestamps) || null;
-      const numSpeakersRaw = firstString(req.query.num_speakers) || null;
-      const groqApiKeyHeader = firstString(req.header("x-groq-api-key"));
-      const withDiarization =
-        withDiarizationRaw === null
-          ? null
-          : /^(1|true|yes|on)$/i.test(withDiarizationRaw.trim());
-      const withTimestamps =
-        withTimestampsRaw === null
-          ? null
-          : /^(1|true|yes|on)$/i.test(withTimestampsRaw.trim());
-      const parsedNumSpeakers = numSpeakersRaw ? Number(numSpeakersRaw) : Number.NaN;
-      const numSpeakers = Number.isFinite(parsedNumSpeakers)
-        ? Math.max(1, Math.floor(parsedNumSpeakers))
-        : null;
-
-      try {
-        const result = await transcribeSpeechWithFairseqS2T({
-          audio: audioBuffer,
-          mimeType,
-          model,
-          fallbackModel,
-          provider,
-          mode,
-          languageCode,
-          withDiarization,
-          withTimestamps,
-          numSpeakers,
-          groqApiKey:
-            groqApiKeyHeader ||
-            firstString(req.query.groq_api_key) ||
-            null,
-        });
-        res.json(result);
-      } catch (error) {
-        if (error instanceof Speech2TextError) {
-          res.status(error.statusCode).json({ message: error.message });
-          return;
-        }
-        const message =
-          error instanceof Error ? error.message : "Speech transcription failed unexpectedly.";
-        res.status(500).json({ message });
-      }
-    }
-  );
-
-  app.post("/api/auth/register", async (req, res) => {
-    const {
-      name,
-      email,
-      password,
-      companyName,
-      role,
-      department,
-      branch,
-      phone,
-    } = req.body as {
-      name?: string;
-      email?: string;
-      password?: string;
-      companyName?: string;
-      role?: UserRole;
-      department?: string;
-      branch?: string;
-      phone?: string;
-    };
-
-    if (!name || !email || !password || !companyName) {
-      res.status(400).json({ message: "Name, email, password and company name are required" });
-      return;
-    }
-
-    const normalizedEmail = normalizeEmail(email);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      res.status(400).json({ message: "Invalid email format" });
-      return;
-    }
-    if (password.length < 6) {
-      res.status(400).json({ message: "Password must be at least 6 characters" });
-      return;
-    }
-
-    const normalizedRole = normalizeRole(role);
-    const normalizedCompanyName = normalizeCompanyName(companyName);
-    const existingRecord = await checkAuthUserForSignup(normalizedEmail);
-    if (existingRecord && resolveApprovalStatus(existingRecord) === "approved") {
-      res.status(409).json({ message: "User already exists for this email" });
-      return;
-    }
-
-    const adminAlreadyExists = await hasAnyApprovedAdmin();
-    if (normalizedRole === "admin" && adminAlreadyExists) {
-      res.status(403).json({
-        message:
-          "An admin already exists. Ask an existing admin to approve additional admin access.",
-      });
-      return;
-    }
-
-    const user = buildUserFromRegistration({
-      name,
-      email: normalizedEmail,
-      companyName: normalizedCompanyName,
-      role: normalizedRole,
-      department,
-      branch,
-      phone,
-    });
-    const now = new Date().toISOString();
-    const authRecord: AuthUserRecord = {
-      user,
-      passwordHash: hashPassword(password),
-      createdAt: now,
-      updatedAt: now,
-      approvalStatus: "approved",
-    };
-    setAuthUserRecord(authRecord);
-    try {
-      await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
-      if (user.role === "admin") {
-        await forceDolibarrAdminPrivilegesForUserIdentity(user);
-      }
-    } catch (error) {
-      removeAuthUserByEmail(user.email);
-      console.error("Failed to persist registered user in MySQL", error);
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Failed to save user in database: ${error.message}`
-            : "Failed to save user in database.",
-      });
-      return;
-    }
-
-    const deviceId = resolveDeviceIdFromRequest(req);
-    try {
-      const token = await issueDeviceScopedAuthToken(user, deviceId);
-      res.status(201).json({ token, user });
-    } catch (error) {
-      if (isSingleDeviceSessionLockError(error)) {
-        res.status(409).json({
-          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
-          code: "session_active_on_another_device",
-        });
-        return;
-      }
-      console.error("Failed to issue auth token during registration", error);
-      res.status(500).json({ message: "Unable to create login session right now." });
-    }
+    initAuthUsersStore,
+    getAuthUserByIdentifier,
+    isMySqlStateEnabled,
+    listNotificationsFromMySql,
+    normalizeWhitespace,
+    isGenericNotificationTitle,
+    normalizeNotificationKind,
+    normalizeNotificationAudience,
+    parseNotificationUserIds,
+    randomUUID,
+    insertNotificationInMySql,
+    firstString,
+    markNotificationReadInMySql,
+    markAllNotificationsReadInMySql,
   });
 
-  app.post("/api/auth/access-request", async (req, res) => {
-    const {
-      name,
-      email,
-      password,
-      companyName,
-      role,
-      department,
-      branch,
-      phone,
-    } = req.body as {
-      name?: string;
-      email?: string;
-      password?: string;
-      companyName?: string;
-      role?: UserRole;
-      department?: string;
-      branch?: string;
-      phone?: string;
-    };
-
-    if (!name || !email || !password || !companyName) {
-      res.status(400).json({ message: "Name, email, password and company name are required" });
-      return;
-    }
-
-    const normalizedEmail = normalizeEmail(email);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      res.status(400).json({ message: "Invalid email format" });
-      return;
-    }
-    if (password.length < 6) {
-      res.status(400).json({ message: "Password must be at least 6 characters" });
-      return;
-    }
-
-    const normalizedRole = normalizeRole(role);
-    const normalizedCompanyName = normalizeCompanyName(companyName);
-    const adminAlreadyExists = await hasAnyApprovedAdmin();
-
-    const existingRecord = await checkAuthUserForSignup(normalizedEmail);
-    const existingStatus = existingRecord ? resolveApprovalStatus(existingRecord) : null;
-    if (existingRecord && existingStatus === "approved") {
-      res.status(409).json({ message: "User already exists for this email" });
-      return;
-    }
-
-    if (normalizedRole === "admin" && !adminAlreadyExists) {
-      const now = new Date().toISOString();
-      const bootstrapAdmin = buildUserFromRegistration({
-        name,
-        email: normalizedEmail,
-        companyName: normalizedCompanyName,
-        role: "admin",
-        department,
-        branch,
-        phone,
-      });
-      const authRecord: AuthUserRecord = {
-        user: bootstrapAdmin,
-        passwordHash: hashPassword(password),
-        createdAt: existingRecord?.createdAt || now,
-        updatedAt: now,
-        approvalStatus: "approved",
-      };
-      setAuthUserRecord(authRecord);
-      try {
-        await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
-        await forceDolibarrAdminPrivilegesForUserIdentity(bootstrapAdmin);
-      } catch (error) {
-        removeAuthUserByEmail(normalizedEmail);
-        console.error("Failed to persist bootstrap admin in MySQL", error);
-        res.status(500).json({
-          message:
-            error instanceof Error
-              ? `Failed to save admin in database: ${error.message}`
-              : "Failed to save admin in database.",
-        });
-        return;
-      }
-      const deviceId = resolveDeviceIdFromRequest(req);
-      try {
-        const token = await issueDeviceScopedAuthToken(bootstrapAdmin, deviceId);
-        res.status(201).json({
-          ok: true,
-          autoApproved: true,
-          message: "First admin account created and approved for this company.",
-          token,
-          user: bootstrapAdmin,
-        });
-        return;
-      } catch (error) {
-        if (isSingleDeviceSessionLockError(error)) {
-          res.status(409).json({
-            message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
-            code: "session_active_on_another_device",
-          });
-          return;
-        }
-        console.error("Failed to issue bootstrap admin session", error);
-        res.status(500).json({ message: "Admin created, but session could not be started." });
-        return;
-      }
-    }
-
-    let existingPendingRequest = getLatestPendingAccessRequestByEmail(normalizedEmail);
-    if (!existingPendingRequest && isMySqlStateEnabled()) {
-      const pendingFromDb = await getLatestPendingAccessRequestByEmailFromMySql(normalizedEmail);
-      if (pendingFromDb) {
-        accessRequestsById.set(pendingFromDb.id, pendingFromDb);
-        existingPendingRequest = toPublicAccessRequest(pendingFromDb);
-      }
-    }
-    if (existingPendingRequest) {
-      res.status(200).json({
-        ok: true,
-        alreadyPending: true,
-        message: "Access request already pending admin approval.",
-        request: existingPendingRequest,
-      });
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const pendingUser = {
-      ...buildUserFromRegistration({
-        name,
-        email: normalizedEmail,
-        companyName: normalizedCompanyName,
-        role: normalizedRole,
-        department,
-        branch,
-        phone,
-      }),
-      approvalStatus: "pending" as const,
-    };
-
-    const pendingPasswordHash = hashPassword(password);
-    const pendingAuthRecord: AuthUserRecord = {
-      user: pendingUser,
-      passwordHash: pendingPasswordHash,
-      createdAt: existingRecord?.createdAt || now,
-      updatedAt: now,
-      approvalStatus: "pending",
-    };
-    setAuthUserRecord(pendingAuthRecord);
-
-    const pendingRequest: AccessRequestRecord = {
-      id: randomUUID(),
-      name: pendingUser.name,
-      email: pendingUser.email,
-      requestedRole: pendingUser.role,
-      approvedRole: null,
-      requestedDepartment: pendingUser.department,
-      requestedBranch: pendingUser.branch,
-      requestedCompanyName: normalizedCompanyName,
-      status: "pending",
-      requestedAt: now,
-      reviewedAt: null,
-      reviewedById: null,
-      reviewedByName: null,
-      reviewComment: null,
-      assignedCompanyIds: [],
-      assignedManagerId: null,
-      assignedManagerName: null,
-      assignedStockistId: null,
-      assignedStockistName: null,
-      passwordHash: pendingPasswordHash,
-    };
-    accessRequestsById.set(pendingRequest.id, pendingRequest);
-    try {
-      await insertAccessRequestInMySql(pendingRequest);
-      await upsertAuthUserInMySql(pendingAuthRecord, normalizedCompanyName);
-      try {
-        const notification = buildAccessRequestNotification({
-          requestId: pendingRequest.id,
-          name: pendingUser.name,
-          email: pendingUser.email,
-        });
-        await removeDuplicateAccessRequestNotifications(notification);
-        await insertNotificationInMySql(notification);
-      } catch (error) {
-        console.error("Failed to persist access request notification", error);
-      }
-    } catch (error) {
-      console.error("Failed to persist access request in MySQL", error);
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Failed to save access request in database: ${error.message}`
-            : "Failed to save access request in database.",
-      });
-      return;
-    }
-
-    res.status(202).json({
-      ok: true,
-      message:
-        "Signup request submitted. Your Dolibarr user is created in disabled state. Wait for admin approval before signing in.",
-      request: toPublicAccessRequest(pendingRequest),
-    });
-  });
-
-  app.get(
-    "/api/admin/access-requests",
+  registerCompanyRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      const parsedStatus = parseRequestStatus(firstString(req.query.status));
-      if (firstString(req.query.status) && !parsedStatus) {
-        res.status(400).json({ message: "Invalid access request status filter." });
-        return;
-      }
+    requireRoles,
+    isMySqlStateEnabled,
+    listCompaniesFromMySql,
+    normalizeWhitespace,
+    ensureCompaniesTableInMySql,
+    getMySqlPool,
+    companyProfileFromRow,
+    upsertCompanyProfileInMySql,
+    normalizeCompanyProfilePayload,
+    getCompanyIdFromName,
+    randomUUID,
+    persistCompaniesLegacyStateFromMySql,
+    firstString,
+    listCompanyProfilesFromMySqlRaw,
+    rehomeLegacyCompanyDataToMySql,
+    deleteCompanyScopedRowsInMySql,
+  });
 
-      void (async () => {
-        if (isMySqlStateEnabled()) {
-          try {
-            const requests = await listAccessRequestsFromMySql(parsedStatus);
-            res.json(requests.map(toPublicAccessRequest));
-            return;
-          } catch (error) {
-            console.error("Failed to read access requests from MySQL", error);
-          }
-        }
-        const requests = Array.from(accessRequestsById.values())
-          .filter((entry) => !parsedStatus || entry.status === parsedStatus)
-          .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
-          .map(toPublicAccessRequest);
-        res.json(requests);
-      })();
-    }
-  );
-
-  app.post(
-    "/api/admin/access-requests/:id/review",
+  registerSupportRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      const requestId = firstString(req.params.id);
-      if (!requestId) {
-        res.status(400).json({ message: "Access request id is required." });
-        return;
-      }
+    firstString,
+    normalizeSupportAttachmentType,
+    storeSupportAttachmentBinary,
+  });
 
-      const body = req.body as {
-        action?: "approved" | "rejected";
-        role?: UserRole;
-        companyIds?: unknown;
-        companyProfiles?: unknown;
-        managerId?: string;
-        managerName?: string;
-        stockistId?: string;
-        stockistName?: string;
-        comment?: string;
-      };
-      const action = body?.action;
-      if (action !== "approved" && action !== "rejected") {
-        res.status(400).json({ message: "Review action must be approved or rejected." });
-        return;
-      }
-
-      let currentRequest = accessRequestsById.get(requestId) || null;
-      if (!currentRequest && isMySqlStateEnabled()) {
-        currentRequest = await getAccessRequestByIdFromMySql(requestId);
-        if (currentRequest) {
-          accessRequestsById.set(requestId, currentRequest);
-        }
-      }
-      if (!currentRequest) {
-        res.status(404).json({ message: "Access request not found." });
-        return;
-      }
-      if (currentRequest.status !== "pending") {
-        res.json(toPublicAccessRequest(currentRequest));
-        return;
-      }
-
-      if (currentRequest.requestedRole === "admin") {
-        const canApproveAdminRequest = await isDolibarrSuperuserReviewer(req);
-        if (!canApproveAdminRequest) {
-          res.status(403).json({
-            message:
-              "Admin access requests can only be approved by Dolibarr superuser (primary admin account).",
-          });
-          return;
-        }
-      }
-
-      const now = new Date().toISOString();
-      const approvedRole =
-        action === "approved"
-          ? normalizeRole(body?.role || currentRequest.requestedRole)
-          : null;
-      const finalRole = approvedRole || currentRequest.requestedRole;
-      const isSalespersonApproval = action === "approved" && isSalesRole(finalRole);
-      const assignedCompanyIds =
-        action === "approved" ? normalizeCompanyIds(body?.companyIds) : [];
-      let selectedCompaniesById = new Map<string, CompanyProfileSummary>();
-      if (action === "approved") {
-        if (assignedCompanyIds.length === 0) {
-          res.status(400).json({ message: "Select at least one company before approval." });
-          return;
-        }
-        selectedCompaniesById = parseCompanyProfilesState(body?.companyProfiles);
-        const storedCompaniesById = await getCompanyProfilesByIds(assignedCompanyIds);
-        for (const [companyId, company] of storedCompaniesById) {
-          selectedCompaniesById.set(companyId, company);
-        }
-        const missingCompanyIds = assignedCompanyIds.filter(
-          (companyId) => !selectedCompaniesById.has(companyId)
-        );
-        if (missingCompanyIds.length > 0) {
-          res.status(400).json({ message: "One or more selected companies are invalid." });
-          return;
-        }
-      }
-      const assignedManagerId =
-        action === "approved" && !isSalesRole(finalRole)
-          ? normalizeWhitespace(typeof body?.managerId === "string" ? body.managerId : "") || null
-          : null;
-      const assignedManagerName =
-        action === "approved" && !isSalesRole(finalRole)
-          ? normalizeWhitespace(typeof body?.managerName === "string" ? body.managerName : "") ||
-            null
-          : null;
-      const assignedStockistId =
-        isSalespersonApproval
-          ? normalizeWhitespace(typeof body?.stockistId === "string" ? body.stockistId : "") ||
-            null
-          : null;
-      const assignedStockistName =
-        isSalespersonApproval
-          ? normalizeWhitespace(typeof body?.stockistName === "string" ? body.stockistName : "") ||
-            null
-          : null;
-      const reviewComment = normalizeWhitespace(
-        typeof body?.comment === "string" ? body.comment : ""
-      );
-
-      const normalizedEmail = normalizeEmail(currentRequest.email);
-      let authRecord = authUsersByEmail.get(normalizedEmail);
-      const pendingPasswordHash = currentRequest.passwordHash || null;
-      if (!authRecord && action === "approved") {
-        if (!pendingPasswordHash) {
-          res.status(404).json({
-            message: "User account request is missing credentials. Ask the user to sign up again.",
-          });
-          return;
-        }
-        const bootstrapUser = buildUserFromRegistration({
-          name: currentRequest.name,
-          email: normalizedEmail,
-          companyName: normalizeCompanyName(currentRequest.requestedCompanyName || DEFAULT_COMPANY_NAME),
-          role: currentRequest.requestedRole,
-          department: currentRequest.requestedDepartment,
-          branch: currentRequest.requestedBranch,
-        });
-        authRecord = {
-          user: bootstrapUser,
-          passwordHash: pendingPasswordHash,
-          createdAt: currentRequest.requestedAt,
-          updatedAt: now,
-          approvalStatus: "pending",
-        };
-        setAuthUserRecord(authRecord);
-      }
-
-      let reviewedUser: AppUser | null = null;
-      if (action === "approved") {
-        const selectedPrimaryCompany = selectedCompaniesById.get(assignedCompanyIds[0]);
-        if (!selectedPrimaryCompany) {
-          res.status(400).json({ message: "Selected company is invalid." });
-          return;
-        }
-        const effectiveCompanyId = selectedPrimaryCompany.id;
-        const effectiveCompanyName = selectedPrimaryCompany.name;
-        reviewedUser = {
-          ...(authRecord?.user ?? buildUserFromRegistration({
-            name: currentRequest.name,
-            email: normalizedEmail,
-            companyName: effectiveCompanyName,
-            role: finalRole,
-            department: currentRequest.requestedDepartment,
-            branch: currentRequest.requestedBranch,
-          })),
-          role: finalRole,
-          department:
-            normalizeDepartmentForRole(finalRole, currentRequest.requestedDepartment),
-          branch:
-            normalizeWhitespace(currentRequest.requestedBranch) ||
-            authRecord?.user.branch ||
-            "Main Branch",
-          companyId: effectiveCompanyId,
-          companyName: effectiveCompanyName,
-          companyIds: assignedCompanyIds,
-          managerId: assignedManagerId || undefined,
-          managerName: assignedManagerName || undefined,
-          stockistId: assignedStockistId || undefined,
-          stockistName: assignedStockistName || undefined,
-          approvalStatus: "approved",
-        };
-
-        if (authRecord) {
-          setAuthUserRecord({
-            ...authRecord,
-            user: reviewedUser,
-            updatedAt: now,
-            approvalStatus: "approved",
-          });
-        }
-      } else {
-        if (authRecord) {
-          setAuthUserRecord({
-            ...authRecord,
-            user: {
-              ...authRecord.user,
-              approvalStatus: "rejected",
-            },
-            updatedAt: now,
-            approvalStatus: "rejected",
-          });
-        }
-      }
-
-      const reviewedRequest: AccessRequestRecord = {
-        ...currentRequest,
-        approvedRole,
-        status: action,
-        reviewedAt: now,
-        reviewedById: req.auth?.sub || null,
-        reviewedByName: req.auth?.email || null,
-        reviewComment: reviewComment || null,
-        assignedCompanyIds,
-        assignedManagerId,
-        assignedManagerName,
-        assignedStockistId,
-        assignedStockistName,
-        passwordHash: action === "approved" ? null : currentRequest.passwordHash ?? null,
-      };
-      accessRequestsById.set(requestId, reviewedRequest);
-      try {
-        const latestAuthRecord = getAuthUserByIdentifier(normalizedEmail);
-        const fallbackAuthRecord =
-          !latestAuthRecord && action === "approved" && reviewedUser
-            ? ({
-                user: {
-                  ...reviewedUser,
-                  approvalStatus: "approved",
-                },
-                passwordHash: pendingPasswordHash || "",
-                createdAt: reviewedRequest.requestedAt,
-                updatedAt: now,
-                approvalStatus: "approved",
-              } as AuthUserRecord)
-            : null;
-        const recordToPersist = latestAuthRecord || fallbackAuthRecord;
-        if (recordToPersist) {
-          await upsertAuthUserInMySql(
-            recordToPersist,
-            reviewedRequest.requestedCompanyName
-          );
-        }
-        const reviewedSalespersonId =
-          action === "approved" && reviewedUser ? reviewedUser.id : authRecord?.user.id || "";
-        if (reviewedSalespersonId) {
-          await syncStockistSalespersonAssignmentInMySql(
-            reviewedSalespersonId,
-            action === "approved" && isSalesRole(finalRole) ? assignedStockistId : null
-          );
-        }
-        if (action === "approved" && reviewedUser?.role === "admin") {
-          await forceDolibarrAdminPrivilegesForUserIdentity(reviewedUser);
-        }
-        await insertAccessRequestInMySql(reviewedRequest);
-      } catch (error) {
-        console.error("Failed to persist reviewed access request in MySQL", error);
-        res.status(500).json({
-          message:
-            error instanceof Error
-              ? `Approval saved locally, but database sync failed: ${error.message}`
-              : "Approval saved locally, but database sync failed.",
-        });
-        return;
-      }
-      res.json(toPublicAccessRequest(reviewedRequest));
-    }
-  );
-
-  app.post(
-    "/api/admin/create-admin",
+  registerDolibarrRoutes(app, {
     requireAuth,
-    requireRoles("admin"),
-    async (req, res) => {
-      const body = req.body as {
-        name?: string;
-        email?: string;
-        password?: string;
-        login?: string;
-        companyName?: string;
-        department?: string;
-        branch?: string;
-        phone?: string;
-        systemAdministrator?: unknown;
-      };
-
-      const name = normalizeWhitespace(typeof body?.name === "string" ? body.name : "");
-      const normalizedEmail = normalizeEmail(
-        typeof body?.email === "string" ? body.email : ""
-      );
-      const password = typeof body?.password === "string" ? body.password : "";
-      const loginInput = normalizeLoginKey(typeof body?.login === "string" ? body.login : "");
-      const companyName = normalizeCompanyName(
-        typeof body?.companyName === "string" && body.companyName.trim()
-          ? body.companyName
-          : DEFAULT_COMPANY_NAME
-      );
-      const department = normalizeWhitespace(
-        typeof body?.department === "string" && body.department.trim()
-          ? body.department
-          : "Administration"
-      );
-      const branch = normalizeWhitespace(
-        typeof body?.branch === "string" && body.branch.trim() ? body.branch : "Main Branch"
-      );
-      const phone = normalizeWhitespace(
-        typeof body?.phone === "string" && body.phone.trim() ? body.phone : "+91 00000 00000"
-      );
-      const systemAdministrator = Boolean(body?.systemAdministrator);
-
-      if (!name || !normalizedEmail || !password) {
-        res.status(400).json({ message: "Name, email, and password are required." });
-        return;
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-        res.status(400).json({ message: "Invalid email format." });
-        return;
-      }
-      if (password.length < 6) {
-        res.status(400).json({ message: "Password must be at least 6 characters." });
-        return;
-      }
-
-      const existingRecord = await checkAuthUserForSignup(normalizedEmail);
-      if (existingRecord) {
-        const existingStatus = resolveApprovalStatus(existingRecord);
-        if (existingStatus === "approved") {
-          res.status(409).json({ message: "User already exists for this email." });
-          return;
-        }
-      }
-
-      const now = new Date().toISOString();
-      const createdUser = buildUserFromRegistration({
-        name,
-        email: normalizedEmail,
-        companyName,
-        role: "admin",
-        department,
-        branch,
-        phone,
-      });
-
-      const finalLogin = loginInput || buildLoginFromEmailAndName(normalizedEmail, name);
-      const userToPersist: AppUser = {
-        ...createdUser,
-        login: finalLogin,
-        companyName,
-        companyId: getCompanyIdFromName(companyName),
-        companyIds: [getCompanyIdFromName(companyName)],
-        approvalStatus: "approved",
-      };
-      const authRecord: AuthUserRecord = {
-        user: userToPersist,
-        passwordHash: hashPassword(password),
-        createdAt: now,
-        updatedAt: now,
-        approvalStatus: "approved",
-      };
-
-      setAuthUserRecord(authRecord);
-      try {
-        await upsertAuthUserInMySql(authRecord, companyName, {
-          systemAdministrator,
-        });
-        if (systemAdministrator) {
-          await forceDolibarrAdminPrivilegesForUserIdentity(userToPersist);
-        }
-      } catch (error) {
-        removeAuthUserByEmail(normalizedEmail);
-        res.status(500).json({
-          message:
-            error instanceof Error
-              ? `Unable to create admin account: ${error.message}`
-              : "Unable to create admin account.",
-        });
-        return;
-      }
-
-      res.status(201).json({
-        ok: true,
-        user: userToPersist,
-        systemAdministrator,
-      });
-    }
-  );
-
-  app.post("/api/auth/login", async (req, res) => {
-    const { email, login, username, identifier, password } = req.body as {
-      email?: string;
-      login?: string;
-      username?: string;
-      identifier?: string;
-      password?: string;
-    };
-    const rawIdentifier =
-      (identifier || "").trim() ||
-      (email || "").trim() ||
-      (login || "").trim() ||
-      (username || "").trim();
-    if (!rawIdentifier || !password) {
-      res.status(400).json({ message: "Email/username and password are required" });
-      return;
-    }
-
-    await initAuthUsersStore();
-    const authRecord = getAuthUserByIdentifier(rawIdentifier);
-    if (authRecord && matchesStoredPasswordHash(authRecord.passwordHash, password)) {
-      const status = resolveApprovalStatus(authRecord);
-      if (status === "pending") {
-        res.status(403).json({ message: "Your access request is pending admin approval." });
-        return;
-      }
-      if (status === "rejected") {
-        res.status(403).json({ message: "Your access request was rejected by admin." });
-        return;
-      }
-    } else if (rawIdentifier.includes("@")) {
-      const normalizedEmail = normalizeEmail(rawIdentifier);
-      let latestRequest = getLatestAccessRequestByEmail(normalizedEmail);
-      if (!latestRequest && isMySqlStateEnabled()) {
-        latestRequest = await getLatestAccessRequestByEmailFromMySql(normalizedEmail);
-      }
-      if (latestRequest?.passwordHash && matchesStoredPasswordHash(latestRequest.passwordHash, password)) {
-        if (latestRequest.status === "pending") {
-          res.status(403).json({ message: "Your access request is pending admin approval." });
-          return;
-        }
-        if (latestRequest.status === "rejected") {
-          res.status(403).json({ message: "Your access request was rejected by admin." });
-          return;
-        }
-      }
-    }
-    const user = await authenticateCredentials(rawIdentifier, password);
-    if (!user) {
-      res.status(401).json({ message: "Invalid credentials" });
-      return;
-    }
-
-    const deviceId = resolveDeviceIdFromRequest(req);
-    try {
-      const token = await issueDeviceScopedAuthToken(user, deviceId);
-      res.json({ token, user });
-    } catch (error) {
-      if (isSingleDeviceSessionLockError(error)) {
-        res.status(409).json({
-          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
-          code: "session_active_on_another_device",
-        });
-        return;
-      }
-      console.error("Failed to issue login token", error);
-      res.status(500).json({ message: "Unable to issue login token right now." });
-    }
+    requireRoles,
+    firstString,
+    resolveDolibarrProxyRule,
+    forwardDolibarrRequest,
+    resolveDolibarrConfigForUser,
+    parseOptionalBoolean,
+    syncApprovedUserToDolibarrEmployee,
   });
 
-  app.post("/api/auth/token", async (req, res) => {
-    const { email, login, username, identifier, password } = req.body as {
-      email?: string;
-      login?: string;
-      username?: string;
-      identifier?: string;
-      password?: string;
-    };
-    const rawIdentifier =
-      (identifier || "").trim() ||
-      (email || "").trim() ||
-      (login || "").trim() ||
-      (username || "").trim();
-    if (!rawIdentifier || !password) {
-      res.status(400).json({ message: "Email/username and password are required" });
-      return;
-    }
-    await initAuthUsersStore();
-    const authRecord = getAuthUserByIdentifier(rawIdentifier);
-    if (authRecord && matchesStoredPasswordHash(authRecord.passwordHash, password)) {
-      const status = resolveApprovalStatus(authRecord);
-      if (status === "pending") {
-        res.status(403).json({ message: "Your access request is pending admin approval." });
-        return;
-      }
-      if (status === "rejected") {
-        res.status(403).json({ message: "Your access request was rejected by admin." });
-        return;
-      }
-    } else if (rawIdentifier.includes("@")) {
-      const normalizedEmail = normalizeEmail(rawIdentifier);
-      let latestRequest = getLatestAccessRequestByEmail(normalizedEmail);
-      if (!latestRequest && isMySqlStateEnabled()) {
-        latestRequest = await getLatestAccessRequestByEmailFromMySql(normalizedEmail);
-      }
-      if (latestRequest?.passwordHash && matchesStoredPasswordHash(latestRequest.passwordHash, password)) {
-        if (latestRequest.status === "pending") {
-          res.status(403).json({ message: "Your access request is pending admin approval." });
-          return;
-        }
-        if (latestRequest.status === "rejected") {
-          res.status(403).json({ message: "Your access request was rejected by admin." });
-          return;
-        }
-      }
-    }
-    const user = await authenticateCredentials(rawIdentifier, password);
-    if (!user) {
-      res.status(401).json({ message: "Invalid credentials" });
-      return;
-    }
-    const deviceId = resolveDeviceIdFromRequest(req);
-    try {
-      const token = await issueDeviceScopedAuthToken(user, deviceId);
-      res.json({ token });
-    } catch (error) {
-      if (isSingleDeviceSessionLockError(error)) {
-        res.status(409).json({
-          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
-          code: "session_active_on_another_device",
-        });
-        return;
-      }
-      console.error("Failed to issue API token", error);
-      res.status(500).json({ message: "Unable to issue API token right now." });
-    }
+  registerSpeechRoutes(app, {
+    MAX_TRANSCRIBE_AUDIO_BYTES,
+    firstString,
+    transcribeSpeechWithFairseqS2T,
+    Speech2TextError,
   });
 
-  app.post("/api/auth/logout", requireAuth, async (req, res) => {
-    const userId = req.auth?.sub || "";
-    if (!userId) {
-      res.status(401).json({ message: "Not authenticated" });
-      return;
-    }
-
-    const bodyDeviceId = normalizeDeviceIdInput((req.body as { deviceId?: unknown } | undefined)?.deviceId);
-    const headerDeviceId = normalizeDeviceIdInput(req.header("x-device-id"));
-    const tokenDeviceId = normalizeDeviceIdInput(req.auth?.deviceId);
-    const deviceId = bodyDeviceId || headerDeviceId || tokenDeviceId || null;
-    const token = extractBearerTokenFromRequest(req);
-    try {
-      await deactivateAuthSession(userId, {
-        deviceId,
-        token: token || null,
-      });
-      res.json({ ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to logout right now.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.get("/api/auth/me", requireAuth, async (req, res) => {
-    const email = req.auth?.email;
-    if (!email) {
-      res.status(401).json({ message: "Not authenticated" });
-      return;
-    }
-    await initAuthUsersStore();
-    const identifier = email.endsWith("@dolibarr.local") ? email.split("@")[0] || email : email;
-    const record =
-      (await syncAuthUserCacheForEmail(identifier)) || getAuthUserByIdentifier(identifier);
-    if (!record) {
-      res.status(404).json({ message: "User not found" });
-      return;
-    }
-    res.json({ user: record.user });
-  });
-
-  app.get(
-    "/api/stockists",
+  registerAuthRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      if (!isMySqlStateEnabled()) {
-        res.status(503).json({ message: "MySQL state store is not configured." });
-        return;
-      }
-      const companyId = toNullableText(req.query.companyId);
-      try {
-        const items = await listStockistsFromMySql();
-        const filtered = companyId
-          ? items.filter(
-              (entry) => entry && typeof entry === "object" && (entry as any).companyId === companyId
-            )
-          : items;
-        res.json({ items: filtered });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unable to load channel partners.";
-        res.status(500).json({ message });
-      }
-    }
-  );
+    requireRoles,
+    normalizeEmail,
+    normalizeRole,
+    normalizeCompanyName,
+    checkAuthUserForSignup,
+    resolveApprovalStatus,
+    hasAnyApprovedAdmin,
+    buildUserFromRegistration,
+    hashPassword,
+    setAuthUserRecord,
+    upsertAuthUserInMySql,
+    forceDolibarrAdminPrivilegesForUserIdentity,
+    removeAuthUserByEmail,
+    resolveDeviceIdFromRequest,
+    issueDeviceScopedAuthToken,
+    isSingleDeviceSessionLockError,
+    SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
+    getLatestPendingAccessRequestByEmail,
+    isMySqlStateEnabled,
+    getLatestPendingAccessRequestByEmailFromMySql,
+    accessRequestsById,
+    insertAccessRequestInMySql,
+    buildAccessRequestNotification,
+    removeDuplicateAccessRequestNotifications,
+    insertNotificationInMySql,
+    toPublicAccessRequest,
+    parseRequestStatus,
+    listAccessRequestsFromMySql,
+    firstString,
+    getAccessRequestByIdFromMySql,
+    isDolibarrSuperuserReviewer,
+    normalizeCompanyIds,
+    parseCompanyProfilesState,
+    getCompanyProfilesByIds,
+    normalizeWhitespace,
+    normalizeDepartmentForRole,
+    isSalesRole,
+    authUsersByEmail,
+    DEFAULT_COMPANY_NAME,
+    syncStockistSalespersonAssignmentInMySql,
+    normalizeLoginKey,
+    buildLoginFromEmailAndName,
+    getCompanyIdFromName,
+    authenticateCredentials,
+    matchesStoredPasswordHash,
+    getLatestAccessRequestByEmail,
+    getLatestAccessRequestByEmailFromMySql,
+    deactivateAuthSession,
+    normalizeDeviceIdInput,
+    extractBearerTokenFromRequest,
+    initAuthUsersStore,
+    syncAuthUserCacheForEmail,
+    getAuthUserByIdentifier,
+    randomUUID,
+  });
 
-  app.post(
-    "/api/stockists",
+  registerStockRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      if (!isMySqlStateEnabled()) {
-        res.status(503).json({ message: "MySQL state store is not configured." });
-        return;
-      }
-      await ensureStockistAssignmentColumns();
-      const body = (req.body || {}) as Record<string, unknown>;
-      const id = toStringId(body.id);
-      if (!id) {
-        res.status(400).json({ message: "Stockist id is required." });
-        return;
-      }
-      const companyId = toNullableText(body.companyId);
-      const name = toRequiredText(body.name, "Channel Partner");
-      const phone = toNullableText(body.phone);
-      const location = toNullableText(body.location);
-      const pincode = toNullableText(body.pincode);
-      const notes = toNullableText(body.notes);
-      const assignedSalespersonIdsProvided = Object.prototype.hasOwnProperty.call(
-        body,
-        "assignedSalespersonIds"
-      );
-      const createdAt = toSqlTimestamp(body.createdAt);
-      const updatedAt = toSqlTimestamp(body.updatedAt ?? body.createdAt);
+    requireRoles,
+    isMySqlStateEnabled,
+    toNullableText,
+    listStockistsFromMySql,
+    ensureStockistAssignmentColumns,
+    toStringId,
+    toRequiredText,
+    toSqlTimestamp,
+    parseStringArrayJson,
+    getMySqlPool,
+    normalizeProductIds,
+    resolveProductStockSchema,
+    PRODUCT_STOCK_TABLE,
+  });
 
-      try {
-        const conn = await getMySqlPool();
-        let assignedSalespersonIds = assignedSalespersonIdsProvided
-          ? parseStringArrayJson(body.assignedSalespersonIds)
-          : [];
-        if (!assignedSalespersonIdsProvided) {
-          const [existingRows] = await conn.query<any[]>(
-            `SELECT assigned_salesperson_ids_json FROM lff_stockists WHERE id = ? LIMIT 1`,
-            [id]
-          );
-          if (existingRows && existingRows.length > 0) {
-            assignedSalespersonIds = parseStringArrayJson(
-              existingRows[0].assigned_salesperson_ids_json
-            );
-          }
-        }
-        await conn.execute(
-          `INSERT INTO lff_stockists
-            (id, company_id, name, phone, location, pincode, notes, assigned_salesperson_ids_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             name = VALUES(name),
-             phone = VALUES(phone),
-             location = VALUES(location),
-             pincode = VALUES(pincode),
-             notes = VALUES(notes),
-             assigned_salesperson_ids_json = VALUES(assigned_salesperson_ids_json),
-             updated_at = VALUES(updated_at)`,
-          [
-            id,
-            companyId,
-            name,
-            phone,
-            location,
-            pincode,
-            notes,
-            JSON.stringify(assignedSalespersonIds),
-            createdAt,
-            updatedAt,
-          ]
-        );
-        res.json({
-          id,
-          companyId: companyId || undefined,
-          name,
-          phone: phone || undefined,
-          location: location || undefined,
-          pincode: pincode || undefined,
-          notes: notes || undefined,
-          assignedSalespersonIds,
-          createdAt: new Date(createdAt).toISOString(),
-          updatedAt: new Date(updatedAt).toISOString(),
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unable to save channel partner.";
-        res.status(500).json({ message });
-      }
-    }
-  );
-
-  app.delete(
-    "/api/stockists/:id",
+  registerStateRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      if (!isMySqlStateEnabled()) {
-        res.status(503).json({ message: "MySQL state store is not configured." });
-        return;
-      }
-      const stockistId = toStringId(req.params.id);
-      if (!stockistId) {
-        res.status(400).json({ message: "Channel partner id is required." });
-        return;
-      }
-      try {
-        const conn = await getMySqlPool();
-        const [result] = await conn.execute<any>(
-          "DELETE FROM lff_stockists WHERE id = ?",
-          [stockistId]
-        );
-        if (!result?.affectedRows) {
-          res.status(404).json({ message: "Channel partner not found." });
-          return;
-        }
-        res.json({ id: stockistId });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unable to delete channel partner.";
-        res.status(500).json({ message });
-      }
-    }
-  );
+    firstString,
+    isRemoteStateKeyAllowed,
+    isLocationLogStateKey,
+    listLocationLogsFromMySql,
+    REMOTE_LOCATION_LOG_READ_LIMIT,
+    REMOTE_LOCATION_LOG_WRITE_LIMIT,
+    isMySqlStateEnabled,
+    readRemoteState,
+    resolveRequestCompanyId,
+    withDefaultCompanyIdForRemoteState,
+    writeRemoteState,
+    getRequestUser,
+    getMySqlPool,
+    authUsersByEmail,
+    randomUUID,
+    insertNotificationInMySql,
+  });
 
-  app.get(
-    "/api/stock/products",
+  registerVisitRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      if (!isMySqlStateEnabled()) {
-        res.status(503).json({ message: "MySQL stock store is not configured." });
-        return;
-      }
-      const ids = normalizeProductIds(req.query.ids);
-      if (!ids.length) {
-        res.status(400).json({ message: "Product ids are required." });
-        return;
-      }
-      try {
-        const conn = await getMySqlPool();
-        const schema = await resolveProductStockSchema(conn);
-        const placeholders = ids.map(() => "?").join(", ");
-        const query = `SELECT \`${schema.productIdCol}\` AS productId, SUM(COALESCE(\`${schema.qtyCol}\`, 0)) AS stock
-          FROM \`${PRODUCT_STOCK_TABLE}\`
-          WHERE \`${schema.productIdCol}\` IN (${placeholders})
-          GROUP BY \`${schema.productIdCol}\``;
-        const [rows] = await conn.execute<any[]>(query, ids);
-        const stockMap = new Map<string, number>();
-        for (const row of rows || []) {
-          const productId = String(row.productId ?? "");
-          const stock = Number(row.stock);
-          if (!productId) continue;
-          stockMap.set(productId, Number.isFinite(stock) ? stock : 0);
-        }
-        const items = ids.map((id) => ({
-          productId: String(id),
-          stock: stockMap.get(String(id)) ?? 0,
-        }));
-        res.json({ items });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unable to read product stock.";
-        res.status(500).json({ message });
-      }
-    }
-  );
+    requireRoles,
+    isMySqlStateEnabled,
+    ensureConversationsTable,
+    migrateLegacyConversationsStateToMySql,
+    resolveRequestCompanyId,
+    normalizeWhitespace,
+    firstString,
+    isSalesRole,
+    parseOptionalInteger,
+    listConversationsFromMySql,
+    getAuthUserByIdentifier,
+    normalizeConversationPayload,
+    getMySqlPool,
+    upsertConversationInMySql,
+    mapConversationRow,
+    getConversationByIdFromMySql,
+    ensureTaskVisitNotesColumns,
+    mapVisitNoteRowToTask,
+    parseOptionalQueryFloat,
+    ensureVisitHistoryTable,
+    mapVisitHistoryRow,
+    normalizeVisitNoteTask,
+    toMySqlDateTime,
+    upsertVisitHistoryInMySql,
+  });
 
-  app.post(
-    "/api/stock/products/adjust",
+  registerGeofenceRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager", "salesperson"),
-    async (req, res) => {
-      if (!isMySqlStateEnabled()) {
-        res.status(503).json({ message: "MySQL stock store is not configured." });
-        return;
-      }
-      const body = req.body as { productId?: unknown; delta?: unknown };
-      const productId = Number(body.productId);
-      const delta = Number(body.delta);
-      if (!Number.isFinite(productId)) {
-        res.status(400).json({ message: "Valid productId is required." });
-        return;
-      }
-      if (!Number.isFinite(delta) || delta === 0) {
-        res.status(400).json({ message: "Valid stock delta is required." });
-        return;
-      }
-      try {
-        const conn = await getMySqlPool();
-        const schema = await resolveProductStockSchema(conn);
-        const selectParts = [
-          `\`${schema.qtyCol}\` AS stock`,
-          schema.rowIdCol ? `\`${schema.rowIdCol}\` AS rowId` : "",
-          schema.warehouseCol ? `\`${schema.warehouseCol}\` AS warehouseId` : "",
-        ].filter(Boolean);
-        const orderBy = schema.warehouseCol ? ` ORDER BY \`${schema.warehouseCol}\` ASC` : "";
-        const selectQuery = `SELECT ${selectParts.join(", ")}
-          FROM \`${PRODUCT_STOCK_TABLE}\`
-          WHERE \`${schema.productIdCol}\` = ?
-          ${orderBy}
-          LIMIT 1`;
-        const [rows] = await conn.execute<any[]>(selectQuery, [productId]);
-        if (!rows.length) {
-          res.status(404).json({ message: "Product stock row not found." });
-          return;
-        }
-        const current = Number(rows[0].stock);
-        const nextStock = Math.max(0, (Number.isFinite(current) ? current : 0) + delta);
-
-        if (schema.rowIdCol && rows[0].rowId !== undefined) {
-          await conn.execute(
-            `UPDATE \`${PRODUCT_STOCK_TABLE}\`
-             SET \`${schema.qtyCol}\` = ?
-             WHERE \`${schema.rowIdCol}\` = ?`,
-            [nextStock, rows[0].rowId]
-          );
-        } else if (schema.warehouseCol && rows[0].warehouseId !== undefined) {
-          await conn.execute(
-            `UPDATE \`${PRODUCT_STOCK_TABLE}\`
-             SET \`${schema.qtyCol}\` = ?
-             WHERE \`${schema.productIdCol}\` = ? AND \`${schema.warehouseCol}\` = ?`,
-            [nextStock, productId, rows[0].warehouseId]
-          );
-        } else {
-          await conn.execute(
-            `UPDATE \`${PRODUCT_STOCK_TABLE}\`
-             SET \`${schema.qtyCol}\` = ?
-             WHERE \`${schema.productIdCol}\` = ?`,
-            [nextStock, productId]
-          );
-        }
-
-        const [totalRows] = await conn.execute<any[]>(
-          `SELECT SUM(COALESCE(\`${schema.qtyCol}\`, 0)) AS stock
-           FROM \`${PRODUCT_STOCK_TABLE}\`
-           WHERE \`${schema.productIdCol}\` = ?`,
-          [productId]
-        );
-        const total = Number(totalRows[0]?.stock);
-        res.json({ productId: String(productId), stock: Number.isFinite(total) ? total : 0 });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unable to update product stock.";
-        res.status(500).json({ message });
-      }
-    }
-  );
-
-  app.get("/api/state/:key", requireAuth, async (req, res) => {
-    const key = decodeURIComponent(firstString(req.params.key) || "").trim();
-    if (!key) {
-      res.status(400).json({ message: "State key is required." });
-      return;
-    }
-    if (!isRemoteStateKeyAllowed(key)) {
-      res.status(403).json({ message: "State key is not allowed for remote sync." });
-      return;
-    }
-
-    try {
-      if (isLocationLogStateKey(key)) {
-        const value = await listLocationLogsFromMySql(REMOTE_LOCATION_LOG_READ_LIMIT);
-        res.json({
-          key,
-          value,
-          updatedAt: new Date().toISOString(),
-          source: isMySqlStateEnabled() ? "mysql" : "memory",
-          truncated: true,
-          limit: REMOTE_LOCATION_LOG_READ_LIMIT,
-        });
-        return;
-      }
-
-      const rawValue = await readRemoteState(key);
-      if (!rawValue) {
-        res.json({
-          key,
-          value: null,
-          updatedAt: null,
-          source: isMySqlStateEnabled() ? "mysql" : "memory",
-        });
-        return;
-      }
-
-      let parsedValue: unknown = null;
-      try {
-        parsedValue = JSON.parse(rawValue);
-      } catch {
-        parsedValue = null;
-      }
-
-      if (Array.isArray(parsedValue) && req.auth?.role !== "admin" && req.auth?.role !== "hr" && req.auth?.role !== "manager") {
-        if (key === "@trackforce_audit_logs") {
-          parsedValue = parsedValue.filter(item => item && typeof item === 'object' && item.userId === req.auth?.sub);
-        } else if (key === "@trackforce_support_threads") {
-          parsedValue = parsedValue.filter(item => item && typeof item === 'object' && item.requestedById === req.auth?.sub);
-        }
-      }
-
-      res.json({
-        key,
-        value: parsedValue,
-        updatedAt: new Date().toISOString(),
-        source: isMySqlStateEnabled() ? "mysql" : "memory",
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to read remote state value.";
-      res.status(500).json({ message });
-    }
+    requireRoles,
+    firstString,
+    ensureUserMatch,
+    resolveRequestCompanyId,
+    listGeofencesForUserResolved,
+    storage,
+    upsertGeofenceInMySql,
   });
 
-  app.get("/api/conversations", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL conversations store is not configured." });
-      return;
-    }
-    try {
-      await ensureConversationsTable();
-      await migrateLegacyConversationsStateToMySql();
-      const companyId = await resolveRequestCompanyId(req);
-      const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salespersonId) || "");
-      const salespersonId =
-        isSalesRole(req.auth?.role)
-          ? normalizeWhitespace(req.auth?.sub || "")
-          : requestedSalespersonId || null;
-      const limit =
-        parseOptionalInteger(req.query.limit) ??
-        250;
-      const items = await listConversationsFromMySql({
-        companyId,
-        salespersonId,
-        limit,
-      });
-      res.json({ items });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to fetch conversations from MySQL.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.post("/api/conversations", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL conversations store is not configured." });
-      return;
-    }
-    const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
-    const body = req.body as { conversation?: Partial<Conversation> } | Partial<Conversation>;
-    const payload =
-      body && "conversation" in body && body.conversation && typeof body.conversation === "object"
-        ? body.conversation
-        : (body as Partial<Conversation>);
-    let normalizedConversation = normalizeConversationPayload(payload || {}, authRecord?.user ?? null);
-    if (!normalizedConversation.id) {
-      res.status(400).json({ message: "Conversation id is required." });
-      return;
-    }
-    if (isSalesRole(req.auth?.role) && req.auth.sub) {
-      normalizedConversation = {
-        ...normalizedConversation,
-        salespersonId: normalizeWhitespace(req.auth.sub || ""),
-        salespersonName:
-          normalizeWhitespace(authRecord?.user.name || "") ||
-          normalizedConversation.salespersonName,
-      };
-    }
-    if (!normalizedConversation.salespersonId) {
-      res.status(400).json({ message: "Salesperson id is required." });
-      return;
-    }
-
-    try {
-      await ensureConversationsTable();
-      await migrateLegacyConversationsStateToMySql();
-      const companyId =
-        normalizedConversation.companyId || (await resolveRequestCompanyId(req)) || null;
-      const conn = await getMySqlPool();
-      normalizedConversation = {
-        ...normalizedConversation,
-        companyId: companyId || undefined,
-      };
-      await upsertConversationInMySql(conn, normalizedConversation, companyId);
-      res.status(201).json(mapConversationRow({
-        id: normalizedConversation.id,
-        company_id: companyId,
-        salesperson_id: normalizedConversation.salespersonId,
-        salesperson_name: normalizedConversation.salespersonName,
-        customer_name: normalizedConversation.customerName,
-        conversation_date: normalizedConversation.date,
-        duration: normalizedConversation.duration,
-        transcript: normalizedConversation.transcript ?? null,
-        transcript_status: normalizedConversation.transcriptStatus,
-        audio_uri: normalizedConversation.audioUri ?? null,
-        transcription_error: normalizedConversation.transcriptionError ?? null,
-        source: normalizedConversation.source ?? null,
-        analysis_provider: normalizedConversation.analysisProvider ?? null,
-        interest_score: normalizedConversation.interestScore,
-        pitch_score: normalizedConversation.pitchScore,
-        confidence_score: normalizedConversation.confidenceScore,
-        talk_listen_ratio: normalizedConversation.talkListenRatio,
-        sentiment: normalizedConversation.sentiment,
-        buying_intent: normalizedConversation.buyingIntent,
-        objections_json: JSON.stringify(normalizedConversation.objections || []),
-        improvements_json: JSON.stringify(normalizedConversation.improvements || []),
-        summary: normalizedConversation.summary ?? "",
-        notes: normalizedConversation.notes ?? null,
-        key_phrases_json: JSON.stringify(normalizedConversation.keyPhrases || []),
-      }));
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to store conversation in MySQL.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.patch("/api/conversations/:id", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL conversations store is not configured." });
-      return;
-    }
-    const conversationId = normalizeWhitespace(firstString(req.params.id) || "");
-    if (!conversationId) {
-      res.status(400).json({ message: "Conversation id is required." });
-      return;
-    }
-    const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
-    try {
-      await ensureConversationsTable();
-      await migrateLegacyConversationsStateToMySql();
-      const companyId = await resolveRequestCompanyId(req);
-      const salespersonId =
-        isSalesRole(req.auth?.role) ? normalizeWhitespace(req.auth.sub || "") : null;
-      const current = await getConversationByIdFromMySql(conversationId, {
-        companyId,
-        salespersonId,
-      });
-      if (!current) {
-        res.status(404).json({ message: "Conversation not found." });
-        return;
-      }
-      const body = req.body as { updates?: Partial<Conversation> } | Partial<Conversation>;
-      const updates =
-        body && "updates" in body && body.updates && typeof body.updates === "object"
-          ? body.updates
-          : (body as Partial<Conversation>);
-      const merged = normalizeConversationPayload(
-        {
-          ...current,
-          ...updates,
-          id: current.id,
-        },
-        authRecord?.user ?? null,
-        current
-      );
-      const conn = await getMySqlPool();
-      await upsertConversationInMySql(conn, merged, companyId || current.companyId || null);
-      res.json(merged);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to update conversation in MySQL.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.get("/api/visit-notes", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL visit notes store is not configured." });
-      return;
-    }
-
-    try {
-      await ensureTaskVisitNotesColumns();
-      const companyId = await resolveRequestCompanyId(req);
-      const conn = await getMySqlPool();
-      const filters: string[] = [
-        "task_type = 'field_visit'",
-        "(TRIM(COALESCE(meeting_notes, '')) <> '' OR TRIM(COALESCE(visit_departure_notes, '')) <> '' OR departure_at IS NOT NULL)",
-      ];
-      const params: unknown[] = [];
-
-      if (companyId) {
-        filters.push("company_id = ?");
-        params.push(companyId);
-      }
-      if (isSalesRole(req.auth?.role)) {
-        filters.push("assigned_to_id = ?");
-        params.push(req.auth.sub);
-      }
-
-      const [rows] = await conn.query<any[]>(
-        `SELECT
-          id,
-          company_id,
-          title,
-          description,
-          task_type,
-          assigned_to_id,
-          assigned_to_name,
-          assigned_by_id,
-          status,
-          priority,
-          due_date,
-          created_at,
-          visit_plan_date,
-          visit_sequence,
-          visit_location_label,
-          visit_location_address,
-          visit_latitude,
-          visit_longitude,
-          arrival_at,
-          departure_at,
-          meeting_notes,
-          meeting_notes_updated_at,
-          visit_departure_notes,
-          visit_departure_notes_updated_at,
-          auto_capture_conversation_id
-        FROM lff_tasks
-        WHERE ${filters.join(" AND ")}
-        ORDER BY COALESCE(visit_departure_notes_updated_at, meeting_notes_updated_at, departure_at, created_at) DESC`,
-        params
-      );
-
-      res.json({ items: rows.map(mapVisitNoteRowToTask) });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to fetch visit notes from MySQL.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.get("/api/visit-history/nearby", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL visit history store is not configured." });
-      return;
-    }
-
-    const latitude = parseOptionalQueryFloat(req.query.latitude);
-    const longitude = parseOptionalQueryFloat(req.query.longitude);
-    if (
-      latitude === null ||
-      longitude === null ||
-      Math.abs(latitude) > 90 ||
-      Math.abs(longitude) > 180
-    ) {
-      res.status(400).json({ message: "Valid latitude and longitude are required." });
-      return;
-    }
-
-    const radiusMeters = Math.max(
-      50,
-      Math.min(5000, parseOptionalQueryFloat(req.query.radius_meters) ?? 250)
-    );
-    const limit = Math.max(1, Math.min(24, parseOptionalInteger(req.query.limit) ?? 8));
-    const requestedSalespersonId = normalizeWhitespace(firstString(req.query.salesperson_id) || "");
-    const salespersonId =
-      isSalesRole(req.auth?.role)
-        ? normalizeWhitespace(req.auth.sub || "")
-        : requestedSalespersonId;
-
-    try {
-      await ensureVisitHistoryTable();
-      const conn = await getMySqlPool();
-      const companyId = await resolveRequestCompanyId(req);
-      const latDelta = radiusMeters / 111_320;
-      const lngDelta =
-        radiusMeters /
-        (111_320 * Math.max(0.1, Math.abs(Math.cos((latitude * Math.PI) / 180))));
-      const filters = [
-        "visit_latitude IS NOT NULL",
-        "visit_longitude IS NOT NULL",
-        "departure_at IS NOT NULL",
-        "visit_latitude BETWEEN ? AND ?",
-        "visit_longitude BETWEEN ? AND ?",
-      ];
-      const params: unknown[] = [
-        latitude,
-        longitude,
-        latitude,
-        latitude - latDelta,
-        latitude + latDelta,
-        longitude - lngDelta,
-        longitude + lngDelta,
-      ];
-
-      if (companyId) {
-        filters.push("company_id = ?");
-        params.push(companyId);
-      }
-      if (salespersonId) {
-        filters.push("salesperson_id = ?");
-        params.push(salespersonId);
-      }
-      params.push(radiusMeters);
-
-      const [rows] = await conn.query<any[]>(
-        `SELECT
-          task_id,
-          company_id,
-          salesperson_id,
-          salesperson_name,
-          visit_label,
-          visit_location_address,
-          visit_latitude,
-          visit_longitude,
-          arrival_at,
-          departure_at,
-          meeting_notes,
-          visit_departure_notes,
-          auto_capture_conversation_id,
-          status,
-          source_updated_at,
-          updated_at,
-          ROUND(
-            6371000 * ACOS(
-              LEAST(
-                1,
-                GREATEST(
-                  -1,
-                  COS(RADIANS(?)) * COS(RADIANS(visit_latitude)) *
-                  COS(RADIANS(visit_longitude) - RADIANS(?)) +
-                  SIN(RADIANS(?)) * SIN(RADIANS(visit_latitude))
-                )
-              )
-            )
-          ) AS distance_meters
-        FROM lff_visit_history
-        WHERE ${filters.join(" AND ")}
-        HAVING distance_meters <= ?
-        ORDER BY distance_meters ASC, COALESCE(departure_at, updated_at) DESC
-        LIMIT ${limit}`,
-        params
-      );
-
-      res.json({ items: rows.map(mapVisitHistoryRow) });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to fetch nearby visit history.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.post("/api/visit-notes", requireAuth, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL visit notes store is not configured." });
-      return;
-    }
-
-    const body = req.body as { task?: Partial<Task> };
-    const authRecord = req.auth?.email ? getAuthUserByIdentifier(req.auth.email) : null;
-    let normalizedTask = normalizeVisitNoteTask(body?.task || {}, authRecord?.user ?? null);
-
-    if (!normalizedTask.id) {
-      res.status(400).json({ message: "Task id is required." });
-      return;
-    }
-    if (normalizedTask.taskType !== "field_visit") {
-      res.status(400).json({ message: "Only field visit tasks can be synced as visit notes." });
-      return;
-    }
-    if (isSalesRole(req.auth?.role) && req.auth.sub) {
-      normalizedTask = {
-        ...normalizedTask,
-        assignedTo: req.auth.sub,
-        assignedToName:
-          normalizeWhitespace(authRecord?.user.name || "") ||
-          normalizeWhitespace(normalizedTask.assignedToName || "") ||
-          "Salesperson",
-      };
-    }
-
-    try {
-      await ensureTaskVisitNotesColumns();
-      await ensureVisitHistoryTable();
-      const companyId = normalizedTask.companyId || (await resolveRequestCompanyId(req)) || null;
-      const conn = await getMySqlPool();
-      const createdAtSql =
-        toMySqlDateTime(normalizedTask.createdAt) ||
-        new Date().toISOString().slice(0, 19).replace("T", " ");
-      const updatedAtSql = new Date().toISOString().slice(0, 19).replace("T", " ");
-      const assignedByName =
-        normalizeWhitespace(authRecord?.user.name || "") ||
-        normalizeWhitespace(req.auth?.email || "") ||
-        "System";
-
-      await conn.execute(
-        `INSERT INTO lff_tasks (
-          id,
-          company_id,
-          title,
-          description,
-          task_type,
-          assigned_to_id,
-          assigned_to_name,
-          assigned_by_id,
-          assigned_by_name,
-          status,
-          priority,
-          due_date,
-          created_at,
-          updated_at,
-          visit_plan_date,
-          visit_sequence,
-          visit_location_label,
-          visit_location_address,
-          visit_latitude,
-          visit_longitude,
-          arrival_at,
-          departure_at,
-          meeting_notes,
-          meeting_notes_updated_at,
-          visit_departure_notes,
-          visit_departure_notes_updated_at,
-          auto_capture_conversation_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          company_id = VALUES(company_id),
-          title = VALUES(title),
-          description = VALUES(description),
-          task_type = VALUES(task_type),
-          assigned_to_id = VALUES(assigned_to_id),
-          assigned_to_name = VALUES(assigned_to_name),
-          assigned_by_id = VALUES(assigned_by_id),
-          assigned_by_name = VALUES(assigned_by_name),
-          status = VALUES(status),
-          priority = VALUES(priority),
-          due_date = VALUES(due_date),
-          visit_plan_date = VALUES(visit_plan_date),
-          visit_sequence = VALUES(visit_sequence),
-          visit_location_label = VALUES(visit_location_label),
-          visit_location_address = VALUES(visit_location_address),
-          visit_latitude = VALUES(visit_latitude),
-          visit_longitude = VALUES(visit_longitude),
-          arrival_at = VALUES(arrival_at),
-          departure_at = VALUES(departure_at),
-          meeting_notes = VALUES(meeting_notes),
-          meeting_notes_updated_at = VALUES(meeting_notes_updated_at),
-          visit_departure_notes = VALUES(visit_departure_notes),
-          visit_departure_notes_updated_at = VALUES(visit_departure_notes_updated_at),
-          auto_capture_conversation_id = VALUES(auto_capture_conversation_id),
-          updated_at = NOW()`,
-        [
-          normalizedTask.id,
-          companyId,
-          normalizedTask.title,
-          normalizedTask.description,
-          normalizedTask.taskType,
-          normalizedTask.assignedTo,
-          normalizedTask.assignedToName,
-          normalizedTask.assignedBy || req.auth?.sub || "system",
-          assignedByName,
-          normalizedTask.status,
-          normalizedTask.priority,
-          toMySqlDateTime(normalizedTask.dueDate) || toMySqlDateTime(normalizedTask.createdAt),
-          createdAtSql,
-          updatedAtSql,
-          toMySqlDateTime(normalizedTask.visitPlanDate),
-          normalizedTask.visitSequence,
-          normalizedTask.visitLocationLabel,
-          normalizedTask.visitLocationAddress,
-          normalizedTask.visitLatitude,
-          normalizedTask.visitLongitude,
-          toMySqlDateTime(normalizedTask.arrivalAt),
-          toMySqlDateTime(normalizedTask.departureAt),
-          normalizedTask.meetingNotes,
-          toMySqlDateTime(normalizedTask.meetingNotesUpdatedAt),
-          normalizedTask.visitDepartureNotes,
-          toMySqlDateTime(normalizedTask.visitDepartureNotesUpdatedAt),
-          normalizedTask.autoCaptureConversationId,
-        ] as any[]
-      );
-
-      await upsertVisitHistoryInMySql(conn, normalizedTask, companyId);
-
-      res.json({ ok: true });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to store visit notes in MySQL.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.delete(
-    "/api/visit-notes/:taskId",
+  registerLocationSyncRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      if (!isMySqlStateEnabled()) {
-        res.status(503).json({ message: "MySQL visit notes store is not configured." });
-        return;
-      }
-
-      const taskId = normalizeWhitespace(firstString(req.params.taskId) || "");
-      if (!taskId) {
-        res.status(400).json({ message: "Task id is required." });
-        return;
-      }
-
-      try {
-        await ensureTaskVisitNotesColumns();
-        await ensureVisitHistoryTable();
-        const companyId = (await resolveRequestCompanyId(req)) || null;
-        const conn = await getMySqlPool();
-
-        const deleteParams = companyId ? [taskId, companyId] : [taskId];
-        const deleteWhere = companyId ? "id = ? AND company_id = ?" : "id = ?";
-        const deleteHistoryWhere = companyId ? "task_id = ? AND company_id = ?" : "task_id = ?";
-
-        await conn.execute(
-          `DELETE FROM lff_visit_history WHERE ${deleteHistoryWhere}`,
-          deleteParams as any[]
-        );
-
-        const [result] = await conn.execute<any>(
-          `DELETE FROM lff_tasks WHERE ${deleteWhere} AND task_type = 'field_visit'`,
-          deleteParams as any[]
-        );
-
-        if (!result?.affectedRows) {
-          res.status(404).json({ message: "Field visit not found." });
-          return;
-        }
-
-        res.json({ ok: true, taskId });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unable to delete field visit from MySQL.";
-        res.status(500).json({ message });
-      }
-    }
-  );
-
-  app.put("/api/state/:key", requireAuth, async (req, res) => {
-    const key = decodeURIComponent(firstString(req.params.key) || "").trim();
-    if (!key) {
-      res.status(400).json({ message: "State key is required." });
-      return;
-    }
-    if (!isRemoteStateKeyAllowed(key)) {
-      res.status(403).json({ message: "State key is not allowed for remote sync." });
-      return;
-    }
-
-    const body = req.body as { value?: unknown };
-    if (!("value" in (body || {}))) {
-      res.status(400).json({ message: "State value is required." });
-      return;
-    }
-
-    try {
-      if (isLocationLogStateKey(key)) {
-        const candidateValue = body.value;
-        const entries = Array.isArray(candidateValue) ? candidateValue : [];
-        if (entries.length > REMOTE_LOCATION_LOG_WRITE_LIMIT) {
-          res.status(413).json({
-            message:
-              "Location log state payload is too large for remote state sync. Use /api/location/batch instead.",
-            limit: REMOTE_LOCATION_LOG_WRITE_LIMIT,
-            received: entries.length,
-          });
-          return;
-        }
-      }
-
-      const defaultCompanyId = await resolveRequestCompanyId(req);
-      const scopedValue = withDefaultCompanyIdForRemoteState(
-        key,
-        body.value ?? null,
-        defaultCompanyId
-      );
-      const serialized = JSON.stringify(scopedValue ?? null);
-      await writeRemoteState(key, serialized, getRequestUser(req));
-      
-      // --- GPS Disabled Alert Logic ---
-      if (key === "@trackforce_attendance_anomalies" && Array.isArray(scopedValue)) {
-        try {
-          const conn = await getMySqlPool();
-          for (const anom of scopedValue) {
-            if (anom && anom.type === "gps_disabled" && anom.id) {
-              const [existing] = await conn.query<any[]>("SELECT id FROM lff_notifications WHERE title = ? AND body LIKE ?", ["GPS Disabled Alert", `%${anom.id}%`]);
-              if (!existing || existing.length === 0) {
-                let employeeName = anom.userId;
-                for (const r of authUsersByEmail.values()) {
-                  if (r.user.id === anom.userId) {
-                    employeeName = r.user.name || r.user.login || anom.userId;
-                    break;
-                  }
-                }
-                const notif = {
-                  id: randomUUID(),
-                  title: "GPS Disabled Alert",
-                  body: `Employee ${employeeName} has disabled GPS or Location Services during check-in. Anomaly: ${anom.id}`,
-                  kind: "alert" as const,
-                  audience: "all" as const,
-                  audienceUserIds: [] as string[],
-                  readByIds: [] as string[],
-                  createdById: "system",
-                  createdByName: "System",
-                  createdAt: new Date().toISOString(),
-                };
-                await insertNotificationInMySql(notif);
-              }
-            }
-          }
-        } catch (e) {
-          console.error("Failed to generate GPS disabled alert", e);
-        }
-      }
-      // --------------------------------
-
-      res.json({
-        ok: true,
-        key,
-        updatedAt: new Date().toISOString(),
-        source: isMySqlStateEnabled() ? "mysql" : "memory",
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to persist remote state value.";
-      res.status(500).json({ message });
-    }
+    parseLocationSample,
+    ensureUserMatch,
+    resolveRequestCompanyId,
+    listGeofencesForUserResolved,
+    resolveGeofenceStatus,
+    randomUUID,
+    storage,
+    insertLocationLogInMySql,
+    insertLocationLogsInMySql,
+    isMySqlStateEnabled,
+    findActiveAttendanceInMySql,
+    insertAttendanceInMySql,
+    resolveDolibarrConfigForUser,
+    syncAttendanceWithDolibarr,
+    insertNotificationInMySql,
+    listAttendanceHistoryFromMySql,
   });
 
-  app.get("/api/geofences/user/:id", requireAuth, async (req, res) => {
-    const userId = firstString(req.params.id);
-    if (!userId) {
-      res.status(400).json({ message: "User id is required" });
-      return;
-    }
-    if (!ensureUserMatch(req, userId)) {
-      res.status(403).json({ message: "Not authorized for this user geofence data" });
-      return;
-    }
-    const companyId = await resolveRequestCompanyId(req);
-    const geofences = await listGeofencesForUserResolved(userId, {
-      companyId,
-      role: req.auth?.role ?? null,
-    });
-    res.json(geofences);
-  });
-
-  app.post("/api/geofences", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
-    const payload = req.body as Partial<Geofence>;
-    if (!payload.name || typeof payload.latitude !== "number" || typeof payload.longitude !== "number") {
-      res.status(400).json({ message: "Missing mandatory geofence fields" });
-      return;
-    }
-    const defaultCompanyId = await resolveRequestCompanyId(req);
-    const created = await storage.createGeofence({
-      ...payload,
-      companyId: payload.companyId ?? defaultCompanyId ?? undefined,
-      radiusMeters: Math.max(500, Math.round(payload.radiusMeters || 500)),
-      allowOverride: payload.allowOverride ?? false,
-      isActive: payload.isActive ?? true,
-    });
-    try {
-      await upsertGeofenceInMySql(created);
-    } catch (error) {
-      console.error("Failed to persist geofence in MySQL", error);
-    }
-    res.status(201).json(created);
-  });
-
-  app.put("/api/geofences/:id", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
-    const geofenceId = firstString(req.params.id);
-    if (!geofenceId) {
-      res.status(400).json({ message: "Geofence id is required" });
-      return;
-    }
-    const defaultCompanyId = await resolveRequestCompanyId(req);
-    const patch = req.body as Partial<Geofence>;
-    const updated = await storage.updateGeofence(geofenceId, {
-      ...patch,
-      companyId: patch.companyId ?? defaultCompanyId ?? undefined,
-      radiusMeters:
-        typeof patch.radiusMeters === "number"
-          ? Math.max(500, Math.round(patch.radiusMeters))
-          : patch.radiusMeters,
-    });
-    if (!updated) {
-      res.status(404).json({ message: "Geofence not found" });
-      return;
-    }
-    try {
-      await upsertGeofenceInMySql(updated);
-    } catch (error) {
-      console.error("Failed to update geofence in MySQL", error);
-    }
-    res.json(updated);
-  });
-
-  app.post("/api/location/log", requireAuth, async (req, res) => {
-    const sample = parseLocationSample(req.body);
-    if (!sample) {
-      res.status(400).json({ message: "Invalid location payload" });
-      return;
-    }
-    if (!ensureUserMatch(req, sample.userId)) {
-      res.status(403).json({ message: "Not authorized to post location" });
-      return;
-    }
-    const companyId = await resolveRequestCompanyId(req);
-    const zones = await listGeofencesForUserResolved(sample.userId, {
-      companyId,
-      role: req.auth?.role ?? null,
-    });
-    const status = resolveGeofenceStatus(
-      {
-        userId: sample.userId,
-        userName: "",
-        latitude: sample.latitude,
-        longitude: sample.longitude,
-        deviceId: "",
-        photoType: "checkin",
-        isInsideGeofence: false,
-      },
-      zones
-    );
-
-    const log: LocationLog = {
-      id: randomUUID(),
-      companyId: companyId ?? undefined,
-      userId: sample.userId,
-      latitude: sample.latitude,
-      longitude: sample.longitude,
-      accuracy: sample.accuracy,
-      speed: sample.speed,
-      heading: sample.heading,
-      batteryLevel: sample.batteryLevel ?? null,
-      geofenceId: status.activeZone?.id ?? null,
-      geofenceName: status.activeZone?.name ?? null,
-      isInsideGeofence: status.inside,
-      capturedAt: sample.capturedAt ?? new Date().toISOString(),
-    };
-    await storage.addLocationLog(log);
-    try {
-      await insertLocationLogInMySql(log);
-    } catch (error) {
-      console.error("Failed to persist location log in MySQL", error);
-    }
-    res.status(201).json({ ok: true, inside: status.inside, zone: status.activeZone?.name ?? null });
-  });
-
-  app.post("/api/location/batch", requireAuth, async (req, res) => {
-    const body = req.body as
-      | { entries?: unknown[]; points?: unknown[]; samples?: unknown[] }
-      | unknown[];
-    const candidateEntries = Array.isArray(body)
-      ? body
-      : Array.isArray(body.entries)
-        ? body.entries
-        : Array.isArray(body.points)
-          ? body.points
-          : Array.isArray(body.samples)
-            ? body.samples
-            : [];
-
-    if (!candidateEntries.length) {
-      res.status(400).json({ message: "Location batch payload is empty." });
-      return;
-    }
-
-    const parsedEntries = candidateEntries.map((entry) => parseLocationSample(entry));
-    const invalidCount = parsedEntries.filter((entry) => !entry).length;
-    const validEntries = parsedEntries.filter(
-      (entry): entry is NonNullable<typeof entry> => Boolean(entry)
-    );
-    if (!validEntries.length) {
-      res.status(400).json({ message: "No valid location points found in payload." });
-      return;
-    }
-
-    const companyId = await resolveRequestCompanyId(req);
-    const zoneCache = new Map<string, Geofence[]>();
-    let accepted = 0;
-    for (const entry of validEntries) {
-      if (!ensureUserMatch(req, entry.userId)) {
-        res.status(403).json({ message: `Not authorized to post location for user ${entry.userId}` });
-        return;
-      }
-      let zones = zoneCache.get(entry.userId);
-      if (!zones) {
-        zones = await listGeofencesForUserResolved(entry.userId, {
-          companyId,
-          role: req.auth?.role ?? null,
-        });
-        zoneCache.set(entry.userId, zones);
-      }
-      const status = resolveGeofenceStatus(
-        {
-          userId: entry.userId,
-          userName: "",
-          latitude: entry.latitude,
-          longitude: entry.longitude,
-          deviceId: "",
-          photoType: "checkin",
-          isInsideGeofence: false,
-        },
-        zones
-      );
-
-      // --- Auto-Checkout Logic ---
-      try {
-        const activeAttendance = isMySqlStateEnabled() 
-          ? await findActiveAttendanceInMySql(entry.userId).catch(() => null)
-          : await storage.findActiveAttendance(entry.userId);
-        if (activeAttendance) {
-          // Verify that the location log was captured AFTER the active check-in
-          const logTime = entry.capturedAt ? new Date(entry.capturedAt).getTime() : Date.now();
-          const checkInTime = new Date(activeAttendance.timestamp).getTime();
-          if (logTime > checkInTime) {
-            // If checked in but now outside > 500m and GPS is accurate
-            if (!status.inside && status.distanceMeters > 500 && (entry.accuracy ?? 2500) <= 2500) {
-              let now = entry.capturedAt ?? new Date().toISOString();
-              const checkInDate = activeAttendance.timestamp.split("T")[0];
-              const logDate = now.split("T")[0];
-              if (checkInDate !== logDate) {
-                now = `${checkInDate}T23:59:59.000Z`;
-              }
-              const checkoutRecord: AttendanceRecord = {
-                id: randomUUID(),
-                userId: entry.userId,
-                userName: activeAttendance.userName,
-                companyId: activeAttendance.companyId,
-                type: "checkout",
-                timestamp: now,
-                timestampServer: new Date().toISOString(),
-                location: { lat: entry.latitude, lng: entry.longitude },
-                geofenceId: activeAttendance.geofenceId,
-                geofenceName: activeAttendance.geofenceName,
-                photoUrl: null,
-                deviceId: activeAttendance.deviceId,
-                isInsideGeofence: false,
-                source: "synced",
-                notes: `Auto-checkout due to geofence exit (distance: ${Math.round(status.distanceMeters)}m, accuracy: ${Math.round(entry.accuracy ?? 0)}m)`,
-                approvalStatus: "approved",
-                approvalReviewedById: "system",
-                approvalReviewedByName: "System",
-                approvalReviewedAt: now,
-              };
-              await storage.createAttendance(checkoutRecord);
-              if (isMySqlStateEnabled()) {
-                try { await insertAttendanceInMySql(checkoutRecord); } catch(e){}
-              }
-              const dolibarrConfig = await resolveDolibarrConfigForUser(entry.userId);
-              void syncAttendanceWithDolibarr(checkoutRecord, dolibarrConfig);
-
-              const notification = {
-                id: randomUUID(),
-                title: "Auto-Checkout Executed",
-                body: "You were automatically checked out for leaving the geofenced area.",
-                kind: "alert" as const,
-                audience: "all" as const,
-                audienceUserIds: [entry.userId],
-                readByIds: [] as string[],
-                createdById: "system",
-                createdByName: "System",
-                createdAt: now,
-              };
-              try { await insertNotificationInMySql(notification); } catch(e){}
-            }
-          }
-        } else {
-          // --- Geofence Enter Notification ---
-          if (status.distanceMeters <= 500) {
-            const today = new Date().toISOString().split('T')[0];
-            
-            // Check if user already checked in today to prevent spam
-            const history = isMySqlStateEnabled() 
-              ? await getAttendanceHistoryFromMySql(entry.userId).catch(() => []) 
-              : await storage.getAttendanceToday(entry.userId);
-              
-            const hasCheckedInToday = history.some(a => a.type === "checkin" && a.timestamp.startsWith(today));
-            
-            if (!hasCheckedInToday) {
-              const reminderId = `notif_checkin_reminder_${entry.userId}_${today}`;
-              const now = new Date().toISOString();
-              const notification = {
-                id: reminderId,
-                title: "Check-in Reminder",
-                body: "You are near the office location. Please check in for the day.",
-                kind: "alert" as const,
-                audience: "all" as const,
-                audienceUserIds: [entry.userId],
-                readByIds: [] as string[],
-                createdById: "system",
-                createdByName: "System",
-                createdAt: now,
-              };
-              try { await insertNotificationInMySql(notification); } catch (e) {}
-            }
-          }
-        }
-      } catch (error) {
-        console.error("Failed auto-checkout / reminder logic", error);
-      }
-      // -----------------------------
-
-      const log: LocationLog = {
-        id: randomUUID(),
-        companyId: companyId ?? undefined,
-        userId: entry.userId,
-        latitude: entry.latitude,
-        longitude: entry.longitude,
-        accuracy: entry.accuracy,
-        speed: entry.speed,
-        heading: entry.heading,
-        batteryLevel: entry.batteryLevel ?? null,
-        geofenceId: status.activeZone?.id ?? null,
-        geofenceName: status.activeZone?.name ?? null,
-        isInsideGeofence: status.inside,
-        capturedAt: entry.capturedAt ?? new Date().toISOString(),
-      };
-      await storage.addLocationLog(log);
-      try {
-        await insertLocationLogInMySql(log);
-      } catch (error) {
-        console.error("Failed to persist location log in MySQL", error);
-      }
-      accepted += 1;
-    }
-
-    res.status(201).json({
-      ok: true,
-      accepted,
-      rejected: invalidCount,
-    });
-  });
-
-  app.get("/api/admin/live-map", requireAuth, requireRoles("admin", "hr", "manager"), async (_req, res) => {
-    res.set({
-      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-      Pragma: "no-cache",
-      Expires: "0",
-    });
-    if (isMySqlStateEnabled()) {
-      try {
-        const latest = await listLocationLogsLatestFromMySql();
-        res.json(latest);
-        return;
-      } catch (error) {
-        console.error("Failed to read latest location logs from MySQL", error);
-      }
-    }
-    const latest = await storage.getLocationLogsLatest();
-    res.json(latest);
-  });
-
-  app.get(
-    "/api/admin/live-map/routes",
+  registerLocationRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager"),
-    async (req, res) => {
-      res.set({
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        Pragma: "no-cache",
-        Expires: "0",
-      });
-      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
-      if (!isIsoDateString(requestedDate)) {
-        res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
-        return;
-      }
-      const useRawPoints = parseBooleanQuery(req.query.raw, false);
-      const intervalMinutes = useRawPoints ? 0 : parseIntervalMinutes(req.query.interval_minutes, 1);
-      let allPoints: LocationLog[] = [];
-      if (isMySqlStateEnabled()) {
-        try {
-          allPoints = await listLocationLogsForDateFromMySql(requestedDate);
-        } catch (error) {
-          console.error("Failed to read location logs for date from MySQL", error);
-          allPoints = await storage.getLocationLogsForDate(requestedDate);
-        }
-      } else {
-        allPoints = await storage.getLocationLogsForDate(requestedDate);
-      }
-      const byUser = new Map<string, LocationLog[]>();
-      for (const point of allPoints) {
-        const bucket = byUser.get(point.userId) ?? [];
-        bucket.push(point);
-        byUser.set(point.userId, bucket);
-      }
-
-      const routes = Array.from(byUser.entries())
-        .map(([userId, userPoints]) => {
-          const sampled = useRawPoints
-            ? [...userPoints].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
-            : downsampleLocationLogsByInterval(userPoints, intervalMinutes);
-          return {
-            userId,
-            intervalMinutes,
-            pointCount: sampled.length,
-            points: sampled,
-            latestPoint: sampled.length ? sampled[sampled.length - 1] : null,
-          };
-        })
-        .sort((a, b) => {
-          const aTime = a.latestPoint?.capturedAt || "";
-          const bTime = b.latestPoint?.capturedAt || "";
-          return bTime.localeCompare(aTime);
-        });
-
-      res.json({
-        date: requestedDate,
-        intervalMinutes,
-        routes,
-      });
-    }
-  );
-
-  app.get(
-    "/api/admin/route/:id",
+    requireRoles,
+    firstString,
+    ensureUserMatch,
+    isMySqlStateEnabled,
+    storage,
+    listLocationLogsLatestFromMySql,
+    listLocationLogsForDateFromMySql,
+    listLocationLogsForUserDateFromMySql,
+    listAttendanceHistoryFromMySql: listAttendanceForUserDateFromMySql,
+    toMumbaiDateKey,
+    isIsoDateString,
+    parseBooleanQuery,
+    parseIntervalMinutes,
+    downsampleLocationLogsByInterval,
+    isMumbaiDateKey,
+    resolveRouteSessionWindow,
+    filterLocationLogsToSessionWindow,
+    buildRouteTimeline,
+    getRouteDailySummaryFromMySql,
+    upsertRouteDailySummaryInMySql,
+    getMapplsDirectionsForLogs,
+    getMapplsDistanceMatrixForLogs,
+    parseOptionalInteger,
+  });
+  registerMapplsRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager", "salesperson"),
-    async (req, res) => {
-      const userId = firstString(req.params.id);
-      if (!userId) {
-        res.status(400).json({ message: "User id is required" });
-        return;
-      }
-      if (!ensureUserMatch(req, userId)) {
-        res.status(403).json({ message: "Token user mismatch" });
-        return;
-      }
+    firstString,
+    parseCoordinatePair,
+    parseOptionalQueryFloat,
+    parseOptionalInteger,
+    parseBooleanQuery,
+    parseCoordinatesList,
+    searchMapplsPlaces,
+    reverseGeocodeMapplsCoordinates,
+    getMapplsDirectionsForCoordinates,
+  });
 
-      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
-      if (!isIsoDateString(requestedDate)) {
-        res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
-        return;
-      }
-
-      const useRawPoints = parseBooleanQuery(req.query.raw, false);
-      const intervalMinutes = useRawPoints ? 0 : parseIntervalMinutes(req.query.interval_minutes, 1);
-      let rawLocationPoints: LocationLog[] = [];
-      if (isMySqlStateEnabled()) {
-        try {
-          rawLocationPoints = await listLocationLogsForUserDateFromMySql(userId, requestedDate);
-        } catch (error) {
-          console.error("Failed to read user location logs for date from MySQL", error);
-          rawLocationPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
-        }
-      } else {
-        rawLocationPoints = await storage.getLocationLogsForUserDate(userId, requestedDate);
-      }
-      const attendance = isMySqlStateEnabled()
-        ? await listAttendanceHistoryFromMySql(userId).catch(() => storage.getAttendanceHistory(userId))
-        : await storage.getAttendanceHistory(userId);
-      const attendanceEvents = attendance
-        .filter((record) => isMumbaiDateKey(record.timestamp, requestedDate))
-        .map((record) => ({
-          id: record.id,
-          type: record.type,
-          at: record.timestamp,
-          geofenceName: record.geofenceName ?? null,
-          latitude: record.location?.lat ?? null,
-          longitude: record.location?.lng ?? null,
-        }))
-        .sort((a, b) => a.at.localeCompare(b.at));
-      const sessionWindow = resolveRouteSessionWindow(attendanceEvents);
-      const windowedPoints = filterLocationLogsToSessionWindow(rawLocationPoints, sessionWindow);
-      const points = useRawPoints
-        ? [...windowedPoints].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
-        : downsampleLocationLogsByInterval(windowedPoints, intervalMinutes);
-      const timeline = buildRouteTimeline(userId, requestedDate, points);
-      const directions = await getMapplsDirectionsForLogs(points, {
-        resource: firstString(req.query.routing_resource) || null,
-        profile: firstString(req.query.routing_profile) || null,
-        overview: firstString(req.query.routing_overview) || null,
-        geometries: firstString(req.query.routing_geometries) || null,
-        alternatives: parseBooleanQuery(req.query.routing_alternatives, false),
-        steps: parseBooleanQuery(req.query.routing_steps, true),
-        region: firstString(req.query.routing_region) || null,
-        routeType: parseOptionalInteger(req.query.routing_rtype),
-      });
-
-      res.json({
-        ...timeline,
-        intervalMinutes,
-        directions,
-        attendanceEvents,
-      });
-    }
-  );
-
-  app.get(
-    "/api/admin/route/:id/matrix",
+  registerAttendanceActionRoutes(app, {
     requireAuth,
-    requireRoles("admin", "hr", "manager", "salesperson"),
-    async (req, res) => {
-      const userId = firstString(req.params.id);
-      if (!userId) {
-        res.status(400).json({ message: "User id is required" });
-        return;
-      }
-      if (!ensureUserMatch(req, userId)) {
-        res.status(403).json({ message: "Token user mismatch" });
-        return;
-      }
-
-      const requestedDate = firstString(req.query.date) || toMumbaiDateKey(new Date());
-      if (!isIsoDateString(requestedDate)) {
-        res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
-        return;
-      }
-
-      const points = await storage.getLocationLogsForUserDate(userId, requestedDate);
-
-      if (points.length < 2) {
-        res.status(400).json({ message: "At least 2 route points are required for matrix" });
-        return;
-      }
-
-      const matrix = await getMapplsDistanceMatrixForLogs(points, {
-        resource: firstString(req.query.distance_resource) || null,
-        profile: firstString(req.query.distance_profile) || null,
-        region: firstString(req.query.distance_region) || null,
-        routeType: parseOptionalInteger(req.query.distance_rtype),
-      });
-
-      if (!matrix) {
-        res.status(400).json({
-          message: "Mappls routing API key missing. Configure MAPPLS_ROUTING_API_KEY in server env.",
-        });
-        return;
-      }
-
-      res.json({
-        userId,
-        date: requestedDate,
-        matrix,
-      });
-    }
-  );
-
-  app.get("/api/mappls/places/autosuggest", requireAuth, async (req, res) => {
-    const query = firstString(req.query.query);
-    if (!query) {
-      res.status(400).json({ message: "query is required." });
-      return;
-    }
-
-    const locationPair =
-      parseCoordinatePair(firstString(req.query.location)) ||
-      (() => {
-        const lat = parseOptionalQueryFloat(req.query.latitude ?? req.query.lat);
-        const lng = parseOptionalQueryFloat(req.query.longitude ?? req.query.lng ?? req.query.lon);
-        if (lat === null || lng === null) return null;
-        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-        return { latitude: lat, longitude: lng };
-      })();
-
-    const limit = parseOptionalInteger(req.query.limit ?? req.query.itemCount);
-    const response = await searchMapplsPlaces("autosuggest", query, {
-      latitude: locationPair?.latitude ?? null,
-      longitude: locationPair?.longitude ?? null,
-      region: firstString(req.query.region) || null,
-      limit,
-    });
-
-    if (!response) {
-      res.status(400).json({
-        message:
-          "Mappls places API key missing. Configure MAPPLS_PLACES_API_KEY or MAPPLS_REST_API_KEY in server env.",
-      });
-      return;
-    }
-
-    res.json(response);
+    parseCheckPayload,
+    ensureUserMatch,
+    recordAnomaly,
+    MAX_LOCATION_ACCURACY_METERS,
+    MIN_LOCATION_SAMPLE_COUNT,
+    parseIsoDate,
+    isFreshDate,
+    MAX_EVIDENCE_AGE_MS,
+    MAX_CAPTURE_DRIFT_MS,
+    storage,
+    isMySqlStateEnabled,
+    findActiveAttendanceInMySql,
+    resolveRequestCompanyId,
+    listGeofencesForUserResolved,
+    resolveGeofenceStatus,
+    storeAttendancePhoto,
+    randomUUID,
+    insertAttendanceInMySql,
+    broadcastAttendanceUpdate,
+    insertLocationLogInMySql,
+    resolveDolibarrConfigForUser,
+    syncAttendanceWithDolibarr,
   });
 
-  app.get("/api/mappls/places/text-search", requireAuth, async (req, res) => {
-    const query = firstString(req.query.query);
-    if (!query) {
-      res.status(400).json({ message: "query is required." });
-      return;
-    }
-
-    const locationPair =
-      parseCoordinatePair(firstString(req.query.location)) ||
-      (() => {
-        const lat = parseOptionalQueryFloat(req.query.latitude ?? req.query.lat);
-        const lng = parseOptionalQueryFloat(req.query.longitude ?? req.query.lng ?? req.query.lon);
-        if (lat === null || lng === null) return null;
-        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-        return { latitude: lat, longitude: lng };
-      })();
-
-    const limit = parseOptionalInteger(req.query.limit ?? req.query.itemCount);
-    const response = await searchMapplsPlaces("text", query, {
-      latitude: locationPair?.latitude ?? null,
-      longitude: locationPair?.longitude ?? null,
-      region: firstString(req.query.region) || null,
-      limit,
-    });
-
-    if (!response) {
-      res.status(400).json({
-        message:
-          "Mappls places API key missing. Configure MAPPLS_PLACES_API_KEY or MAPPLS_REST_API_KEY in server env.",
-      });
-      return;
-    }
-
-    res.json(response);
+  registerAttendanceRoutes(app, {
+    requireAuth,
+    firstString,
+    ensureUserMatch,
+    isMySqlStateEnabled,
+    storage,
+    listAttendanceTodayFromMySql,
+    listAttendanceTodayFromMySqlAll,
+    listAttendanceHistoryFromMySql,
+    listAttendanceForUserDateFromMySql,
+    getRequestUser,
+    normalizeWhitespace,
+    normalizeCompanyIds,
+    resolveRequestCompanyId,
+    defaultCompanyId: DEFAULT_COMPANY_ID,
   });
-
-  app.get("/api/mappls/reverse-geocode", requireAuth, async (req, res) => {
-    const pointFromPair = parseCoordinatePair(firstString(req.query.location));
-    const lat = parseOptionalQueryFloat(req.query.latitude ?? req.query.lat);
-    const lng = parseOptionalQueryFloat(req.query.longitude ?? req.query.lng ?? req.query.lon);
-    const point =
-      pointFromPair ||
-      (lat !== null && lng !== null
-        ? {
-            latitude: lat,
-            longitude: lng,
-          }
-        : null);
-
-    if (!point || Math.abs(point.latitude) > 90 || Math.abs(point.longitude) > 180) {
-      res.status(400).json({
-        message:
-          "Valid latitude and longitude are required. Use latitude/longitude or location=lat,lng.",
-      });
-      return;
-    }
-
-    const response = await reverseGeocodeMapplsCoordinates(point.latitude, point.longitude);
-    if (!response) {
-      res.status(400).json({
-        message:
-          "Mappls places API key missing. Configure MAPPLS_PLACES_API_KEY or MAPPLS_REST_API_KEY in server env.",
-      });
-      return;
-    }
-    res.json(response);
+  registerSalaryRoutes(app, {
+    requireAuth,
+    requireRoles,
+    populateUser,
+    isMySqlStateEnabled,
+    getMySqlPool,
+    listDolibarrSalaryRows,
+    verifyJwt,
+    firstString,
+    normalizeSalaryIdentity,
+    resolveDolibarrSalaryViewerIds,
+    toSqlDateOnly,
+    toSqlNumber,
+    upsertDolibarrSalaryRecord,
+    deleteDolibarrSalaryRecord,
+    updateDolibarrSalaryStatus,
   });
-
-  app.get("/api/mappls/route/preview", requireAuth, async (req, res) => {
-    const origin =
-      parseCoordinatePair(firstString(req.query.origin)) ||
-      (() => {
-        const lat = parseOptionalQueryFloat(req.query.origin_latitude ?? req.query.origin_lat);
-        const lng = parseOptionalQueryFloat(
-          req.query.origin_longitude ?? req.query.origin_lng ?? req.query.origin_lon
-        );
-        if (lat === null || lng === null) return null;
-        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-        return { latitude: lat, longitude: lng };
-      })();
-    const destination =
-      parseCoordinatePair(firstString(req.query.destination)) ||
-      (() => {
-        const lat = parseOptionalQueryFloat(req.query.destination_latitude ?? req.query.destination_lat);
-        const lng = parseOptionalQueryFloat(
-          req.query.destination_longitude ?? req.query.destination_lng ?? req.query.destination_lon
-        );
-        if (lat === null || lng === null) return null;
-        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-        return { latitude: lat, longitude: lng };
-      })();
-    const waypoints = parseCoordinatesList(firstString(req.query.waypoints));
-
-    if (!origin || !destination) {
-      res.status(400).json({
-        message:
-          "origin and destination are required. Use origin=lat,lng and destination=lat,lng.",
-      });
-      return;
-    }
-
-    const routePoints = [origin, ...waypoints, destination];
-    const directions = await getMapplsDirectionsForCoordinates(routePoints, {
-      resource: firstString(req.query.resource) || null,
-      profile: firstString(req.query.profile) || null,
-      overview: firstString(req.query.overview) || null,
-      geometries: firstString(req.query.geometries) || null,
-      alternatives: parseBooleanQuery(req.query.alternatives, false),
-      steps: parseBooleanQuery(req.query.steps, true),
-      region: firstString(req.query.region) || null,
-      routeType: parseOptionalInteger(req.query.rtype),
-    });
-
-    if (!directions) {
-      res.status(400).json({
-        message: "Mappls routing API key missing. Configure MAPPLS_ROUTING_API_KEY in server env.",
-      });
-      return;
-    }
-
-    res.json({
-      provider: "mappls",
-      origin,
-      destination,
-      waypointCount: waypoints.length,
-      routePointCount: routePoints.length,
-      directions,
-    });
-  });
-
-  app.post("/api/attendance/checkin", requireAuth, async (req, res) => {
-    const payload = parseCheckPayload(req);
-    if (!payload) {
-      res.status(400).json({ message: "Invalid attendance payload" });
-      return;
-    }
-    if (!ensureUserMatch(req, payload.userId)) {
-      res.status(403).json({ message: "Token user mismatch" });
-      return;
-    }
-
-    if (payload.biometricRequired && !payload.biometricVerified) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "biometric_failed",
-        severity: "high",
-        details: `Biometric verification failed on check-in (${payload.biometricFailureReason ?? "unknown"})`,
-      });
-      res.status(400).json({
-        message: "Biometric verification is required for check-in.",
-      });
-      return;
-    }
-
-    if (
-      typeof payload.locationAccuracyMeters !== "number" ||
-      payload.locationAccuracyMeters > MAX_LOCATION_ACCURACY_METERS
-    ) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "gps_weak",
-        severity: "medium",
-        details:
-          typeof payload.locationAccuracyMeters === "number"
-            ? `Weak GPS accuracy on check-in: +/-${Math.round(payload.locationAccuracyMeters)}m`
-            : "Missing GPS accuracy evidence on check-in",
-      });
-      res.status(400).json({ message: "Location accuracy is weak. Move near open sky and try again." });
-      return;
-    }
-
-    if (
-      typeof payload.locationSampleCount !== "number" ||
-      payload.locationSampleCount < MIN_LOCATION_SAMPLE_COUNT
-    ) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "gps_weak",
-        severity: "medium",
-        details: `Insufficient stable location samples on check-in (${payload.locationSampleCount ?? 0})`,
-      });
-      res.status(400).json({ message: "Stable GPS verification failed. Wait for lock and retry." });
-      return;
-    }
-
-    const capturedAt = parseIsoDate(payload.capturedAtClient ?? null);
-    if (!capturedAt) {
-      res.status(400).json({ message: "Missing attendance evidence timestamp" });
-      return;
-    }
-    if (!isFreshDate(capturedAt, MAX_EVIDENCE_AGE_MS)) {
-      res.status(400).json({ message: "Stale attendance evidence. Please retry." });
-      return;
-    }
-    const photoCapturedAt = parseIsoDate(payload.photoCapturedAt ?? null);
-    if (photoCapturedAt && !isFreshDate(photoCapturedAt, MAX_EVIDENCE_AGE_MS)) {
-      res.status(400).json({ message: "Stale photo evidence. Please recapture and retry." });
-      return;
-    }
-    if (photoCapturedAt && Math.abs(photoCapturedAt.getTime() - capturedAt.getTime()) > MAX_CAPTURE_DRIFT_MS) {
-      res.status(400).json({ message: "Location and photo timestamps are too far apart." });
-      return;
-    }
-
-    if (payload.mockLocationDetected) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "mock_location",
-        severity: "high",
-        details: "Mock location flag raised from mobile client",
-      });
-      res.status(400).json({ message: "Mock location detected. Disable fake GPS and retry." });
-      return;
-    }
-
-    const bindResult = await storage.bindDevice(payload.userId, payload.deviceId);
-    if (!bindResult.ok) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "device_mismatch",
-        severity: "high",
-        details: "Device binding mismatch detected on check-in",
-      });
-      res.status(403).json({ message: "Device mismatch detected" });
-      return;
-    }
-
-    const existing = isMySqlStateEnabled()
-      ? await findActiveAttendanceInMySql(payload.userId).catch(() => storage.findActiveAttendance(payload.userId))
-      : await storage.findActiveAttendance(payload.userId);
-    if (existing) {
-      await recordAnomaly({
-        attendanceId: existing.id,
-        userId: payload.userId,
-        type: "duplicate_checkin",
-        severity: "medium",
-        details: "Attempted duplicate check-in while already checked in",
-      });
-      res.status(409).json({ message: "User already checked in" });
-      return;
-    }
-
-    const companyId = await resolveRequestCompanyId(req);
-    const userZones = await listGeofencesForUserResolved(payload.userId, {
-      companyId,
-      role: req.auth?.role ?? null,
-    });
-    const zoneStatus = resolveGeofenceStatus(payload, userZones);
-    const isEmployeeOfficeAttendance = req.auth?.role === "employee";
-    const isFieldSalespersonAttendance = req.auth?.role === "salesperson";
-    const allowOverride = isFieldSalespersonAttendance || (zoneStatus.activeZone?.allowOverride ?? false);
-    const insideZone = zoneStatus.insideConfirmed || (isEmployeeOfficeAttendance && zoneStatus.inside);
-
-    if (isEmployeeOfficeAttendance && userZones.length === 0) {
-      res.status(400).json({
-        message: "Company office location is not configured. Ask admin to set attendance location.",
-      });
-      return;
-    }
-
-    if (zoneStatus.inside && !zoneStatus.insideConfirmed && !allowOverride) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "uncertain_geofence",
-        severity: "medium",
-        details:
-          `Geofence boundary uncertainty on check-in. Distance ${Math.round(zoneStatus.distanceMeters)}m, ` +
-          `buffer ${zoneStatus.confidenceBufferMeters}m`,
-      });
-    }
-
-    if (!insideZone && !allowOverride) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "outside_geofence",
-        severity: "high",
-        details:
-          `Check-in attempted outside strict geofence. Distance: ${Math.round(zoneStatus.distanceMeters)}m, ` +
-          `buffer: ${zoneStatus.confidenceBufferMeters}m`,
-      });
-      res.status(400).json({ message: "Outside geofence. Check-in denied." });
-      return;
-    }
-
-    const photoUrl = payload.photoBase64
-      ? await storeAttendancePhoto(
-          payload.photoBase64,
-          payload.photoMimeType ?? "image/jpeg",
-          payload.userId,
-          "checkin"
-        )
-      : null;
-
-    const now = new Date().toISOString();
-    const attendanceRecord: AttendanceRecord = {
-      id: randomUUID(),
-      userId: payload.userId,
-      userName: payload.userName,
-      companyId: companyId ?? undefined,
-      type: "checkin",
-      timestamp: now,
-      timestampServer: now,
-      location: { lat: payload.latitude, lng: payload.longitude },
-      geofenceId: zoneStatus.activeZone?.id ?? payload.geofenceId ?? null,
-      geofenceName: zoneStatus.activeZone?.name ?? payload.geofenceName ?? null,
-      photoUrl,
-      deviceId: payload.deviceId,
-      isInsideGeofence: insideZone,
-      notes: payload.notes,
-      source: "mobile",
-    };
-
-    await storage.createAttendance(attendanceRecord);
-    try {
-      await insertAttendanceInMySql(attendanceRecord);
-    } catch (error) {
-      console.error("Failed to persist attendance check-in in MySQL", error);
-    }
-    broadcastAttendanceUpdate(attendanceRecord);
-    const checkInLocationLog: LocationLog = {
-      id: randomUUID(),
-      companyId: companyId ?? undefined,
-      userId: payload.userId,
-      latitude: payload.latitude,
-      longitude: payload.longitude,
-      accuracy: null,
-      speed: null,
-      heading: null,
-      geofenceId: attendanceRecord.geofenceId ?? null,
-      geofenceName: attendanceRecord.geofenceName ?? null,
-      isInsideGeofence: attendanceRecord.isInsideGeofence ?? false,
-      capturedAt: now,
-    };
-    await storage.addLocationLog(checkInLocationLog);
-    try {
-      await insertLocationLogInMySql(checkInLocationLog);
-    } catch (error) {
-      console.error("Failed to persist check-in location log in MySQL", error);
-    }
-
-    if (photoUrl) {
-      await storage.addAttendancePhoto({
-        id: randomUUID(),
-        attendanceId: attendanceRecord.id,
-        userId: payload.userId,
-        photoUrl,
-        capturedAt: now,
-        latitude: payload.latitude,
-        longitude: payload.longitude,
-        geofenceId: attendanceRecord.geofenceId ?? null,
-        geofenceName: attendanceRecord.geofenceName ?? null,
-        metadataOverlay: payload.notes ?? "",
-        photoType: "checkin",
-      });
-    }
-
-    const checkInDolibarrConfig = await resolveDolibarrConfigForUser(payload.userId);
-    void syncAttendanceWithDolibarr(attendanceRecord, checkInDolibarrConfig);
-    res.status(201).json(attendanceRecord);
-  });
-
-  app.post("/api/attendance/checkout", requireAuth, async (req, res) => {
-    const payload = parseCheckPayload(req);
-    if (!payload) {
-      res.status(400).json({ message: "Invalid attendance payload" });
-      return;
-    }
-    if (!ensureUserMatch(req, payload.userId)) {
-      res.status(403).json({ message: "Token user mismatch" });
-      return;
-    }
-
-    if (payload.biometricRequired && !payload.biometricVerified) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "biometric_failed",
-        severity: "high",
-        details: `Biometric verification failed on checkout (${payload.biometricFailureReason ?? "unknown"})`,
-      });
-      res.status(400).json({
-        message: "Biometric verification is required for checkout.",
-      });
-      return;
-    }
-
-    if (
-      typeof payload.locationAccuracyMeters !== "number" ||
-      payload.locationAccuracyMeters > MAX_LOCATION_ACCURACY_METERS
-    ) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "gps_weak",
-        severity: "medium",
-        details:
-          typeof payload.locationAccuracyMeters === "number"
-            ? `Weak GPS accuracy on checkout: +/-${Math.round(payload.locationAccuracyMeters)}m`
-            : "Missing GPS accuracy evidence on checkout",
-      });
-      res.status(400).json({ message: "Location accuracy is weak. Move near open sky and try again." });
-      return;
-    }
-
-    if (
-      typeof payload.locationSampleCount !== "number" ||
-      payload.locationSampleCount < MIN_LOCATION_SAMPLE_COUNT
-    ) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "gps_weak",
-        severity: "medium",
-        details: `Insufficient stable location samples on checkout (${payload.locationSampleCount ?? 0})`,
-      });
-      res.status(400).json({ message: "Stable GPS verification failed. Wait for lock and retry." });
-      return;
-    }
-
-    const capturedAt = parseIsoDate(payload.capturedAtClient ?? null);
-    if (!capturedAt) {
-      res.status(400).json({ message: "Missing attendance evidence timestamp" });
-      return;
-    }
-    if (!isFreshDate(capturedAt, MAX_EVIDENCE_AGE_MS)) {
-      res.status(400).json({ message: "Stale attendance evidence. Please retry." });
-      return;
-    }
-    const photoCapturedAt = parseIsoDate(payload.photoCapturedAt ?? null);
-    if (photoCapturedAt && !isFreshDate(photoCapturedAt, MAX_EVIDENCE_AGE_MS)) {
-      res.status(400).json({ message: "Stale photo evidence. Please recapture and retry." });
-      return;
-    }
-    if (photoCapturedAt && Math.abs(photoCapturedAt.getTime() - capturedAt.getTime()) > MAX_CAPTURE_DRIFT_MS) {
-      res.status(400).json({ message: "Location and photo timestamps are too far apart." });
-      return;
-    }
-
-    if (payload.mockLocationDetected) {
-      await recordAnomaly({
-        attendanceId: null,
-        userId: payload.userId,
-        type: "mock_location",
-        severity: "high",
-        details: "Mock location flag raised from mobile client on checkout",
-      });
-      res.status(400).json({ message: "Mock location detected. Disable fake GPS and retry." });
-      return;
-    }
-
-    const active = isMySqlStateEnabled()
-      ? await findActiveAttendanceInMySql(payload.userId).catch(() => storage.findActiveAttendance(payload.userId))
-      : await storage.findActiveAttendance(payload.userId);
-    if (!active) {
-      res.status(400).json({ message: "No active check-in found for checkout" });
-      return;
-    }
-
-    const companyId = await resolveRequestCompanyId(req);
-    const userZones = await listGeofencesForUserResolved(payload.userId, {
-      companyId,
-      role: req.auth?.role ?? null,
-    });
-    const zoneStatus = resolveGeofenceStatus(payload, userZones);
-    let now = new Date().toISOString();
-
-    if (!zoneStatus.inside) {
-      await recordAnomaly({
-        attendanceId: active.id,
-        userId: payload.userId,
-        type: "checkout_outside_zone",
-        severity: "medium",
-        details: `Checkout performed outside zone at distance ${Math.round(zoneStatus.distanceMeters)}m`,
-      });
-    }
-
-    const checkInDate = active.timestamp.split("T")[0];
-    const logDate = now.split("T")[0];
-    if (checkInDate !== logDate) {
-      now = `${checkInDate}T23:59:59.000Z`;
-    }
-
-    const photoUrl = payload.photoBase64
-      ? await storeAttendancePhoto(
-          payload.photoBase64,
-          payload.photoMimeType ?? "image/jpeg",
-          payload.userId,
-          "checkout"
-        )
-      : null;
-
-    const checkoutRecord: AttendanceRecord = {
-      id: randomUUID(),
-      userId: payload.userId,
-      userName: payload.userName,
-      companyId: companyId ?? undefined,
-      type: "checkout",
-      timestamp: now,
-      timestampServer: now,
-      location: { lat: payload.latitude, lng: payload.longitude },
-      geofenceId: zoneStatus.activeZone?.id ?? payload.geofenceId ?? null,
-      geofenceName: zoneStatus.activeZone?.name ?? payload.geofenceName ?? null,
-      photoUrl,
-      deviceId: payload.deviceId,
-      isInsideGeofence: zoneStatus.inside,
-      notes: payload.notes,
-      source: "mobile",
-    };
-
-    await storage.createAttendance(checkoutRecord);
-    try {
-      await insertAttendanceInMySql(checkoutRecord);
-    } catch (error) {
-      console.error("Failed to persist attendance check-out in MySQL", error);
-    }
-    broadcastAttendanceUpdate(checkoutRecord);
-    const checkOutLocationLog: LocationLog = {
-      id: randomUUID(),
-      companyId: companyId ?? undefined,
-      userId: payload.userId,
-      latitude: payload.latitude,
-      longitude: payload.longitude,
-      accuracy: null,
-      speed: null,
-      heading: null,
-      batteryLevel: null,
-      geofenceId: checkoutRecord.geofenceId ?? null,
-      geofenceName: checkoutRecord.geofenceName ?? null,
-      isInsideGeofence: checkoutRecord.isInsideGeofence ?? false,
-      capturedAt: now,
-    };
-    await storage.addLocationLog(checkOutLocationLog);
-    try {
-      await insertLocationLogInMySql(checkOutLocationLog);
-    } catch (error) {
-      console.error("Failed to persist check-out location log in MySQL", error);
-    }
-    if (photoUrl) {
-      await storage.addAttendancePhoto({
-        id: randomUUID(),
-        attendanceId: checkoutRecord.id,
-        userId: payload.userId,
-        photoUrl,
-        capturedAt: now,
-        latitude: payload.latitude,
-        longitude: payload.longitude,
-        geofenceId: checkoutRecord.geofenceId ?? null,
-        geofenceName: checkoutRecord.geofenceName ?? null,
-        metadataOverlay: payload.notes ?? "",
-        photoType: "checkout",
-      });
-    }
-
-    const checkOutDolibarrConfig = await resolveDolibarrConfigForUser(payload.userId);
-    void syncAttendanceWithDolibarr(checkoutRecord, checkOutDolibarrConfig);
-    res.status(201).json(checkoutRecord);
-  });
-
-  app.get("/api/attendance/today", requireAuth, async (req, res) => {
-    const userId = firstString(req.query.user_id);
-    if (!userId) {
-      res.status(400).json({ message: "user_id query is required" });
-      return;
-    }
-    if (!ensureUserMatch(req, userId)) {
-      res.status(403).json({ message: "Not authorized for this user records" });
-      return;
-    }
-    const records = isMySqlStateEnabled()
-      ? await listAttendanceTodayFromMySql(userId).catch(() => storage.getAttendanceToday(userId))
-      : await storage.getAttendanceToday(userId);
-    res.json(records);
-  });
-
-  app.get("/api/attendance/company/today", requireAuth, async (req, res) => {
-    try {
-      const requestUser = getRequestUser(req);
-      const requestedCompanyId = normalizeWhitespace(
-        typeof req.query.company_id === "string" ? req.query.company_id : ""
-      );
-      const allowedCompanyIds = new Set(
-        normalizeCompanyIds(requestUser?.companyIds || (requestUser?.companyId ? [requestUser.companyId] : []))
-      );
-      const canUseRequestedCompany =
-        requestedCompanyId &&
-        (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
-      const companyId =
-        (canUseRequestedCompany ? requestedCompanyId : "") ||
-        (await resolveRequestCompanyId(req)) ||
-        requestUser?.companyId ||
-        DEFAULT_COMPANY_ID;
-
-      const records = isMySqlStateEnabled()
-        ? await listAttendanceTodayFromMySqlAll(companyId)
-        : [];
-      res.json(records);
-    } catch (error) {
-      console.error("Failed to list company attendance today", error);
-      res.status(500).json({ message: "Failed to list company attendance" });
-    }
-  });
-
-  app.get("/api/attendance/history", requireAuth, async (req, res) => {
-    const userId = firstString(req.query.user_id);
-    if (!userId) {
-      res.status(400).json({ message: "user_id query is required" });
-      return;
-    }
-    if (!ensureUserMatch(req, userId)) {
-      res.status(403).json({ message: "Not authorized for this user records" });
-      return;
-    }
-    const records = isMySqlStateEnabled()
-      ? await listAttendanceHistoryFromMySql(userId).catch(() => storage.getAttendanceHistory(userId))
-      : await storage.getAttendanceHistory(userId);
-    res.json(records);
-  });
-
-  // ─── Salary REST endpoints ────────────────────────────────────────────────
-
-  app.get("/api/salaries", async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    try {
-      const conn = await getMySqlPool();
-      let items = await listDolibarrSalaryRows(conn);
-      const authHeader = req.header("authorization");
-      const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      const authPayload = bearer ? verifyJwt(bearer) : null;
-      const isPrivileged = ["admin", "hr", "manager"].includes(authPayload?.role || "");
-
-      if (!isPrivileged) {
-        const requestUserId = firstString(req.query.userId).trim();
-        const requestUserEmail = firstString(req.query.userEmail).trim();
-        const requestUserName = firstString(req.query.userName).trim();
-        const requestUserLogin = firstString(req.query.userLogin).trim();
-        const userId = (authPayload?.sub || requestUserId).trim().toLowerCase();
-        const userEmail = (authPayload?.email || requestUserEmail).trim().toLowerCase();
-        const userName = normalizeSalaryIdentity(requestUserName);
-        const userLogin = normalizeSalaryIdentity(requestUserLogin);
-
-        if (userId || userEmail || userName || userLogin) {
-          const viewerIds = await resolveDolibarrSalaryViewerIds(conn, {
-            id: userId,
-            name: requestUserName,
-            email: authPayload?.email || requestUserEmail,
-            login: requestUserLogin || undefined,
-            role: "salesperson",
-            companyId: "",
-            companyName: "",
-            department: "",
-            branch: "",
-            phone: "",
-            joinDate: "",
-          } as AppUser);
-
-          items = items.filter((salary) => {
-            const salaryEmail = (salary.employeeEmail || "").trim().toLowerCase();
-            const salaryId = (salary.employeeId || "").trim().toLowerCase();
-            const salaryName = normalizeSalaryIdentity(salary.employeeName);
-            return Boolean(
-              (userEmail && salaryEmail === userEmail) ||
-                (userId && (salaryId === userId || salaryId === `dolibarr_${userId}`)) ||
-                (userLogin && (salaryEmail === userLogin || salaryName === userLogin || salaryId === `dolibarr_${userLogin}`)) ||
-                (userName && salaryName === userName) ||
-                viewerIds.has(salaryId)
-            );
-          });
-        } else {
-          items = [];
-        }
-      }
-
-      res.json({ items });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to fetch salaries.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.post("/api/salaries", requireAuth, requireRoles("admin", "hr", "manager"), populateUser, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    try {
-      const e = (req.body || {}) as Record<string, unknown>;
-      const id = e.id ? String(e.id).trim() : "";
-      if (!id) {
-        res.status(400).json({ message: "id is required" });
-        return;
-      }
-      const pool = await getMySqlPool();
-      const conn = await pool.getConnection();
-      const employeeId = e.employeeId ? String(e.employeeId).trim() : "";
-      const employeeName = e.employeeName ? String(e.employeeName).trim() : "Employee";
-      const employeeEmail = e.employeeEmail ? String(e.employeeEmail).trim() : null;
-      const label = e.label ? String(e.label).trim() : null;
-      const periodStart = e.periodStart ? toSqlDateOnly(e.periodStart) : null;
-      const periodEnd = e.periodEnd ? toSqlDateOnly(e.periodEnd) : null;
-      const paymentDate = e.paymentDate ? toSqlDateOnly(e.paymentDate) : null;
-      const paymentMode = e.paymentMode ? String(e.paymentMode).trim() : null;
-      const bankAccount = e.bankAccount ? String(e.bankAccount).trim() : null;
-      const note = e.note ? String(e.note).trim() : null;
-      const month = e.month ? String(e.month).trim() : "unknown";
-      const status = e.status === "paid" ? "paid" : e.status === "approved" ? "approved" : "pending";
-      try {
-        await conn.beginTransaction();
-        await upsertDolibarrSalaryRecord(
-          conn,
-          {
-            id,
-            employeeId,
-            employeeName,
-            employeeEmail: employeeEmail || undefined,
-            label: label || undefined,
-            periodStart: periodStart ? String(periodStart) : undefined,
-            periodEnd: periodEnd ? String(periodEnd) : undefined,
-            paymentDate: paymentDate ? String(paymentDate) : undefined,
-            paymentMode: paymentMode || undefined,
-            bankAccount: bankAccount || undefined,
-            note: note || undefined,
-            month,
-            basic: toSqlNumber(e.basic),
-            hra: toSqlNumber(e.hra),
-            transport: toSqlNumber(e.transport),
-            medical: toSqlNumber(e.medical),
-            bonus: toSqlNumber(e.bonus),
-            overtime: toSqlNumber(e.overtime),
-            tax: toSqlNumber(e.tax),
-            pf: toSqlNumber(e.pf),
-            insurance: toSqlNumber(e.insurance),
-            grossPay: toSqlNumber(e.grossPay),
-            totalDeductions: toSqlNumber(e.totalDeductions),
-            netPay: toSqlNumber(e.netPay),
-            status,
-          },
-          (req as any).user as AppUser
-        );
-        await conn.commit();
-        res.status(201).json({ id, ok: true });
-      } catch (error) {
-        await conn.rollback();
-        throw error;
-      } finally {
-        conn.release();
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to save salary.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.delete("/api/salaries/:id", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    const salaryId = firstString(req.params.id);
-    if (!salaryId) {
-      res.status(400).json({ message: "Salary id is required." });
-      return;
-    }
-    try {
-      const conn = await getMySqlPool();
-      await deleteDolibarrSalaryRecord(conn, salaryId);
-      res.json({ id: salaryId, ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to delete salary.";
-      res.status(500).json({ message });
-    }
-  });
-
-  app.patch("/api/salaries/:id/status", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    const salaryId = firstString(req.params.id);
-    if (!salaryId) {
-      res.status(400).json({ message: "Salary id is required." });
-      return;
-    }
-
-    const rawStatus = firstString((req.body as Record<string, unknown> | undefined)?.status);
-    const status = rawStatus === "paid" ? "paid" : rawStatus === "approved" ? "approved" : rawStatus === "pending" ? "pending" : null;
-    if (!status) {
-      res.status(400).json({ message: "A valid salary status is required." });
-      return;
-    }
-
-    try {
-      const conn = await getMySqlPool();
-      await updateDolibarrSalaryStatus(conn, salaryId, status);
-      res.json({ id: salaryId, status, ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to update salary status.";
-      res.status(500).json({ message });
-    }
-  });
-
   // ─── Employee Bank Accounts REST endpoints ────────────────────────────────
 
-  app.get("/api/bank-accounts", requireAuth, populateUser, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    try {
-      await ensureBankAccountsTable();
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const companyId = await resolveRequestCompanyId(req);
-      const employeeId = typeof req.query.employeeId === "string" ? req.query.employeeId.trim().toLowerCase() : "";
-      const employeeEmail =
-        typeof req.query.employeeEmail === "string" ? req.query.employeeEmail.trim().toLowerCase() : "";
-      const employeeName =
-        typeof req.query.employeeName === "string" ? req.query.employeeName.trim().toLowerCase() : "";
-      const employeeIdAlt =
-        employeeId && employeeId.startsWith("dolibarr_")
-          ? employeeId.replace("dolibarr_", "")
-          : employeeId
-            ? `dolibarr_${employeeId}`
-            : "";
-
-      let query = "SELECT * FROM `lff_bank_accounts`";
-      const params: unknown[] = [];
-      const accessClauses: string[] = [];
-      const filterClauses: string[] = [];
-      // Non-admin/hr/manager users can only see their own accounts
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        const ownAccessClauses: string[] = [];
-        const ownAccessParams: unknown[] = [];
-        const requestEmail = (requestUser?.email || "").trim().toLowerCase();
-        const requestId = (requestUser?.id || "").trim().toLowerCase();
-        const requestName = (requestUser?.name || "").trim().toLowerCase();
-        if (requestEmail) {
-          ownAccessClauses.push("LOWER(TRIM(employee_email)) = ?");
-          ownAccessParams.push(requestEmail);
-        }
-        if (requestId) {
-          ownAccessClauses.push("LOWER(TRIM(employee_id)) = ?");
-          ownAccessParams.push(requestId);
-        }
-        if (requestName) {
-          ownAccessClauses.push("LOWER(TRIM(employee_name)) = ?");
-          ownAccessParams.push(requestName);
-        }
-        if (ownAccessClauses.length > 0) {
-          accessClauses.push(`(${ownAccessClauses.join(" OR ")})`);
-          params.push(...ownAccessParams);
-        }
-      }
-      if (employeeEmail) {
-        filterClauses.push("LOWER(TRIM(employee_email)) = ?");
-        params.push(employeeEmail);
-      }
-      if (employeeName) {
-        filterClauses.push("LOWER(TRIM(employee_name)) = ?");
-        params.push(employeeName);
-      }
-      if (employeeId) {
-        const idClauses = ["LOWER(TRIM(employee_id)) = ?"];
-        const idParams: unknown[] = [employeeId];
-        if (employeeIdAlt && employeeIdAlt !== employeeId) {
-          idClauses.push("LOWER(TRIM(employee_id)) = ?");
-          idParams.push(employeeIdAlt);
-        }
-        filterClauses.push(`(${idClauses.join(" OR ")})`);
-        params.push(...idParams);
-      }
-      const whereClauses: string[] = [];
-      if (accessClauses.length > 0) {
-        whereClauses.push(...accessClauses);
-      }
-      if (filterClauses.length > 0) {
-        whereClauses.push(`(${filterClauses.join(" OR ")})`);
-      }
-      if (companyId) {
-        whereClauses.push("company_id = ?");
-        params.push(companyId);
-      }
-      if (whereClauses.length > 0) {
-        query += ` WHERE ${whereClauses.join(" AND ")}`;
-      }
-      query += " ORDER BY updated_at DESC";
-      const [rows] = await conn.query<any[]>(query, params);
-      res.json({ items: (rows || []).map(mapBankAccountRow) });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to fetch bank accounts.";
-      res.status(500).json({ message });
-    }
+  registerBankAccountRoutes(app, {
+    requireAuth,
+    populateUser,
+    isMySqlStateEnabled,
+    ensureBankAccountsTable,
+    getMySqlPool,
+    resolveRequestCompanyId,
+    mapBankAccountRow,
+    toNullableText,
+    randomUUID,
+    toSqlTimestamp,
+    firstString,
   });
 
-  app.post("/api/bank-accounts", requireAuth, populateUser, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    try {
-      await ensureBankAccountsTable();
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const body = (req.body || {}) as Record<string, unknown>;
-      const companyId = toNullableText(body.companyId) || (await resolveRequestCompanyId(req));
-      const id = body.id ? String(body.id).trim() : randomUUID();
-      const employeeId = body.employeeId ? String(body.employeeId).trim() : "";
-      const employeeName = body.employeeName ? String(body.employeeName).trim() : "";
-      const employeeEmail = body.employeeEmail ? String(body.employeeEmail).trim() : requestUser?.email || "";
-      const accountType = body.accountType ? String(body.accountType).trim() : "bank";
-      const dolibarrRef = body.dolibarrRef ? String(body.dolibarrRef).trim() : null;
-      const dolibarrLabel = body.dolibarrLabel ? String(body.dolibarrLabel).trim() : null;
-      const dolibarrType =
-        body.dolibarrType === "savings" || body.dolibarrType === "cash" ? String(body.dolibarrType) : "current";
-      const currencyCode = body.currencyCode ? String(body.currencyCode).trim().toUpperCase() : "INR";
-      const countryCode = body.countryCode ? String(body.countryCode).trim().toUpperCase() : "IN";
-      const parsedCountryId =
-        typeof body.countryId === "number" ? body.countryId : Number(String(body.countryId || ""));
-      const countryId = Number.isFinite(parsedCountryId) && parsedCountryId > 0 ? Math.trunc(parsedCountryId) : 117;
-      const status = body.status === "closed" ? "closed" : "open";
-      const bankName = body.bankName ? String(body.bankName).trim() : null;
-      const bankAddress = body.bankAddress ? String(body.bankAddress).trim() : null;
-      const accountNumber = body.accountNumber ? String(body.accountNumber).trim() : null;
-      const ifscCode = body.ifscCode ? String(body.ifscCode).trim() : null;
-      const upiId = body.upiId ? String(body.upiId).trim() : null;
-      const holderName = body.holderName ? String(body.holderName).trim() : null;
-      const website = body.website ? String(body.website).trim() : null;
-      const comment = body.comment ? String(body.comment).trim() : null;
-      const isDefault = body.isDefault ? 1 : 0;
-      const now = toSqlTimestamp(new Date());
-      await conn.execute(
-        `INSERT INTO \`lff_bank_accounts\`
-          (\`id\`, \`company_id\`, \`employee_id\`, \`employee_name\`, \`employee_email\`, \`account_type\`, \`dolibarr_ref\`, \`dolibarr_label\`, \`dolibarr_type\`, \`currency_code\`, \`country_code\`, \`country_id\`, \`status\`, \`bank_name\`, \`bank_address\`, \`account_number\`, \`ifsc_code\`, \`upi_id\`, \`holder_name\`, \`website\`, \`comment\`, \`is_default\`, \`created_at\`, \`updated_at\`)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           \`company_id\` = VALUES(\`company_id\`),
-           \`dolibarr_ref\` = VALUES(\`dolibarr_ref\`),
-           \`dolibarr_label\` = VALUES(\`dolibarr_label\`),
-           \`dolibarr_type\` = VALUES(\`dolibarr_type\`),
-           \`currency_code\` = VALUES(\`currency_code\`),
-           \`country_code\` = VALUES(\`country_code\`),
-           \`country_id\` = VALUES(\`country_id\`),
-           \`status\` = VALUES(\`status\`),
-           \`bank_name\` = VALUES(\`bank_name\`),
-           \`bank_address\` = VALUES(\`bank_address\`),
-           \`account_number\` = VALUES(\`account_number\`),
-           \`ifsc_code\` = VALUES(\`ifsc_code\`),
-           \`upi_id\` = VALUES(\`upi_id\`),
-           \`holder_name\` = VALUES(\`holder_name\`),
-           \`website\` = VALUES(\`website\`),
-           \`comment\` = VALUES(\`comment\`),
-           \`account_type\` = VALUES(\`account_type\`),
-           \`is_default\` = VALUES(\`is_default\`),
-           \`updated_at\` = VALUES(\`updated_at\`)`,
-        [
-          id,
-          companyId,
-          employeeId,
-          employeeName,
-          employeeEmail,
-          accountType,
-          dolibarrRef,
-          dolibarrLabel,
-          dolibarrType,
-          currencyCode,
-          countryCode,
-          countryId,
-          status,
-          bankName,
-          bankAddress,
-          accountNumber,
-          ifscCode,
-          upiId,
-          holderName,
-          website,
-          comment,
-          isDefault,
-          now,
-          now,
-        ]
-      );
-      res.status(201).json({ id, ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to save bank account.";
-      res.status(500).json({ message });
-    }
+  registerLeaveRoutes(app, {
+    getMySqlPool,
+    isMySqlStateEnabled,
+    requireAuth,
+    populateUser,
+    randomUUID,
+    toSqlDateOnly,
+    insertNotificationInMySql,
+    firstString,
+    getRequestUser,
+    normalizeWhitespace,
+    normalizeCompanyIds,
+    resolveRequestCompanyId,
+    listCompanyProfilesFromMySqlRaw,
+    ensureAccessRequestAssignmentColumns,
+    listAccessRequestsFromMySql,
+    normalizeEmail,
+    normalizeLoginKey,
+    isLegacyDemoProfileName,
+    normalizeRole,
+    isSalesRole,
+    normalizeDepartmentForRole,
+    DEFAULT_COMPANY_ID,
   });
-
-  app.delete("/api/bank-accounts/:id", requireAuth, populateUser, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    const accountId = firstString(req.params.id);
-    if (!accountId) {
-      res.status(400).json({ message: "Account id is required." });
-      return;
-    }
-    try {
-      await ensureBankAccountsTable();
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const companyId = await resolveRequestCompanyId(req);
-      // Non-admins can only delete their own accounts
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        const params: unknown[] = [accountId, requestUser?.email || ""];
-        let where = "`id` = ? AND `employee_email` = ?";
-        if (companyId) {
-          where += " AND `company_id` = ?";
-          params.push(companyId);
-        }
-        await conn.execute(
-          `DELETE FROM \`lff_bank_accounts\` WHERE ${where}`,
-          params
-        );
-      } else {
-        const params: unknown[] = [accountId];
-        let where = "`id` = ?";
-        if (companyId) {
-          where += " AND `company_id` = ?";
-          params.push(companyId);
-        }
-        await conn.execute(`DELETE FROM \`lff_bank_accounts\` WHERE ${where}`, params);
-      }
-      res.json({ id: accountId, ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to delete bank account.";
-      res.status(500).json({ message });
-    }
-  });
-
-  // ---------------------------------------------------------------------------
-  // Leave Management
-  // ---------------------------------------------------------------------------
-
-  let leaveTableEnsured = false;
-  async function ensureLeaveRequestsTable(): Promise<void> {
-    if (leaveTableEnsured) return;
-    const conn = await getMySqlPool();
-    await conn.execute(
-      `CREATE TABLE IF NOT EXISTS \`lff_leave_requests\` (
-        \`id\`                    VARCHAR(64) NOT NULL,
-        \`company_id\`            VARCHAR(64) NULL,
-        \`user_id\`               VARCHAR(64) NOT NULL,
-        \`user_name\`             VARCHAR(191) NOT NULL,
-        \`user_email\`            VARCHAR(191) NULL,
-        \`leave_date\`            DATE NOT NULL,
-        \`leave_end_date\`        DATE NULL,
-        \`leave_type\`            ENUM('planned','unplanned') NOT NULL,
-        \`is_half_day\`           TINYINT(1) NOT NULL DEFAULT 0,
-        \`leave_days\`            DECIMAL(3,1) NOT NULL DEFAULT 1.0,
-        \`note\`                  LONGTEXT NULL,
-        \`status\`                ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
-        \`reviewed_by_id\`        VARCHAR(64) NULL,
-        \`reviewed_by_name\`      VARCHAR(191) NULL,
-        \`reviewed_at\`           DATETIME NULL,
-        \`review_comment\`        LONGTEXT NULL,
-        \`dolibarr_holiday_id\`   BIGINT NULL,
-        \`created_at\`            DATETIME NOT NULL,
-        \`updated_at\`            DATETIME NOT NULL,
-        PRIMARY KEY (\`id\`),
-        KEY \`idx_lff_leave_user_date\` (\`user_id\`, \`leave_date\`),
-        KEY \`idx_lff_leave_status\` (\`status\`),
-        KEY \`idx_lff_leave_company\` (\`company_id\`),
-        KEY \`idx_lff_leave_dolibarr\` (\`dolibarr_holiday_id\`)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
-    );
-    leaveTableEnsured = true;
-  }
-
-  // Ensure App Config Table
-  async function ensureAppConfigTable() {
-    try {
-      const conn = await getMySqlPool();
-      await conn.execute(`
-        CREATE TABLE IF NOT EXISTS \`lff_app_config\` (
-          \`key\` VARCHAR(50) PRIMARY KEY,
-          \`value\` TEXT NOT NULL
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-      `);
-    } catch (e) {}
-  }
-  
-  ensureAppConfigTable();
-
-  function mapDolibarrLeaveStatus(statut: number): string {
-    if (statut === 1 || statut === 2) return "pending";
-    if (statut === 3) return "approved";
-    if (statut === 4 || statut === 5) return "rejected";
-    return "pending";
-  }
-
-  // GET /api/leaves
-  app.get("/api/leaves", requireAuth, populateUser, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      res.status(503).json({ message: "MySQL is not configured." });
-      return;
-    }
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const isPrivileged = ["admin", "hr", "manager"].includes(requestUser?.role || "");
-
-      let query = `
-        SELECT h.*, u.email as user_email, u.firstname, u.lastname
-        FROM \`nmy5_holiday\` h
-        LEFT JOIN \`nmy5_user\` u ON h.fk_user = u.rowid
-      `;
-      const whereClauses: string[] = [];
-      const params: unknown[] = [];
-
-      if (!isPrivileged) {
-        whereClauses.push("u.email = ?");
-        params.push(requestUser?.email || "");
-      }
-
-      if (whereClauses.length > 0) {
-        query += ` WHERE ${whereClauses.join(" AND ")}`;
-      }
-      query += " ORDER BY h.date_debut DESC LIMIT 500";
-
-      const [rows] = await conn.query<any[]>(query, params);
-      
-      const mapped = (rows || []).map(row => ({
-        id: String(row.rowid),
-        companyId: null,
-        userId: (requestUser?.email || "").trim().toLowerCase() === (row.user_email || "").trim().toLowerCase() ? String(requestUser?.id) : String(row.fk_user),
-        userName: `${row.firstname || ""} ${row.lastname || ""}`.trim(),
-        userEmail: row.user_email || "",
-        leaveDate: row.date_debut ? new Date(row.date_debut).toISOString().slice(0, 10) : "",
-        leaveEndDate: row.date_fin ? new Date(row.date_fin).toISOString().slice(0, 10) : null,
-        leaveType: Number(row.fk_type) === 4 ? "unplanned" : "planned",
-        isHalfDay: row.halfday > 0,
-        leaveDays: Number(row.nb_open_day || 1),
-        note: row.description || "",
-        status: mapDolibarrLeaveStatus(Number(row.statut)),
-        reviewedById: null,
-        reviewedByName: null,
-        reviewedAt: null,
-        reviewComment: null,
-        dolibarrHolidayId: row.rowid,
-        createdAt: row.date_create ? new Date(row.date_create).toISOString() : "",
-        updatedAt: row.date_create ? new Date(row.date_create).toISOString() : "",
-      }));
-
-      res.json({ items: mapped });
-    } catch (error) {
-      res.status(500).json({ message: "Error fetching leaves" });
-    }
-  });
-
-  
-  // GET /api/users
-  app.get("/api/users", requireAuth, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = getRequestUser(req);
-      const requestedCompanyId = normalizeWhitespace(
-        typeof req.query.companyId === "string" ? req.query.companyId : ""
-      );
-      const allowedCompanyIds = new Set(
-        normalizeCompanyIds(requestUser?.companyIds || (requestUser?.companyId ? [requestUser.companyId] : []))
-      );
-      const canUseRequestedCompany =
-        requestedCompanyId &&
-        (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
-      const companyId =
-        (canUseRequestedCompany ? requestedCompanyId : "") ||
-        (await resolveRequestCompanyId(req)) ||
-        requestUser?.companyId ||
-        DEFAULT_COMPANY_ID;
-      const companies = await listCompanyProfilesFromMySqlRaw();
-      const companyById = new Map(companies.map((company) => [company.id, company]));
-      try {
-        await ensureAccessRequestAssignmentColumns();
-      } catch {
-        // Continue with the current schema; the access request reader will handle missing data.
-      }
-
-      let userRows: any[] = [];
-      try {
-        [userRows] = await conn.query<any[]>(
-          `SELECT
-            u.rowid as id,
-            u.login,
-            u.firstname,
-            u.lastname,
-            u.email,
-            u.office_phone,
-            u.user_mobile,
-            u.admin,
-            u.employee,
-            u.job,
-            u.statut,
-            p.employee_category
-           FROM \`nmy5_user\` u
-           LEFT JOIN \`nmy5_hrm_employee_profile\` p ON p.fk_user = u.rowid
-           WHERE u.statut = 1`
-        );
-      } catch {
-        [userRows] = await conn.query<any[]>(
-          `SELECT
-            rowid as id,
-            login,
-            firstname,
-            lastname,
-            email,
-            office_phone,
-            user_mobile,
-            admin,
-            employee,
-            job,
-            statut,
-            NULL as employee_category
-           FROM \`nmy5_user\`
-           WHERE statut = 1`
-        );
-      }
-      const approvedRequests = await listAccessRequestsFromMySql("approved");
-      const requestByEmail = new Map<string, AccessRequestRecord>();
-      const requestByLogin = new Map<string, AccessRequestRecord>();
-      for (const r of approvedRequests) {
-        const emailKey = normalizeEmail(r.email || "");
-        const loginKey = normalizeLoginKey(emailKey.split("@")[0] || "");
-        if (emailKey && !requestByEmail.has(emailKey)) {
-          requestByEmail.set(emailKey, r);
-        }
-        if (loginKey && !requestByLogin.has(loginKey)) {
-          requestByLogin.set(loginKey, r);
-        }
-      }
-
-      const mappedByScope = new Map<string, Record<string, unknown>>();
-      for (const row of userRows || []) {
-        const email = normalizeEmail(String(row.email || ""));
-        const loginKey = normalizeLoginKey(String(row.login || ""));
-        
-        // Find matching access request to get company assignments
-        const request = (email && requestByEmail.get(email)) || (loginKey && requestByLogin.get(loginKey)) || null;
-        if (!request) continue;
-
-        const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
-        if (!assignedCompanyIds.length) continue;
-        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
-
-        const firstName = normalizeWhitespace(String(row.firstname || ""));
-        const lastName = normalizeWhitespace(String(row.lastname || ""));
-        const displayName =
-          normalizeWhitespace(request.name) ||
-          normalizeWhitespace(`${firstName} ${lastName}`) ||
-          normalizeWhitespace(String(row.login || "")) ||
-          email ||
-          "Employee";
-        if (isLegacyDemoProfileName(displayName)) continue;
-
-        // Dolibarr's admin flag is authoritative. Employee profile metadata must
-        // never downgrade an administrator into the attendance roster.
-        let role: string = Number(row.admin || 0) === 1 ? "admin" : "employee";
-        if (role !== "admin" && row.employee_category === "on_field") {
-          role = "salesperson";
-        } else if (role !== "admin" && row.employee_category === "fixed_location") {
-          role = "employee";
-        } else if (role !== "admin") {
-          // Fallback: decide from job title or the approved access request.
-          let mappedRole: string | null = null;
-          if (!mappedRole && row.job) {
-            const jobStr = String(row.job).toLowerCase();
-            if (jobStr.includes("on field") || jobStr.includes("sales")) {
-              mappedRole = "salesperson";
-            } else if (jobStr.includes("fixed") || jobStr.includes("office") || jobStr.includes("support") || jobStr.includes("hr")) {
-              mappedRole = "employee";
-            }
-          }
-          role = mappedRole || request.approvedRole || request.requestedRole || "salesperson";
-        }
-        const finalRole = normalizeRole(role);
-        const employeeCategory =
-          finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
-
-        const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
-        for (const assignedCompanyId of targetCompanyIds) {
-          const company = companyById.get(assignedCompanyId);
-          const id = row.id || `access_${request.id}`;
-          const key = `${assignedCompanyId}:${email || String(id) || displayName.toLowerCase()}`;
-          mappedByScope.set(key, {
-            id: String(id),
-            rowid: row.id ? String(row.id) : undefined,
-            user_id: row.id ? String(row.id) : undefined,
-            login: normalizeWhitespace(String(row.login || email.split("@")[0] || "")),
-            firstname: firstName || displayName.split(" ")[0] || "",
-            lastname: lastName || displayName.split(" ").slice(1).join(" ") || "",
-            name: displayName,
-            email,
-            phone: normalizeWhitespace(String(row.user_mobile || row.office_phone || "")),
-            town: "",
-            address: "",
-            zip: "",
-            statut: row.statut ?? 1,
-            status: row.statut ?? 1,
-            companyId: assignedCompanyId,
-            companyName:
-              company?.name ||
-              (assignedCompanyId === requestUser?.companyId ? requestUser?.companyName : "") ||
-              request.requestedCompanyName ||
-              assignedCompanyId,
-            assignedCompanyIds,
-            admin: Number(row.admin || 0),
-            employee: Number(row.employee || 0),
-            employeeCategory,
-            employee_category: employeeCategory,
-            role: finalRole,
-            department: normalizeDepartmentForRole(finalRole, request.requestedDepartment || row.job),
-            branch:
-              normalizeWhitespace(request.requestedBranch || "") ||
-              company?.primaryBranch ||
-              requestUser?.branch ||
-              "Main Branch",
-            managerId: request.assignedManagerId || undefined,
-            managerName: request.assignedManagerName || undefined,
-            stockistId: request.assignedStockistId || undefined,
-            stockistName: request.assignedStockistName || undefined,
-          });
-        }
-      }
-
-      res.json({ items: Array.from(mappedByScope.values()) });
-    } catch (e) {
-      res.json({ items: [] });
-    }
-  });
-
-  // POST /api/collective-leaves
-  app.post("/api/collective-leaves", requireAuth, populateUser, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        return res.status(403).json({ message: "Unauthorized" });
-      }
-      const body = req.body || {};
-      const userIds = Array.isArray(body.userIds) ? body.userIds : [];
-      if (userIds.length === 0) return res.status(400).json({ message: "No users selected" });
-
-      const startDate = body.startDate || "";
-      const endDate = body.endDate || startDate;
-      const startAmPm = body.startAmPm || "morning";
-      const endAmPm = body.endAmPm || "afternoon";
-      const fkType = body.leaveType === "unplanned" ? 4 : 1;
-      const note = (body.note || "").slice(0, 2000);
-      const fkValidator = Number(body.approvedBy) || 1;
-      const autoValidate = Boolean(body.autoValidate);
-      const statut = autoValidate ? 3 : 2;
-      
-      let halfday = 0;
-      if (startAmPm === "morning" && endAmPm === "afternoon") halfday = 0;
-      else if (startAmPm === "afternoon" && endAmPm === "afternoon") halfday = 1;
-      else if (startAmPm === "morning" && endAmPm === "morning") halfday = 2;
-      else if (startAmPm === "afternoon" && endAmPm === "morning") halfday = 3;
-
-      let insertedCount = 0;
-      for (const uid of userIds) {
-        const provRef = "(PROV" + Math.floor(Math.random() * 1000000) + ")";
-        await conn.execute(
-          "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_validator, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, 1)",
-          [provRef, Number(uid), requestUser?.id ? Number(requestUser.id) : null, fkValidator, fkType, startDate, endDate, halfday, statut, note]
-        );
-        insertedCount++;
-      }
-      res.status(201).json({ ok: true, count: insertedCount });
-    } catch (error) {
-      console.error("[Collective Leave Error]:", error);
-      res.status(500).json({ message: "Failed to create collective leaves" });
-    }
-  });
-
-// POST /api/leaves
-  app.post("/api/leaves", requireAuth, populateUser, async (req, res) => {
-    if (!isMySqlStateEnabled()) {
-      return res.status(503).json({ message: "MySQL is not configured." });
-    }
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      const body = req.body || {};
-      
-      const userEmail = body.userEmail ? String(body.userEmail).trim() : requestUser?.email || "";
-      const userName = body.userName ? String(body.userName).trim() : requestUser?.name || "";
-      const leaveDate = body.leaveDate ? String(body.leaveDate).trim() : "";
-      const leaveEndDate = body.leaveEndDate ? String(body.leaveEndDate).trim() : leaveDate;
-      const leaveType = body.leaveType === "unplanned" ? "unplanned" : "planned";
-      const note = body.note ? String(body.note).trim().slice(0, 2000) : "";
-      
-      const startAmPm = body.startAmPm || "morning";
-      const endAmPm = body.endAmPm || "afternoon";
-      const fkValidator = Number(body.approvedBy) || 1;
-      
-      let halfday = 0;
-      if (startAmPm === "morning" && endAmPm === "afternoon") halfday = 0;
-      else if (startAmPm === "afternoon" && endAmPm === "afternoon") halfday = 1;
-      else if (startAmPm === "morning" && endAmPm === "morning") halfday = 2;
-      else if (startAmPm === "afternoon" && endAmPm === "morning") halfday = 3;
-
-      const [uRows] = await conn.query<any[]>("SELECT rowid FROM \`nmy5_user\` WHERE email = ? LIMIT 1", [userEmail]);
-      if (!uRows || uRows.length === 0) {
-        return res.status(400).json({ message: "User not linked to Dolibarr." });
-      }
-      const fkUser = uRows[0].rowid;
-      const fkType = leaveType === "unplanned" ? 4 : 1;
-      const provRef = "(PROV" + Math.floor(Math.random() * 1000000) + ")";
-
-      const [insertRes] = await conn.execute(
-        "INSERT INTO \`nmy5_holiday\` (ref, entity, fk_user, fk_user_create, fk_validator, fk_type, date_create, date_debut, date_fin, halfday, statut, description, nb_open_day) VALUES (?, 1, ?, ?, ?, ?, NOW(), ?, ?, ?, 2, ?, 1)",
-        [provRef, fkUser, fkUser, fkValidator, fkType, leaveDate, leaveEndDate, halfday, note]
-      );
-      
-      const rowid = (insertRes as any).insertId;
-
-      res.status(201).json({
-        id: String(rowid),
-        companyId: null,
-        userId: String(requestUser?.id || fkUser),
-        userName,
-        userEmail,
-        leaveDate,
-        leaveEndDate,
-        leaveType,
-        isHalfDay: halfday !== 0,
-        leaveDays: 1,
-        note,
-        status: "pending",
-        reviewedById: null,
-        reviewedByName: null,
-        reviewedAt: null,
-        reviewComment: null,
-        dolibarrHolidayId: rowid,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error("[Leave POST Error]:", error);
-      const msg = error instanceof Error ? error.message : String(error);
-      res.status(500).json({ message: "Unable to create leave request. DB ERROR: " + msg });
-    }
-  });
-
-  // PUT /api/leaves/:id/status
-  app.put("/api/leaves/:id/status", requireAuth, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const body = req.body || {};
-      const newStatut = body.status === "approved" ? 3 : 5;
-      const leaveId = req.params.id;
-      
-      await conn.execute("UPDATE \`nmy5_holiday\` SET statut = ? WHERE rowid = ?", [newStatut, leaveId]);
-
-      res.json({ id: leaveId, status: body.status, ok: true });
-    } catch (error) {
-      res.status(500).json({ message: "Unable to update status." });
-    }
-  });
-
-  // DELETE /api/leaves/:id
-  app.delete("/api/leaves/:id", requireAuth, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const leaveId = req.params.id;
-      await conn.execute("DELETE FROM \`nmy5_holiday\` WHERE rowid = ?", [leaveId]);
-      res.json({ id: leaveId, ok: true });
-    } catch (error) {
-      res.status(500).json({ message: "Unable to delete request." });
-    }
-  });
-
-  // GET /api/leaves/summary
-  app.get("/api/leaves/summary", requireAuth, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>(`
-        SELECT 
-          u.email as userId,
-          CONCAT(u.firstname, ' ', u.lastname) as userName,
-          SUM(IF(h.fk_type = 1 AND h.statut = 3, h.nb_open_day, 0)) as totalPlannedMonth,
-          SUM(IF(h.fk_type = 4 AND h.statut = 3, h.nb_open_day, 0)) as totalUnplannedMonth,
-          SUM(IF(h.statut = 3, h.nb_open_day, 0)) as totalLeavesMonth
-        FROM \`nmy5_holiday\` h
-        JOIN \`nmy5_user\` u ON h.fk_user = u.rowid
-        WHERE MONTH(h.date_debut) = ? AND YEAR(h.date_debut) = ?
-        GROUP BY u.rowid
-      `, [req.query.month || new Date().getMonth() + 1, req.query.year || new Date().getFullYear()]);
-      res.json({ items: rows });
-    } catch (error) {
-      res.json({ items: [] });
-    }
-  });
-
-  // GET /api/public-holidays
-  app.get("/api/public-holidays", requireAuth, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT id, day, month, year, code, code as dayRule FROM `nmy5_c_hrm_public_holiday`");
-      res.json({ items: rows });
-    } catch (error) {
-      console.error("[GET /api/public-holidays] Error:", error);
-      res.json({ items: [] });
-    }
-  });
-
-  // POST /api/public-holidays
-  app.post("/api/public-holidays", requireAuth, populateUser, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        res.status(403).json({ message: "Unauthorized" });
-        return;
-      }
-      const body = req.body || {};
-      console.log("[POST /api/public-holidays] received body:", body);
-      
-      // Use ON DUPLICATE KEY UPDATE to handle the unique constraint uk_c_hrm_public_holiday
-      const [insertRes] = await conn.execute<any>(
-        "INSERT INTO `nmy5_c_hrm_public_holiday` (day, month, year, code) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE month = VALUES(month), year = VALUES(year)",
-        [body.day, body.month, body.year || 0, body.code || ""]
-      );
-
-      // Create and dispatch a broadcast notification to all users
-      const holidayDate = `${body.day}/${body.month}/${body.year || new Date().getFullYear()}`;
-      const notifId = `holiday_declared_${insertRes.insertId}_${Date.now()}`;
-      const notification: AppNotification = {
-        id: notifId,
-        title: "Public Holiday Declared",
-        body: `Admin ${requestUser.name || "Admin"} has declared ${holidayDate} as a Public Holiday.`,
-        kind: "announcement" as const,
-        audience: "all" as const,
-        audienceUserIds: [],
-        readByIds: [],
-        createdById: requestUser.id,
-        createdByName: requestUser.name || "Admin",
-        createdAt: new Date().toISOString(),
-      };
-
-      try {
-        await insertNotificationInMySql(notification);
-      } catch (err: any) {
-        console.error("Failed to insert public holiday notification:", err);
-      }
-
-      res.status(201).json({ id: insertRes.insertId, ...body });
-    } catch (error: any) {
-      console.error("[POST /api/public-holidays] INSERT FAILED:", error);
-      res.status(500).json({ message: `Unable to add holiday: ${error.message}` });
-    }
-  });
-
-  // DELETE /api/public-holidays/:id
-  app.delete("/api/public-holidays/:id", requireAuth, populateUser, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        res.status(403).json({ message: "Unauthorized" });
-        return;
-      }
-      console.log("[DELETE /api/public-holidays] deleting id:", req.params.id);
-      const [result] = await conn.execute<any>("DELETE FROM `nmy5_c_hrm_public_holiday` WHERE id = ?", [req.params.id]);
-      console.log("[DELETE /api/public-holidays] result:", result);
-      res.json({ id: req.params.id, ok: true });
-    } catch (error: any) {
-      console.error("[DELETE /api/public-holidays] FAILED:", error);
-      res.status(500).json({ message: `Unable to delete holiday: ${error.message}` });
-    }
-  });
-
-  // GET /api/weekend-config
-  app.get("/api/weekend-config", requireAuth, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const [rows] = await conn.query<any[]>("SELECT weekend_days FROM lff_companies LIMIT 1");
-      if (rows && rows.length > 0 && rows[0].weekend_days) {
-        res.json({ weekendDays: JSON.parse(rows[0].weekend_days) });
-      } else {
-        res.json({ weekendDays: [0] });
-      }
-    } catch (error) {
-      res.json({ weekendDays: [0] });
-    }
-  });
-
-  // POST /api/weekend-config
-  app.post("/api/weekend-config", requireAuth, populateUser, async (req, res) => {
-    try {
-      const conn = await getMySqlPool();
-      const requestUser = (req as any).user as AppUser;
-      if (!["admin", "hr", "manager"].includes(requestUser?.role || "")) {
-        res.status(403).json({ message: "Unauthorized" });
-        return;
-      }
-      const body = req.body || {};
-      const weekendDays = Array.isArray(body.weekendDays) ? body.weekendDays : [0];
-      
-      // Update all rows in lff_companies (usually just 1 tenant row)
-      await conn.execute("UPDATE lff_companies SET weekend_days = ?", [JSON.stringify(weekendDays)]);
-      
-      res.json({ weekendDays, ok: true });
-    } catch (error) {
-      console.error("Weekend save error", error);
-      res.status(500).json({ message: "Unable to update weekend config" });
-    }
-  });
-
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ noServer: true });
 
