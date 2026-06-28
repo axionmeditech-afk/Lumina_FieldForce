@@ -25,6 +25,7 @@ import {
   setApiToken,
   setAttendanceQueue,
 } from "@/lib/storage";
+import { beginGlobalLoading } from "@/lib/global-loading";
 
 const FALLBACK_API_BASE = "http://localhost:5000/api";
 const RELEASE_FALLBACK_API_BASE = "https://api.axionmeditech.com/api";
@@ -557,6 +558,8 @@ function buildBodyPreview(text: string): string {
 let cachedLastWorkingApiBase: string | null = null;
 
 async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const endGlobalLoading = beginGlobalLoading();
+  try {
   let apiBases = await getApiBaseUrlCandidates();
   if (cachedLastWorkingApiBase && apiBases.includes(cachedLastWorkingApiBase)) {
     apiBases = [cachedLastWorkingApiBase, ...apiBases.filter((b) => b !== cachedLastWorkingApiBase)];
@@ -653,6 +656,9 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new Error(`Backend request rejected across API bases. Tried: ${applicationFailures.join(" | ")}`);
   }
   throw new Error("Backend request failed.");
+  } finally {
+    endGlobalLoading();
+  }
 }
 
 interface AuthRequestOptions {

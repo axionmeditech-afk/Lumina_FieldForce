@@ -1404,15 +1404,17 @@ export default function RouteTrackingScreen() {
     return [...events].sort((a, b) => a.at.localeCompare(b.at))[events.length - 1];
   }, [timeline?.attendanceEvents]);
   const hasRoutePoints = (timeline?.points?.length ?? 0) > 0;
+  const isTodayRoute = selectedDate === toMumbaiDateKey(new Date());
   const isTrackingVisible = latestAttendanceEvent?.type === "checkin";
   const isCheckedOutView = latestAttendanceEvent?.type === "checkout";
-  const shouldShowMapStatusOverlay = !isTrackingVisible && !hasRoutePoints;
+  const shouldShowMapStatusOverlay = isTodayRoute && !isTrackingVisible && !hasRoutePoints;
   const mapStatusTitle = isCheckedOutView ? "Checked Out" : "Not Checked In";
   const mapStatusText = isCheckedOutView
     ? `${selectedEmployee?.name || "This salesperson"} checked out${
         latestAttendanceEvent?.at ? ` at ${toTime(latestAttendanceEvent.at)}` : ""
       }. Showing the route captured between check-in and check-out.`
     : `${selectedEmployee?.name || "This salesperson"} is not checked in for this date.`;
+  const historicalNoRouteText = "No GPS route points were captured for this date.";
 
   if (!canViewTracking) {
     return (
@@ -1653,7 +1655,7 @@ export default function RouteTrackingScreen() {
           <View style={[styles.infoWrap, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <Ionicons name="pulse-outline" size={16} color={colors.secondary} />
             <Text style={[styles.infoText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
-              Live log view: {summary.rawPointCount} GPS samples processed into {summary.pointCount} map points.
+              {isTodayRoute ? "Live log view" : "Historical route view"}: {summary.rawPointCount} GPS samples processed into {summary.pointCount} map points.
             </Text>
           </View>
         ) : null}
@@ -1741,13 +1743,19 @@ export default function RouteTrackingScreen() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.currentLocationTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
-              {isTrackingVisible ? "Current Location" : hasRoutePoints ? "Last Route Point" : "Attendance Status"}
+              {isTodayRoute && isTrackingVisible
+                ? "Current Location"
+                : hasRoutePoints
+                  ? "Last Route Point"
+                  : "Route History"}
             </Text>
             <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               {latestRoutePoint
                 ? `${latestRoutePoint.locationName || latestRoutePoint.geofenceName || "Resolving location..."} | ${toTime(
                     latestRoutePoint.at
                   )}${latestRoutePoint.battery ? ` | ${latestRoutePoint.battery}` : ""}`
+                : !isTodayRoute
+                ? historicalNoRouteText
                 : !isTrackingVisible
                 ? mapStatusText
                 : "Waiting for live GPS point..."}
@@ -1768,7 +1776,9 @@ export default function RouteTrackingScreen() {
                 Attendance Window
               </Text>
               <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                Kept separate from route movement so historical tracking stays clean.
+                {isTodayRoute
+                  ? "Live check-in and check-out status for today."
+                  : "Check-in and check-out status for this route date."}
               </Text>
             </View>
           </View>

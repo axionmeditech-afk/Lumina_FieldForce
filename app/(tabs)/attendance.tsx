@@ -102,7 +102,16 @@ const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
 const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
-const ADMIN_ATTENDANCE_REFRESH_MS = 15 * 1000;
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
+const ADMIN_ATTENDANCE_REFRESH_MS = readPositiveIntegerEnv(
+  "EXPO_PUBLIC_ATTENDANCE_REFRESH_MS",
+  5 * 1000
+);
 
 type BannerType = "inside" | "outside" | "weak" | "boundary" | "loading";
 
@@ -691,23 +700,27 @@ export default function AttendanceScreen() {
     if (!user?.id) return;
     const requestId = ++loadBaseDataRequestRef.current;
     const shouldLoadRoster = canReviewSignIns || isAdminAttendanceManager;
+    const dateKey = selectedDate;
+    const companyId = company?.id || undefined;
 
     // SVR Cache Phase
     if (isAdminAttendanceManager) {
       try {
-        const cacheKey = `@attendance_cache_status_${company?.id}_${selectedDate}`;
-        const rosterKey = `@attendance_cache_roster_${company?.id}`;
+        const cacheKey = `@attendance_cache_status_${companyId || "workspace"}_${dateKey}`;
+        const rosterKey = `@attendance_cache_roster_${companyId || "workspace"}`;
         const [cachedStatusRaw, cachedRosterRaw] = await Promise.all([
           AsyncStorage.getItem(cacheKey),
           AsyncStorage.getItem(rosterKey),
         ]);
         if (requestId === loadBaseDataRequestRef.current) {
-          let cachedRecords = [];
-          let cachedEmployees = [];
+          let cachedRecords: AttendanceRecord[] = [];
+          let cachedEmployees: Employee[] = [];
           if (cachedStatusRaw) cachedRecords = JSON.parse(cachedStatusRaw);
           if (cachedRosterRaw) cachedEmployees = JSON.parse(cachedRosterRaw);
-          if (cachedRecords.length > 0 || cachedEmployees.length > 0) {
-            setAdminAttendanceStatuses(buildAdminAttendanceStatuses(cachedRecords, cachedEmployees, user.id, selectedDate));
+          if (cachedEmployees.length > 0) {
+            setAdminAttendanceStatuses(buildAdminAttendanceStatuses(cachedRecords, cachedEmployees, user.id, dateKey));
+          } else {
+            setAdminAttendanceStatuses([]);
           }
         }
       } catch (e) {
@@ -718,11 +731,11 @@ export default function AttendanceScreen() {
     const [localAttendance, companyAttendance, currentCheckIn, employees] = await Promise.all([
       getAttendance(),
       isAdminAttendanceManager
-        ? getCompanyAttendanceToday(company?.id || undefined, selectedDate).catch(() => [] as AttendanceRecord[])
+        ? getCompanyAttendanceToday(companyId, dateKey).catch(() => [] as AttendanceRecord[])
         : Promise.resolve([] as AttendanceRecord[]),
       isCheckedIn(),
       shouldLoadRoster
-        ? loadAttendanceRoster({ id: company?.id, name: company?.name }).catch(() => [] as Employee[])
+        ? loadAttendanceRoster({ id: companyId, name: company?.name }).catch(() => [] as Employee[])
         : Promise.resolve([] as Employee[]),
     ]);
     if (requestId !== loadBaseDataRequestRef.current) return;
@@ -732,17 +745,17 @@ export default function AttendanceScreen() {
       (entry) =>
         (entry.userId === user.id ||
         normalizeAttendanceIdentity(entry.userName) === normalizeAttendanceIdentity(user.name)) &&
-        toMumbaiDateKey(entry.timestamp) === selectedDate
+        toMumbaiDateKey(entry.timestamp) === dateKey
     );
     setRecords(userRecords);
 
     if (shouldLoadRoster) {
       if (isAdminAttendanceManager) {
-        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id, selectedDate));
+        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id, dateKey));
         // Save SVR Cache
         try {
-          const cacheKey = `@attendance_cache_status_${company?.id}_${selectedDate}`;
-          const rosterKey = `@attendance_cache_roster_${company?.id}`;
+          const cacheKey = `@attendance_cache_status_${companyId || "workspace"}_${dateKey}`;
+          const rosterKey = `@attendance_cache_roster_${companyId || "workspace"}`;
           await Promise.all([
             AsyncStorage.setItem(cacheKey, JSON.stringify(companyAttendance)),
             AsyncStorage.setItem(rosterKey, JSON.stringify(employees)),
@@ -759,6 +772,7 @@ export default function AttendanceScreen() {
         const pending = localAttendance
           .filter((entry) => {
             if (entry.type !== "checkin") return false;
+            if (toMumbaiDateKey(entry.timestamp) !== dateKey) return false;
             if ((entry.approvalStatus ?? "approved") !== "pending") return false;
             if (entry.userId === user.id) return false;
             const matchedEmployee =
@@ -802,8 +816,13 @@ export default function AttendanceScreen() {
   }, [canReviewSignIns, isAdminAttendanceManager, loadBaseData, user?.id]);
 
   useEffect(() => {
+    setRecords([]);
+    setPendingSignIns([]);
+    if (isAdminAttendanceManager) {
+      setAdminAttendanceStatuses([]);
+    }
     void loadBaseData();
-  }, [selectedDate, loadBaseData]);
+  }, [isAdminAttendanceManager, selectedDate, loadBaseData]);
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
@@ -2140,17 +2159,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
         {isAdminAttendanceManager ? (
           <>
-          <View style={[styles.adminNoticePanel, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-            <View style={[styles.adminNoticeIcon, { backgroundColor: colors.primary + "18" }]}>
-              <Ionicons name="shield-checkmark-outline" size={24} color={colors.primary} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.adminNoticeTitle, { color: colors.text }]}>Admin attendance is not required</Text>
-              <Text style={[styles.adminNoticeText, { color: colors.textSecondary }]}>
-                Employee check-in is controlled by company geofences configured during company creation.
-              </Text>
-            </View>
-          </View>
           <View style={styles.adminAttendanceSection}>
             <View style={styles.adminAttendanceHeader}>
               <Text style={[styles.logsTitle, { color: colors.text, marginTop: 0, marginBottom: 0 }]}>
@@ -2275,7 +2283,11 @@ setOfficeLocationName((current) => current.trim() || result.label);
                                     </Text>
                                   </View>
                                   <Text style={[styles.logMeta, { color: colors.textSecondary }]}>
-                                    {metaParts.length ? metaParts.join(" | ") : "No check-in or checkout today"}
+                                    {metaParts.length
+                                      ? metaParts.join(" | ")
+                                      : selectedDate === toMumbaiDateKey(new Date())
+                                        ? "No check-in or checkout today"
+                                        : "No check-in or checkout for this date"}
                                     {approvalLabel ? ` | ${approvalLabel}` : ""}
                                   </Text>
                                 </View>
@@ -3254,4 +3266,3 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 });
-

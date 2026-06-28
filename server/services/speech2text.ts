@@ -39,7 +39,7 @@ const DEFAULT_FALLBACK_MODEL =
   process.env.HF_STT_FALLBACK_MODEL?.trim() || "openai/whisper-large-v3";
 const DEFAULT_PROVIDER_ORDER = (
   process.env.SPEECH_TO_TEXT_PROVIDER_ORDER?.trim() ||
-  "gemini"
+  "google"
 ).toLowerCase();
 const LOCAL_STT_ENABLED =
   (process.env.LOCAL_STT_ENABLED?.trim() || "true").toLowerCase() !== "false";
@@ -73,8 +73,17 @@ const GEMINI_TIMEOUT_MS = Math.max(
   Number(process.env.GEMINI_TIMEOUT_MS || 120_000)
 );
 const GOOGLE_TIMEOUT_MS = Math.max(
-  20_000,
-  Number(process.env.GOOGLE_TIMEOUT_MS || 120_000)
+  120_000,
+  Number(process.env.GOOGLE_TIMEOUT_MS || process.env.SPEECH_TRANSCRIBE_TIMEOUT_MS || 900_000)
+);
+const GOOGLE_STT_PHRASE_HINTS = (process.env.GOOGLE_STT_PHRASE_HINTS || "")
+  .split(/[,;\n]/)
+  .map((entry) => entry.trim())
+  .filter(Boolean)
+  .slice(0, 500);
+const GOOGLE_STT_PHRASE_BOOST = Math.max(
+  0,
+  Math.min(20, Number(process.env.GOOGLE_STT_PHRASE_BOOST || 12))
 );
 
 type SpeechProvider = "google" | "groq" | "gemini" | "revup" | "local_python" | "huggingface";
@@ -214,12 +223,6 @@ function parseProviderOrder(input: string): SpeechProvider[] {
   }
   if (!providers.length) {
     providers.push("gemini");
-  }
-  if (providers.includes("gemini")) {
-    return ["gemini", ...providers.filter((provider) => provider !== "gemini")];
-  }
-  if (providers.includes("groq")) {
-    return ["groq", ...providers.filter((provider) => provider !== "groq")];
   }
   return providers;
 }
@@ -872,9 +875,12 @@ async function callGeminiModel(params: {
     `:generateContent?key=${encodeURIComponent(params.apiKey)}`;
   const base64Audio = params.audio.toString("base64");
   const promptLines = [
-    "Transcribe this audio accurately.",
-    "Return only transcript text.",
-    "Do not include markdown or explanations.",
+    "Transcribe this sales meeting audio verbatim and accurately.",
+    "Preserve product names, medical/technical terms, quantities, dimensions, prices, dates, and follow-up commitments exactly when audible.",
+    "Handle Indian English, Hindi, and Hinglish naturally; do not translate unless the speaker translates.",
+    "Do not summarize, paraphrase, clean up meaning, or invent inaudible words.",
+    "If a word is unclear, write [unclear] instead of guessing.",
+    "Return only transcript text with no markdown or explanations.",
   ];
   if (params.languageCode?.trim()) {
     promptLines.push(`Preferred language: ${params.languageCode.trim()}.`);
@@ -1085,7 +1091,19 @@ async function callGoogleSpeechModel(params: {
 
   const config: any = {
     languageCode: params.languageCode?.trim() || "en-US",
+    enableAutomaticPunctuation: true,
+    useEnhanced: true,
+    model: "latest_long",
   };
+
+  if (GOOGLE_STT_PHRASE_HINTS.length > 0) {
+    config.speechContexts = [
+      {
+        phrases: GOOGLE_STT_PHRASE_HINTS,
+        boost: GOOGLE_STT_PHRASE_BOOST,
+      },
+    ];
+  }
 
   const lowerMime = params.mimeType.toLowerCase();
   if (lowerMime.includes("webm")) {
@@ -1128,7 +1146,20 @@ async function callGoogleSpeechModel(params: {
       // For large files, use longRunningRecognize and wait for completion.
       // This will take time but bypasses the 1-minute synchronous limit.
       const [operation] = await client.longRunningRecognize(request);
-      [response] = await operation.promise();
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      try {
+        [response] = await Promise.race([
+          operation.promise(),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Speech2TextError("Google long-running STT request timed out.", 504)),
+              GOOGLE_TIMEOUT_MS
+            );
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
       
       // Cleanup the temporary file from GCS
       try {

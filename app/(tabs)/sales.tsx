@@ -187,7 +187,16 @@ type RoutePlannerStop = {
   source?: "location" | "customer";
   customerId?: string | null;
 };
-const FALLBACK_SEGMENT_MS = 2500;
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
+const FALLBACK_SEGMENT_MS = readPositiveIntegerEnv(
+  "EXPO_PUBLIC_SALES_AI_TRANSCRIBE_CHUNK_MS",
+  15_000
+);
 const FALLBACK_POLL_MS = 100;
 const LIVE_HINT_RESTART_DELAY_MS = 180;
 const TRANSCRIBE_LOADING_RETRY_DELAY_MS = 800;
@@ -1072,12 +1081,16 @@ const useSpeechRecognitionEvent: SpeechRecognitionHook =
   speechPackage?.useSpeechRecognitionEvent ?? (() => {});
 const DEFAULT_S2T_MODEL =
   (
+    process.env.EXPO_PUBLIC_SALES_AI_STT_MODEL ||
     process.env.EXPO_PUBLIC_GEMINI_MODEL ||
     process.env.GEMINI_MODEL ||
     "gemini-2.5-flash-lite"
   ).trim();
 let preferredSpeechApiBase: string | null = null;
-const DEFAULT_STT_PROVIDER_ORDER = "gemini";
+const DEFAULT_STT_PROVIDER_ORDER =
+  (process.env.EXPO_PUBLIC_SALES_AI_STT_PROVIDER_ORDER || "google").trim();
+const DEFAULT_STT_LANGUAGE_CODE =
+  (process.env.EXPO_PUBLIC_SALES_AI_STT_LANGUAGE_CODE || "en-IN").trim();
 const FORCE_SERVER_TRANSCRIPTION = false;
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
 const SPEECH_API_HEALTH_CACHE_TTL_MS = 45_000;
@@ -1375,8 +1388,10 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
     model: DEFAULT_S2T_MODEL,
     provider: DEFAULT_STT_PROVIDER_ORDER,
     with_diarization: "1",
-    with_timestamps: "0",
-    mode: "fast",
+    with_timestamps: "1",
+    language_code: DEFAULT_STT_LANGUAGE_CODE,
+    num_speakers: "2",
+    mode: "accurate",
   });
 
   const apiBaseCandidates = await getApiBaseUrlCandidates();
@@ -1480,6 +1495,15 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
     );
   }
   throw new Error("Speech-to-text service unavailable.");
+}
+
+function shouldUseFinalTranscript(currentTranscript: string, candidateTranscript: string): boolean {
+  const current = sanitizeConversationTranscript(currentTranscript);
+  const candidate = sanitizeConversationTranscript(candidateTranscript);
+  if (!candidate) return false;
+  if (!current) return true;
+  if (candidate.length >= current.length) return true;
+  return candidate.length >= Math.max(40, Math.floor(current.length * 0.85));
 }
 
 async function analyzeConversationWithBackendAIForMeeting(input: {
@@ -4775,6 +4799,29 @@ export default function SalesScreen() {
         const salespersonName = user?.name ?? "Sales Rep";
         const salespersonId = user?.id ?? "sales_unknown";
         const persistedAudioUri = await persistConversationAudioUri(audioUri);
+        let transcriptStatus: Conversation["transcriptStatus"] = "completed";
+        let transcriptionError: string | null = null;
+        if (persistedAudioUri) {
+          setInterimTranscript("Generating final transcript...");
+          try {
+            const finalServerTranscript = sanitizeConversationTranscript(
+              await transcribeAudioWithSpeechApi(persistedAudioUri)
+            );
+            if (shouldUseFinalTranscript(finalTranscript, finalServerTranscript)) {
+              finalTranscript = finalServerTranscript;
+              finalSegmentsRef.current = finalTranscript ? [finalTranscript] : [];
+              setTranscriptDraft(finalTranscript);
+            } else {
+              transcriptionError =
+                "Final STT result was shorter than the live draft, so the safer live transcript was preserved.";
+            }
+          } catch (error) {
+            transcriptStatus = finalTranscript ? "completed" : "failed";
+            transcriptionError = getErrorMessage(error, "Final transcription failed.");
+          } finally {
+            setInterimTranscript("");
+          }
+        }
         const playableAudioUri = await uploadConversationAudioToRemote(persistedAudioUri);
         const conversation = buildConversationFromTranscript({
           salespersonId,
@@ -4784,6 +4831,8 @@ export default function SalesScreen() {
           durationMs: elapsedMs,
           audioUri: playableAudioUri,
         });
+        conversation.transcriptStatus = transcriptStatus;
+        conversation.transcriptionError = transcriptionError;
 
         await addConversation(conversation);
         setConversations((current) => mergeConversationsById(current, [conversation]));

@@ -6,6 +6,7 @@ import { StatusBar } from "expo-status-bar";
 import { Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { GlobalBackendLoader } from "@/components/GlobalBackendLoader";
 import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ThemeProvider, useAppTheme } from "@/contexts/ThemeContext";
@@ -164,6 +165,7 @@ function AppShell() {
       <KeyboardProviderSafe>
         <StatusBar style={isDark ? "light" : "dark"} />
         <RootLayoutNav />
+        <GlobalBackendLoader />
       </KeyboardProviderSafe>
     </GestureHandlerRootView>
   );
