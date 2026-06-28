@@ -93,6 +93,15 @@ export function broadcastAttendanceUpdate(record: AttendanceRecord) {
   }
 }
 
+export function broadcastLocationUpdate(log: LocationLog) {
+  const message = JSON.stringify({ type: "location_update", log });
+  for (const client of adminWsClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
+
 
 const MAX_LOCATION_ACCURACY_METERS = 120;
 const MAX_EVIDENCE_AGE_MS = 2 * 60 * 1000;
@@ -8125,6 +8134,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     syncAttendanceWithDolibarr,
     insertNotificationInMySql,
     listAttendanceHistoryFromMySql,
+    broadcastLocationUpdate,
   });
 
   registerLocationRoutes(app, {

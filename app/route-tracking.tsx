@@ -22,6 +22,7 @@ import {
   getAdminLiveMapPoints,
   getAdminLiveMapRoutes,
   getAdminRouteTimeline,
+  getApiBaseUrlCandidates,
   getRemoteState,
   type LiveMapPoint,
   type AdminRouteTimelineResponse,
@@ -48,6 +49,7 @@ import {
   addLocationLog,
   getAttendance,
   getAttendanceAnomalies,
+  getApiToken,
   getLocationLogs,
   getTasks,
 } from "@/lib/storage";
@@ -71,6 +73,25 @@ function toBatteryLabel(value: number | null | undefined): string | null {
 
 function toLocationKey(latitude: number, longitude: number): string {
   return `${latitude.toFixed(4)}_${longitude.toFixed(4)}`;
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
+function getAdminTrackingWsUrl(apiBase: string, token: string): string | null {
+  try {
+    const url = new URL(apiBase);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const basePath = url.pathname.replace(/\/+$/, "");
+    url.pathname = `${basePath}/ws/attendance`;
+    url.searchParams.set("token", token);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function formatReverseGeocodeName(
@@ -489,7 +510,10 @@ export default function RouteTrackingScreen() {
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
   const resolvingLocationKeysRef = useRef(new Set<string>());
-  const LIVE_REFRESH_INTERVAL_MS = 15 * 1000;
+  const LIVE_REFRESH_INTERVAL_MS = readPositiveIntegerEnv(
+    "EXPO_PUBLIC_ROUTE_TRACKING_REFRESH_MS",
+    5 * 1000
+  );
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "osm")
     .trim()
@@ -1075,6 +1099,125 @@ export default function RouteTrackingScreen() {
     selectedUserId,
     shouldAutoRefreshTimeline,
     LIVE_REFRESH_INTERVAL_MS,
+  ]);
+
+  useEffect(() => {
+    if (!selectedUserId || !canViewTracking || authExpired || selectedDate !== toMumbaiDateKey(new Date())) {
+      return undefined;
+    }
+
+    let ws: WebSocket | null = null;
+    let closed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    let lastRefreshAt = 0;
+
+    const watchedUserIds = new Set(
+      buildUserIdCandidates(selectedUserId, selectedEmployee?.id, user?.id)
+    );
+
+    const requestLiveRefresh = () => {
+      const now = Date.now();
+      const elapsed = now - lastRefreshAt;
+      if (elapsed >= 1200) {
+        lastRefreshAt = now;
+        void loadTimeline();
+        return;
+      }
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        lastRefreshAt = Date.now();
+        void loadTimeline();
+      }, 1200 - elapsed);
+    };
+
+    const scheduleReconnect = () => {
+      if (closed) return;
+      const delay = Math.min(1000 * 2 ** attempt, 30000);
+      attempt += 1;
+      reconnectTimer = setTimeout(() => {
+        void connect(0);
+      }, delay);
+    };
+
+    const connect = async (candidateIndex = 0) => {
+      try {
+        const [token, apiBases] = await Promise.all([getApiToken(), getApiBaseUrlCandidates()]);
+        if (closed) return;
+        if (!token) {
+          scheduleReconnect();
+          return;
+        }
+
+        const wsUrls = apiBases
+          .map((apiBase) => getAdminTrackingWsUrl(apiBase, token))
+          .filter((url): url is string => Boolean(url));
+        if (!wsUrls.length) {
+          scheduleReconnect();
+          return;
+        }
+
+        const wsUrl = wsUrls[Math.min(candidateIndex, wsUrls.length - 1)];
+        ws = new WebSocket(wsUrl);
+        let opened = false;
+        const openTimeout = setTimeout(() => {
+          if (!opened) ws?.close();
+        }, 8000);
+
+        ws.onopen = () => {
+          opened = true;
+          clearTimeout(openTimeout);
+          attempt = 0;
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(String(event.data || "{}"));
+            if (data?.type !== "location_update") return;
+            const userId = typeof data?.log?.userId === "string" ? data.log.userId : "";
+            if (!watchedUserIds.has(userId)) return;
+            requestLiveRefresh();
+          } catch {
+            // Ignore malformed websocket payloads.
+          }
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+
+        ws.onclose = () => {
+          clearTimeout(openTimeout);
+          if (closed) return;
+          if (!opened && candidateIndex + 1 < wsUrls.length) {
+            void connect(candidateIndex + 1);
+            return;
+          }
+          scheduleReconnect();
+        };
+      } catch {
+        scheduleReconnect();
+      }
+    };
+
+    void connect(0);
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      ws?.close();
+    };
+  }, [
+    authExpired,
+    canViewTracking,
+    loadTimeline,
+    selectedDate,
+    selectedEmployee?.id,
+    selectedUserId,
+    user?.id,
   ]);
 
   useEffect(() => {

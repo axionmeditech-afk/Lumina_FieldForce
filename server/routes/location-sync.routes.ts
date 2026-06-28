@@ -22,6 +22,7 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
     syncAttendanceWithDolibarr,
     insertNotificationInMySql,
     listAttendanceHistoryFromMySql,
+    broadcastLocationUpdate,
   } = deps;
 
   app.post("/api/location/log", requireAuth, async (req, res) => {
@@ -73,6 +74,7 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
     } catch (error) {
       console.error("Failed to persist location log in MySQL", error);
     }
+    broadcastLocationUpdate?.(log);
     res.status(201).json({ ok: true, inside: status.inside, zone: status.activeZone?.name ?? null });
   });
 
@@ -267,6 +269,9 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
       await insertLocationLogsInMySql(logsToPersist);
     } catch (error) {
       console.error("Failed to persist location log batch in MySQL", error);
+    }
+    for (const log of logsToPersist) {
+      broadcastLocationUpdate?.(log);
     }
 
     res.status(201).json({

@@ -14,8 +14,21 @@ import {
 const BACKGROUND_LOCATION_TASK = "trackforce-background-location-task-v1";
 const BACKGROUND_QUEUE_KEY = "@trackforce_background_location_queue";
 const MAX_BATCH_SIZE = 25;
-const BACKGROUND_LOCATION_INTERVAL_MS = 2 * 60 * 1000;
-const BACKGROUND_LOCATION_DISTANCE_METERS = 0;
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
+}
+
+const BACKGROUND_LOCATION_INTERVAL_MS = readPositiveIntegerEnv(
+  "EXPO_PUBLIC_FIELD_FORCE_LOCATION_INTERVAL_MS",
+  15 * 1000
+);
+const BACKGROUND_LOCATION_DISTANCE_METERS = readPositiveIntegerEnv(
+  "EXPO_PUBLIC_FIELD_FORCE_LOCATION_DISTANCE_METERS",
+  5
+);
 
 interface QueuedLocationPoint {
   userId: string;
@@ -243,6 +256,7 @@ export async function ensureBackgroundLocationTracking(): Promise<{
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.BestForNavigation,
       timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
+      distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
       pausesUpdatesAutomatically: false,
       showsBackgroundLocationIndicator: true,
       activityType: Location.ActivityType.OtherNavigation,
