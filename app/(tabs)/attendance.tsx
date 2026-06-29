@@ -102,6 +102,9 @@ const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
 const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
+const AUTO_CHECKOUT_ON_GEOFENCE_EXIT =
+  (process.env.EXPO_PUBLIC_AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "false").trim().toLowerCase() === "true";
+
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -1132,8 +1135,8 @@ export default function AttendanceScreen() {
       setGpsLoading(false);
       setLocationReady(true);
 
-      // AUTO CHECKOUT: if checked in, but GPS is confirmed >500m away with good accuracy
       const canTriggerAutoCheckout =
+        AUTO_CHECKOUT_ON_GEOFENCE_EXIT &&
         checkedInState &&
         isOfficeGeofenceAttendance &&
         geofencesLoaded &&

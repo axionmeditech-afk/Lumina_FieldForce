@@ -3,6 +3,9 @@ import type { AttendanceRecord, Geofence, LocationLog } from "@/lib/types";
 
 export type LocationSyncRouteDeps = Record<string, any>;
 
+const AUTO_CHECKOUT_ON_GEOFENCE_EXIT =
+  (process.env.AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "false").trim().toLowerCase() === "true";
+
 export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRouteDeps) {
   const {
     requireAuth,
@@ -141,7 +144,7 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
         resolvedZones
       );
 
-      // --- Auto-Checkout Logic ---
+      // --- Auto-checkout / reminder logic ---
       try {
         let activeAttendance = activeAttendanceCache.get(entry.userId);
         if (!activeAttendanceCache.has(entry.userId)) {
@@ -150,7 +153,7 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
             : await storage.findActiveAttendance(entry.userId);
           activeAttendanceCache.set(entry.userId, activeAttendance ?? null);
         }
-        if (activeAttendance) {
+        if (activeAttendance && AUTO_CHECKOUT_ON_GEOFENCE_EXIT) {
           // Verify that the location log was captured AFTER the active check-in
           const logTime = entry.capturedAt ? new Date(entry.capturedAt).getTime() : Date.now();
           const checkInTime = new Date(activeAttendance.timestamp).getTime();

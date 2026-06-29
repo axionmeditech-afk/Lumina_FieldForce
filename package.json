@@ -90,6 +90,7 @@
   "devDependencies": {
     "@babel/core": "^7.25.2",
     "@expo/ngrok": "^4.1.0",
+    "@react-native-community/cli": "^20.2.0",
     "@types/express": "^5.0.0",
     "@types/fs-extra": "^11.0.4",
     "@types/react": "~19.1.10",

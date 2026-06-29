@@ -515,7 +515,7 @@ export default function RouteTrackingScreen() {
     5 * 1000
   );
   const isExpoGo = Constants.appOwnership === "expo";
-  const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "osm")
+  const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "google")
     .trim()
     .toLowerCase();
   const mapProvider =

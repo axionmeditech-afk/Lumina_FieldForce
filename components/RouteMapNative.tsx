@@ -747,7 +747,7 @@ export function RouteMapNative({
 }: RouteMapNativeProps) {
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (
-    process.env.EXPO_PUBLIC_MAP_PROVIDER || "osm"
+    process.env.EXPO_PUBLIC_MAP_PROVIDER || "google"
   )
     .trim()
     .toLowerCase();
