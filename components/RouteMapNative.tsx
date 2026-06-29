@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, Easing, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import MapView, {
+  Circle,
   Marker,
   Polyline,
   PROVIDER_GOOGLE,
@@ -873,6 +874,7 @@ export function RouteMapNative({
     () => points.slice(1, -1).filter(isValidLocationPoint),
     [points]
   );
+  const routeSamplePoints = useMemo(() => points.filter(isValidLocationPoint), [points]);
   const trackingPoints = useMemo(() => points.filter(isValidLocationPoint), [points]);
   const trackingStartPoint = trackingPoints[0];
   const trackingEndPoint = trackingPoints[trackingPoints.length - 1];
@@ -1931,6 +1933,27 @@ export function RouteMapNative({
             </MapplsGL.PointAnnotation>
           ) : null}
 
+          {routeSamplePoints.map((point, idx) => (
+            <MapplsGL.PointAnnotation
+              key={`route_sample_${point.id}_${idx}`}
+              id={`route_sample_${idx}`}
+              coordinate={[point.longitude, point.latitude]}
+            >
+              <View
+                style={[
+                  styles.pointDot,
+                  {
+                    backgroundColor:
+                      idx === routeSamplePoints.length - 1 ? colors.primary : colors.secondary,
+                    width: idx === routeSamplePoints.length - 1 ? 12 : 8,
+                    height: idx === routeSamplePoints.length - 1 ? 12 : 8,
+                    borderRadius: idx === routeSamplePoints.length - 1 ? 6 : 4,
+                  },
+                ]}
+              />
+            </MapplsGL.PointAnnotation>
+          ))}
+
           {intermediatePoints.map((point, idx) => (
             <MapplsGL.PointAnnotation
               key={`route_pt_${point.id}`}
@@ -2128,6 +2151,17 @@ export function RouteMapNative({
           : (
             <>
               <Polyline coordinates={coords} strokeColor={colors.primary} strokeWidth={4} />
+
+              {routeSamplePoints.map((point, index) => (
+                <Circle
+                  key={`route_sample_${point.id}_${index}`}
+                  center={{ latitude: point.latitude, longitude: point.longitude }}
+                  radius={index === routeSamplePoints.length - 1 ? 18 : 10}
+                  strokeColor={index === routeSamplePoints.length - 1 ? colors.primary : colors.secondary}
+                  fillColor={index === routeSamplePoints.length - 1 ? `${colors.primary}44` : `${colors.secondary}55`}
+                  strokeWidth={2}
+                />
+              ))}
 
               {startPoint ? (
                 <Marker
