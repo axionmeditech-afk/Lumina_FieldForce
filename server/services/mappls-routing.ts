@@ -1,6 +1,7 @@
 import type { LocationLog, RoutePathPoint, RouteDirections, RouteDistanceMatrix } from "@/lib/types";
 
 const MAPPLS_ROUTE_BASE_URL = "https://route.mappls.com/route";
+const GOOGLE_DIRECTIONS_BASE_URL = "https://maps.googleapis.com/maps/api/directions/json";
 const DEFAULT_DIRECTION_RESOURCE = "route_adv";
 const DEFAULT_DISTANCE_RESOURCE = "distance_matrix";
 const DEFAULT_PROFILE = "driving";
@@ -25,6 +26,15 @@ function getMapplsRoutingApiKey(): string {
     process.env.MAPPLS_REST_API_KEY?.trim() ||
     process.env.MAPPLS_ACCESS_TOKEN?.trim() ||
     process.env.EXPO_PUBLIC_MAPPLS_ROUTING_API_KEY?.trim() ||
+    ""
+  );
+}
+
+function getGoogleMapsApiKey(): string {
+  return (
+    process.env.GOOGLE_MAPS_API_KEY?.trim() ||
+    process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY?.trim() ||
+    process.env.GOOGLE_DIRECTIONS_API_KEY?.trim() ||
     ""
   );
 }
@@ -149,7 +159,7 @@ function decodePolyline(encoded: string, precision = 6): RoutePathPoint[] {
   return coordinates;
 }
 
-function buildCacheKey(prefix: string, fields: Array<string | number | boolean | null | undefined>): string {
+function buildCacheKey(prefix: string, fields: (string | number | boolean | null | undefined)[]): string {
   const base = fields.map((field) => (field === undefined ? "" : String(field))).join("|");
   return `${prefix}:${base}`;
 }
@@ -225,6 +235,144 @@ function parseDirectionsPayload(payload: unknown, geometryType: string): {
   }
 
   return { path: [], distanceMeters, durationSeconds, routeId };
+}
+
+function parseGoogleDirectionsPayload(payload: unknown): {
+  path: RoutePathPoint[];
+  distanceMeters: number | null;
+  durationSeconds: number | null;
+  routeId: string | null;
+  error: string | null;
+} {
+  const body = (payload ?? {}) as Record<string, unknown>;
+  const status = typeof body.status === "string" ? body.status : "";
+  if (status && status !== "OK") {
+    const message =
+      typeof body.error_message === "string" && body.error_message.trim()
+        ? body.error_message.trim()
+        : `Google Directions returned ${status}`;
+    return { path: [], distanceMeters: null, durationSeconds: null, routeId: null, error: message };
+  }
+
+  const routes = Array.isArray(body.routes) ? body.routes : [];
+  const first = routes[0] as Record<string, unknown> | undefined;
+  if (!first) {
+    return {
+      path: [],
+      distanceMeters: null,
+      durationSeconds: null,
+      routeId: null,
+      error: "Google Directions returned no route.",
+    };
+  }
+
+  const overviewPolyline = (first.overview_polyline ?? {}) as Record<string, unknown>;
+  const encoded = typeof overviewPolyline.points === "string" ? overviewPolyline.points : "";
+  const path = encoded ? decodePolyline(encoded, 5) : [];
+  const legs = Array.isArray(first.legs) ? first.legs : [];
+  let distanceMeters = 0;
+  let durationSeconds = 0;
+  let hasDistance = false;
+  let hasDuration = false;
+
+  for (const leg of legs) {
+    const entry = (leg ?? {}) as Record<string, unknown>;
+    const distance = (entry.distance ?? {}) as Record<string, unknown>;
+    const duration = (entry.duration ?? {}) as Record<string, unknown>;
+    if (typeof distance.value === "number" && Number.isFinite(distance.value)) {
+      distanceMeters += distance.value;
+      hasDistance = true;
+    }
+    if (typeof duration.value === "number" && Number.isFinite(duration.value)) {
+      durationSeconds += duration.value;
+      hasDuration = true;
+    }
+  }
+
+  return {
+    path,
+    distanceMeters: hasDistance ? distanceMeters : null,
+    durationSeconds: hasDuration ? durationSeconds : null,
+    routeId: typeof first.summary === "string" ? first.summary : null,
+    error: path.length >= 2 ? null : "Google Directions returned empty route geometry.",
+  };
+}
+
+async function getGoogleDirectionsForSampledPoints(
+  sampled: LocationLog[],
+  rawPointCount: number,
+  baseFallbackPath: RoutePathPoint[],
+  previousError?: string | null
+): Promise<RouteDirections | null> {
+  const apiKey = getGoogleMapsApiKey();
+  if (!apiKey || sampled.length < 2) return null;
+
+  const cacheKey = buildCacheKey("gdir", [
+    sampled.length,
+    sampled[0].capturedAt,
+    sampled[sampled.length - 1].capturedAt,
+    sampled.map((p) => `${p.latitude.toFixed(5)},${p.longitude.toFixed(5)}`).join(";"),
+  ]);
+  const cached = getCached(directionCache, cacheKey);
+  if (cached) return cached;
+
+  const origin = sampled[0];
+  const destination = sampled[sampled.length - 1];
+  const waypoints = sampled.slice(1, -1);
+  const url = new URL(GOOGLE_DIRECTIONS_BASE_URL);
+  url.searchParams.set("origin", `${origin.latitude},${origin.longitude}`);
+  url.searchParams.set("destination", `${destination.latitude},${destination.longitude}`);
+  url.searchParams.set("mode", "driving");
+  url.searchParams.set("region", "in");
+  url.searchParams.set("key", apiKey);
+  if (waypoints.length) {
+    url.searchParams.set(
+      "waypoints",
+      waypoints.map((point) => `${point.latitude},${point.longitude}`).join("|")
+    );
+  }
+
+  try {
+    const response = await fetch(url.toString());
+    const payload = (await response.json().catch(() => ({}))) as unknown;
+    const parsed = parseGoogleDirectionsPayload(payload);
+    const next: RouteDirections = {
+      provider: "google",
+      enabled: true,
+      path: parsed.path.length >= 2 ? parsed.path : baseFallbackPath,
+      profile: "driving",
+      resource: "directions",
+      geometries: "polyline",
+      distanceMeters: parsed.distanceMeters,
+      durationSeconds: parsed.durationSeconds,
+      routeId: parsed.routeId,
+      sampledPointCount: sampled.length,
+      rawPointCount,
+      error: response.ok && !parsed.error ? null : parsed.error || `Google Directions HTTP ${response.status}`,
+    };
+    setCached(directionCache, cacheKey, next);
+    return next;
+  } catch (error) {
+    const next: RouteDirections = {
+      provider: "google",
+      enabled: true,
+      path: baseFallbackPath,
+      profile: "driving",
+      resource: "directions",
+      geometries: "polyline",
+      distanceMeters: null,
+      durationSeconds: null,
+      routeId: null,
+      sampledPointCount: sampled.length,
+      rawPointCount,
+      error:
+        error instanceof Error
+          ? `${previousError ? `${previousError} | ` : ""}${error.message}`
+          : previousError || "Google Directions request failed",
+    };
+    setCached(directionCache, cacheKey, next);
+    return next;
+  }
 }
 
 function buildDirectionError(status: number, bodyText: string): string {
@@ -304,6 +452,13 @@ export async function getMapplsDirectionsForLogs(
     const response = await fetch(url.toString());
     const text = await response.text();
     if (!response.ok) {
+      const googleFallback = await getGoogleDirectionsForSampledPoints(
+        sampled,
+        rawPoints.length,
+        baseFallbackPath,
+        buildDirectionError(response.status, text)
+      );
+      if (googleFallback && !googleFallback.error) return googleFallback;
       const failed: RouteDirections = {
         provider: "mappls",
         enabled: true,
@@ -316,7 +471,7 @@ export async function getMapplsDirectionsForLogs(
         routeId: null,
         sampledPointCount: sampled.length,
         rawPointCount: rawPoints.length,
-        error: buildDirectionError(response.status, text),
+        error: googleFallback?.error || buildDirectionError(response.status, text),
       };
       setCached(directionCache, cacheKey, failed);
       return failed;
@@ -330,6 +485,15 @@ export async function getMapplsDirectionsForLogs(
     }
 
     const parsed = parseDirectionsPayload(payload, geometries);
+    if (parsed.path.length < 2) {
+      const googleFallback = await getGoogleDirectionsForSampledPoints(
+        sampled,
+        rawPoints.length,
+        baseFallbackPath,
+        "Mappls returned empty route geometry."
+      );
+      if (googleFallback && !googleFallback.error) return googleFallback;
+    }
     const next: RouteDirections = {
       provider: "mappls",
       enabled: true,
@@ -347,6 +511,14 @@ export async function getMapplsDirectionsForLogs(
     setCached(directionCache, cacheKey, next);
     return next;
   } catch (error) {
+    const mapplsError = error instanceof Error ? error.message : "Mappls routing request failed";
+    const googleFallback = await getGoogleDirectionsForSampledPoints(
+      sampled,
+      rawPoints.length,
+      baseFallbackPath,
+      mapplsError
+    );
+    if (googleFallback && !googleFallback.error) return googleFallback;
     const failed: RouteDirections = {
       provider: "mappls",
       enabled: true,
@@ -359,7 +531,7 @@ export async function getMapplsDirectionsForLogs(
       routeId: null,
       sampledPointCount: sampled.length,
       rawPointCount: rawPoints.length,
-      error: error instanceof Error ? error.message : "Mappls routing request failed",
+      error: googleFallback?.error || mapplsError,
     };
     setCached(directionCache, cacheKey, failed);
     return failed;

@@ -555,7 +555,7 @@ export interface RoutePathPoint {
 }
 
 export interface RouteDirections {
-  provider: "mappls";
+  provider: "mappls" | "google";
   enabled: boolean;
   path: RoutePathPoint[];
   profile: string;

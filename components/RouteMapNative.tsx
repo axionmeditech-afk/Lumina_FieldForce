@@ -868,7 +868,7 @@ export function RouteMapNative({
   const region = useMemo(() => buildRegion(allCoords), [allCoords]);
   const bounds = useMemo(() => buildBounds(allCoords), [allCoords]);
   const startPoint = points[0];
-  const endPoint = points[points.length - 1];
+  const endPoint = points.length >= 2 ? points[points.length - 1] : null;
   const intermediatePoints = useMemo(
     () => points.slice(1, -1).filter(isValidLocationPoint),
     [points]
@@ -1034,7 +1034,7 @@ export function RouteMapNative({
           lat: startPoint.latitude,
           lng: startPoint.longitude,
           color: colors.success,
-          label: "S",
+          label: points.length >= 2 ? "S" : "C",
         });
       }
       if (endPoint) {
@@ -1104,6 +1104,7 @@ export function RouteMapNative({
     multiRouteDefs,
     normalizedPlannedStops,
     normalizedQuickSalePoints,
+    points.length,
     startPoint,
   ]);
 
@@ -2131,7 +2132,7 @@ export function RouteMapNative({
               {startPoint ? (
                 <Marker
                   coordinate={{ latitude: startPoint.latitude, longitude: startPoint.longitude }}
-                  title="Route Start"
+                  title={points.length >= 2 ? "Route Start" : "Current Location"}
                   description={formatMumbaiTime(startPoint.capturedAt)}
                   pinColor={colors.success}
                 />
