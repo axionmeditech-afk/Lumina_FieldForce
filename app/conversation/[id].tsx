@@ -117,6 +117,19 @@ function isAudioFileName(name: string): boolean {
   return /\.(m4a|mp4|mp3|wav|aac|3gp|webm|ogg|flac)$/i.test(name);
 }
 
+function getAudioExtensionFromUri(uri: string): string {
+  const cleanUri = uri.split("?")[0] || uri;
+  const match = cleanUri.match(/\.(m4a|mp4|mp3|wav|aac|3gp|webm|ogg|flac)$/i);
+  return match ? `.${match[1].toLowerCase()}` : ".m4a";
+}
+
+function formatAudioClock(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 async function listExistingAudioFilesInDirectory(directoryUri: string, maxDepth = 3, currentDepth = 0): Promise<string[]> {
   try {
     if (currentDepth > maxDepth) return [];
@@ -168,7 +181,9 @@ async function findLocalConversationAudioFallback({
   }
 
   const files = (
-    await Promise.all(Array.from(directories).map(listExistingAudioFilesInDirectory))
+    await Promise.all(
+      Array.from(directories).map((directoryUri) => listExistingAudioFilesInDirectory(directoryUri))
+    )
   ).flat();
   let best: { uri: string; score: number } | null = null;
 
@@ -250,6 +265,27 @@ async function resolveRemoteConversationAudioPlaybackUri(audioUri: string): Prom
   return audioUri;
 }
 
+async function cacheRemoteConversationAudioForPlayback(remoteUri: string): Promise<string> {
+  const playbackRoot = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+  if (!playbackRoot) return remoteUri;
+
+  const playbackDir = `${ensureTrailingSlash(playbackRoot)}conversation-audio-playback`;
+  await FileSystem.makeDirectoryAsync(playbackDir, { intermediates: true }).catch(() => undefined);
+  const targetUri = `${ensureTrailingSlash(playbackDir)}remote_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}${getAudioExtensionFromUri(remoteUri)}`;
+
+  try {
+    const result = await FileSystem.downloadAsync(remoteUri, targetUri);
+    const info = await FileSystem.getInfoAsync(result.uri).catch(() => null);
+    if (info?.exists) return result.uri;
+  } catch {
+    // Streaming the remote URL is still a valid fallback.
+  }
+
+  return remoteUri;
+}
+
 async function resolveConversationAudioPlaybackUri(
   audioUri: string,
   context?: { conversationDate?: string | null }
@@ -260,7 +296,8 @@ async function resolveConversationAudioPlaybackUri(
   }
   if (!normalizedUri.startsWith("file://")) {
     try {
-      return await resolveRemoteConversationAudioPlaybackUri(normalizedUri);
+      const remotePlaybackUri = await resolveRemoteConversationAudioPlaybackUri(normalizedUri);
+      return await cacheRemoteConversationAudioForPlayback(remotePlaybackUri);
     } catch (error) {
       const localFallback = await findLocalConversationAudioFallback({
         audioUri: normalizedUri,
@@ -1265,6 +1302,7 @@ export default function ConversationDetailScreen() {
   const canViewAnalysis = user?.role === "admin";
   const normalizedStoredNotes = normalizeConversationNotes(convo.notes);
   const showConversationNotes = canViewAnalysis && Boolean(normalizedStoredNotes);
+  const hasConversationAudio = Boolean(convo.audioUri?.trim());
 
   const onPlaybackStatusUpdate = (status: AVPlaybackStatus) => {
     if (!status.isLoaded) {
@@ -1304,6 +1342,12 @@ export default function ConversationDetailScreen() {
           await currentSound.pauseAsync();
           setAudioPlaying(false);
         } else {
+          if (
+            status.durationMillis &&
+            status.positionMillis >= Math.max(0, status.durationMillis - 500)
+          ) {
+            await currentSound.setPositionAsync(0);
+          }
           await currentSound.playAsync();
           setAudioPlaying(true);
         }
@@ -1471,30 +1515,52 @@ export default function ConversationDetailScreen() {
             <Text style={[styles.summaryText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
               {convo.summary}
             </Text>
-            <Pressable
-              onPress={() => void playConversationAudio()}
-              disabled={audioBusy}
-              style={({ pressed }) => [
-                styles.audioButton,
-                {
-                  backgroundColor: colors.primary,
-                  opacity: pressed || audioBusy ? 0.88 : 1,
-                },
-              ]}
-            >
-              {audioBusy ? (
-                <ActivityIndicator size="small" color="#FFFFFF" />
-              ) : (
-                <Ionicons name={audioPlaying ? "pause-circle-outline" : "play-circle-outline"} size={18} color="#FFFFFF" />
-              )}
-              <Text style={styles.audioButtonText}>
-                {audioPlaying ? "Pause Conversation Audio" : "Play Conversation Audio"}
-              </Text>
-            </Pressable>
-            {(audioDurationMs > 0 || audioPositionMs > 0) ? (
-              <Text style={[styles.audioMetaText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                {Math.max(0, Math.floor(audioPositionMs / 1000))}s / {Math.max(0, Math.floor(audioDurationMs / 1000))}s
-              </Text>
+            {hasConversationAudio ? (
+              <View style={[styles.audioPanel, { backgroundColor: colors.surface, borderColor: colors.borderLight }]}>
+                <Pressable
+                  onPress={() => void playConversationAudio()}
+                  disabled={audioBusy}
+                  style={({ pressed }) => [
+                    styles.audioButton,
+                    {
+                      backgroundColor: audioPlaying ? colors.danger : colors.primary,
+                      opacity: pressed || audioBusy ? 0.88 : 1,
+                    },
+                  ]}
+                >
+                  {audioBusy ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Ionicons name={audioPlaying ? "pause-circle-outline" : "play-circle-outline"} size={18} color="#FFFFFF" />
+                  )}
+                  <Text style={styles.audioButtonText}>
+                    {audioBusy
+                      ? "Preparing Audio..."
+                      : audioPlaying
+                        ? "Pause Conversation Audio"
+                        : "Play Conversation Audio"}
+                  </Text>
+                </Pressable>
+                <View style={styles.audioProgressRow}>
+                  <Text style={[styles.audioMetaText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                    {formatAudioClock(audioPositionMs)}
+                  </Text>
+                  <View style={[styles.audioProgressTrack, { backgroundColor: colors.borderLight }]}>
+                    <View
+                      style={[
+                        styles.audioProgressFill,
+                        {
+                          backgroundColor: colors.primary,
+                          width: `${audioDurationMs > 0 ? Math.min(100, (audioPositionMs / audioDurationMs) * 100) : 0}%`,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={[styles.audioMetaText, { color: colors.textSecondary, fontFamily: "Inter_500Medium" }]}>
+                    {audioDurationMs > 0 ? formatAudioClock(audioDurationMs) : "--:--"}
+                  </Text>
+                </View>
+              </View>
             ) : null}
             <View style={styles.metaRow}>
               {convo.source ? (
@@ -1987,8 +2053,14 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   summaryText: { fontSize: 14, lineHeight: 20 },
-  audioButton: {
+  audioPanel: {
     marginTop: 14,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+    gap: 10,
+  },
+  audioButton: {
     minHeight: 40,
     borderRadius: 10,
     alignSelf: "flex-start",
@@ -1999,8 +2071,25 @@ const styles = StyleSheet.create({
   },
   audioButtonText: { color: "#FFFFFF", fontSize: 12.5, fontFamily: "Inter_600SemiBold" },
   audioMetaText: {
-    marginTop: 6,
     fontSize: 11.5,
+    minWidth: 40,
+    textAlign: "center",
+  },
+  audioProgressRow: {
+    minHeight: 18,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  audioProgressTrack: {
+    flex: 1,
+    height: 5,
+    borderRadius: 999,
+    overflow: "hidden",
+  },
+  audioProgressFill: {
+    height: "100%",
+    borderRadius: 999,
   },
   metaRow: {
     marginTop: 12,

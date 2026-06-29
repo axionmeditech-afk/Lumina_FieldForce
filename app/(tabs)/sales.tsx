@@ -1506,6 +1506,25 @@ function shouldUseFinalTranscript(currentTranscript: string, candidateTranscript
   return candidate.length >= Math.max(40, Math.floor(current.length * 0.85));
 }
 
+async function transcribeFinalConversationAudio(input: {
+  primaryAudioUri: string | null;
+  orderedChunkUris: string[];
+}): Promise<string> {
+  const chunkUris = input.orderedChunkUris.filter(Boolean);
+  if (chunkUris.length > 1) {
+    const transcripts: string[] = [];
+    for (const uri of chunkUris) {
+      const transcript = sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(uri));
+      if (transcript) transcripts.push(transcript);
+    }
+    return transcripts.join("\n").trim();
+  }
+
+  const audioUri = chunkUris[0] || input.primaryAudioUri;
+  if (!audioUri) return "";
+  return sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(audioUri));
+}
+
 async function analyzeConversationWithBackendAIForMeeting(input: {
   transcript: string;
   customerName: string;
@@ -2193,6 +2212,7 @@ export default function SalesScreen() {
   const fallbackChunkIndexRef = useRef(0);
   const fallbackNextChunkToApplyRef = useRef(0);
   const fallbackChunkBufferRef = useRef<Map<number, string>>(new Map());
+  const fallbackChunkAudioUrisRef = useRef<Map<number, string>>(new Map());
   const fallbackTranscribeTasksRef = useRef<Set<Promise<void>>>(new Set());
   const startFallbackRecordingRef = useRef<(() => Promise<void>) | null>(null);
   const liveHintSpeechActiveRef = useRef(false);
@@ -4307,6 +4327,7 @@ export default function SalesScreen() {
     fallbackChunkIndexRef.current = 0;
     fallbackNextChunkToApplyRef.current = 0;
     fallbackChunkBufferRef.current.clear();
+    fallbackChunkAudioUrisRef.current.clear();
     fallbackTranscribeTasksRef.current.clear();
     recordingModeRef.current = "audio-fallback";
     sessionModeRef.current = "audio-fallback";
@@ -4345,6 +4366,7 @@ export default function SalesScreen() {
 
     const queueFallbackTranscription = (uri: string) => {
       const chunkIndex = fallbackChunkIndexRef.current++;
+      fallbackChunkAudioUrisRef.current.set(chunkIndex, uri);
       const task = (async () => {
         try {
           const transcript = sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(uri));
@@ -4537,6 +4559,7 @@ export default function SalesScreen() {
         setRequestBusy(true);
         try {
           finalSegmentsRef.current = [];
+          fallbackChunkAudioUrisRef.current.clear();
           setTranscriptDraft("");
           setInterimTranscript("");
           setRecordError(null);
@@ -4563,6 +4586,7 @@ export default function SalesScreen() {
         setRequestBusy(true);
         try {
           finalSegmentsRef.current = [];
+          fallbackChunkAudioUrisRef.current.clear();
           setTranscriptDraft("");
           setInterimTranscript("");
           setRecordError(null);
@@ -4589,6 +4613,7 @@ export default function SalesScreen() {
         setRequestBusy(true);
         try {
           finalSegmentsRef.current = [];
+          fallbackChunkAudioUrisRef.current.clear();
           setTranscriptDraft("");
           setInterimTranscript("");
           setRecordError(null);
@@ -4636,6 +4661,7 @@ export default function SalesScreen() {
         }
 
         finalSegmentsRef.current = [];
+        fallbackChunkAudioUrisRef.current.clear();
         setTranscriptDraft("");
         setInterimTranscript("");
         setRecordError(null);
@@ -4751,8 +4777,9 @@ export default function SalesScreen() {
       void transcribeWithFallbackApi(audioUri);
       return;
     }
-    finalSegmentsRef.current = [];
-    setTranscriptDraft("");
+        finalSegmentsRef.current = [];
+        fallbackChunkAudioUrisRef.current.clear();
+        setTranscriptDraft("");
     setInterimTranscript("");
     setRecordError(null);
     sessionModeRef.current = "file";
@@ -4801,12 +4828,16 @@ export default function SalesScreen() {
         const persistedAudioUri = await persistConversationAudioUri(audioUri);
         let transcriptStatus: Conversation["transcriptStatus"] = "completed";
         let transcriptionError: string | null = null;
-        if (persistedAudioUri) {
+        const orderedFallbackChunkUris = Array.from(fallbackChunkAudioUrisRef.current.entries())
+          .sort(([left], [right]) => left - right)
+          .map(([, uri]) => uri);
+        if (persistedAudioUri || orderedFallbackChunkUris.length > 0) {
           setInterimTranscript("Generating final transcript...");
           try {
-            const finalServerTranscript = sanitizeConversationTranscript(
-              await transcribeAudioWithSpeechApi(persistedAudioUri)
-            );
+            const finalServerTranscript = await transcribeFinalConversationAudio({
+              primaryAudioUri: persistedAudioUri,
+              orderedChunkUris: orderedFallbackChunkUris,
+            });
             if (shouldUseFinalTranscript(finalTranscript, finalServerTranscript)) {
               finalTranscript = finalServerTranscript;
               finalSegmentsRef.current = finalTranscript ? [finalTranscript] : [];
@@ -4856,6 +4887,7 @@ export default function SalesScreen() {
         setAudioUri(null);
         setRecordError(null);
         finalSegmentsRef.current = [];
+        fallbackChunkAudioUrisRef.current.clear();
         if (options?.navigateToDetail !== false) {
           router.push({ pathname: "/conversation/[id]", params: { id: conversation.id } });
         }

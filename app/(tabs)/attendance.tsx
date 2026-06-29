@@ -132,6 +132,8 @@ type AdminAttendanceStatus = {
   status: "checked_in" | "checked_out" | "no_activity";
   checkInAt: string | null;
   checkOutAt: string | null;
+  workMinutes: number;
+  workHoursLabel: string;
   geofenceName: string | null;
   locationLabel: string | null;
   approvalStatus: AttendanceRecord["approvalStatus"] | null;
@@ -142,6 +144,26 @@ type AdminAttendanceGroup = {
   name: string;
   entries: AdminAttendanceStatus[];
   checkedInCount: number;
+};
+
+type MonthlyAttendanceSummary = {
+  monthKey: string;
+  monthLabel: string;
+  countedDays: number;
+  totalUsers: number;
+  presentUserDays: number;
+  absentUserDays: number;
+  checkedOutUserDays: number;
+  totalWorkMinutes: number;
+  averageWorkMinutes: number;
+  topRows: {
+    id: string;
+    name: string;
+    role: string;
+    presentDays: number;
+    absentDays: number;
+    workMinutes: number;
+  }[];
 };
 
 function getBannerConfig(
@@ -321,6 +343,157 @@ function formatAttendanceTime(value: string | null): string {
   return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function parseDateKeyParts(dateKey: string): { year: number; month: number; day: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateKey.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  return { year, month, day };
+}
+
+function dateKeyToLocalDate(dateKey: string): Date {
+  const parts = parseDateKeyParts(dateKey) ?? parseDateKeyParts(toMumbaiDateKey(new Date()))!;
+  return new Date(parts.year, parts.month - 1, parts.day);
+}
+
+function toLocalDateKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function shiftDateKey(dateKey: string, dayDelta: number): string {
+  const date = dateKeyToLocalDate(dateKey);
+  date.setDate(date.getDate() + dayDelta);
+  return toLocalDateKey(date);
+}
+
+function getMonthKey(dateKey: string): string {
+  const parts = parseDateKeyParts(dateKey) ?? parseDateKeyParts(toMumbaiDateKey(new Date()))!;
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}`;
+}
+
+function getMonthDateKeys(monthKey: string): string[] {
+  const [yearRaw, monthRaw] = monthKey.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return [];
+  const totalDays = new Date(year, month, 0).getDate();
+  const todayKey = toMumbaiDateKey(new Date());
+  const keys: string[] = [];
+  for (let day = 1; day <= totalDays; day += 1) {
+    const key = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    if (key > todayKey) break;
+    keys.push(key);
+  }
+  return keys;
+}
+
+function formatWorkDuration(minutesValue: number): string {
+  const safeMinutes = Math.max(0, Math.floor(Number.isFinite(minutesValue) ? minutesValue : 0));
+  return `${Math.floor(safeMinutes / 60)}h ${safeMinutes % 60}m`;
+}
+
+function computeAttendanceWorkMinutes(entries: AttendanceRecord[], dateKey: string): number {
+  const sorted = entries
+    .filter((entry) => toMumbaiDateKey(entry.timestamp) === dateKey)
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  let minutes = 0;
+  let checkInAt: Date | null = null;
+  const todayKey = toMumbaiDateKey(new Date());
+  for (const entry of sorted) {
+    if (entry.type === "checkin") {
+      checkInAt = new Date(entry.timestamp);
+    } else if (entry.type === "checkout" && checkInAt) {
+      const checkoutAt = new Date(entry.timestamp);
+      minutes += Math.max(0, checkoutAt.getTime() - checkInAt.getTime()) / 60000;
+      checkInAt = null;
+    }
+  }
+  if (checkInAt && dateKey === todayKey) {
+    minutes += Math.max(0, Date.now() - checkInAt.getTime()) / 60000;
+  }
+  return Math.max(0, Math.floor(minutes));
+}
+
+function buildMonthlyAttendanceSummary(
+  monthKey: string,
+  attendance: AttendanceRecord[],
+  employees: Employee[]
+): MonthlyAttendanceSummary {
+  const dateKeys = getMonthDateKeys(monthKey);
+  const roster = employees.filter(
+    (employee) => isAttendanceRosterMember(employee) && Boolean(employee.companyId) && employee.companyId !== "workspace_default"
+  );
+  const employeeGroups = new Map<string, { employee: Employee; ids: Set<string>; names: Set<string> }>();
+  for (const employee of roster) {
+    const nameKey = normalizeAttendanceIdentity(employee.name);
+    const roleKey = normalizeAttendanceIdentity(employee.role);
+    const groupKey = nameKey ? `name:${roleKey}:${nameKey}` : `id:${employee.id}`;
+    const existing = employeeGroups.get(groupKey);
+    if (existing) {
+      existing.ids.add(employee.id);
+      if (nameKey) existing.names.add(nameKey);
+      continue;
+    }
+    employeeGroups.set(groupKey, {
+      employee,
+      ids: new Set([employee.id]),
+      names: nameKey ? new Set([nameKey]) : new Set(),
+    });
+  }
+
+  let presentUserDays = 0;
+  let checkedOutUserDays = 0;
+  let totalWorkMinutes = 0;
+  const topRows = Array.from(employeeGroups.values()).map(({ employee, ids, names }) => {
+    let presentDays = 0;
+    let checkedOutDays = 0;
+    let workMinutes = 0;
+    for (const dateKey of dateKeys) {
+      const entries = attendance.filter(
+        (entry) =>
+          toMumbaiDateKey(entry.timestamp) === dateKey &&
+          (ids.has(entry.userId) || names.has(normalizeAttendanceIdentity(entry.userName)))
+      );
+      if (entries.some((entry) => entry.type === "checkin")) {
+        presentDays += 1;
+        presentUserDays += 1;
+      }
+      if (entries.some((entry) => entry.type === "checkout")) {
+        checkedOutDays += 1;
+        checkedOutUserDays += 1;
+      }
+      workMinutes += computeAttendanceWorkMinutes(entries, dateKey);
+    }
+    totalWorkMinutes += workMinutes;
+    return {
+      id: employee.id,
+      name: employee.name,
+      role: employee.role || "employee",
+      presentDays,
+      absentDays: Math.max(0, dateKeys.length - presentDays),
+      workMinutes,
+    };
+  });
+
+  const totalUsers = topRows.length;
+  const totalExpectedUserDays = totalUsers * dateKeys.length;
+  const monthDate = dateKeyToLocalDate(`${monthKey}-01`);
+  return {
+    monthKey,
+    monthLabel: monthDate.toLocaleDateString([], { month: "long", year: "numeric" }),
+    countedDays: dateKeys.length,
+    totalUsers,
+    presentUserDays,
+    absentUserDays: Math.max(0, totalExpectedUserDays - presentUserDays),
+    checkedOutUserDays,
+    totalWorkMinutes,
+    averageWorkMinutes: presentUserDays > 0 ? Math.floor(totalWorkMinutes / presentUserDays) : 0,
+    topRows: topRows.sort((a, b) => b.presentDays - a.presentDays || b.workMinutes - a.workMinutes).slice(0, 8),
+  };
+}
+
 function normalizeAttendanceIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
@@ -463,6 +636,7 @@ function buildAdminAttendanceStatuses(
     const latest = entries[entries.length - 1] ?? null;
     const latestCheckIn = [...entries].reverse().find((entry) => entry.type === "checkin") ?? null;
     const latestCheckOut = [...entries].reverse().find((entry) => entry.type === "checkout") ?? null;
+    const workMinutes = computeAttendanceWorkMinutes(entries, today);
     const location = latest?.location ?? latestCheckIn?.location ?? latestCheckOut?.location ?? null;
     const locationLabel = location ? `${location.lat.toFixed(5)}, ${location.lng.toFixed(5)}` : null;
 
@@ -478,6 +652,8 @@ function buildAdminAttendanceStatuses(
       status: latest ? (latest.type === "checkin" ? "checked_in" : "checked_out") : "no_activity",
       checkInAt: latestCheckIn?.timestamp ?? null,
       checkOutAt: latestCheckOut?.timestamp ?? null,
+      workMinutes,
+      workHoursLabel: formatWorkDuration(workMinutes),
       geofenceName: latest?.geofenceName ?? latestCheckIn?.geofenceName ?? latestCheckOut?.geofenceName ?? null,
       locationLabel,
       approvalStatus: latestCheckIn?.approvalStatus ?? null,
@@ -610,6 +786,10 @@ function useAttendanceWebSocket(
 export default function AttendanceScreen() {
   const { user, company, updateCompany } = useAuth();
   const [selectedDate, setSelectedDate] = useState(() => toMumbaiDateKey(new Date()));
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+  const [datePickerMonthKey, setDatePickerMonthKey] = useState(() => getMonthKey(toMumbaiDateKey(new Date())));
+  const [monthlySummary, setMonthlySummary] = useState<MonthlyAttendanceSummary | null>(null);
+  const [monthlySummaryLoading, setMonthlySummaryLoading] = useState(false);
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
@@ -823,6 +1003,38 @@ export default function AttendanceScreen() {
     }
     void loadBaseData();
   }, [isAdminAttendanceManager, selectedDate, loadBaseData]);
+
+  const loadMonthlySummary = useCallback(
+    async (monthKey = datePickerMonthKey) => {
+      if (!isAdminAttendanceManager) return;
+      setMonthlySummaryLoading(true);
+      try {
+        const companyId = company?.id || undefined;
+        const [employees, recordsByDay] = await Promise.all([
+          loadAttendanceRoster({ id: companyId, name: company?.name }).catch(() => [] as Employee[]),
+          Promise.all(
+            getMonthDateKeys(monthKey).map((dateKey) =>
+              getCompanyAttendanceToday(companyId, dateKey).catch(() => [] as AttendanceRecord[])
+            )
+          ),
+        ]);
+        setMonthlySummary(buildMonthlyAttendanceSummary(monthKey, recordsByDay.flat(), employees));
+      } catch (error) {
+        Alert.alert(
+          "Monthly Summary Failed",
+          error instanceof Error ? error.message : "Unable to load monthly attendance summary."
+        );
+      } finally {
+        setMonthlySummaryLoading(false);
+      }
+    },
+    [company?.id, company?.name, datePickerMonthKey, isAdminAttendanceManager]
+  );
+
+  useEffect(() => {
+    if (!datePickerOpen || !isAdminAttendanceManager) return;
+    void loadMonthlySummary(datePickerMonthKey);
+  }, [datePickerMonthKey, datePickerOpen, isAdminAttendanceManager, loadMonthlySummary]);
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
@@ -1914,6 +2126,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
   const adminCheckedInCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_in").length;
   const adminCheckedOutCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_out").length;
   const adminNoActivityCount = adminAttendanceStatuses.filter((entry) => entry.status === "no_activity").length;
+  const adminTotalWorkMinutes = adminAttendanceStatuses.reduce((sum, entry) => sum + entry.workMinutes, 0);
   const adminAttendanceGroups = useMemo<AdminAttendanceGroup[]>(() => {
     const groupsByCompany = new Map<string, AdminAttendanceStatus[]>();
     for (const entry of adminAttendanceStatuses) {
@@ -2008,6 +2221,158 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
   return (
     <AppCanvas>
+      <Modal visible={datePickerOpen} transparent animationType="fade" onRequestClose={() => setDatePickerOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.datePickerCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+            <View style={styles.datePickerHeader}>
+              <Pressable
+                style={[styles.datePickerIconButton, { borderColor: colors.border }]}
+                onPress={() => {
+                  const date = dateKeyToLocalDate(`${datePickerMonthKey}-01`);
+                  date.setMonth(date.getMonth() - 1);
+                  setDatePickerMonthKey(getMonthKey(toLocalDateKey(date)));
+                }}
+              >
+                <Ionicons name="chevron-back" size={18} color={colors.primary} />
+              </Pressable>
+              <View style={{ flex: 1, alignItems: "center" }}>
+                <Text style={[styles.datePickerTitle, { color: colors.text }]}>
+                  {dateKeyToLocalDate(`${datePickerMonthKey}-01`).toLocaleDateString([], { month: "long", year: "numeric" })}
+                </Text>
+                <Text style={[styles.datePickerSubtitle, { color: colors.textSecondary }]}>Select date or review month</Text>
+              </View>
+              <Pressable
+                disabled={datePickerMonthKey >= getMonthKey(toMumbaiDateKey(new Date()))}
+                style={[
+                  styles.datePickerIconButton,
+                  { borderColor: colors.border },
+                  datePickerMonthKey >= getMonthKey(toMumbaiDateKey(new Date())) && { opacity: 0.35 },
+                ]}
+                onPress={() => {
+                  const date = dateKeyToLocalDate(`${datePickerMonthKey}-01`);
+                  date.setMonth(date.getMonth() + 1);
+                  const nextMonthKey = getMonthKey(toLocalDateKey(date));
+                  if (nextMonthKey <= getMonthKey(toMumbaiDateKey(new Date()))) {
+                    setDatePickerMonthKey(nextMonthKey);
+                  }
+                }}
+              >
+                <Ionicons name="chevron-forward" size={18} color={colors.primary} />
+              </Pressable>
+            </View>
+
+            <View style={styles.calendarWeekRow}>
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => (
+                <Text key={day} style={[styles.calendarWeekText, { color: colors.textTertiary }]}>{day}</Text>
+              ))}
+            </View>
+            <View style={styles.calendarGrid}>
+              {(() => {
+                const firstDate = dateKeyToLocalDate(`${datePickerMonthKey}-01`);
+                const leadingBlanks = firstDate.getDay();
+                const days = getMonthDateKeys(datePickerMonthKey);
+                const cells = [
+                  ...Array.from({ length: leadingBlanks }, (_, index) => ({ key: `blank_${index}`, dateKey: "" })),
+                  ...days.map((dateKey) => ({ key: dateKey, dateKey })),
+                ];
+                return cells.map((cell) => {
+                  if (!cell.dateKey) return <View key={cell.key} style={styles.calendarDayCell} />;
+                  const day = parseDateKeyParts(cell.dateKey)?.day ?? 1;
+                  const selected = cell.dateKey === selectedDate;
+                  return (
+                    <Pressable
+                      key={cell.key}
+                      style={[
+                        styles.calendarDayCell,
+                        {
+                          backgroundColor: selected ? colors.primary : colors.surfaceSecondary,
+                          borderColor: selected ? colors.primary : colors.borderLight,
+                        },
+                      ]}
+                      onPress={() => {
+                        setSelectedDate(cell.dateKey);
+                        setDatePickerOpen(false);
+                        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      }}
+                    >
+                      <Text style={[styles.calendarDayText, { color: selected ? "#fff" : colors.text }]}>
+                        {day}
+                      </Text>
+                    </Pressable>
+                  );
+                });
+              })()}
+            </View>
+
+            {isAdminAttendanceManager ? (
+            <View style={[styles.monthSummaryPanel, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+              <View style={styles.monthSummaryHeader}>
+                <Text style={[styles.monthSummaryTitle, { color: colors.text }]}>Monthly Summary</Text>
+                <Pressable
+                  style={[styles.monthSummaryRefresh, { backgroundColor: colors.primary }]}
+                  onPress={() => void loadMonthlySummary(datePickerMonthKey)}
+                  disabled={monthlySummaryLoading}
+                >
+                  {monthlySummaryLoading ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Ionicons name="refresh-outline" size={16} color="#fff" />
+                  )}
+                </Pressable>
+              </View>
+              {monthlySummaryLoading && !monthlySummary ? (
+                <View style={styles.monthSummaryLoading}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={[styles.monthSummaryMeta, { color: colors.textSecondary }]}>Loading month...</Text>
+                </View>
+              ) : monthlySummary ? (
+                <>
+                  <View style={styles.monthSummaryGrid}>
+                    <View style={[styles.monthSummaryChip, { borderColor: colors.borderLight }]}>
+                      <Text style={[styles.monthSummaryValue, { color: colors.text }]}>{monthlySummary.totalUsers}</Text>
+                      <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Users</Text>
+                    </View>
+                    <View style={[styles.monthSummaryChip, { borderColor: colors.borderLight }]}>
+                      <Text style={[styles.monthSummaryValue, { color: colors.success }]}>{monthlySummary.presentUserDays}</Text>
+                      <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Present Days</Text>
+                    </View>
+                    <View style={[styles.monthSummaryChip, { borderColor: colors.borderLight }]}>
+                      <Text style={[styles.monthSummaryValue, { color: colors.danger }]}>{monthlySummary.absentUserDays}</Text>
+                      <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Absent Days</Text>
+                    </View>
+                    <View style={[styles.monthSummaryChip, { borderColor: colors.borderLight }]}>
+                      <Text style={[styles.monthSummaryValue, { color: colors.primary }]}>{formatWorkDuration(monthlySummary.totalWorkMinutes)}</Text>
+                      <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Work Hours</Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.monthSummaryMeta, { color: colors.textSecondary }]}>
+                    Counted {monthlySummary.countedDays} calendar day(s). Avg present-day hours: {formatWorkDuration(monthlySummary.averageWorkMinutes)}.
+                  </Text>
+                  {monthlySummary.topRows.slice(0, 4).map((row) => (
+                    <View key={`month_row_${row.id}`} style={[styles.monthUserRow, { borderTopColor: colors.borderLight }]}>
+                      <Text style={[styles.monthUserName, { color: colors.text }]} numberOfLines={1}>{row.name}</Text>
+                      <Text style={[styles.monthUserMeta, { color: colors.textSecondary }]}>
+                        P {row.presentDays} | A {row.absentDays} | {formatWorkDuration(row.workMinutes)}
+                      </Text>
+                    </View>
+                  ))}
+                </>
+              ) : (
+                <Text style={[styles.monthSummaryMeta, { color: colors.textSecondary }]}>Tap refresh to load summary.</Text>
+              )}
+            </View>
+            ) : null}
+
+            <Pressable
+              style={[styles.datePickerCloseButton, { backgroundColor: colors.primary }]}
+              onPress={() => setDatePickerOpen(false)}
+            >
+              <Text style={styles.datePickerCloseText}>Done</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={permissionExplainerOpen && !isAdminAttendanceManager} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
@@ -2086,20 +2451,22 @@ setOfficeLocationName((current) => current.trim() || result.label);
           <Pressable
             style={({ pressed }) => [styles.dateNavButton, pressed && { opacity: 0.7 }]}
             onPress={() => {
-              const parts = selectedDate.split("-");
-              const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-              d.setDate(d.getDate() - 1);
-              const yyyy = d.getFullYear();
-              const mm = String(d.getMonth() + 1).padStart(2, "0");
-              const dd = String(d.getDate()).padStart(2, "0");
-              setSelectedDate(yyyy + "-" + mm + "-" + dd);
+              const nextDate = shiftDateKey(selectedDate, -1);
+              setSelectedDate(nextDate);
+              setDatePickerMonthKey(getMonthKey(nextDate));
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             }}
           >
             <Ionicons name="chevron-back" size={20} color={colors.primary} />
           </Pressable>
 
-          <View style={styles.dateNavLabelContainer}>
+          <Pressable
+            style={({ pressed }) => [styles.dateNavLabelContainer, pressed && { opacity: 0.82 }]}
+            onPress={() => {
+              setDatePickerMonthKey(getMonthKey(selectedDate));
+              setDatePickerOpen(true);
+            }}
+          >
             <Text style={[styles.dateNavLabel, { color: colors.text }]}>
               {(() => {
                 const todayKey = toMumbaiDateKey(new Date());
@@ -2109,7 +2476,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
                 return formatMumbaiDateKey(selectedDate);
               })()}
             </Text>
-          </View>
+            <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+          </Pressable>
 
           <Pressable
             disabled={selectedDate >= toMumbaiDateKey(new Date())}
@@ -2119,15 +2487,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
               selectedDate >= toMumbaiDateKey(new Date()) && { opacity: 0.3 }
             ]}
             onPress={() => {
-              const parts = selectedDate.split("-");
-              const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-              d.setDate(d.getDate() + 1);
-              const yyyy = d.getFullYear();
-              const mm = String(d.getMonth() + 1).padStart(2, "0");
-              const dd = String(d.getDate()).padStart(2, "0");
-              const nextKey = yyyy + "-" + mm + "-" + dd;
+              const nextKey = shiftDateKey(selectedDate, 1);
               if (nextKey <= toMumbaiDateKey(new Date())) {
                 setSelectedDate(nextKey);
+                setDatePickerMonthKey(getMonthKey(nextKey));
                 void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
               }
             }}
@@ -2183,6 +2546,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
               <View style={[styles.adminSummaryChip, { backgroundColor: colors.textTertiary + "12", borderColor: colors.border }]}>
                 <Text style={[styles.adminSummaryValue, { color: colors.textSecondary }]}>{adminNoActivityCount}</Text>
                 <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>No Activity</Text>
+              </View>
+              <View style={[styles.adminSummaryChip, { backgroundColor: colors.secondary + "12", borderColor: colors.secondary + "44" }]}>
+                <Text style={[styles.adminSummaryValue, { color: colors.secondary }]}>{formatWorkDuration(adminTotalWorkMinutes)}</Text>
+                <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>Work Hours</Text>
               </View>
             </View>
             <View style={[styles.logList, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
@@ -2253,6 +2620,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
                             const metaParts = [
                               entry.checkInAt ? `In ${formatAttendanceTime(entry.checkInAt)}` : null,
                               entry.checkOutAt ? `Out ${formatAttendanceTime(entry.checkOutAt)}` : null,
+                              `Work ${entry.workHoursLabel}`,
                               entry.geofenceName ?? entry.locationLabel,
                             ].filter(Boolean);
                             const approvalLabel =
@@ -2720,11 +3088,157 @@ const styles = StyleSheet.create({
   },
   dateNavLabelContainer: {
     flex: 1,
+    minHeight: 42,
     alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
   },
   dateNavLabel: {
     fontSize: 16,
+    fontWeight: "700",
+  },
+  datePickerCard: {
+    width: "92%",
+    maxWidth: 460,
+    borderRadius: 20,
+    borderWidth: 1,
+    padding: 16,
+    maxHeight: "88%",
+  },
+  datePickerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 14,
+  },
+  datePickerIconButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  datePickerTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  datePickerSubtitle: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  calendarWeekRow: {
+    flexDirection: "row",
+    marginBottom: 8,
+  },
+  calendarWeekText: {
+    flex: 1,
+    textAlign: "center",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  calendarGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  calendarDayCell: {
+    width: "13.4%",
+    aspectRatio: 1,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  calendarDayText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  monthSummaryPanel: {
+    marginTop: 14,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+  },
+  monthSummaryHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  monthSummaryTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  monthSummaryRefresh: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  monthSummaryLoading: {
+    minHeight: 56,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  monthSummaryGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  monthSummaryChip: {
+    flexGrow: 1,
+    flexBasis: "47%",
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+  },
+  monthSummaryValue: {
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  monthSummaryLabel: {
+    marginTop: 2,
+    fontSize: 11,
     fontWeight: "600",
+  },
+  monthSummaryMeta: {
+    marginTop: 10,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  monthUserRow: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  monthUserName: {
+    flex: 1,
+    fontSize: 12.5,
+    fontWeight: "700",
+  },
+  monthUserMeta: {
+    fontSize: 11.5,
+    fontWeight: "600",
+  },
+  datePickerCloseButton: {
+    marginTop: 14,
+    minHeight: 42,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  datePickerCloseText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "800",
   },
   pastDateNotice: {
     flexDirection: "row",

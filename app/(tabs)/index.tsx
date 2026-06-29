@@ -61,6 +61,7 @@ import {
   dedupeAttendanceRosterMembers,
   isSystemAdministratorAccount,
 } from "@/lib/attendance-roster";
+import { formatMumbaiDateTime } from "@/lib/ist-time";
 
 type ActivityEntry = {
   id: string;
@@ -202,10 +203,8 @@ function isTaskInMetricRange(task: Task, rangeId: MetricRangeId, now: Date): boo
   return isMetricDateInRange(task.visitPlanDate || task.dueDate || task.createdAt, rangeId, now);
 }
 
-function formatTimeLabel(timestamp: string): string {
-  const parsed = new Date(timestamp);
-  if (Number.isNaN(parsed.getTime())) return "--";
-  return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function formatActivityDateTimeLabel(timestamp: string): string {
+  return formatMumbaiDateTime(timestamp);
 }
 
 function formatRelativeTime(timestamp: string): string {
@@ -557,7 +556,7 @@ function buildActivityFeed(
     icon: record.type === "checkin" ? "enter-outline" : "exit-outline",
     iconColor: record.type === "checkin" ? colors.success : colors.warning,
     title: `${record.userName} ${record.type === "checkin" ? "checked in" : "checked out"}`,
-    subtitle: record.geofenceName || "Location update captured",
+    subtitle: `${record.geofenceName || "Location update captured"} | ${formatActivityDateTimeLabel(record.timestamp)}`,
     timestamp: record.timestamp,
     badge:
       record.approvalStatus && record.approvalStatus !== "approved"
@@ -2288,7 +2287,7 @@ export default function DashboardScreen() {
                       {entry.subtitle}
                     </Text>
                     <Text style={[styles.activityTime, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
-                      {formatTimeLabel(entry.timestamp)} · {formatRelativeTime(entry.timestamp)}
+                      {formatActivityDateTimeLabel(entry.timestamp)} · {formatRelativeTime(entry.timestamp)}
                     </Text>
                   </View>
                 </View>
