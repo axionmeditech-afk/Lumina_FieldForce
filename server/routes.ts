@@ -8136,6 +8136,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     insertNotificationInMySql,
     listAttendanceHistoryFromMySql,
     broadcastLocationUpdate,
+    getRequestUser,
   });
 
   registerLocationRoutes(app, {

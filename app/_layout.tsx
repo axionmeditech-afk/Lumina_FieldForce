@@ -37,16 +37,35 @@ SplashScreen.preventAutoHideAsync();
 function resolveCheckedInFromRecords(
   records: AttendanceRecord[],
   userId: string,
-  userName?: string | null
+  userName?: string | null,
+  isSalesperson = false
 ): boolean | null {
   const normalizedUserName = (userName || "").trim().toLowerCase();
-  const latest = records
+  const ordered = records
     .filter(
       (entry) =>
         entry.userId === userId ||
         ((entry.userName || "").trim().toLowerCase() === normalizedUserName && normalizedUserName.length > 0)
     )
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const filtered: AttendanceRecord[] = [];
+  let lastCheckInAt: string | null = null;
+  for (const entry of ordered) {
+    if (entry.type === "checkin") {
+      filtered.push(entry);
+      lastCheckInAt = entry.timestamp;
+      continue;
+    }
+    if (isSalesperson && entry.type === "checkout" && lastCheckInAt) {
+      const deltaMs = new Date(entry.timestamp).getTime() - new Date(lastCheckInAt).getTime();
+      if (Number.isFinite(deltaMs) && deltaMs >= 0 && deltaMs <= 2 * 60_000) {
+        continue;
+      }
+    }
+    filtered.push(entry);
+    lastCheckInAt = null;
+  }
+  const latest = filtered.at(-1);
   if (!latest) return null;
   return latest.type === "checkin";
 }
@@ -114,7 +133,12 @@ function AppShell() {
       }
 
       const [checkedInFlag, attendanceRecords] = await Promise.all([isCheckedIn(), getAttendance()]);
-      const derivedCheckedIn = resolveCheckedInFromRecords(attendanceRecords, user.id, user.name);
+      const derivedCheckedIn = resolveCheckedInFromRecords(
+        attendanceRecords,
+        user.id,
+        user.name,
+        user.role === "salesperson"
+      );
       const checkedIn = derivedCheckedIn ?? checkedInFlag;
       if (checkedIn !== checkedInFlag) {
         await setCheckedIn(checkedIn);
@@ -134,7 +158,7 @@ function AppShell() {
         await flushBackgroundLocationQueue();
       }
     },
-    [user?.id, user?.name]
+    [user?.id, user?.name, user?.role]
   );
 
   useEffect(() => {

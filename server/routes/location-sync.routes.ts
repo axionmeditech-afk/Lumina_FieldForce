@@ -4,7 +4,7 @@ import type { AttendanceRecord, Geofence, LocationLog } from "@/lib/types";
 export type LocationSyncRouteDeps = Record<string, any>;
 
 const AUTO_CHECKOUT_ON_GEOFENCE_EXIT =
-  (process.env.AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "false").trim().toLowerCase() === "true";
+  (process.env.AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "true").trim().toLowerCase() === "true";
 
 export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRouteDeps) {
   const {
@@ -26,6 +26,7 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
     insertNotificationInMySql,
     listAttendanceHistoryFromMySql,
     broadcastLocationUpdate,
+    getRequestUser,
   } = deps;
 
   app.post("/api/location/log", requireAuth, async (req, res) => {
@@ -153,7 +154,12 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
             : await storage.findActiveAttendance(entry.userId);
           activeAttendanceCache.set(entry.userId, activeAttendance ?? null);
         }
-        if (activeAttendance && AUTO_CHECKOUT_ON_GEOFENCE_EXIT) {
+        const requestUser = typeof getRequestUser === "function" ? getRequestUser(req) : null;
+        const autoCheckoutBlockedForRole =
+          req.auth?.role === "salesperson" ||
+          requestUser?.role === "salesperson" ||
+          requestUser?.employeeCategory === "on_field";
+        if (activeAttendance && AUTO_CHECKOUT_ON_GEOFENCE_EXIT && !autoCheckoutBlockedForRole) {
           // Verify that the location log was captured AFTER the active check-in
           const logTime = entry.capturedAt ? new Date(entry.capturedAt).getTime() : Date.now();
           const checkInTime = new Date(activeAttendance.timestamp).getTime();

@@ -1597,6 +1597,7 @@ async function analyzeConversationWithBackendAIForMeeting(input: {
 }
 
 const ROUTE_POINT_INTERVAL_MINUTES = 1;
+const LIVE_ROUTE_POINT_INTERVAL_MINUTES = 0;
 const LIVE_ROUTE_REFRESH_MS = 15 * 1000;
 
 function toMs(value: string): number {
@@ -1694,8 +1695,36 @@ interface RouteSessionWindow {
   endAt: string | null;
 }
 
+function withoutInstantSalespersonCheckouts<T extends { type: "checkin" | "checkout"; timestamp: string }>(
+  events: T[]
+): T[] {
+  const ordered = [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const filtered: T[] = [];
+  let lastCheckInAt: string | null = null;
+
+  for (const event of ordered) {
+    if (event.type === "checkin") {
+      filtered.push(event);
+      lastCheckInAt = event.timestamp;
+      continue;
+    }
+
+    if (event.type === "checkout" && lastCheckInAt) {
+      const deltaMs = toMs(event.timestamp) - toMs(lastCheckInAt);
+      if (Number.isFinite(deltaMs) && deltaMs >= 0 && deltaMs <= 2 * 60_000) {
+        continue;
+      }
+    }
+
+    filtered.push(event);
+    lastCheckInAt = null;
+  }
+
+  return filtered;
+}
+
 function resolveRouteSessionWindow(attendanceEvents: AttendanceRecord[]): RouteSessionWindow {
-  const ordered = [...attendanceEvents].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const ordered = withoutInstantSalespersonCheckouts(attendanceEvents);
   let activeStartAt: string | null = null;
   let lastCompletedWindow: RouteSessionWindow = { startAt: null, endAt: null };
 
@@ -1760,6 +1789,7 @@ function filterPointsToSessionWindow(
 function downsamplePointsByInterval(points: LocationLog[], intervalMinutes: number): LocationLog[] {
   if (points.length <= 1) return points;
   const sorted = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  if (intervalMinutes <= 0) return sorted;
   const intervalMs = Math.max(1, intervalMinutes) * 60_000;
   const sampled: LocationLog[] = [];
   let lastIncludedMs = Number.NaN;
@@ -1795,6 +1825,7 @@ function normalizePointsForInterval(points: LocationLog[], intervalMinutes: numb
     deduped.push(point);
   }
 
+  if (intervalMinutes <= 0) return deduped;
   return downsamplePointsByInterval(deduped, intervalMinutes);
 }
 
@@ -1803,9 +1834,14 @@ function getTimelineLatestActivityAt(timeline: AdminRouteTimelineResponse | null
   const latestPointAt = [...(timeline.points || [])]
     .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
     .at(-1)?.capturedAt;
-  const latestAttendanceAt = [...(timeline.attendanceEvents || [])]
-    .sort((a, b) => a.at.localeCompare(b.at))
-    .at(-1)?.at;
+  const latestAttendanceAt = withoutInstantSalespersonCheckouts(
+    (timeline.attendanceEvents || []).map((entry) => ({
+      type: entry.type,
+      timestamp: entry.at,
+    }))
+  )
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+    .at(-1)?.timestamp;
   return [latestPointAt, latestAttendanceAt]
     .filter((value): value is string => Boolean(value))
     .sort((a, b) => a.localeCompare(b))
@@ -1816,10 +1852,10 @@ function getLatestAttendanceStatus(
   localAttendance: AttendanceRecord[],
   remoteAttendanceEvents: { type: "checkin" | "checkout"; at: string }[]
 ): { type: "checkin" | "checkout"; timestamp: string } | null {
-  const combined = [
+  const combined = withoutInstantSalespersonCheckouts([
     ...localAttendance.map((entry) => ({ type: entry.type, timestamp: entry.timestamp })),
     ...remoteAttendanceEvents.map((entry) => ({ type: entry.type, timestamp: entry.at })),
-  ].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  ]).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   return combined.at(-1) ?? null;
 }
 
@@ -3283,7 +3319,7 @@ export default function SalesScreen() {
       .filter((entry) => isMumbaiDateKey(entry.capturedAt, todayDateKey));
     const normalizedPoints = normalizePointsForInterval(
       filterPointsToSessionWindow(selectedDayPoints, sessionWindow),
-      ROUTE_POINT_INTERVAL_MINUTES
+      LIVE_ROUTE_POINT_INTERVAL_MINUTES
     );
     return buildRouteTimeline(selectedSalespersonId, todayDateKey, normalizedPoints);
   }, [
@@ -3317,7 +3353,7 @@ export default function SalesScreen() {
           const currentTimeline = await getAdminRouteTimeline(
             candidateId,
             todayDateKey,
-            ROUTE_POINT_INTERVAL_MINUTES
+            { intervalMinutes: ROUTE_POINT_INTERVAL_MINUTES, raw: true }
           );
           const currentLatestActivity = getTimelineLatestActivityAt(currentTimeline);
           const resolvedLatestActivity = getTimelineLatestActivityAt(resolvedTimeline);
@@ -3337,7 +3373,10 @@ export default function SalesScreen() {
 
       if ((!resolvedTimeline || (resolvedTimeline.points?.length ?? 0) === 0) && candidateIds.length) {
         try {
-          const liveRoutes = await getAdminLiveMapRoutes(todayDateKey, ROUTE_POINT_INTERVAL_MINUTES);
+          const liveRoutes = await getAdminLiveMapRoutes(todayDateKey, {
+            intervalMinutes: ROUTE_POINT_INTERVAL_MINUTES,
+            raw: true,
+          });
           const matchingRoute = (liveRoutes.routes || [])
             .filter((route) => candidateIds.includes(route.userId) && (route.points?.length ?? 0) > 0)
             .sort((a, b) => {

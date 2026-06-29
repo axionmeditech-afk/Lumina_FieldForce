@@ -230,6 +230,7 @@ function buildSelectedUserAliases(
 }
 
 const ROUTE_POINT_INTERVAL_MINUTES = 1;
+const LIVE_ROUTE_POINT_INTERVAL_MINUTES = 0;
 
 interface RouteSessionWindow {
   startAt: string | null;
@@ -281,6 +282,7 @@ function filterPointsToSessionWindow(
 function downsamplePointsByInterval(points: LocationLog[], intervalMinutes: number): LocationLog[] {
   if (points.length <= 1) return points;
   const sorted = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  if (intervalMinutes <= 0) return sorted;
   const intervalMs = Math.max(1, intervalMinutes) * 60_000;
   const sampled: LocationLog[] = [];
   let lastIncludedMs = Number.NaN;
@@ -316,6 +318,7 @@ function normalizePointsForInterval(points: LocationLog[], intervalMinutes: numb
     deduped.push(point);
   }
 
+  if (intervalMinutes <= 0) return deduped;
   return downsamplePointsByInterval(deduped, intervalMinutes);
 }
 
@@ -334,6 +337,34 @@ function normalizeTimelineForInterval(
 
 type RouteAttendanceStatusEvent = AdminRouteTimelineResponse["attendanceEvents"][number];
 
+function withoutInstantSalespersonCheckouts<T extends { type: "checkin" | "checkout"; at: string }>(
+  events: T[]
+): T[] {
+  const ordered = [...events].sort((a, b) => a.at.localeCompare(b.at));
+  const filtered: T[] = [];
+  let lastCheckInAt: string | null = null;
+
+  for (const event of ordered) {
+    if (event.type === "checkin") {
+      filtered.push(event);
+      lastCheckInAt = event.at;
+      continue;
+    }
+
+    if (event.type === "checkout" && lastCheckInAt) {
+      const deltaMs = toMs(event.at) - toMs(lastCheckInAt);
+      if (Number.isFinite(deltaMs) && deltaMs >= 0 && deltaMs <= 2 * 60_000) {
+        continue;
+      }
+    }
+
+    filtered.push(event);
+    lastCheckInAt = null;
+  }
+
+  return filtered;
+}
+
 interface GpsDisabledWindow {
   id: string;
   startAt: string;
@@ -342,7 +373,7 @@ interface GpsDisabledWindow {
 }
 
 function resolveRouteEventSessionWindow(events: RouteAttendanceStatusEvent[]): RouteSessionWindow {
-  const ordered = [...events].sort((a, b) => a.at.localeCompare(b.at));
+  const ordered = withoutInstantSalespersonCheckouts(events);
   let activeStartAt: string | null = null;
   let lastCompletedWindow: RouteSessionWindow = { startAt: null, endAt: null };
 
@@ -387,7 +418,7 @@ function getTimelineLatestActivityAt(timeline: AdminRouteTimelineResponse | null
   const latestPointAt = [...(timeline.points || [])]
     .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
     .at(-1)?.capturedAt;
-  const latestAttendanceAt = [...(timeline.attendanceEvents || [])]
+  const latestAttendanceAt = withoutInstantSalespersonCheckouts(timeline.attendanceEvents || [])
     .sort((a, b) => a.at.localeCompare(b.at))
     .at(-1)?.at;
   return [latestPointAt, latestAttendanceAt]
@@ -600,7 +631,8 @@ export default function RouteTrackingScreen() {
     async (
       existingDayPoints: LocationLog[],
       aliases: Set<string>,
-      isTrackingActive: boolean
+      isTrackingActive: boolean,
+      minPersistIntervalMinutes = ROUTE_POINT_INTERVAL_MINUTES
     ): Promise<boolean> => {
       if (!user || !selectedEmployee) return false;
       const todayKey = toMumbaiDateKey(new Date());
@@ -679,7 +711,7 @@ export default function RouteTrackingScreen() {
         const lastPointMs = toMs(lastPoint.capturedAt);
         const elapsedMs =
           Number.isFinite(lastPointMs) && lastPointMs > 0 ? Math.max(0, nowMs - lastPointMs) : Number.POSITIVE_INFINITY;
-        if (elapsedMs < ROUTE_POINT_INTERVAL_MINUTES * 60_000) {
+        if (minPersistIntervalMinutes > 0 && elapsedMs < minPersistIntervalMinutes * 60_000) {
           return false;
         }
       }
@@ -810,6 +842,14 @@ export default function RouteTrackingScreen() {
         mergedAttendanceSnapshot,
         selectedUserId
       );
+      const isLiveRouteDate = selectedDate === toMumbaiDateKey(new Date());
+      const routePointIntervalMinutes = isLiveRouteDate
+        ? LIVE_ROUTE_POINT_INTERVAL_MINUTES
+        : ROUTE_POINT_INTERVAL_MINUTES;
+      const routeFetchOptions = {
+        intervalMinutes: ROUTE_POINT_INTERVAL_MINUTES,
+        raw: isLiveRouteDate,
+      };
       const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
       const selectedUserAttendanceAll = mergedAttendanceSnapshot
         .filter(
@@ -844,13 +884,14 @@ export default function RouteTrackingScreen() {
       );
       let dayLocalPoints = normalizePointsForInterval(
         filterPointsToSessionWindow(dayLocalPointsRaw, sessionWindow),
-        ROUTE_POINT_INTERVAL_MINUTES
+        routePointIntervalMinutes
       );
 
       const createdCurrentPoint = await persistCurrentLocationPointIfMoved(
         dayLocalPoints,
         aliases,
-        isLocallyTrackingActive
+        isLocallyTrackingActive,
+        routePointIntervalMinutes
       );
       if (createdCurrentPoint) {
         const refreshedLogs = await getLocationLogs();
@@ -862,7 +903,7 @@ export default function RouteTrackingScreen() {
         );
         dayLocalPoints = normalizePointsForInterval(
           filterPointsToSessionWindow(dayLocalPointsRaw, sessionWindow),
-          ROUTE_POINT_INTERVAL_MINUTES
+          routePointIntervalMinutes
         );
       }
 
@@ -905,7 +946,7 @@ export default function RouteTrackingScreen() {
           const currentRemote = await getAdminRouteTimeline(
             candidateUserId,
             selectedDate,
-            ROUTE_POINT_INTERVAL_MINUTES
+            routeFetchOptions
           );
           const currentLatestActivity = getTimelineLatestActivityAt(currentRemote);
           const resolvedLatestActivity = getTimelineLatestActivityAt(remoteTimeline);
@@ -923,9 +964,8 @@ export default function RouteTrackingScreen() {
         }
       }
 
-      const mergedAttendanceEvents = mergeRouteAttendanceEvents(
-        localAttendanceEvents,
-        remoteTimeline?.attendanceEvents || []
+      const mergedAttendanceEvents = withoutInstantSalespersonCheckouts(
+        mergeRouteAttendanceEvents(localAttendanceEvents, remoteTimeline?.attendanceEvents || [])
       );
       const mergedAttendanceSessionWindow = resolveRouteEventSessionWindow(mergedAttendanceEvents);
       const selectedUserGpsAnomalies = mergedAnomalySnapshot.filter((entry) =>
@@ -942,7 +982,7 @@ export default function RouteTrackingScreen() {
               ...remoteTimeline,
               attendanceEvents: mergedAttendanceEvents,
             },
-            ROUTE_POINT_INTERVAL_MINUTES
+            routePointIntervalMinutes
           )
         );
         return;
@@ -959,7 +999,7 @@ export default function RouteTrackingScreen() {
               ...localResolvedTimeline,
               attendanceEvents: mergedAttendanceEvents,
             },
-            ROUTE_POINT_INTERVAL_MINUTES
+            routePointIntervalMinutes
           )
         );
         setError("Showing current/local route points while live API catches up.");
@@ -972,7 +1012,7 @@ export default function RouteTrackingScreen() {
         // Fallback for alias mismatch or delayed route timeline API hydration:
         // resolve selected salesperson route from all admin routes for selected date.
         try {
-          const liveRoutes = await getAdminLiveMapRoutes(selectedDate, ROUTE_POINT_INTERVAL_MINUTES);
+          const liveRoutes = await getAdminLiveMapRoutes(selectedDate, routeFetchOptions);
           const matchingRoute = (liveRoutes.routes || [])
             .filter((route) => aliases.has(route.userId) && (route.points?.length ?? 0) > 0)
             .sort((a, b) => {
@@ -983,7 +1023,7 @@ export default function RouteTrackingScreen() {
           if (matchingRoute && matchingRoute.points.length > 0) {
             const normalizedRoutePoints = normalizePointsForInterval(
               filterPointsToSessionWindow(matchingRoute.points, mergedAttendanceSessionWindow),
-              ROUTE_POINT_INTERVAL_MINUTES
+              routePointIntervalMinutes
             );
             if (normalizedRoutePoints.length) {
               const fallbackTimeline = buildRouteTimeline(
@@ -1019,7 +1059,7 @@ export default function RouteTrackingScreen() {
               const fallbackTimeline = buildRouteTimeline(
                 selectedUserId,
                 selectedDate,
-                normalizePointsForInterval([mappedPoint], ROUTE_POINT_INTERVAL_MINUTES)
+                normalizePointsForInterval([mappedPoint], routePointIntervalMinutes)
               );
               setTimeline({
                 ...fallbackTimeline,
@@ -1041,7 +1081,7 @@ export default function RouteTrackingScreen() {
               ...remoteTimeline,
               attendanceEvents: mergedAttendanceEvents,
             },
-            ROUTE_POINT_INTERVAL_MINUTES
+            routePointIntervalMinutes
           )
         );
         return;
@@ -1326,7 +1366,9 @@ export default function RouteTrackingScreen() {
   }, [timeline?.summary]);
 
   const attendanceStatusEvents = useMemo(() => {
-    return [...(timeline?.attendanceEvents ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+    return withoutInstantSalespersonCheckouts(timeline?.attendanceEvents ?? []).sort((a, b) =>
+      a.at.localeCompare(b.at)
+    );
   }, [timeline?.attendanceEvents]);
 
   const routePointRows = useMemo(() => {
@@ -1399,7 +1441,7 @@ export default function RouteTrackingScreen() {
     ? routePointRows[routePointRows.length - 1]
     : null;
   const latestAttendanceEvent = useMemo(() => {
-    const events = timeline?.attendanceEvents ?? [];
+    const events = withoutInstantSalespersonCheckouts(timeline?.attendanceEvents ?? []);
     if (!events.length) return null;
     return [...events].sort((a, b) => a.at.localeCompare(b.at))[events.length - 1];
   }, [timeline?.attendanceEvents]);
