@@ -45,6 +45,7 @@ import {
 } from "@/lib/location-service";
 import { isSalesRole } from "@/lib/role-access";
 import { buildRouteTimeline } from "@/lib/route-analytics";
+import { haversineDistanceMeters } from "@/lib/geofence";
 import {
   addLocationLog,
   getAttendance,
@@ -537,6 +538,7 @@ export default function RouteTrackingScreen() {
   const [error, setError] = useState<string | null>(null);
   const [authExpired, setAuthExpired] = useState(false);
   const [placeNameByLocationKey, setPlaceNameByLocationKey] = useState<Record<string, string>>({});
+  const hasLoadedTimelineRef = useRef(false);
   const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
@@ -762,7 +764,7 @@ export default function RouteTrackingScreen() {
       }
       return;
     }
-    setLoading(true);
+    setLoading(!hasLoadedTimelineRef.current);
     setError(null);
     setGpsDisabledWindows([]);
     try {
@@ -1098,6 +1100,7 @@ export default function RouteTrackingScreen() {
         setError(message);
       }
     } finally {
+      hasLoadedTimelineRef.current = true;
       setLoading(false);
     }
   }, [
@@ -1268,9 +1271,19 @@ export default function RouteTrackingScreen() {
 
   const rows = useMemo<TimelineRow[]>(() => {
     if (!timeline) return [];
+    void mumbaiNowLabel;
     const halts = timeline.halts ?? [];
     const segments = timeline.segments ?? [];
     const haltById = new Map(halts.map((halt) => [halt.id, halt]));
+    const activeCheckIn = withoutInstantSalespersonCheckouts(timeline.attendanceEvents || [])
+      .filter((event) => event.type === "checkin")
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .at(-1);
+    const hasCheckoutAfterActiveCheckIn =
+      Boolean(activeCheckIn) &&
+      withoutInstantSalespersonCheckouts(timeline.attendanceEvents || []).some(
+        (event) => event.type === "checkout" && activeCheckIn && event.at > activeCheckIn.at
+      );
 
     const segmentRows: TimelineRow[] = segments.map((segment) => {
       if (segment.type === "halt") {
@@ -1322,14 +1335,38 @@ export default function RouteTrackingScreen() {
     });
 
     const merged = [...segmentRows, ...gpsRows];
+    if (
+      !merged.length &&
+      activeCheckIn &&
+      !hasCheckoutAfterActiveCheckIn &&
+      (timeline.points?.length ?? 0) > 0
+    ) {
+      const latestPoint = [...(timeline.points || [])].sort((a, b) =>
+        a.capturedAt.localeCompare(b.capturedAt)
+      ).at(-1);
+      const startAt = activeCheckIn.at;
+      const nowIso = new Date().toISOString();
+      const stationaryMinutes = Math.max(1, Math.round((toMs(nowIso) - toMs(startAt)) / 60000));
+      const locationLabel = latestPoint?.geofenceName || "current location";
+      merged.push({
+        id: `active_stationary_${activeCheckIn.id}`,
+        type: "halt",
+        startAt,
+        endAt: nowIso,
+        icon: "pause-circle-outline",
+        iconColor: colors.warning,
+        text: `Stationary at ${locationLabel} (${stationaryMinutes} mins). No meaningful movement detected yet.`,
+      });
+    }
     return merged.sort((a, b) => {
       const aStart = a.startAt;
       const bStart = b.startAt;
       return aStart.localeCompare(bStart);
     });
-  }, [colors.danger, colors.primary, colors.warning, gpsDisabledWindows, timeline]);
+  }, [colors.danger, colors.primary, colors.warning, gpsDisabledWindows, mumbaiNowLabel, timeline]);
 
   const summary = useMemo(() => {
+    void mumbaiNowLabel;
     const raw = timeline?.summary;
     const totalDistanceKm =
       typeof raw?.totalDistanceKm === "number" && Number.isFinite(raw.totalDistanceKm)
@@ -1355,15 +1392,33 @@ export default function RouteTrackingScreen() {
       typeof raw?.rawPointCount === "number" && Number.isFinite(raw.rawPointCount)
         ? raw.rawPointCount
         : pointCount;
+    const activeCheckIn = withoutInstantSalespersonCheckouts(timeline?.attendanceEvents || [])
+      .filter((event) => event.type === "checkin")
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .at(-1);
+    const hasCheckoutAfterActiveCheckIn =
+      Boolean(activeCheckIn) &&
+      withoutInstantSalespersonCheckouts(timeline?.attendanceEvents || []).some(
+        (event) => event.type === "checkout" && activeCheckIn && event.at > activeCheckIn.at
+      );
+    const shouldTreatAsActiveHalt =
+      activeCheckIn &&
+      !hasCheckoutAfterActiveCheckIn &&
+      pointCount > 0 &&
+      totalMovingMinutes === 0 &&
+      haltCount === 0;
+    const activeHaltMinutes = shouldTreatAsActiveHalt
+      ? Math.max(1, Math.round((Date.now() - toMs(activeCheckIn.at)) / 60000))
+      : 0;
     return {
       totalDistanceKm,
-      totalMovingMinutes,
-      totalHaltMinutes,
-      haltCount,
+      totalMovingMinutes: shouldTreatAsActiveHalt ? activeHaltMinutes : totalMovingMinutes,
+      totalHaltMinutes: shouldTreatAsActiveHalt ? activeHaltMinutes : totalHaltMinutes,
+      haltCount: shouldTreatAsActiveHalt ? 1 : haltCount,
       pointCount,
       rawPointCount,
     };
-  }, [timeline?.summary]);
+  }, [mumbaiNowLabel, timeline?.attendanceEvents, timeline?.summary]);
 
   const attendanceStatusEvents = useMemo(() => {
     return withoutInstantSalespersonCheckouts(timeline?.attendanceEvents ?? []).sort((a, b) =>
@@ -1375,16 +1430,41 @@ export default function RouteTrackingScreen() {
     if (!timeline?.points?.length) return [];
     return [...timeline.points]
       .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
-      .map((point) => ({
-        id: point.id,
-        at: point.capturedAt,
-        geofenceName: point.geofenceName || null,
-        latitude: point.latitude,
-        longitude: point.longitude,
-        locationKey: toLocationKey(point.latitude, point.longitude),
-        locationName: placeNameByLocationKey[toLocationKey(point.latitude, point.longitude)] ?? null,
-        battery: toBatteryLabel(point.batteryLevel),
-      }));
+      .map((point, index, points) => {
+        const previous = index > 0 ? points[index - 1] : null;
+        const distanceFromPreviousMeters = previous
+          ? Math.round(
+              haversineDistanceMeters(
+                previous.latitude,
+                previous.longitude,
+                point.latitude,
+                point.longitude
+              )
+            )
+          : null;
+        const elapsedFromPreviousMinutes = previous
+          ? Math.max(0, Math.round((toMs(point.capturedAt) - toMs(previous.capturedAt)) / 60000))
+          : null;
+        const movementDetail =
+          distanceFromPreviousMeters === null
+            ? "First captured point"
+            : distanceFromPreviousMeters <= 25
+              ? `Stationary sample${elapsedFromPreviousMinutes ? ` after ${elapsedFromPreviousMinutes} mins` : ""}`
+              : `Moved ${distanceFromPreviousMeters} m${
+                  elapsedFromPreviousMinutes ? ` in ${elapsedFromPreviousMinutes} mins` : ""
+                }`;
+        return {
+          id: point.id,
+          at: point.capturedAt,
+          geofenceName: point.geofenceName || null,
+          latitude: point.latitude,
+          longitude: point.longitude,
+          locationKey: toLocationKey(point.latitude, point.longitude),
+          locationName: placeNameByLocationKey[toLocationKey(point.latitude, point.longitude)] ?? null,
+          battery: toBatteryLabel(point.batteryLevel),
+          movementDetail,
+        };
+      });
   }, [placeNameByLocationKey, timeline?.points]);
 
   useEffect(() => {
@@ -1888,6 +1968,9 @@ export default function RouteTrackingScreen() {
                       </Text>
                       <Text style={[styles.rowText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
                         {point.locationName || point.geofenceName || "Resolving location..."}
+                      </Text>
+                      <Text style={[styles.rowText, { color: colors.textTertiary, fontFamily: "Inter_400Regular" }]}>
+                        {point.movementDetail}
                       </Text>
                     </View>
                   </View>
