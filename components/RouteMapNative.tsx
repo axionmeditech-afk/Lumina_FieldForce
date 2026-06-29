@@ -64,7 +64,7 @@ type WebMapMarkerPayload = {
   lat: number;
   lng: number;
   color: string;
-  renderMode?: "standard" | "alert";
+  renderMode?: "standard" | "alert" | "breadcrumb" | "latest" | "pulse_only";
   label?: string;
   title?: string;
   summary?: string | null;
@@ -236,6 +236,21 @@ function buildOsmHtml(payload: {
         top: 5px;
         left: 5px;
       }
+      .route-marker--breadcrumb {
+        width: 10px;
+        height: 10px;
+        top: 13px;
+        left: 13px;
+        border-width: 2px;
+        opacity: 0.9;
+      }
+      .route-marker--latest {
+        width: 16px;
+        height: 16px;
+        top: 10px;
+        left: 10px;
+        border-width: 3px;
+      }
       .route-marker-pulse {
         position: absolute;
         inset: -1px;
@@ -303,7 +318,7 @@ function buildOsmHtml(payload: {
             <div class="route-marker-wrap" style="color: \${marker.color || "#22d3ee"}">
               \${marker.isNearby ? '<div class="route-marker-pulse"></div>' : ""}
               \${marker.isNearby ? '<div class="route-marker-pulse route-marker-pulse--secondary"></div>' : ""}
-              <div class="route-marker \${marker.isNearby ? "route-marker--nearby" : ""} \${marker.renderMode === "pulse_only" ? "route-marker--ghost" : ""}" style="background: \${marker.color || "#22d3ee"}">
+              <div class="route-marker \${marker.isNearby ? "route-marker--nearby" : ""} \${marker.renderMode === "breadcrumb" ? "route-marker--breadcrumb" : ""} \${marker.renderMode === "latest" ? "route-marker--latest" : ""} \${marker.renderMode === "pulse_only" ? "route-marker--ghost" : ""}" style="background: \${marker.color || "#22d3ee"}">
                 \${marker.label || ""}
               </div>
             </div>
@@ -546,12 +561,21 @@ function buildMaptilerHtml(payload: {
               "circle-color": ["get", "color"],
               "circle-radius": [
                 "case",
+                ["==", ["get", "renderMode"], "breadcrumb"],
+                5,
+                ["==", ["get", "renderMode"], "latest"],
+                9,
                 ["==", ["get", "isNearby"], true],
                 14,
                 11
               ],
               "circle-stroke-color": "#FFFFFF",
-              "circle-stroke-width": 3
+              "circle-stroke-width": [
+                "case",
+                ["==", ["get", "renderMode"], "breadcrumb"],
+                1.5,
+                3
+              ]
             }
           });
 
@@ -823,15 +847,17 @@ export function RouteMapNative({
   const [selectedQuickSaleId, setSelectedQuickSaleId] = useState<string | null>(null);
   const [isInsightModalVisible, setInsightModalVisible] = useState(false);
 
+  const pointCoords = useMemo(() => toLatLng(points), [points]);
+  const hasRoadRoutePath = Boolean(routePath && routePath.length >= 2);
   const coords = useMemo(() => {
-    if (routePath && routePath.length >= 2) {
+    if (hasRoadRoutePath && routePath) {
       return routePath.map((point) => ({
         latitude: point.latitude,
         longitude: point.longitude,
       }));
     }
-    return toLatLng(points);
-  }, [points, routePath]);
+    return pointCoords;
+  }, [hasRoadRoutePath, pointCoords, routePath]);
 
   const allCoords = useMemo(() => {
     if (hasMultiRoutes) {
@@ -855,6 +881,7 @@ export function RouteMapNative({
     }
     return [
       ...coords,
+      ...pointCoords,
       ...normalizedPlannedStops.map((stop) => ({
         latitude: stop.latitude,
         longitude: stop.longitude,
@@ -864,7 +891,7 @@ export function RouteMapNative({
         longitude: point.longitude,
       })),
     ];
-  }, [coords, hasMultiRoutes, normalizedMultiRoutes, normalizedPlannedStops, normalizedQuickSalePoints]);
+  }, [coords, hasMultiRoutes, normalizedMultiRoutes, normalizedPlannedStops, normalizedQuickSalePoints, pointCoords]);
 
   const region = useMemo(() => buildRegion(allCoords), [allCoords]);
   const bounds = useMemo(() => buildBounds(allCoords), [allCoords]);
@@ -1003,16 +1030,21 @@ export function RouteMapNative({
           color: route.color,
         }));
     }
-    if (coords.length >= 2) {
-      return [
-        {
-          coords: coords.map((coord) => [coord.latitude, coord.longitude] as [number, number]),
-          color: colors.primary,
-        },
-      ];
+    const routes: { coords: [number, number][]; color: string }[] = [];
+    if (hasRoadRoutePath && pointCoords.length >= 2) {
+      routes.push({
+        coords: pointCoords.map((coord) => [coord.latitude, coord.longitude] as [number, number]),
+        color: colors.secondary,
+      });
     }
-    return [];
-  }, [colors.primary, coords, hasMultiRoutes, multiRouteDefs]);
+    if (coords.length >= 2) {
+      routes.push({
+        coords: coords.map((coord) => [coord.latitude, coord.longitude] as [number, number]),
+        color: colors.primary,
+      });
+    }
+    return routes;
+  }, [colors.primary, colors.secondary, coords, hasMultiRoutes, hasRoadRoutePath, multiRouteDefs, pointCoords]);
 
   const osmMarkers = useMemo(() => {
     const markers: WebMapMarkerPayload[] = [];
@@ -1029,6 +1061,19 @@ export function RouteMapNative({
         }
       }
     } else {
+      routeSamplePoints.forEach((point, idx) => {
+        const isLatest = idx === routeSamplePoints.length - 1;
+        markers.push({
+          id: `route_sample_${point.id}_${idx}`,
+          kind: "route",
+          lat: point.latitude,
+          lng: point.longitude,
+          color: isLatest ? colors.primary : colors.secondary,
+          renderMode: isLatest ? "latest" : "breadcrumb",
+          label: "",
+          title: isLatest ? "Latest GPS point" : "Captured GPS point",
+        });
+      });
       if (startPoint) {
         markers.push({
           id: "route_start",
@@ -1107,6 +1152,7 @@ export function RouteMapNative({
     normalizedPlannedStops,
     normalizedQuickSalePoints,
     points.length,
+    routeSamplePoints,
     startPoint,
   ]);
 
@@ -2150,6 +2196,14 @@ export function RouteMapNative({
             ))
           : (
             <>
+              {hasRoadRoutePath && pointCoords.length >= 2 ? (
+                <Polyline
+                  coordinates={pointCoords}
+                  strokeColor={colors.secondary}
+                  strokeWidth={3}
+                  lineDashPattern={[6, 6]}
+                />
+              ) : null}
               <Polyline coordinates={coords} strokeColor={colors.primary} strokeWidth={4} />
 
               {routeSamplePoints.map((point, index) => (

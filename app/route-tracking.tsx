@@ -332,6 +332,10 @@ function normalizeTimelineForInterval(
   return {
     ...timeline,
     ...rebuilt,
+    summary: {
+      ...rebuilt.summary,
+      rawPointCount: timeline.summary?.rawPointCount ?? timeline.points?.length ?? normalizedPoints.length,
+    },
     attendanceEvents: timeline.attendanceEvents || [],
   };
 }
@@ -1520,6 +1524,32 @@ export default function RouteTrackingScreen() {
   const latestRoutePoint = routePointRows.length
     ? routePointRows[routePointRows.length - 1]
     : null;
+  const liveProgress = useMemo(() => {
+    if (!latestRoutePoint) return null;
+    void mumbaiNowLabel;
+    const destination =
+      plannedStops.find((stop) => stop.status === "in_progress") ??
+      plannedStops.find((stop) => stop.status !== "completed") ??
+      plannedStops[plannedStops.length - 1] ??
+      null;
+    const latestPointMs = toMs(latestRoutePoint.at);
+    const staleMinutes = Number.isFinite(latestPointMs)
+      ? Math.max(0, Math.round((Date.now() - latestPointMs) / 60000))
+      : null;
+    const remainingMeters = destination
+      ? haversineDistanceMeters(
+          latestRoutePoint.latitude,
+          latestRoutePoint.longitude,
+          destination.latitude,
+          destination.longitude
+        )
+      : null;
+    return {
+      destination,
+      staleMinutes,
+      remainingMeters,
+    };
+  }, [latestRoutePoint, mumbaiNowLabel, plannedStops]);
   const latestAttendanceEvent = useMemo(() => {
     const events = withoutInstantSalespersonCheckouts(timeline?.attendanceEvents ?? []);
     if (!events.length) return null;
@@ -1884,6 +1914,34 @@ export default function RouteTrackingScreen() {
             </Text>
           </View>
         </Animated.View>
+
+        {liveProgress ? (
+          <Animated.View
+            entering={FadeInDown.duration(350).delay(100)}
+            style={[styles.currentLocationCard, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}
+          >
+            <View style={[styles.currentLocationIcon, { backgroundColor: `${colors.secondary}18` }]}>
+              <Ionicons name="navigate-outline" size={16} color={colors.secondary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.currentLocationTitle, { color: colors.text, fontFamily: "Inter_600SemiBold" }]}>
+                Live Route Progress
+              </Text>
+              <Text style={[styles.currentLocationMeta, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
+                {liveProgress.destination
+                  ? `${liveProgress.destination.label} | ${
+                      liveProgress.remainingMeters !== null
+                        ? `${(liveProgress.remainingMeters / 1000).toFixed(2)} km approx remaining`
+                        : "remaining distance unavailable"
+                    }`
+                  : "No planned destination assigned. Showing captured movement trail."}
+                {typeof liveProgress.staleMinutes === "number"
+                  ? ` | Last GPS ${liveProgress.staleMinutes <= 0 ? "just now" : `${liveProgress.staleMinutes} min ago`}`
+                  : ""}
+              </Text>
+            </View>
+          </Animated.View>
+        ) : null}
 
         <Animated.View
           entering={FadeInDown.duration(350).delay(105)}

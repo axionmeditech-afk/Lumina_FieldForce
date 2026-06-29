@@ -211,11 +211,18 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         }
       }
       const timeline = deps.buildRouteTimeline(userId, requestedDate, points);
+      const timelineWithRawCount = {
+        ...timeline,
+        summary: {
+          ...timeline.summary,
+          rawPointCount: rawLocationPoints.length,
+        },
+      };
       if (points.length && deps.isMySqlStateEnabled()) {
         void deps.upsertRouteDailySummaryInMySql(
           userId,
           requestedDate,
-          { ...timeline, source: "raw_logs" },
+          { ...timelineWithRawCount, source: "raw_logs" },
           attendanceEvents,
           rawLocationPoints.length,
         ).catch((error) => {
@@ -237,7 +244,7 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
       });
 
       res.json({
-        ...timeline,
+        ...timelineWithRawCount,
         intervalMinutes,
         directions,
         attendanceEvents,

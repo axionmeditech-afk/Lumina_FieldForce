@@ -401,12 +401,21 @@ export async function getMapplsDirectionsForLogs(
   }
 ): Promise<RouteDirections | null> {
   const apiKey = getMapplsRoutingApiKey();
-  if (!apiKey) return null;
-
   const compacted = compactSequential(rawPoints);
   if (compacted.length < 2) return null;
 
   const sampled = pickEvenlySpaced(compacted, MAX_ROUTE_POSITIONS);
+  const baseFallbackPath = toRoutePathFromLogs(sampled);
+
+  if (!apiKey) {
+    return getGoogleDirectionsForSampledPoints(
+      sampled,
+      rawPoints.length,
+      baseFallbackPath,
+      "Mappls routing API key missing."
+    );
+  }
+
   const resource = sanitizeDirectionResource(options?.resource ?? process.env.MAPPLS_ROUTING_RESOURCE);
   const profile = sanitizeProfile(options?.profile ?? process.env.MAPPLS_ROUTING_PROFILE);
   const overview = sanitizeOverview(options?.overview ?? process.env.MAPPLS_ROUTING_OVERVIEW);
@@ -447,7 +456,6 @@ export async function getMapplsDirectionsForLogs(
   if (region) url.searchParams.set("region", region);
   if (routeType !== null) url.searchParams.set("rtype", String(routeType));
 
-  const baseFallbackPath = toRoutePathFromLogs(sampled);
   try {
     const response = await fetch(url.toString());
     const text = await response.text();
