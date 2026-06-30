@@ -315,6 +315,25 @@ export class DeviceSessionLockedError extends Error {
   }
 }
 
+export class ApiSessionInvalidError extends Error {
+  readonly code = "api_session_invalid" as const;
+
+  constructor(message = "Session is no longer active. Please sign in again.") {
+    super(message);
+    this.name = "ApiSessionInvalidError";
+  }
+}
+
+export function isApiSessionInvalidError(error: unknown): error is ApiSessionInvalidError {
+  return (
+    error instanceof ApiSessionInvalidError ||
+    (error instanceof Error &&
+      (error.name === "ApiSessionInvalidError" ||
+        (typeof (error as { code?: unknown }).code === "string" &&
+          (error as { code?: string }).code === "api_session_invalid")))
+  );
+}
+
 export function isDeviceSessionLockedError(error: unknown): error is DeviceSessionLockedError {
   return (
     error instanceof DeviceSessionLockedError ||
@@ -597,10 +616,22 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
           /invalid or expired token|missing authorization bearer token|missing authorization/i.test(
             normalized
           );
+        const isSessionInvalid =
+          Boolean(token) &&
+          !isAuthRoute &&
+          (response.status === 401 || response.status === 403 || response.status === 404) &&
+          /session|not authenticated|user not found|user inactive|access request|pending admin approval|rejected by admin|no longer active|disabled/i.test(
+            messageFromJson || text || ""
+          );
 
-        if (isTokenError) {
+        if (isTokenError || isSessionInvalid) {
           if (token && !isAuthRoute) {
             await setApiToken(null);
+          }
+          if (isSessionInvalid) {
+            throw new ApiSessionInvalidError(
+              messageFromJson || "Session is no longer active. Please sign in again."
+            );
           }
           if (token) {
             throw new Error("Session expired. Please log out and sign in again.");
@@ -664,6 +695,7 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
 interface AuthRequestOptions {
   timeoutMs?: number;
   throwOnDeviceLock?: boolean;
+  throwOnInvalidSession?: boolean;
 }
 
 export interface AccessRequestPayload {
@@ -828,7 +860,10 @@ export async function getAuthenticatedApiUser(
       timeoutMs
     );
     return response.user;
-  } catch {
+  } catch (error) {
+    if (options?.throwOnInvalidSession && isApiSessionInvalidError(error)) {
+      throw error;
+    }
     return null;
   }
 }

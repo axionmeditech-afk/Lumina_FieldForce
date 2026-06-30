@@ -9,12 +9,14 @@ import {
   registerUser,
   deleteAuthUserByEmail,
   getCurrentCompanyProfile,
+  getApiToken,
   syncBackendAuthenticatedUser,
   updateCompanyProfile,
 } from "@/lib/storage";
 import {
   getAuthenticatedApiUser,
   isDeviceSessionLockedError,
+  isApiSessionInvalidError,
   issueApiToken,
   logoutApiSession,
   registerApiUser,
@@ -106,6 +108,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshSession = useCallback(async () => {
     const activeUser = await getCurrentUser();
+    if (activeUser && isStandaloneRuntime) {
+      const token = await getApiToken();
+      if (!token) {
+        await logoutUser();
+        setUser(null);
+        setCompany(null);
+        return;
+      }
+
+      try {
+        const remoteUser = await getAuthenticatedApiUser({
+          timeoutMs: 7000,
+          throwOnInvalidSession: true,
+        });
+        if (remoteUser) {
+          const hydrated = await syncBackendAuthenticatedUser(remoteUser);
+          setUser(hydrated);
+          const activeCompany = await getCurrentCompanyProfile();
+          setCompany(activeCompany);
+          return;
+        }
+        const tokenAfterValidation = await getApiToken();
+        if (!tokenAfterValidation) {
+          await logoutUser();
+          setUser(null);
+          setCompany(null);
+          return;
+        }
+      } catch (error) {
+        if (isApiSessionInvalidError(error)) {
+          await logoutUser();
+          setUser(null);
+          setCompany(null);
+          return;
+        }
+      }
+    }
     setUser(activeUser);
     if (activeUser) {
       const activeCompany = await getCurrentCompanyProfile();
@@ -113,7 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       setCompany(null);
     }
-  }, []);
+  }, [isStandaloneRuntime]);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -201,6 +240,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setCompany(activeCompany);
         return { ok: true };
       }
+    }
+
+    if (isStandaloneRuntime) {
+      return {
+        ok: false,
+        message: lastErrorMessage || "Online sign-in is required. Please check backend access and try again.",
+      };
     }
 
     const u = await authenticateUser(rawIdentifier, password);

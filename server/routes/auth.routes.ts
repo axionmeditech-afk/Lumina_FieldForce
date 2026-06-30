@@ -60,6 +60,7 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     deactivateAuthSession,
     normalizeDeviceIdInput,
     extractBearerTokenFromRequest,
+    readActiveAuthSession,
     initAuthUsersStore,
     syncAuthUserCacheForEmail,
     getAuthUserByIdentifier,
@@ -941,8 +942,18 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
 
   app.get("/api/auth/me", requireAuth, async (req, res) => {
     const email = req.auth?.email;
-    if (!email) {
+    const userId = req.auth?.sub || "";
+    if (!email || !userId) {
       res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const activeSession =
+      typeof readActiveAuthSession === "function"
+        ? await readActiveAuthSession(userId).catch(() => null)
+        : null;
+    const tokenDeviceId = normalizeDeviceIdInput(req.auth?.deviceId);
+    if (!activeSession || (tokenDeviceId && activeSession.deviceId !== tokenDeviceId)) {
+      res.status(401).json({ message: "Session is no longer active. Please sign in again." });
       return;
     }
     await initAuthUsersStore();
@@ -951,6 +962,15 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       (await syncAuthUserCacheForEmail(identifier)) || getAuthUserByIdentifier(identifier);
     if (!record) {
       res.status(404).json({ message: "User not found" });
+      return;
+    }
+    const status = resolveApprovalStatus(record);
+    if (status === "pending") {
+      res.status(403).json({ message: "Your access request is pending admin approval." });
+      return;
+    }
+    if (status === "rejected") {
+      res.status(403).json({ message: "Your access request was rejected by admin." });
       return;
     }
     res.json({ user: record.user });
