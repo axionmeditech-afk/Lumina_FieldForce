@@ -24,11 +24,19 @@ function readDotenvValue(name) {
 module.exports = () => {
   const expoConfig = appJson.expo || {};
   const androidConfig = expoConfig.android || {};
+  const iosConfig = expoConfig.ios || {};
   const googleMapsApiKey =
     process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ||
     process.env.GOOGLE_MAPS_API_KEY ||
     readDotenvValue("EXPO_PUBLIC_GOOGLE_MAPS_API_KEY") ||
     readDotenvValue("GOOGLE_MAPS_API_KEY") ||
+    "";
+  const googleMapsIosApiKey =
+    process.env.GOOGLE_MAPS_IOS_API_KEY ||
+    process.env.EXPO_PUBLIC_GOOGLE_MAPS_IOS_API_KEY ||
+    googleMapsApiKey ||
+    readDotenvValue("GOOGLE_MAPS_IOS_API_KEY") ||
+    readDotenvValue("EXPO_PUBLIC_GOOGLE_MAPS_IOS_API_KEY") ||
     "";
 
   return {
@@ -48,9 +56,21 @@ module.exports = () => {
             }
           : {}),
       },
+      ios: {
+        ...iosConfig,
+        ...(googleMapsIosApiKey
+          ? {
+              config: {
+                ...(iosConfig.config || {}),
+                googleMapsApiKey: googleMapsIosApiKey,
+              },
+            }
+          : {}),
+      },
       extra: {
         ...(expoConfig.extra || {}),
         googleMapsConfigured: Boolean(googleMapsApiKey),
+        googleMapsIosConfigured: Boolean(googleMapsIosApiKey),
       },
     },
   };

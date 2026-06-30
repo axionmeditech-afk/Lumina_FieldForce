@@ -6,6 +6,8 @@ workflows:
     integrations:
       app_store_connect: Lumina_fieldforce
     environment:
+      groups:
+        - API KEYS
       ios_signing:
         distribution_type: app_store # Change to ad_hoc if you want a directly installable device build.
         bundle_identifier: com.luminafieldforce
