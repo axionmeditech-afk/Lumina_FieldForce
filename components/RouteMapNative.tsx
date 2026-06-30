@@ -638,6 +638,24 @@ function toLatLng(points: LocationLog[]): LatLng[] {
   }));
 }
 
+function pickBreadcrumbPoints(points: LocationLog[], maxCount = 48): LocationLog[] {
+  if (points.length <= maxCount) return points;
+  if (maxCount <= 2) return [points[0], points[points.length - 1]];
+
+  const lastIndex = points.length - 1;
+  const selected: LocationLog[] = [];
+  const seen = new Set<number>();
+
+  for (let i = 0; i < maxCount; i += 1) {
+    const index = Math.round((i * lastIndex) / (maxCount - 1));
+    if (seen.has(index)) continue;
+    seen.add(index);
+    selected.push(points[index]);
+  }
+
+  return selected;
+}
+
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const num = Number(value);
@@ -897,11 +915,8 @@ export function RouteMapNative({
   const bounds = useMemo(() => buildBounds(allCoords), [allCoords]);
   const startPoint = points[0];
   const endPoint = points.length >= 2 ? points[points.length - 1] : null;
-  const intermediatePoints = useMemo(
-    () => points.slice(1, -1).filter(isValidLocationPoint),
-    [points]
-  );
   const routeSamplePoints = useMemo(() => points.filter(isValidLocationPoint), [points]);
+  const routeBreadcrumbPoints = useMemo(() => pickBreadcrumbPoints(routeSamplePoints), [routeSamplePoints]);
   const trackingPoints = useMemo(() => points.filter(isValidLocationPoint), [points]);
   const trackingStartPoint = trackingPoints[0];
   const trackingEndPoint = trackingPoints[trackingPoints.length - 1];
@@ -1061,8 +1076,8 @@ export function RouteMapNative({
         }
       }
     } else {
-      routeSamplePoints.forEach((point, idx) => {
-        const isLatest = idx === routeSamplePoints.length - 1;
+      routeBreadcrumbPoints.forEach((point, idx) => {
+        const isLatest = idx === routeBreadcrumbPoints.length - 1;
         markers.push({
           id: `route_sample_${point.id}_${idx}`,
           kind: "route",
@@ -1152,7 +1167,7 @@ export function RouteMapNative({
     normalizedPlannedStops,
     normalizedQuickSalePoints,
     points.length,
-    routeSamplePoints,
+    routeBreadcrumbPoints,
     startPoint,
   ]);
 
@@ -1375,8 +1390,13 @@ export function RouteMapNative({
   }, [shouldUseTrackingWidget]);
 
   const googleMapsApiKey = (Constants.expoConfig as any)?.android?.config?.googleMaps?.apiKey;
+  const isStandaloneAndroidBuild = Platform.OS === "android" && !isExpoGo;
   const hasAndroidMapsKey =
-    Platform.OS !== "android" || isExpoGo || mapProvider !== "google" || Boolean(googleMapsApiKey);
+    Platform.OS !== "android" ||
+    isExpoGo ||
+    mapProvider !== "google" ||
+    Boolean(googleMapsApiKey) ||
+    isStandaloneAndroidBuild;
 
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -1979,7 +1999,7 @@ export function RouteMapNative({
             </MapplsGL.PointAnnotation>
           ) : null}
 
-          {routeSamplePoints.map((point, idx) => (
+          {routeBreadcrumbPoints.map((point, idx) => (
             <MapplsGL.PointAnnotation
               key={`route_sample_${point.id}_${idx}`}
               id={`route_sample_${idx}`}
@@ -1990,23 +2010,13 @@ export function RouteMapNative({
                   styles.pointDot,
                   {
                     backgroundColor:
-                      idx === routeSamplePoints.length - 1 ? colors.primary : colors.secondary,
-                    width: idx === routeSamplePoints.length - 1 ? 12 : 8,
-                    height: idx === routeSamplePoints.length - 1 ? 12 : 8,
-                    borderRadius: idx === routeSamplePoints.length - 1 ? 6 : 4,
+                      idx === routeBreadcrumbPoints.length - 1 ? colors.primary : colors.secondary,
+                    width: idx === routeBreadcrumbPoints.length - 1 ? 10 : 6,
+                    height: idx === routeBreadcrumbPoints.length - 1 ? 10 : 6,
+                    borderRadius: idx === routeBreadcrumbPoints.length - 1 ? 5 : 3,
                   },
                 ]}
               />
-            </MapplsGL.PointAnnotation>
-          ))}
-
-          {intermediatePoints.map((point, idx) => (
-            <MapplsGL.PointAnnotation
-              key={`route_pt_${point.id}`}
-              id={`route_pt_${idx}`}
-              coordinate={[point.longitude, point.latitude]}
-            >
-              <View style={[styles.pointDot, { backgroundColor: colors.secondary }]} />
             </MapplsGL.PointAnnotation>
           ))}
 
@@ -2206,14 +2216,14 @@ export function RouteMapNative({
               ) : null}
               <Polyline coordinates={coords} strokeColor={colors.primary} strokeWidth={4} />
 
-              {routeSamplePoints.map((point, index) => (
+              {routeBreadcrumbPoints.map((point, index) => (
                 <Circle
                   key={`route_sample_${point.id}_${index}`}
                   center={{ latitude: point.latitude, longitude: point.longitude }}
-                  radius={index === routeSamplePoints.length - 1 ? 18 : 10}
-                  strokeColor={index === routeSamplePoints.length - 1 ? colors.primary : colors.secondary}
-                  fillColor={index === routeSamplePoints.length - 1 ? `${colors.primary}44` : `${colors.secondary}55`}
-                  strokeWidth={2}
+                  radius={index === routeBreadcrumbPoints.length - 1 ? 14 : 5}
+                  strokeColor={index === routeBreadcrumbPoints.length - 1 ? colors.primary : `${colors.secondary}AA`}
+                  fillColor={index === routeBreadcrumbPoints.length - 1 ? `${colors.primary}44` : `${colors.secondary}33`}
+                  strokeWidth={index === routeBreadcrumbPoints.length - 1 ? 2 : 1}
                 />
               ))}
 
@@ -2222,8 +2232,12 @@ export function RouteMapNative({
                   coordinate={{ latitude: startPoint.latitude, longitude: startPoint.longitude }}
                   title={points.length >= 2 ? "Route Start" : "Current Location"}
                   description={formatMumbaiTime(startPoint.capturedAt)}
-                  pinColor={colors.success}
-                />
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  <View style={[styles.routeEndpointMarker, { backgroundColor: colors.success }]}>
+                    <Text style={styles.routeEndpointText}>{points.length >= 2 ? "S" : "C"}</Text>
+                  </View>
+                </Marker>
               ) : null}
 
               {endPoint ? (
@@ -2231,19 +2245,13 @@ export function RouteMapNative({
                   coordinate={{ latitude: endPoint.latitude, longitude: endPoint.longitude }}
                   title="Route End"
                   description={formatMumbaiTime(endPoint.capturedAt)}
-                  pinColor={colors.danger}
-                />
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  <View style={[styles.routeEndpointMarker, { backgroundColor: colors.danger }]}>
+                    <Text style={styles.routeEndpointText}>E</Text>
+                  </View>
+                </Marker>
               ) : null}
-
-              {intermediatePoints.map((point) => (
-                <Marker
-                  key={`route_point_${point.id}`}
-                  coordinate={{ latitude: point.latitude, longitude: point.longitude }}
-                  title="Route Point"
-                  description={formatMumbaiTime(point.capturedAt)}
-                  pinColor={colors.secondary}
-                />
-              ))}
 
               {halts.map((halt, idx) => (
                 <Marker
@@ -2478,6 +2486,20 @@ const styles = StyleSheet.create({
   pinText: {
     color: "#FFFFFF",
     fontSize: 11,
+    fontFamily: "Inter_700Bold",
+  },
+  routeEndpointMarker: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#FFFFFF",
+  },
+  routeEndpointText: {
+    color: "#FFFFFF",
+    fontSize: 9,
     fontFamily: "Inter_700Bold",
   },
   historyAlertPinText: {

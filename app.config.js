@@ -1,4 +1,25 @@
 const appJson = require("./app.json");
+const fs = require("fs");
+const path = require("path");
+
+function readDotenvValue(name) {
+  const envPath = path.join(process.cwd(), ".env");
+  if (!fs.existsSync(envPath)) return "";
+
+  const content = fs.readFileSync(envPath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex <= 0) continue;
+    const key = trimmed.slice(0, separatorIndex).trim();
+    if (key !== name) continue;
+    const rawValue = trimmed.slice(separatorIndex + 1).trim();
+    return rawValue.replace(/^['"]|['"]$/g, "");
+  }
+
+  return "";
+}
 
 module.exports = () => {
   const expoConfig = appJson.expo || {};
@@ -6,6 +27,8 @@ module.exports = () => {
   const googleMapsApiKey =
     process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ||
     process.env.GOOGLE_MAPS_API_KEY ||
+    readDotenvValue("EXPO_PUBLIC_GOOGLE_MAPS_API_KEY") ||
+    readDotenvValue("GOOGLE_MAPS_API_KEY") ||
     "";
 
   return {
@@ -24,6 +47,10 @@ module.exports = () => {
               },
             }
           : {}),
+      },
+      extra: {
+        ...(expoConfig.extra || {}),
+        googleMapsConfigured: Boolean(googleMapsApiKey),
       },
     },
   };

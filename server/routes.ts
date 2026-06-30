@@ -2728,6 +2728,14 @@ const LOCATION_LOG_PRUNE_INTERVAL_MS = readPositiveIntegerEnv(
   "LOCATION_LOG_PRUNE_INTERVAL_MS",
   60 * 60 * 1000
 );
+const LOCATION_LOG_OVERFLOW_MIN_KEEP_DAYS = readPositiveIntegerEnv(
+  "LOCATION_LOG_OVERFLOW_MIN_KEEP_DAYS",
+  2
+);
+const LOCATION_LOG_DELETE_BATCH_SIZE = readPositiveIntegerEnv(
+  "LOCATION_LOG_DELETE_BATCH_SIZE",
+  5000
+);
 
 async function ensureMySqlIndex(
   tableName: string,
@@ -2765,6 +2773,32 @@ async function ensureLocationLogIndexes(): Promise<void> {
   locationLogIndexesEnsured = true;
 }
 
+type LocationLogRouteKey = {
+  userId: string;
+  routeDate: string;
+};
+
+function normalizeLocationRouteRows(rows: any[] | undefined): LocationLogRouteKey[] {
+  const normalized: LocationLogRouteKey[] = [];
+  const seen = new Set<string>();
+  for (const row of rows ?? []) {
+    const userId = row.user_id ? String(row.user_id) : "";
+    const routeDate = row.route_date ? toSqlDateOnly(row.route_date) : "";
+    if (!userId || !isIsoDateString(routeDate)) continue;
+    const key = `${userId}:${routeDate}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push({ userId, routeDate });
+  }
+  return normalized;
+}
+
+async function summarizeLocationRouteKeys(routeKeys: LocationLogRouteKey[]): Promise<void> {
+  for (const routeKey of routeKeys) {
+    await summarizeRawRouteDateForMySql(routeKey.userId, routeKey.routeDate);
+  }
+}
+
 async function pruneLocationLogsIfNeeded(force = false): Promise<void> {
   if (!isMySqlStateEnabled()) return;
   const now = Date.now();
@@ -2778,24 +2812,33 @@ async function pruneLocationLogsIfNeeded(force = false): Promise<void> {
       .toISOString()
       .slice(0, 19)
       .replace("T", " ");
-    const [staleRouteRows] = await conn.query<any[]>(
-      `SELECT DISTINCT user_id, DATE_FORMAT(CONVERT_TZ(captured_at, '+00:00', '+05:30'), '%Y-%m-%d') AS route_date
-       FROM lff_location_logs
-       WHERE captured_at < ?
-       ORDER BY route_date ASC
-       LIMIT 500`,
-      [retentionCutoff]
-    );
-    for (const row of staleRouteRows ?? []) {
-      const userId = row.user_id ? String(row.user_id) : "";
-      const routeDate = row.route_date ? toSqlDateOnly(row.route_date) : "";
-      if (!userId || !isIsoDateString(routeDate)) continue;
-      await summarizeRawRouteDateForMySql(userId, routeDate);
-    }
-    await conn.execute(
-      `DELETE FROM lff_location_logs WHERE captured_at < ?`,
-      [retentionCutoff]
-    );
+
+    const deleteBatchSize = Math.max(100, Math.min(50000, LOCATION_LOG_DELETE_BATCH_SIZE));
+    let deletedStaleRows = 0;
+    do {
+      const [staleRouteRows] = await conn.query<any[]>(
+        `SELECT DISTINCT user_id, DATE_FORMAT(CONVERT_TZ(captured_at, '+00:00', '+05:30'), '%Y-%m-%d') AS route_date
+         FROM (
+           SELECT user_id, captured_at
+           FROM lff_location_logs
+           WHERE captured_at < ?
+           ORDER BY captured_at ASC, id ASC
+           LIMIT ${deleteBatchSize}
+         ) stale_logs
+         ORDER BY route_date ASC`,
+        [retentionCutoff]
+      );
+      await summarizeLocationRouteKeys(normalizeLocationRouteRows(staleRouteRows));
+
+      const [deleteResult] = await conn.execute<any>(
+        `DELETE FROM lff_location_logs
+         WHERE captured_at < ?
+         ORDER BY captured_at ASC, id ASC
+         LIMIT ${deleteBatchSize}`,
+        [retentionCutoff]
+      );
+      deletedStaleRows = Number(deleteResult?.affectedRows ?? 0);
+    } while (deletedStaleRows === deleteBatchSize);
 
     const [countRows] = await conn.query<any[]>(
       `SELECT COUNT(*) AS count FROM lff_location_logs`
@@ -2804,17 +2847,117 @@ async function pruneLocationLogsIfNeeded(force = false): Promise<void> {
     if (count <= LOCATION_LOG_MAX_ROWS) return;
 
     const overflow = count - LOCATION_LOG_MAX_ROWS;
-    await conn.execute(
-      `DELETE FROM lff_location_logs
-       ORDER BY captured_at ASC, id ASC
-       LIMIT ${Math.max(1, Math.trunc(overflow))}`
+    const overflowCutoff = new Date(now - LOCATION_LOG_OVERFLOW_MIN_KEEP_DAYS * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 19)
+      .replace("T", " ");
+    const [eligibleRows] = await conn.query<any[]>(
+      `SELECT COUNT(*) AS count FROM lff_location_logs WHERE captured_at < ?`,
+      [overflowCutoff]
     );
+    const eligibleCount = Number(eligibleRows?.[0]?.count ?? 0);
+    const rowsToDelete = Math.min(overflow, eligibleCount);
+    if (rowsToDelete <= 0) return;
+
+    let remainingOverflowDeletes = Math.max(1, Math.trunc(rowsToDelete));
+    while (remainingOverflowDeletes > 0) {
+      const batchLimit = Math.min(deleteBatchSize, remainingOverflowDeletes);
+      const [overflowRouteRows] = await conn.query<any[]>(
+        `SELECT DISTINCT user_id, DATE_FORMAT(CONVERT_TZ(captured_at, '+00:00', '+05:30'), '%Y-%m-%d') AS route_date
+         FROM (
+           SELECT user_id, captured_at
+           FROM lff_location_logs
+           WHERE captured_at < ?
+           ORDER BY captured_at ASC, id ASC
+           LIMIT ${batchLimit}
+         ) old_logs
+         ORDER BY route_date ASC`,
+        [overflowCutoff]
+      );
+      await summarizeLocationRouteKeys(normalizeLocationRouteRows(overflowRouteRows));
+
+      const [deleteResult] = await conn.execute<any>(
+        `DELETE FROM lff_location_logs
+         WHERE captured_at < ?
+         ORDER BY captured_at ASC, id ASC
+         LIMIT ${batchLimit}`,
+        [overflowCutoff]
+      );
+      const deletedRows = Number(deleteResult?.affectedRows ?? 0);
+      if (deletedRows <= 0) break;
+      remainingOverflowDeletes -= deletedRows;
+    }
   } catch (error) {
     console.warn(
       "Unable to prune location logs:",
       error instanceof Error ? error.message : error
     );
   }
+}
+
+async function getLocationRetentionStatsFromMySql(): Promise<{
+  enabled: boolean;
+  retentionDays: number;
+  maxRows: number;
+  overflowMinKeepDays: number;
+  pruneIntervalMs: number;
+  rawRowCount: number;
+  summaryRowCount: number;
+  oldestCapturedAt: string | null;
+  newestCapturedAt: string | null;
+  nextRetentionCutoff: string;
+  lastPruneAt: string | null;
+}> {
+  if (!isMySqlStateEnabled()) {
+    return {
+      enabled: false,
+      retentionDays: LOCATION_LOG_RETENTION_DAYS,
+      maxRows: LOCATION_LOG_MAX_ROWS,
+      overflowMinKeepDays: LOCATION_LOG_OVERFLOW_MIN_KEEP_DAYS,
+      pruneIntervalMs: LOCATION_LOG_PRUNE_INTERVAL_MS,
+      rawRowCount: 0,
+      summaryRowCount: 0,
+      oldestCapturedAt: null,
+      newestCapturedAt: null,
+      nextRetentionCutoff: new Date(Date.now() - LOCATION_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+      lastPruneAt: lastLocationLogPruneAt ? new Date(lastLocationLogPruneAt).toISOString() : null,
+    };
+  }
+
+  await ensureLocationLogIndexes();
+  await ensureRouteDailySummaryTable();
+  const conn = await getMySqlPool();
+  const [rawRows] = await conn.query<any[]>(
+    `SELECT COUNT(*) AS raw_row_count, MIN(captured_at) AS oldest_captured_at, MAX(captured_at) AS newest_captured_at
+     FROM lff_location_logs`
+  );
+  const [summaryRows] = await conn.query<any[]>(
+    `SELECT COUNT(*) AS summary_row_count FROM lff_route_daily_summaries`
+  );
+  const raw = rawRows?.[0] ?? {};
+  const summary = summaryRows?.[0] ?? {};
+  return {
+    enabled: true,
+    retentionDays: LOCATION_LOG_RETENTION_DAYS,
+    maxRows: LOCATION_LOG_MAX_ROWS,
+    overflowMinKeepDays: LOCATION_LOG_OVERFLOW_MIN_KEEP_DAYS,
+    pruneIntervalMs: LOCATION_LOG_PRUNE_INTERVAL_MS,
+    rawRowCount: Number(raw.raw_row_count ?? 0),
+    summaryRowCount: Number(summary.summary_row_count ?? 0),
+    oldestCapturedAt: raw.oldest_captured_at ? new Date(raw.oldest_captured_at).toISOString() : null,
+    newestCapturedAt: raw.newest_captured_at ? new Date(raw.newest_captured_at).toISOString() : null,
+    nextRetentionCutoff: new Date(Date.now() - LOCATION_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+    lastPruneAt: lastLocationLogPruneAt ? new Date(lastLocationLogPruneAt).toISOString() : null,
+  };
+}
+
+function scheduleLocationLogRetentionJob(): void {
+  if (!isMySqlStateEnabled()) return;
+  void pruneLocationLogsIfNeeded(true);
+  const interval = setInterval(() => {
+    void pruneLocationLogsIfNeeded(true);
+  }, Math.max(60_000, LOCATION_LOG_PRUNE_INTERVAL_MS));
+  interval.unref?.();
 }
 
 type RouteAttendanceSummaryEvent = {
@@ -8277,6 +8420,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
     normalizeDepartmentForRole,
     DEFAULT_COMPANY_ID,
   });
+
+  app.get(
+    "/api/admin/location-retention/stats",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (_req, res) => {
+      try {
+        res.json(await getLocationRetentionStatsFromMySql());
+      } catch (error) {
+        res.status(500).json({
+          message: error instanceof Error ? error.message : "Unable to read location retention stats.",
+        });
+      }
+    }
+  );
+
+  app.post(
+    "/api/admin/location-retention/prune",
+    requireAuth,
+    requireRoles("admin", "hr", "manager"),
+    async (_req, res) => {
+      try {
+        await pruneLocationLogsIfNeeded(true);
+        res.json({
+          ok: true,
+          stats: await getLocationRetentionStatsFromMySql(),
+        });
+      } catch (error) {
+        res.status(500).json({
+          message: error instanceof Error ? error.message : "Unable to prune location logs.",
+        });
+      }
+    }
+  );
+
+  scheduleLocationLogRetentionJob();
+
   const httpServer = createServer(app);
   const wss = new WebSocketServer({ noServer: true });
 
