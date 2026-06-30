@@ -743,6 +743,13 @@ function getQuickSaleAccent(colors: typeof Colors.light): string {
   return colors.primary || "#6D28D9";
 }
 
+function hasUsableGoogleMapsKey(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const cleaned = value.trim();
+  if (!cleaned) return false;
+  return !/^YOUR_.*GOOGLE_MAPS.*API_KEY$/i.test(cleaned);
+}
+
 function getPlannedStopTitle(stop: PlannedStopPoint): string {
   return stop.customerName || stop.label;
 }
@@ -789,18 +796,22 @@ export function RouteMapNative({
   height = 260,
 }: RouteMapNativeProps) {
   const isExpoGo = Constants.appOwnership === "expo";
-  const configuredMapProvider = (
-    process.env.EXPO_PUBLIC_MAP_PROVIDER || "google"
-  )
+  const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "google")
     .trim()
     .toLowerCase();
+  const maptilerStyleUrl = process.env.EXPO_PUBLIC_MAPTILER_STYLE_URL?.trim() || "";
+  const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY?.trim() || "";
+  const googleMapsApiKey =
+    process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY?.trim() ||
+    process.env.GOOGLE_MAPS_API_KEY?.trim() ||
+    (Constants.expoConfig as any)?.android?.config?.googleMaps?.apiKey ||
+    "";
+  const canUseGoogleMaps = hasUsableGoogleMapsKey(googleMapsApiKey);
   const mapProvider =
     configuredMapProvider === "mappls" && isExpoGo ? "osm" : configuredMapProvider;
   const shouldUseMappls = Platform.OS === "android" && mapProvider === "mappls" && !isExpoGo;
   const isOsmProvider = mapProvider === "osm" || mapProvider === "openstreetmap";
   const isMaptilerProvider = mapProvider === "maptiler";
-  const maptilerStyleUrl = process.env.EXPO_PUBLIC_MAPTILER_STYLE_URL?.trim() || "";
-  const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY?.trim() || "";
   const mapplsClusterId = process.env.EXPO_PUBLIC_MAPPLS_CLUSTER_ID?.trim() || "";
   const mapplsRegion = process.env.EXPO_PUBLIC_MAPPLS_REGION?.trim() || "IND";
   const mapplsTrackingEnabled = (process.env.EXPO_PUBLIC_MAPPLS_TRACKING_WIDGET || "true")
@@ -1389,14 +1400,11 @@ export function RouteMapNative({
     };
   }, [shouldUseTrackingWidget]);
 
-  const googleMapsApiKey = (Constants.expoConfig as any)?.android?.config?.googleMaps?.apiKey;
-  const isStandaloneAndroidBuild = Platform.OS === "android" && !isExpoGo;
   const hasAndroidMapsKey =
     Platform.OS !== "android" ||
     isExpoGo ||
     mapProvider !== "google" ||
-    Boolean(googleMapsApiKey) ||
-    isStandaloneAndroidBuild;
+    canUseGoogleMaps;
 
   useEffect(() => {
     if (Platform.OS === "web") return;
@@ -2157,7 +2165,7 @@ export function RouteMapNative({
           ]}
         >
           <Text style={[styles.noteText, { color: colors.warning, fontFamily: "Inter_500Medium" }]}> 
-            Android Google Maps API key missing. Set `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY`, or switch to Mappls with `EXPO_PUBLIC_MAP_PROVIDER=mappls`.
+            Android Google Maps API key missing in this APK build. Set `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` or `GOOGLE_MAPS_API_KEY` before building the APK.
           </Text>
         </View>
       </View>

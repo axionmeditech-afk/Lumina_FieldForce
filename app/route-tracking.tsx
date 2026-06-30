@@ -24,6 +24,7 @@ import {
   getAdminRouteTimeline,
   getApiBaseUrlCandidates,
   getRemoteState,
+  reverseGeocodeMappls,
   type LiveMapPoint,
   type AdminRouteTimelineResponse,
 } from "@/lib/attendance-api";
@@ -117,6 +118,80 @@ function formatReverseGeocodeName(
   });
   if (!labels.length) return null;
   return labels.slice(0, 3).join(", ");
+}
+
+function formatMapplsReverseGeocodeName(response: {
+  label?: string | null;
+  address?: string | null;
+  locality?: string | null;
+  city?: string | null;
+  state?: string | null;
+  pincode?: string | null;
+}): string | null {
+  const compact = (value: string | null | undefined) => (value || "").trim();
+  const unique = new Set<string>();
+  const labels = [
+    compact(response.label),
+    compact(response.address),
+    compact(response.locality),
+    compact(response.city),
+    compact(response.state),
+    compact(response.pincode),
+  ].filter((value) => {
+    if (!value) return false;
+    const normalized = value.toLowerCase();
+    if (unique.has(normalized)) return false;
+    unique.add(normalized);
+    return true;
+  });
+  if (!labels.length) return null;
+  return labels.slice(0, 3).join(", ");
+}
+
+function formatCoordinateLabel(latitude: number, longitude: number): string {
+  return `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
+}
+
+function isWeakLocationLabel(value: string | null | undefined): boolean {
+  const normalized = (value || "").trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized === "location unavailable" ||
+    normalized === "unknown location" ||
+    normalized === "resolving location..."
+  );
+}
+
+async function resolveRoutePlaceName(point: {
+  latitude: number;
+  longitude: number;
+  geofenceName?: string | null;
+}): Promise<string> {
+  const geofenceName = point.geofenceName?.trim();
+  if (geofenceName && !isWeakLocationLabel(geofenceName)) {
+    return geofenceName;
+  }
+
+  try {
+    const mappls = await reverseGeocodeMappls(point.latitude, point.longitude);
+    const mapplsName = formatMapplsReverseGeocodeName(mappls);
+    if (mapplsName) return mapplsName;
+  } catch {
+    // Device geocoder below is the offline-ish fallback when server reverse geocoding is unavailable.
+  }
+
+  try {
+    const geoResults = await Location.reverseGeocodeAsync({
+      latitude: point.latitude,
+      longitude: point.longitude,
+    });
+    const expoName = formatReverseGeocodeName(geoResults[0]);
+    if (expoName) return expoName;
+  } catch {
+    // Coordinates are better than a permanent "Location unavailable" label.
+  }
+
+  return formatCoordinateLabel(point.latitude, point.longitude);
 }
 
 function normalizeIdentity(value: string | null | undefined): string {
@@ -1279,6 +1354,17 @@ export default function RouteTrackingScreen() {
     const halts = timeline.halts ?? [];
     const segments = timeline.segments ?? [];
     const haltById = new Map(halts.map((halt) => [halt.id, halt]));
+    const resolveTimelineLabel = (
+      fallback: string | null | undefined,
+      point?: { latitude: number; longitude: number } | null
+    ) => {
+      if (point) {
+        const resolved = placeNameByLocationKey[toLocationKey(point.latitude, point.longitude)];
+        if (!isWeakLocationLabel(resolved)) return resolved;
+      }
+      if (!isWeakLocationLabel(fallback)) return String(fallback).trim();
+      return point ? formatCoordinateLabel(point.latitude, point.longitude) : "selected route point";
+    };
     const activeCheckIn = withoutInstantSalespersonCheckouts(timeline.attendanceEvents || [])
       .filter((event) => event.type === "checkin")
       .sort((a, b) => a.at.localeCompare(b.at))
@@ -1292,6 +1378,7 @@ export default function RouteTrackingScreen() {
     const segmentRows: TimelineRow[] = segments.map((segment) => {
       if (segment.type === "halt") {
         const halt = segment.haltId ? haltById.get(segment.haltId) : undefined;
+        const haltLabel = resolveTimelineLabel(segment.fromLabel, halt);
         const startBattery = toBatteryLabel(halt?.startBatteryLevel);
         const endBattery = toBatteryLabel(halt?.endBatteryLevel);
         const averageBattery = toBatteryLabel(halt?.averageBatteryLevel);
@@ -1308,7 +1395,7 @@ export default function RouteTrackingScreen() {
           endAt: segment.endAt,
           icon: "pause-circle-outline",
           iconColor: colors.warning,
-          text: `Halt at ${segment.fromLabel} (${segment.durationMinutes} mins)${batteryText}`,
+          text: `Halt at ${haltLabel} (${segment.durationMinutes} mins)${batteryText}`,
         };
       }
       const km = (segment.distanceMeters / 1000).toFixed(2);
@@ -1351,7 +1438,7 @@ export default function RouteTrackingScreen() {
       const startAt = activeCheckIn.at;
       const nowIso = new Date().toISOString();
       const stationaryMinutes = Math.max(1, Math.round((toMs(nowIso) - toMs(startAt)) / 60000));
-      const locationLabel = latestPoint?.geofenceName || "current location";
+      const locationLabel = resolveTimelineLabel(latestPoint?.geofenceName, latestPoint);
       merged.push({
         id: `active_stationary_${activeCheckIn.id}`,
         type: "halt",
@@ -1367,7 +1454,15 @@ export default function RouteTrackingScreen() {
       const bStart = b.startAt;
       return aStart.localeCompare(bStart);
     });
-  }, [colors.danger, colors.primary, colors.warning, gpsDisabledWindows, mumbaiNowLabel, timeline]);
+  }, [
+    colors.danger,
+    colors.primary,
+    colors.warning,
+    gpsDisabledWindows,
+    mumbaiNowLabel,
+    placeNameByLocationKey,
+    timeline,
+  ]);
 
   const summary = useMemo(() => {
     void mumbaiNowLabel;
@@ -1464,7 +1559,9 @@ export default function RouteTrackingScreen() {
           latitude: point.latitude,
           longitude: point.longitude,
           locationKey: toLocationKey(point.latitude, point.longitude),
-          locationName: placeNameByLocationKey[toLocationKey(point.latitude, point.longitude)] ?? null,
+          locationName:
+            placeNameByLocationKey[toLocationKey(point.latitude, point.longitude)] ??
+            (!isWeakLocationLabel(point.geofenceName) ? point.geofenceName : null),
           battery: toBatteryLabel(point.batteryLevel),
           movementDetail,
         };
@@ -1472,12 +1569,31 @@ export default function RouteTrackingScreen() {
   }, [placeNameByLocationKey, timeline?.points]);
 
   useEffect(() => {
-    if (!routePointRows.length) return;
+    if (!routePointRows.length && !(timeline?.halts?.length ?? 0)) return;
     let cancelled = false;
 
-    const unresolved = routePointRows.filter(
+    const targetByKey = new Map<
+      string,
+      { latitude: number; longitude: number; geofenceName?: string | null; locationKey: string; locationName?: string | null }
+    >();
+    for (const point of routePointRows) {
+      targetByKey.set(point.locationKey, point);
+    }
+    for (const halt of timeline?.halts ?? []) {
+      const locationKey = toLocationKey(halt.latitude, halt.longitude);
+      targetByKey.set(locationKey, {
+        latitude: halt.latitude,
+        longitude: halt.longitude,
+        geofenceName: halt.label,
+        locationKey,
+        locationName: placeNameByLocationKey[locationKey] ?? null,
+      });
+    }
+
+    const unresolved = Array.from(targetByKey.values()).filter(
       (point) =>
-        !point.locationName && !resolvingLocationKeysRef.current.has(point.locationKey)
+        isWeakLocationLabel(point.locationName) &&
+        !resolvingLocationKeysRef.current.has(point.locationKey)
     );
     if (!unresolved.length) return;
 
@@ -1486,26 +1602,19 @@ export default function RouteTrackingScreen() {
         if (cancelled) break;
         resolvingLocationKeysRef.current.add(point.locationKey);
         try {
-          const geoResults = await Location.reverseGeocodeAsync({
-            latitude: point.latitude,
-            longitude: point.longitude,
-          });
-          const resolvedName =
-            formatReverseGeocodeName(geoResults[0]) ||
-            point.geofenceName ||
-            "Location unavailable";
+          const resolvedName = await resolveRoutePlaceName(point);
           if (!cancelled) {
             setPlaceNameByLocationKey((current) =>
-              current[point.locationKey]
+              current[point.locationKey] && !isWeakLocationLabel(current[point.locationKey])
                 ? current
                 : { ...current, [point.locationKey]: resolvedName }
             );
           }
         } catch {
-          const fallbackName = point.geofenceName || "Location unavailable";
+          const fallbackName = point.geofenceName || formatCoordinateLabel(point.latitude, point.longitude);
           if (!cancelled) {
             setPlaceNameByLocationKey((current) =>
-              current[point.locationKey]
+              current[point.locationKey] && !isWeakLocationLabel(current[point.locationKey])
                 ? current
                 : { ...current, [point.locationKey]: fallbackName }
             );
@@ -1520,7 +1629,7 @@ export default function RouteTrackingScreen() {
     return () => {
       cancelled = true;
     };
-  }, [routePointRows]);
+  }, [placeNameByLocationKey, routePointRows, timeline?.halts]);
   const latestRoutePoint = routePointRows.length
     ? routePointRows[routePointRows.length - 1]
     : null;
