@@ -1,11 +1,14 @@
 @echo off
 setlocal EnableExtensions
 
+set "JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
+set "PATH=%JAVA_HOME%\bin;%PATH%"
+
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "PROJ=%SCRIPT_DIR%"
-set "SHORT=D:\ep_new"
-set "APK_SHORT=D:\ep_new\android\app\build\outputs\apk\release\app-release.apk"
+set "SHORT=D:\p"
+set "APK_SHORT=D:\p\android\app\build\outputs\apk\release\app-release.apk"
 set "APK_REAL=%PROJ%\android\app\build\outputs\apk\release\app-release.apk"
 
 echo ===== STEP 1: Kill stale Gradle daemons =====
@@ -61,6 +64,7 @@ if not exist "%APK_SHORT%" (
 
 if not exist "%PROJ%\android\app\build\outputs\apk\release" mkdir "%PROJ%\android\app\build\outputs\apk\release"
 copy /Y "%APK_SHORT%" "%APK_REAL%" >nul
+copy /Y "%APK_SHORT%" "%PROJ%\LuminaFieldForce-latest.apk" >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-Item '%APK_REAL%').LastWriteTime = Get-Date"
 
 echo.

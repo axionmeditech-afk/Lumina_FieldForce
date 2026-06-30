@@ -156,6 +156,7 @@ type MonthlyAttendanceSummary = {
   totalUsers: number;
   presentUserDays: number;
   absentUserDays: number;
+  attendanceRatePercent: number;
   checkedOutUserDays: number;
   totalWorkMinutes: number;
   averageWorkMinutes: number;
@@ -451,7 +452,6 @@ function buildMonthlyAttendanceSummary(
   let totalWorkMinutes = 0;
   const topRows = Array.from(employeeGroups.values()).map(({ employee, ids, names }) => {
     let presentDays = 0;
-    let checkedOutDays = 0;
     let workMinutes = 0;
     for (const dateKey of dateKeys) {
       const entries = attendance.filter(
@@ -464,7 +464,6 @@ function buildMonthlyAttendanceSummary(
         presentUserDays += 1;
       }
       if (entries.some((entry) => entry.type === "checkout")) {
-        checkedOutDays += 1;
         checkedOutUserDays += 1;
       }
       workMinutes += computeAttendanceWorkMinutes(entries, dateKey);
@@ -490,6 +489,8 @@ function buildMonthlyAttendanceSummary(
     totalUsers,
     presentUserDays,
     absentUserDays: Math.max(0, totalExpectedUserDays - presentUserDays),
+    attendanceRatePercent:
+      totalExpectedUserDays > 0 ? Math.round((presentUserDays / totalExpectedUserDays) * 100) : 0,
     checkedOutUserDays,
     totalWorkMinutes,
     averageWorkMinutes: presentUserDays > 0 ? Math.floor(totalWorkMinutes / presentUserDays) : 0,
@@ -2130,7 +2131,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
   const adminCheckedInCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_in").length;
   const adminCheckedOutCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_out").length;
   const adminNoActivityCount = adminAttendanceStatuses.filter((entry) => entry.status === "no_activity").length;
-  const adminTotalWorkMinutes = adminAttendanceStatuses.reduce((sum, entry) => sum + entry.workMinutes, 0);
   const adminAttendanceGroups = useMemo<AdminAttendanceGroup[]>(() => {
     const groupsByCompany = new Map<string, AdminAttendanceStatus[]>();
     for (const entry of adminAttendanceStatuses) {
@@ -2225,9 +2225,31 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
   return (
     <AppCanvas>
-      <Modal visible={datePickerOpen} transparent animationType="fade" onRequestClose={() => setDatePickerOpen(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.datePickerCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+      <Modal
+        visible={datePickerOpen}
+        transparent
+        statusBarTranslucent
+        hardwareAccelerated
+        animationType="fade"
+        onRequestClose={() => setDatePickerOpen(false)}
+      >
+        <View style={[styles.modalOverlay, styles.datePickerOverlay]}>
+          <View
+            style={[
+              styles.datePickerCard,
+              {
+                backgroundColor: colors.backgroundElevated,
+                borderColor: colors.border,
+                marginBottom: Math.max(28, insets.bottom + 22),
+              },
+            ]}
+          >
+            <ScrollView
+              style={styles.datePickerScroll}
+              contentContainerStyle={styles.datePickerScrollContent}
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+            >
             <View style={styles.datePickerHeader}>
               <Pressable
                 style={[styles.datePickerIconButton, { borderColor: colors.border }]}
@@ -2345,19 +2367,24 @@ setOfficeLocationName((current) => current.trim() || result.label);
                       <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Absent Days</Text>
                     </View>
                     <View style={[styles.monthSummaryChip, { borderColor: colors.borderLight }]}>
-                      <Text style={[styles.monthSummaryValue, { color: colors.primary }]}>{formatWorkDuration(monthlySummary.totalWorkMinutes)}</Text>
-                      <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Work Hours</Text>
+                      <Text style={[styles.monthSummaryValue, { color: colors.primary }]}>{monthlySummary.attendanceRatePercent}%</Text>
+                      <Text style={[styles.monthSummaryLabel, { color: colors.textSecondary }]}>Attendance</Text>
                     </View>
                   </View>
                   <Text style={[styles.monthSummaryMeta, { color: colors.textSecondary }]}>
-                    Counted {monthlySummary.countedDays} calendar day(s). Avg present-day hours: {formatWorkDuration(monthlySummary.averageWorkMinutes)}.
+                    Counted {monthlySummary.countedDays} calendar day(s). Work hours are shown per user below.
                   </Text>
-                  {monthlySummary.topRows.slice(0, 4).map((row) => (
+                  {monthlySummary.topRows.map((row) => (
                     <View key={`month_row_${row.id}`} style={[styles.monthUserRow, { borderTopColor: colors.borderLight }]}>
-                      <Text style={[styles.monthUserName, { color: colors.text }]} numberOfLines={1}>{row.name}</Text>
-                      <Text style={[styles.monthUserMeta, { color: colors.textSecondary }]}>
-                        P {row.presentDays} | A {row.absentDays} | {formatWorkDuration(row.workMinutes)}
-                      </Text>
+                      <View style={styles.monthUserTextWrap}>
+                        <Text style={[styles.monthUserName, { color: colors.text }]} numberOfLines={1}>{row.name}</Text>
+                        <Text style={[styles.monthUserMeta, { color: colors.textSecondary }]}>
+                          Present {row.presentDays} | Absent {row.absentDays}
+                        </Text>
+                      </View>
+                      <View style={[styles.monthWorkPill, { backgroundColor: colors.primary + "12", borderColor: colors.primary + "44" }]}>
+                        <Text style={[styles.monthWorkPillText, { color: colors.primary }]}>{formatWorkDuration(row.workMinutes)}</Text>
+                      </View>
                     </View>
                   ))}
                 </>
@@ -2366,6 +2393,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
               )}
             </View>
             ) : null}
+            </ScrollView>
 
             <Pressable
               style={[styles.datePickerCloseButton, { backgroundColor: colors.primary }]}
@@ -2551,10 +2579,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
                 <Text style={[styles.adminSummaryValue, { color: colors.textSecondary }]}>{adminNoActivityCount}</Text>
                 <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>No Activity</Text>
               </View>
-              <View style={[styles.adminSummaryChip, { backgroundColor: colors.secondary + "12", borderColor: colors.secondary + "44" }]}>
-                <Text style={[styles.adminSummaryValue, { color: colors.secondary }]}>{formatWorkDuration(adminTotalWorkMinutes)}</Text>
-                <Text style={[styles.adminSummaryLabel, { color: colors.textSecondary }]}>Work Hours</Text>
-              </View>
             </View>
             <View style={[styles.logList, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
               {adminAttendanceStatuses.length === 0 ? (
@@ -2624,7 +2648,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
                             const metaParts = [
                               entry.checkInAt ? `In ${formatAttendanceTime(entry.checkInAt)}` : null,
                               entry.checkOutAt ? `Out ${formatAttendanceTime(entry.checkOutAt)}` : null,
-                              `Work ${entry.workHoursLabel}`,
                               entry.geofenceName ?? entry.locationLabel,
                             ].filter(Boolean);
                             const approvalLabel =
@@ -2663,7 +2686,14 @@ setOfficeLocationName((current) => current.trim() || result.label);
                                     {approvalLabel ? ` | ${approvalLabel}` : ""}
                                   </Text>
                                 </View>
-                                <Text style={[styles.adminStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                                <View style={styles.adminAttendanceSide}>
+                                  <Text style={[styles.adminStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                                  <View style={[styles.adminWorkPill, { borderColor: colors.secondary + "44", backgroundColor: colors.secondary + "12" }]}>
+                                    <Text style={[styles.adminWorkPillText, { color: colors.secondary }]}>
+                                      {entry.workHoursLabel}
+                                    </Text>
+                                  </View>
+                                </View>
                               </View>
                             );
                           })
@@ -3103,18 +3133,26 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   datePickerCard: {
-    width: "92%",
+    width: "94%",
     maxWidth: 460,
     borderRadius: 20,
     borderWidth: 1,
-    padding: 16,
-    maxHeight: "88%",
+    maxHeight: "78%",
+    overflow: "hidden",
+  },
+  datePickerScroll: {
+    flexGrow: 0,
+  },
+  datePickerScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
   },
   datePickerHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginBottom: 14,
+    marginBottom: 8,
   },
   datePickerIconButton: {
     width: 38,
@@ -3161,7 +3199,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   monthSummaryPanel: {
-    marginTop: 14,
+    marginTop: 8,
     borderWidth: 1,
     borderRadius: 14,
     padding: 12,
@@ -3196,10 +3234,12 @@ const styles = StyleSheet.create({
   },
   monthSummaryChip: {
     flexGrow: 1,
-    flexBasis: "47%",
+    flexBasis: "30%",
     borderWidth: 1,
     borderRadius: 12,
     padding: 10,
+    minHeight: 72,
+    justifyContent: "center",
   },
   monthSummaryValue: {
     fontSize: 17,
@@ -3223,8 +3263,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
-  monthUserName: {
+  monthUserTextWrap: {
     flex: 1,
+    minWidth: 0,
+  },
+  monthUserName: {
     fontSize: 12.5,
     fontWeight: "700",
   },
@@ -3232,8 +3275,21 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     fontWeight: "600",
   },
+  monthWorkPill: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    minWidth: 76,
+    alignItems: "center",
+  },
+  monthWorkPillText: {
+    fontSize: 11.5,
+    fontWeight: "800",
+  },
   datePickerCloseButton: {
-    marginTop: 14,
+    marginHorizontal: 16,
+    marginBottom: 12,
     minHeight: 42,
     borderRadius: 12,
     alignItems: "center",
@@ -3428,6 +3484,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textAlign: "right",
     maxWidth: 78,
+  },
+  adminAttendanceSide: {
+    alignItems: "flex-end",
+    gap: 6,
+  },
+  adminWorkPill: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    minWidth: 62,
+    alignItems: "center",
+  },
+  adminWorkPillText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 10.5,
   },
   statRow: {
     flexDirection: "row",
@@ -3736,6 +3808,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.45)",
     justifyContent: "flex-end",
+  },
+  datePickerOverlay: {
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 12,
   },
   modalCard: {
     borderTopLeftRadius: 18,
