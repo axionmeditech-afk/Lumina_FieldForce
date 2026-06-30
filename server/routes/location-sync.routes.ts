@@ -4,7 +4,7 @@ import type { AttendanceRecord, Geofence, LocationLog } from "@/lib/types";
 export type LocationSyncRouteDeps = Record<string, any>;
 
 const AUTO_CHECKOUT_ON_GEOFENCE_EXIT =
-  (process.env.AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "true").trim().toLowerCase() === "true";
+  (process.env.AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "false").trim().toLowerCase() === "true";
 
 export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRouteDeps) {
   const {

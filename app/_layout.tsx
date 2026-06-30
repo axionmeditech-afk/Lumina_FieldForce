@@ -3,7 +3,7 @@ import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useCallback, useEffect, useState } from "react";
 import { StatusBar } from "expo-status-bar";
-import { Platform } from "react-native";
+import { AppState, Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { GlobalBackendLoader } from "@/components/GlobalBackendLoader";
@@ -33,6 +33,8 @@ import {
 } from "@expo-google-fonts/inter";
 
 SplashScreen.preventAutoHideAsync();
+
+const LOCATION_RUNTIME_WATCHDOG_MS = 30 * 1000;
 
 function resolveCheckedInFromRecords(
   records: AttendanceRecord[],
@@ -177,10 +179,24 @@ function AppShell() {
         // Keep UI stable if a settings-triggered sync fails.
       });
     });
+    const appStateSubscription = AppState.addEventListener("change", (state) => {
+      if (!mounted || state !== "active") return;
+      void applyRuntimeSettings().catch(() => {
+        // Keep UI stable if a resume-triggered sync fails.
+      });
+    });
+    const trackingWatchdog = setInterval(() => {
+      if (!mounted || AppState.currentState !== "active") return;
+      void applyRuntimeSettings().catch(() => {
+        // Keep route tracking self-healing without interrupting navigation.
+      });
+    }, LOCATION_RUNTIME_WATCHDOG_MS);
 
     return () => {
       mounted = false;
       unsubscribe();
+      appStateSubscription.remove();
+      clearInterval(trackingWatchdog);
     };
   }, [applyRuntimeSettings]);
 

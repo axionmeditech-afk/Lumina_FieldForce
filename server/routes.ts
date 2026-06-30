@@ -1013,6 +1013,7 @@ function downsampleLocationLogsByInterval(
 interface RouteAttendanceEventLike {
   type: "checkin" | "checkout";
   at: string;
+  notes?: string | null;
 }
 
 interface RouteSessionWindow {
@@ -1028,6 +1029,12 @@ function resolveRouteSessionWindow(events: RouteAttendanceEventLike[]): RouteSes
   for (const entry of ordered) {
     if (entry.type === "checkin") {
       activeStartAt = entry.at;
+      continue;
+    }
+    if (
+      entry.type === "checkout" &&
+      (entry.notes || "").toLowerCase().includes("auto-checkout due to geofence exit")
+    ) {
       continue;
     }
     if (entry.type === "checkout" && activeStartAt) {
@@ -2957,7 +2964,8 @@ function scheduleLocationLogRetentionJob(): void {
   const interval = setInterval(() => {
     void pruneLocationLogsIfNeeded(true);
   }, Math.max(60_000, LOCATION_LOG_PRUNE_INTERVAL_MS));
-  interval.unref?.();
+  const nodeInterval = interval as unknown as { unref?: () => void };
+  nodeInterval.unref?.();
 }
 
 type RouteAttendanceSummaryEvent = {
@@ -2967,6 +2975,8 @@ type RouteAttendanceSummaryEvent = {
   geofenceName: string | null;
   latitude: number | null;
   longitude: number | null;
+  source?: string | null;
+  notes?: string | null;
 };
 
 function parseJsonArray<T>(value: unknown): T[] {
@@ -3196,6 +3206,8 @@ async function summarizeRawRouteDateForMySql(userId: string, dateKey: string): P
       geofenceName: record.geofenceName ?? null,
       latitude: record.location?.lat ?? null,
       longitude: record.location?.lng ?? null,
+      source: record.source ?? null,
+      notes: record.notes ?? null,
     }))
     .sort((a, b) => a.at.localeCompare(b.at));
   const sessionWindow = resolveRouteSessionWindow(attendanceEvents);

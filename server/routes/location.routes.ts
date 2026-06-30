@@ -179,6 +179,8 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
           geofenceName: record.geofenceName ?? null,
           latitude: record.location?.lat ?? null,
           longitude: record.location?.lng ?? null,
+          source: record.source ?? null,
+          notes: record.notes ?? null,
         }))
         .sort((a, b) => a.at.localeCompare(b.at));
       const sessionWindow = deps.resolveRouteSessionWindow(attendanceEvents);

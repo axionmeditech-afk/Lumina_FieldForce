@@ -198,6 +198,14 @@ function normalizeIdentity(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+function isGeofenceAutoCheckoutText(value: string | null | undefined): boolean {
+  return (value || "").toLowerCase().includes("auto-checkout due to geofence exit");
+}
+
+function isGeofenceAutoCheckoutRecord(record: Pick<AttendanceRecord, "type" | "notes">): boolean {
+  return record.type === "checkout" && isGeofenceAutoCheckoutText(record.notes);
+}
+
 function resolveCarryoverAttendanceRecord(
   records: AttendanceRecord[],
   selectedDate: string
@@ -213,6 +221,10 @@ function resolveCarryoverAttendanceRecord(
 
     if (entry.type === "checkin") {
       activeCheckIn = entry;
+      continue;
+    }
+
+    if (isGeofenceAutoCheckoutRecord(entry)) {
       continue;
     }
 
@@ -328,6 +340,9 @@ function resolveRouteSessionWindow(attendanceEvents: AttendanceRecord[]): RouteS
       activeStartAt = entry.timestamp;
       continue;
     }
+    if (isGeofenceAutoCheckoutRecord(entry)) {
+      continue;
+    }
     if (entry.type === "checkout" && activeStartAt) {
       lastCompletedWindow = {
         startAt: activeStartAt,
@@ -417,7 +432,9 @@ function normalizeTimelineForInterval(
 
 type RouteAttendanceStatusEvent = AdminRouteTimelineResponse["attendanceEvents"][number];
 
-function withoutInstantSalespersonCheckouts<T extends { type: "checkin" | "checkout"; at: string }>(
+function withoutInstantSalespersonCheckouts<
+  T extends { type: "checkin" | "checkout"; at: string; notes?: string | null }
+>(
   events: T[]
 ): T[] {
   const ordered = [...events].sort((a, b) => a.at.localeCompare(b.at));
@@ -428,6 +445,10 @@ function withoutInstantSalespersonCheckouts<T extends { type: "checkin" | "check
     if (event.type === "checkin") {
       filtered.push(event);
       lastCheckInAt = event.at;
+      continue;
+    }
+
+    if (event.type === "checkout" && isGeofenceAutoCheckoutText(event.notes)) {
       continue;
     }
 
@@ -555,6 +576,10 @@ function buildGpsDisabledWindows(
   return windows;
 }
 
+function getOpenGpsDisabledWindows(windows: GpsDisabledWindow[]): GpsDisabledWindow[] {
+  return windows.filter((window) => !window.endAt);
+}
+
 function mapLivePointToLocationLog(point: LiveMapPoint): LocationLog {
   return {
     id: point.id,
@@ -618,6 +643,7 @@ export default function RouteTrackingScreen() {
   const [authExpired, setAuthExpired] = useState(false);
   const [placeNameByLocationKey, setPlaceNameByLocationKey] = useState<Record<string, string>>({});
   const hasLoadedTimelineRef = useRef(false);
+  const loadTimelineInFlightRef = useRef(false);
   const [mumbaiNowLabel, setMumbaiNowLabel] = useState(() =>
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
@@ -700,6 +726,10 @@ export default function RouteTrackingScreen() {
       setMapMode("polyline");
     }
   }, [mapProvider]);
+
+  useEffect(() => {
+    hasLoadedTimelineRef.current = false;
+  }, [selectedDate, selectedUserId]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -836,6 +866,7 @@ export default function RouteTrackingScreen() {
   );
 
   const loadTimeline = useCallback(async () => {
+    if (loadTimelineInFlightRef.current) return;
     if (!selectedUserId || !canViewTracking || authExpired) {
       if (!selectedUserId) {
         setPlannedStops([]);
@@ -843,9 +874,10 @@ export default function RouteTrackingScreen() {
       }
       return;
     }
-    setLoading(!hasLoadedTimelineRef.current);
+    loadTimelineInFlightRef.current = true;
+    const isInitialLoad = !hasLoadedTimelineRef.current;
+    setLoading(isInitialLoad);
     setError(null);
-    setGpsDisabledWindows([]);
     try {
       const taskSnapshot = await getTasks();
       const selectedEmployeeName = normalizeIdentity(selectedEmployee?.name);
@@ -1175,10 +1207,11 @@ export default function RouteTrackingScreen() {
       if (/session expired|invalid or expired token|missing authorization bearer token/i.test(message)) {
         setAuthExpired(true);
         setError("Session expired. Please log out and sign in again.");
-      } else {
+      } else if (isInitialLoad) {
         setError(message);
       }
     } finally {
+      loadTimelineInFlightRef.current = false;
       hasLoadedTimelineRef.current = true;
       setLoading(false);
     }
@@ -1410,7 +1443,23 @@ export default function RouteTrackingScreen() {
       };
     });
 
-    const gpsRows: TimelineRow[] = gpsDisabledWindows.map((window) => {
+    const latestTimelinePointAt = [...(timeline.points || [])]
+      .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+      .at(-1)?.capturedAt;
+    const latestTimelinePointMs = latestTimelinePointAt ? toMs(latestTimelinePointAt) : Number.NaN;
+    const timelineGpsWindows = gpsDisabledWindows.map((window) => {
+      if (window.endAt || !Number.isFinite(latestTimelinePointMs)) return window;
+      const startMs = toMs(window.startAt);
+      if (Number.isFinite(startMs) && latestTimelinePointMs > startMs + 60_000) {
+        return {
+          ...window,
+          endAt: latestTimelinePointAt ?? window.endAt,
+          details: `${window.details} GPS samples resumed after this alert.`,
+        };
+      }
+      return window;
+    });
+    const gpsRows: TimelineRow[] = timelineGpsWindows.map((window) => {
       const durationText = window.endAt
         ? `${Math.max(1, Math.round((toMs(window.endAt) - toMs(window.startAt)) / 60000))} mins`
         : "still off / not restored";
@@ -1633,6 +1682,25 @@ export default function RouteTrackingScreen() {
   const latestRoutePoint = routePointRows.length
     ? routePointRows[routePointRows.length - 1]
     : null;
+  const displayGpsDisabledWindows = useMemo(() => {
+    const latestPointMs = latestRoutePoint ? toMs(latestRoutePoint.at) : Number.NaN;
+    return gpsDisabledWindows.map((window) => {
+      if (window.endAt || !Number.isFinite(latestPointMs)) return window;
+      const startMs = toMs(window.startAt);
+      if (Number.isFinite(startMs) && latestPointMs > startMs + 60_000) {
+        return {
+          ...window,
+          endAt: latestRoutePoint?.at ?? window.endAt,
+          details: `${window.details} GPS samples resumed after this alert.`,
+        };
+      }
+      return window;
+    });
+  }, [gpsDisabledWindows, latestRoutePoint]);
+  const activeGpsDisabledWindows = useMemo(
+    () => getOpenGpsDisabledWindows(displayGpsDisabledWindows),
+    [displayGpsDisabledWindows]
+  );
   const liveProgress = useMemo(() => {
     if (!latestRoutePoint) return null;
     void mumbaiNowLabel;
@@ -1797,12 +1865,12 @@ export default function RouteTrackingScreen() {
           </View>
         ) : null}
 
-        {gpsDisabledWindows.length ? (
+        {activeGpsDisabledWindows.length ? (
           <View style={[styles.errorWrap, { backgroundColor: colors.danger + "14", borderColor: colors.danger + "55" }]}>
             <Ionicons name="location-outline" size={16} color={colors.danger} />
             <Text style={[styles.errorText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>
-              GPS off detected during check-in: {gpsDisabledWindows
-                .map((window) => `${toTime(window.startAt)} - ${window.endAt ? toTime(window.endAt) : "Open"}`)
+              GPS is currently off during check-in: {activeGpsDisabledWindows
+                .map((window) => `${toTime(window.startAt)} - now`)
                 .join(", ")}
             </Text>
           </View>

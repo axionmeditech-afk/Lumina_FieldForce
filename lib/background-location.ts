@@ -13,7 +13,9 @@ import {
 
 const BACKGROUND_LOCATION_TASK = "trackforce-background-location-task-v1";
 const BACKGROUND_QUEUE_KEY = "@trackforce_background_location_queue";
+const BACKGROUND_RECOVERY_CAPTURE_KEY = "@trackforce_background_recovery_capture_v1";
 const MAX_BATCH_SIZE = 25;
+const RECOVERY_CAPTURE_MIN_INTERVAL_MS = 20 * 1000;
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -65,6 +67,24 @@ async function readQueue(): Promise<QueuedLocationPoint[]> {
 
 async function writeQueue(entries: QueuedLocationPoint[]): Promise<void> {
   await AsyncStorage.setItem(BACKGROUND_QUEUE_KEY, JSON.stringify(entries));
+}
+
+function isUsableLocation(location: Location.LocationObject | null | undefined): location is Location.LocationObject {
+  return Boolean(
+    location &&
+      Number.isFinite(location.coords.latitude) &&
+      Number.isFinite(location.coords.longitude)
+  );
+}
+
+async function shouldCaptureRecoveryPoint(userId: string): Promise<boolean> {
+  const raw = await AsyncStorage.getItem(`${BACKGROUND_RECOVERY_CAPTURE_KEY}_${userId}`);
+  const lastCaptureMs = raw ? Number(raw) : 0;
+  return !Number.isFinite(lastCaptureMs) || Date.now() - lastCaptureMs >= RECOVERY_CAPTURE_MIN_INTERVAL_MS;
+}
+
+async function markRecoveryPointCaptured(userId: string): Promise<void> {
+  await AsyncStorage.setItem(`${BACKGROUND_RECOVERY_CAPTURE_KEY}_${userId}`, String(Date.now()));
 }
 
 function toQueuePoint(
@@ -196,6 +216,47 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
   }
 }
 
+async function captureForegroundRecoveryPoint(user: { id: string }): Promise<boolean> {
+  if (!(await shouldCaptureRecoveryPoint(user.id))) return false;
+
+  let location: Location.LocationObject | null = null;
+  try {
+    location = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.BestForNavigation,
+    });
+  } catch {
+    try {
+      location = await Location.getLastKnownPositionAsync({
+        maxAge: 60 * 1000,
+      });
+    } catch {
+      location = null;
+    }
+  }
+
+  if (!isUsableLocation(location)) return false;
+
+  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
+  const point = toQueuePoint(user.id, location, batteryLevel);
+  await enqueueBackgroundLocationPoints([point]);
+  await addLocationLog({
+    id: `fg_loc_${new Date(point.capturedAt).getTime()}_${Math.random().toString(36).slice(2, 8)}`,
+    userId: point.userId,
+    latitude: point.latitude,
+    longitude: point.longitude,
+    accuracy: point.accuracy ?? null,
+    speed: point.speed ?? null,
+    heading: point.heading ?? null,
+    batteryLevel: point.batteryLevel ?? null,
+    geofenceId: null,
+    geofenceName: null,
+    isInsideGeofence: false,
+    capturedAt: point.capturedAt,
+  });
+  await markRecoveryPointCaptured(user.id);
+  return true;
+}
+
 if (Platform.OS !== "web" && !TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
   TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
     if (error) {
@@ -269,6 +330,7 @@ export async function ensureBackgroundLocationTracking(): Promise<{
   }
 
   await recordGpsRestoredDuringCheckIn(currentUser);
+  await captureForegroundRecoveryPoint(currentUser);
   await flushBackgroundLocationQueue();
   return { started: true };
 }

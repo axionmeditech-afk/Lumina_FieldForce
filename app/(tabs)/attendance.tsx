@@ -103,7 +103,7 @@ const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
 const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
 const AUTO_CHECKOUT_ON_GEOFENCE_EXIT =
-  (process.env.EXPO_PUBLIC_AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "true").trim().toLowerCase() === "true";
+  (process.env.EXPO_PUBLIC_AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "false").trim().toLowerCase() === "true";
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -1139,6 +1139,7 @@ export default function AttendanceScreen() {
       const canTriggerAutoCheckout =
         AUTO_CHECKOUT_ON_GEOFENCE_EXIT &&
         !isSalesRole(user?.role) &&
+        !isSalespersonFieldCheckIn &&
         checkedInState &&
         isOfficeGeofenceAttendance &&
         geofencesLoaded &&

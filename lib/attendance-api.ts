@@ -1164,6 +1164,8 @@ export interface RouteAttendanceEvent {
   geofenceName: string | null;
   latitude: number | null;
   longitude: number | null;
+  source?: string | null;
+  notes?: string | null;
 }
 
 export interface AdminRouteTimelineResponse extends RouteTimeline {
