@@ -227,6 +227,16 @@ function parseProviderOrder(input: string): SpeechProvider[] {
   return providers;
 }
 
+function mergeProviderOrders(primary: SpeechProvider[], fallback: SpeechProvider[]): SpeechProvider[] {
+  const merged: SpeechProvider[] = [];
+  for (const provider of [...primary, ...fallback]) {
+    if (!merged.includes(provider)) {
+      merged.push(provider);
+    }
+  }
+  return merged.length ? merged : ["gemini"];
+}
+
 function guessFileExtension(mimeType: string): string {
   const lower = mimeType.toLowerCase();
   if (lower.includes("wav")) return ".wav";
@@ -1447,7 +1457,12 @@ export async function transcribeSpeechWithFairseqS2T(
       ? requestedModel
       : DEFAULT_FAIRSEQ_S2T_MODEL;
   const hfFallbackModel = toModelId(request.fallbackModel, DEFAULT_FALLBACK_MODEL);
-  const providerOrder = parseProviderOrder(request.provider?.trim() || DEFAULT_PROVIDER_ORDER);
+  const requestedProviderOrder = parseProviderOrder(request.provider?.trim() || DEFAULT_PROVIDER_ORDER);
+  const defaultProviderOrder = parseProviderOrder(DEFAULT_PROVIDER_ORDER || "google,gemini");
+  const providerOrder = mergeProviderOrders(
+    mergeProviderOrders(requestedProviderOrder, defaultProviderOrder),
+    parseProviderOrder("google,gemini")
+  );
 
   let googleFailure: string | null = null;
   let groqFailure: string | null = null;

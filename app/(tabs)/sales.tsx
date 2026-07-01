@@ -76,7 +76,7 @@ import {
 import { getEmployees } from "@/lib/employee-data";
 import { buildConversationFromTranscript } from "@/lib/sales-analysis";
 import { buildRouteTimeline } from "@/lib/route-analytics";
-import { formatMumbaiDateTime, formatMumbaiTime, isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
+import { formatMumbaiDateTime, formatMumbaiTime, getMumbaiDateEndIso, isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { maybeSendLocationReminder, syncLocationReminderCatalog } from "@/lib/location-reminders";
 import { getLastKnownLocationSafe } from "@/lib/location-service";
 import { isSalesRole } from "@/lib/role-access";
@@ -1110,7 +1110,12 @@ const DEFAULT_S2T_MODEL =
   ).trim();
 let preferredSpeechApiBase: string | null = null;
 const DEFAULT_STT_PROVIDER_ORDER =
-  (process.env.EXPO_PUBLIC_SALES_AI_STT_PROVIDER_ORDER || "google").trim();
+  (
+    process.env.EXPO_PUBLIC_SALES_AI_STT_PROVIDER_ORDER ||
+    process.env.EXPO_PUBLIC_STT_PROVIDER_ORDER ||
+    process.env.SPEECH_TO_TEXT_PROVIDER_ORDER ||
+    "google,gemini"
+  ).trim();
 const DEFAULT_STT_LANGUAGE_CODE =
   (process.env.EXPO_PUBLIC_SALES_AI_STT_LANGUAGE_CODE || "en-IN").trim();
 const FORCE_SERVER_TRANSCRIPTION = true;
@@ -1495,12 +1500,18 @@ async function transcribeAudioWithSpeechApi(audioUri: string): Promise<string> {
             : typeof payload?.error === "string"
               ? payload.error
               : `Speech transcription failed (${status}).`;
+        const isProviderConfigError =
+          /permission_denied|api has not been used|disabled|credential|quota|billing|all speech-to-text providers failed|speech provider/i.test(
+            apiError
+          );
         const shouldTryNextApiBase = [404, 408, 425, 429, 500, 502, 503, 504].includes(status);
-        if (shouldTryNextApiBase) {
+        if (shouldTryNextApiBase && !isProviderConfigError) {
           networkErrors.push(`${apiBase} -> HTTP ${status}: ${apiError}`);
           continue;
         }
-        const msg = /quota|credit|billing|limit|rate/i.test(apiError)
+        const msg = /permission_denied|api has not been used|disabled|credential/i.test(apiError)
+          ? `Speech provider configuration issue: ${apiError}`
+          : /quota|credit|billing|limit|rate/i.test(apiError)
           ? `Speech provider usage/quota issue: ${apiError}`
           : `Speech-to-text error: ${apiError}`;
         throw new Error(msg);
@@ -2301,6 +2312,7 @@ export default function SalesScreen() {
   const fallbackLoopRunningRef = useRef(false);
   const isTranscriptionUnavailableRef = useRef(false);
   const fallbackStopRequestedRef = useRef(false);
+  const fallbackSkipFinalTranscriptionRef = useRef(false);
   const fallbackChunkAudioUrisRef = useRef<Map<number, string>>(new Map());
   const startFallbackRecordingRef = useRef<(() => Promise<void>) | null>(null);
   const liveHintSpeechActiveRef = useRef(false);
@@ -4430,6 +4442,7 @@ export default function SalesScreen() {
     });
     fallbackLoopRunningRef.current = true;
     fallbackStopRequestedRef.current = false;
+    fallbackSkipFinalTranscriptionRef.current = false;
     liveHintSpeechActiveRef.current = false;
     if (liveHintSpeechRestartTimerRef.current) {
       clearTimeout(liveHintSpeechRestartTimerRef.current);
@@ -4484,8 +4497,13 @@ export default function SalesScreen() {
           const durableUri = persistedUri || uri;
           setAudioUri(durableUri);
           fallbackChunkAudioUrisRef.current.set(0, durableUri);
+          if (startedAtRef.current !== null) {
+            setElapsedMs(Date.now() - startedAtRef.current);
+            startedAtRef.current = null;
+          }
+          setIsRecording(false);
 
-          if (isTranscriptionUnavailableRef.current) {
+          if (isTranscriptionUnavailableRef.current || fallbackSkipFinalTranscriptionRef.current) {
             setTranscriptDraft("Transcription unavailable. Voice recording is preserved.");
           } else {
             setIsTranscribingFile(true);
@@ -4513,6 +4531,7 @@ export default function SalesScreen() {
       } finally {
         fallbackLoopRunningRef.current = false;
         fallbackStopRequestedRef.current = false;
+        fallbackSkipFinalTranscriptionRef.current = false;
         liveHintSpeechActiveRef.current = false;
         if (liveHintSpeechRestartTimerRef.current) {
           clearTimeout(liveHintSpeechRestartTimerRef.current);
@@ -4543,9 +4562,10 @@ export default function SalesScreen() {
     startFallbackRecordingRef.current = startFallbackRecording;
   }, [startFallbackRecording]);
 
-  const stopFallbackRecordingAndTranscribe = useCallback(async () => {
+  const stopFallbackRecordingAndTranscribe = useCallback(async (options?: { skipTranscription?: boolean }) => {
     if (recordingModeRef.current !== "audio-fallback") return;
     fallbackStopRequestedRef.current = true;
+    fallbackSkipFinalTranscriptionRef.current = Boolean(options?.skipTranscription);
     fallbackLoopRunningRef.current = false;
     liveHintSpeechActiveRef.current = false;
     if (liveHintSpeechRestartTimerRef.current) {
@@ -4763,33 +4783,39 @@ export default function SalesScreen() {
     return !isRecordingStateRef.current && !isTranscribingStateRef.current;
   }, []);
 
-  const stopRecordingAndWait = useCallback(async (): Promise<boolean> => {
+  const waitForRecordingStopped = useCallback(async (timeoutMs = 12_000): Promise<boolean> => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (!isRecordingStateRef.current) {
+        return true;
+      }
+      await wait(160);
+    }
+    return !isRecordingStateRef.current;
+  }, []);
+
+  const stopRecordingAndWait = useCallback(async (options?: {
+    timeoutMs?: number;
+    waitForTranscription?: boolean;
+  }): Promise<boolean> => {
     if (isRecordingStateRef.current) {
       if (
         recordingModeRef.current === "audio-fallback" ||
         sessionModeRef.current === "audio-fallback"
       ) {
-        await stopFallbackRecordingAndTranscribe();
+        await stopFallbackRecordingAndTranscribe({
+          skipTranscription: options?.waitForTranscription === false,
+        });
       } else {
         ExpoSpeechRecognitionModule?.stop?.();
       }
     }
-    return waitForRecorderIdle();
-  }, [stopFallbackRecordingAndTranscribe, waitForRecorderIdle]);
-
-  useEffect(() => {
-    if (previousTodayDateKeyRef.current === todayDateKey) return;
-    previousTodayDateKeyRef.current = todayDateKey;
-
-    void (async () => {
-      if (isRecordingStateRef.current || isTranscribingStateRef.current) {
-        await stopRecordingAndWait().catch(() => false);
-      }
-      setLocalMeetingCaptureTaskId(null);
-      setActiveVisitTaskId(null);
-      await loadData();
-    })();
-  }, [loadData, stopRecordingAndWait, todayDateKey]);
+    const timeoutMs = options?.timeoutMs;
+    if (options?.waitForTranscription === false) {
+      return waitForRecordingStopped(timeoutMs);
+    }
+    return waitForRecorderIdle(timeoutMs);
+  }, [stopFallbackRecordingAndTranscribe, waitForRecorderIdle, waitForRecordingStopped]);
 
   const stopRecording = useCallback(() => {
     if (!isRecording) return;
@@ -4827,11 +4853,20 @@ export default function SalesScreen() {
       navigateToDetail?: boolean;
       overrideCustomerName?: string;
       minTranscriptLength?: number;
+      allowPlaceholderTranscript?: boolean;
+      skipFinalTranscription?: boolean;
+      dateISO?: string;
     }): Promise<Conversation | null> => {
       const silent = Boolean(options?.silent);
       const resolvedCustomerName = (options?.overrideCustomerName ?? customerName).trim();
       const transcript = trimTranscriptForMemory((transcriptDraft || interimTranscript).trim());
       const minTranscriptLength = Math.max(1, options?.minTranscriptLength ?? 20);
+      const rawFallbackChunkUris = Array.from(fallbackChunkAudioUrisRef.current.entries())
+        .sort(([left], [right]) => left - right)
+        .map(([, uri]) => uri)
+        .filter(Boolean);
+      const primaryAudioUri = audioUri || rawFallbackChunkUris[0] || null;
+      const hasCapturedAudio = Boolean(primaryAudioUri || rawFallbackChunkUris.length > 0);
 
       if (!resolvedCustomerName) {
         if (!silent) {
@@ -4840,9 +4875,17 @@ export default function SalesScreen() {
         return null;
       }
       let finalTranscript = transcript;
+      let transcriptStatus: Conversation["transcriptStatus"] = "completed";
+      let transcriptionError: string | null = null;
       if (!finalTranscript || finalTranscript.length < minTranscriptLength) {
-        if (audioUri) {
+        if (hasCapturedAudio) {
           finalTranscript = "Transcription unavailable. Voice recording is preserved.";
+          transcriptStatus = "pending";
+          transcriptionError = "Transcript was not ready at meeting end. Saved audio can be transcribed later.";
+        } else if (options?.allowPlaceholderTranscript) {
+          finalTranscript = "No transcript or audio was captured for this meeting.";
+          transcriptStatus = "failed";
+          transcriptionError = "Recorder did not provide an audio file before the meeting was ended.";
         } else {
           if (!silent) {
             Alert.alert("Transcript Too Short", "Please record a longer conversation before saving.");
@@ -4855,13 +4898,13 @@ export default function SalesScreen() {
       try {
         const salespersonName = user?.name ?? "Sales Rep";
         const salespersonId = user?.id ?? "sales_unknown";
-        const persistedAudioUri = await persistConversationAudioUri(audioUri);
-        let transcriptStatus: Conversation["transcriptStatus"] = "completed";
-        let transcriptionError: string | null = null;
-        const orderedFallbackChunkUris = Array.from(fallbackChunkAudioUrisRef.current.entries())
-          .sort(([left], [right]) => left - right)
-          .map(([, uri]) => uri);
-        if (persistedAudioUri || orderedFallbackChunkUris.length > 0) {
+        const persistedAudioUri = await persistConversationAudioUri(primaryAudioUri);
+        const orderedFallbackChunkUris = (
+          await Promise.all(rawFallbackChunkUris.map((uri) => persistConversationAudioUri(uri)))
+        ).filter((uri): uri is string => Boolean(uri));
+        const shouldRunFinalTranscription =
+          !options?.skipFinalTranscription && (persistedAudioUri || orderedFallbackChunkUris.length > 0);
+        if (shouldRunFinalTranscription) {
           setInterimTranscript("Generating final transcript...");
           try {
             const finalServerTranscript = await transcribeFinalConversationAudio({
@@ -4882,6 +4925,9 @@ export default function SalesScreen() {
           } finally {
             setInterimTranscript("");
           }
+        } else if (options?.skipFinalTranscription && hasCapturedAudio && transcriptStatus !== "completed") {
+          transcriptionError =
+            transcriptionError || "Audio was saved without blocking meeting end; transcription can be retried later.";
         }
         const playableAudioUri = await uploadConversationAudioToRemote(persistedAudioUri);
         const conversation = buildConversationFromTranscript({
@@ -4891,6 +4937,7 @@ export default function SalesScreen() {
           transcript: finalTranscript,
           durationMs: elapsedMs,
           audioUri: playableAudioUri,
+          dateISO: options?.dateISO,
         });
         conversation.transcriptStatus = transcriptStatus;
         conversation.transcriptionError = transcriptionError;
@@ -5082,31 +5129,49 @@ export default function SalesScreen() {
   );
 
   const handleMeetingEnd = useCallback(
-    async (task: Task) => {
+    async (
+      task: Task,
+      options?: { endedAt?: string; silent?: boolean; reason?: "manual" | "midnight_rollover" }
+    ) => {
       if (!user || isAdminViewer) return;
       if (visitActionTaskId) return;
       setVisitActionTaskId(task.id);
       let meetingEndedSuccessfully = false;
+      const meetingEndWarnings: string[] = [];
       try {
-        await stopRecordingAndWait();
+        const endedAtIso = options?.endedAt || new Date().toISOString();
+        const recorderIdle = await stopRecordingAndWait({
+          timeoutMs: 12_000,
+          waitForTranscription: false,
+        });
+        if (!recorderIdle) {
+          meetingEndWarnings.push("Recorder finalization is still catching up; saved audio/transcript may be incomplete.");
+        }
         const conversation = await saveConversation({
           silent: true,
           navigateToDetail: false,
           overrideCustomerName: getVisitLabel(task),
           minTranscriptLength: 1,
+          allowPlaceholderTranscript: true,
+          skipFinalTranscription: true,
+          dateISO: endedAtIso,
         });
         if (!conversation) {
-          throw new Error("Recording could not be saved. Please try Meeting End again.");
+          meetingEndWarnings.push("Conversation/audio could not sync right now, but the meeting was closed.");
         }
-        const nowIso = new Date().toISOString();
         await updateTask(task.id, {
           autoCaptureRecordingActive: false,
-          autoCaptureRecordingStoppedAt: nowIso,
-          autoCaptureConversationId: conversation.id,
+          autoCaptureRecordingStoppedAt: endedAtIso,
+          autoCaptureConversationId: conversation?.id ?? task.autoCaptureConversationId ?? null,
         });
         let analyzedConversation = conversation;
-        const transcriptText = (conversation.transcript || "").trim();
-        if (transcriptText.length >= 20 && transcriptText !== "Transcription unavailable. Voice recording is preserved.") {
+        const transcriptText = (conversation?.transcript || "").trim();
+        if (
+          conversation &&
+          transcriptText.length >= 20 &&
+          transcriptText !== "Transcription unavailable. Voice recording is preserved." &&
+          transcriptText !== "No transcript or audio was captured for this meeting."
+        ) {
           try {
             const aiResult = await analyzeConversationWithBackendAIForMeeting({
               transcript: conversation.transcript || "",
@@ -5128,35 +5193,48 @@ export default function SalesScreen() {
           }
         }
         let recommendationItems: MeetingConversationProductRecommendation[] = [];
-        try {
-          const recommendationProducts = await ensureConversationRecommendationProducts();
-          recommendationItems = buildMeetingConversationProductRecommendations(
-            analyzedConversation,
-            recommendationProducts
-          );
-        } catch {
-          recommendationItems = [];
+        if (analyzedConversation) {
+          try {
+            const recommendationProducts = await ensureConversationRecommendationProducts();
+            recommendationItems = buildMeetingConversationProductRecommendations(
+              analyzedConversation,
+              recommendationProducts
+            );
+          } catch {
+            recommendationItems = [];
+          }
+          setMeetingRecommendationConversation(analyzedConversation);
+          setMeetingRecommendationItems(recommendationItems);
+          setMeetingRecommendationVisible(true);
         }
-        setMeetingRecommendationConversation(analyzedConversation);
-        setMeetingRecommendationItems(recommendationItems);
-        setMeetingRecommendationVisible(true);
         await addAuditLog({
           id: createLocalId("audit"),
           userId: user.id,
           userName: user.name,
-          action: "Meeting Ended",
-          details: `${user.name} ended meeting at ${getVisitLabel(task)}.`,
-          timestamp: nowIso,
+          action: options?.reason === "midnight_rollover" ? "Meeting Auto Ended" : "Meeting Ended",
+          details: `${user.name} ${
+            options?.reason === "midnight_rollover" ? "auto-ended" : "ended"
+          } meeting at ${getVisitLabel(task)}${
+            meetingEndWarnings.length ? ` (${meetingEndWarnings.join(" ")})` : "."
+          }`,
+          timestamp: endedAtIso,
           module: "Sales Intelligence",
         });
         meetingEndedSuccessfully = true;
         await loadData();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        if (meetingEndWarnings.length && !options?.silent) {
+          Alert.alert("Meeting Ended", meetingEndWarnings.join("\n\n"));
+        }
       } catch (error) {
-        Alert.alert(
-          "Unable to End Meeting",
-          error instanceof Error ? error.message : "Failed to stop meeting."
-        );
+        if (!options?.silent) {
+          Alert.alert(
+            "Unable to End Meeting",
+            error instanceof Error ? error.message : "Failed to stop meeting."
+          );
+        } else {
+          setRecordError(error instanceof Error ? error.message : "Failed to auto-end meeting.");
+        }
       } finally {
         if (meetingEndedSuccessfully) {
           setLocalMeetingCaptureTaskId(null);
@@ -5165,7 +5243,6 @@ export default function SalesScreen() {
       }
     },
     [
-      analyzeConversationWithBackendAIForMeeting,
       ensureConversationRecommendationProducts,
       isAdminViewer,
       loadData,
@@ -5175,6 +5252,75 @@ export default function SalesScreen() {
       visitActionTaskId,
     ]
   );
+
+  useEffect(() => {
+    const previousDateKey = previousTodayDateKeyRef.current;
+    if (previousDateKey === todayDateKey) return;
+    previousTodayDateKeyRef.current = todayDateKey;
+    if (!user || isAdminViewer || visitActionTaskId) return;
+
+    const endedAt = getMumbaiDateEndIso(previousDateKey) || new Date().toISOString();
+    const activeIds = new Set(
+      [localMeetingCaptureTaskId, activeVisitTaskId, persistedMeetingCaptureTaskId].filter(
+        (value): value is string => Boolean(value)
+      )
+    );
+    const assignedUserName = normalizeIdentity(user.name);
+    const rolloverTask =
+      tasks.find((task) => activeIds.has(task.id)) ||
+      tasks.find((task) => {
+        if (task.taskType !== "field_visit") return false;
+        if ((task.visitPlanDate || task.dueDate) !== previousDateKey) return false;
+        if (!task.autoCaptureRecordingActive || task.autoCaptureRecordingStoppedAt) return false;
+        const assignedName = normalizeIdentity(task.assignedToName);
+        return task.assignedTo === user.id || (assignedName.length > 0 && assignedName === assignedUserName);
+      }) ||
+      null;
+
+    void (async () => {
+      if (rolloverTask) {
+        await handleMeetingEnd(rolloverTask, {
+          endedAt,
+          silent: true,
+          reason: "midnight_rollover",
+        });
+        return;
+      }
+
+      if (isRecordingStateRef.current || isTranscribingStateRef.current) {
+        await stopRecordingAndWait({
+          timeoutMs: 12_000,
+          waitForTranscription: false,
+        }).catch(() => false);
+        await saveConversation({
+          silent: true,
+          navigateToDetail: false,
+          overrideCustomerName: customerName.trim() || "Auto-ended meeting",
+          minTranscriptLength: 1,
+          allowPlaceholderTranscript: true,
+          skipFinalTranscription: true,
+          dateISO: endedAt,
+        }).catch(() => null);
+        setLocalMeetingCaptureTaskId(null);
+        setActiveVisitTaskId(null);
+        await loadData();
+      }
+    })();
+  }, [
+    activeVisitTaskId,
+    customerName,
+    handleMeetingEnd,
+    isAdminViewer,
+    loadData,
+    localMeetingCaptureTaskId,
+    persistedMeetingCaptureTaskId,
+    saveConversation,
+    stopRecordingAndWait,
+    tasks,
+    todayDateKey,
+    user,
+    visitActionTaskId,
+  ]);
 
   const closeDepartureNotesModal = useCallback(() => {
     if (visitActionTaskId) return;
@@ -5347,10 +5493,6 @@ export default function SalesScreen() {
       if (visitActionTaskId) return;
       if (task.autoCaptureRecordingActive) {
         Alert.alert("Meeting In Progress", "Please end the meeting before departure.");
-        return;
-      }
-      if (!task.autoCaptureConversationId) {
-        Alert.alert("Meeting Not Ended", "Please tap Meeting End before departure.");
         return;
       }
       openDepartureNotesModal(task);
