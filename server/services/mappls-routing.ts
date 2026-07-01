@@ -32,11 +32,28 @@ function getMapplsRoutingApiKey(): string {
 
 function getGoogleMapsApiKey(): string {
   return (
+    process.env.GOOGLE_DIRECTIONS_API_KEY?.trim() ||
     process.env.GOOGLE_MAPS_API_KEY?.trim() ||
     process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY?.trim() ||
-    process.env.GOOGLE_DIRECTIONS_API_KEY?.trim() ||
     ""
   );
+}
+
+function getPreferredRoutingProvider(): "google" | "mappls" {
+  const provider = (
+    process.env.ROUTING_PROVIDER ||
+    process.env.MAP_PROVIDER ||
+    process.env.EXPO_PUBLIC_MAP_PROVIDER ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  if (provider === "mappls") return "mappls";
+  if (provider === "google") return "google";
+
+  // Production default: when a Google Maps key is configured, use Google Directions
+  // for road-snapped routes without requiring one more env variable on Render.
+  return getGoogleMapsApiKey() ? "google" : "mappls";
 }
 
 function toCoordToken(point: { latitude: number; longitude: number }): string {
@@ -406,6 +423,15 @@ export async function getMapplsDirectionsForLogs(
 
   const sampled = pickEvenlySpaced(compacted, MAX_ROUTE_POSITIONS);
   const baseFallbackPath = toRoutePathFromLogs(sampled);
+
+  if (getPreferredRoutingProvider() === "google") {
+    return getGoogleDirectionsForSampledPoints(
+      sampled,
+      rawPoints.length,
+      baseFallbackPath,
+      "Google routing provider selected."
+    );
+  }
 
   if (!apiKey) {
     return getGoogleDirectionsForSampledPoints(

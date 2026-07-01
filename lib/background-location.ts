@@ -15,6 +15,9 @@ import {
 const BACKGROUND_LOCATION_TASK = "trackforce-background-location-task-v1";
 const BACKGROUND_QUEUE_KEY = "@trackforce_background_location_queue";
 const BACKGROUND_RECOVERY_CAPTURE_KEY = "@trackforce_background_recovery_capture_v1";
+const BACKGROUND_LAST_TASK_EVENT_KEY = "@trackforce_background_last_task_event_v1";
+const BACKGROUND_LAST_ENQUEUED_KEY = "@trackforce_background_last_enqueued_v1";
+const BACKGROUND_LAST_FLUSH_ERROR_KEY = "@trackforce_background_last_flush_error_v1";
 const MAX_BATCH_SIZE = 25;
 const RECOVERY_CAPTURE_MIN_INTERVAL_MS = 20 * 1000;
 
@@ -70,6 +73,14 @@ async function writeQueue(entries: QueuedLocationPoint[]): Promise<void> {
   await AsyncStorage.setItem(BACKGROUND_QUEUE_KEY, JSON.stringify(entries));
 }
 
+async function rememberLocationHealth(key: string, value?: string): Promise<void> {
+  try {
+    await AsyncStorage.setItem(key, value ?? new Date().toISOString());
+  } catch {
+    // Health metadata must never break location capture.
+  }
+}
+
 function isUsableLocation(location: Location.LocationObject | null | undefined): location is Location.LocationObject {
   return Boolean(
     location &&
@@ -111,6 +122,7 @@ export async function enqueueBackgroundLocationPoints(entries: QueuedLocationPoi
   queue.push(...entries);
   const bounded = queue.slice(-1500);
   await writeQueue(bounded);
+  await rememberLocationHealth(BACKGROUND_LAST_ENQUEUED_KEY, entries[entries.length - 1]?.capturedAt);
 }
 
 export async function queueLocationPoint(payload: LocationQueuePointPayload): Promise<void> {
@@ -133,8 +145,8 @@ export async function queueLocationPoint(payload: LocationQueuePointPayload): Pr
 }
 
 export async function flushBackgroundLocationQueue(options?: { force?: boolean }): Promise<void> {
-  const settings = await getSettings();
-  if (!options?.force && (settings.offlineMode === "true" || settings.autoSync === "false")) {
+  const settings = await getSettings().catch(() => null);
+  if (!options?.force && (settings?.offlineMode === "true" || settings?.autoSync === "false")) {
     return;
   }
 
@@ -159,6 +171,7 @@ export async function flushBackgroundLocationQueue(options?: { force?: boolean }
       );
       remaining.splice(0, batch.length);
     } catch {
+      await rememberLocationHealth(BACKGROUND_LAST_FLUSH_ERROR_KEY);
       break;
     }
   }
@@ -167,17 +180,18 @@ export async function flushBackgroundLocationQueue(options?: { force?: boolean }
 }
 
 async function handleBackgroundLocations(data: unknown): Promise<void> {
-  const currentUser = await getCurrentUser();
+  await rememberLocationHealth(BACKGROUND_LAST_TASK_EVENT_KEY);
+  const currentUser = await getCurrentUser().catch(() => null);
   if (!currentUser) return;
 
-  const settings = await getSettings();
-  if (settings.locationTracking === "false") return;
+  const settings = await getSettings().catch(() => null);
+  if (settings?.locationTracking === "false") return;
 
   const payload = data as { locations?: Location.LocationObject[] } | undefined;
   const locations = Array.isArray(payload?.locations) ? payload.locations : [];
   if (!locations.length) return;
 
-  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
+  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 }).catch(() => null);
   const queuePoints = locations.map((location) =>
     toQueuePoint(currentUser.id, location, batteryLevel)
   );
@@ -197,10 +211,12 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
       geofenceName: null,
       isInsideGeofence: false,
       capturedAt: point.capturedAt,
+    }).catch(() => {
+      // The server queue above is the source of truth; local log failures should not stop tracking.
     });
   }
 
-  if (settings.notifications !== "false") {
+  if (settings?.notifications !== "false") {
     const latestPoint = queuePoints[queuePoints.length - 1];
     if (latestPoint) {
       await maybeSendLocationReminder({
@@ -208,12 +224,16 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
         longitude: latestPoint.longitude,
         userId: currentUser.id,
         companyId: currentUser.companyId ?? null,
+      }).catch(() => {
+        // Reminder delivery is optional; GPS capture is not.
       });
     }
   }
 
-  if (settings.autoSync !== "false" && settings.offlineMode !== "true") {
-    await flushBackgroundLocationQueue();
+  if (settings?.autoSync !== "false" && settings?.offlineMode !== "true") {
+    await flushBackgroundLocationQueue().catch(() => {
+      // Keep the task alive; queued points will retry on the next wake/resume.
+    });
   }
 }
 
@@ -237,7 +257,7 @@ async function captureForegroundRecoveryPoint(user: { id: string }): Promise<boo
 
   if (!isUsableLocation(location)) return false;
 
-  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
+  const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 }).catch(() => null);
   const point = toQueuePoint(user.id, location, batteryLevel);
   await enqueueBackgroundLocationPoints([point]);
   await addLocationLog({
@@ -253,6 +273,8 @@ async function captureForegroundRecoveryPoint(user: { id: string }): Promise<boo
     geofenceName: null,
     isInsideGeofence: false,
     capturedAt: point.capturedAt,
+  }).catch(() => {
+    // Recovery point is already queued for backend sync.
   });
   await markRecoveryPointCaptured(user.id);
   return true;
@@ -271,7 +293,17 @@ if (Platform.OS !== "web" && !TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK
   });
 }
 
-export async function ensureBackgroundLocationTracking(): Promise<{
+async function hasStartedBackgroundLocationUpdates(): Promise<boolean> {
+  try {
+    return await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+  } catch {
+    return false;
+  }
+}
+
+export async function ensureBackgroundLocationTracking(options?: {
+  forceRecoveryCapture?: boolean;
+}): Promise<{
   started: boolean;
   reason?: string;
 }> {
@@ -279,71 +311,80 @@ export async function ensureBackgroundLocationTracking(): Promise<{
     return { started: false, reason: "Background location not supported on web." };
   }
 
-  const currentUser = await getCurrentUser();
+  const currentUser = await getCurrentUser().catch(() => null);
   if (!currentUser) {
     await stopBackgroundLocationTracking();
     return { started: false, reason: "No authenticated user." };
   }
 
-  const settings = await getSettings();
-  if (settings.locationTracking === "false") {
+  const settings = await getSettings().catch(() => null);
+  if (settings?.locationTracking === "false") {
     await stopBackgroundLocationTracking();
     return { started: false, reason: "Tracking disabled in settings." };
   }
 
-  let foreground = await Location.getForegroundPermissionsAsync();
-  if (!foreground.granted && foreground.canAskAgain) {
-    foreground = await Location.requestForegroundPermissionsAsync();
+  let foreground = await Location.getForegroundPermissionsAsync().catch(() => null);
+  if (!foreground?.granted && foreground?.canAskAgain) {
+    foreground = await Location.requestForegroundPermissionsAsync().catch(() => foreground);
   }
-  if (!foreground.granted) {
+  if (!foreground?.granted) {
     return { started: false, reason: "Foreground location permission denied." };
   }
 
-  let background = await Location.getBackgroundPermissionsAsync();
-  if (!background.granted && background.canAskAgain) {
-    background = await Location.requestBackgroundPermissionsAsync();
+  let background = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  if (!background?.granted && background?.canAskAgain) {
+    background = await Location.requestBackgroundPermissionsAsync().catch(() => background);
   }
-  if (!background.granted) {
+  if (!background?.granted) {
     return { started: false, reason: "Background location permission denied." };
   }
 
-  const servicesEnabled = await Location.hasServicesEnabledAsync();
+  const servicesEnabled = await Location.hasServicesEnabledAsync().catch(() => false);
   if (!servicesEnabled) {
     await recordGpsDisabledDuringCheckIn(currentUser, "Device location services are off.");
     return { started: false, reason: "Location services disabled." };
   }
 
-  const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+  const alreadyStarted = await hasStartedBackgroundLocationUpdates();
   const hadGpsDisabledState = await hasGpsDisabledDuringCheckIn(currentUser.id);
   if (!alreadyStarted) {
-    await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
-      accuracy: Location.Accuracy.BestForNavigation,
-      timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
-      distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
-      pausesUpdatesAutomatically: false,
-      showsBackgroundLocationIndicator: true,
-      activityType: Location.ActivityType.OtherNavigation,
-      foregroundService: {
-        notificationTitle: "Lumina FieldForce",
-        notificationBody: "App is running",
-        killServiceOnDestroy: false,
-      },
-    });
+    try {
+      await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
+        accuracy: Location.Accuracy.BestForNavigation,
+        timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
+        distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
+        pausesUpdatesAutomatically: false,
+        showsBackgroundLocationIndicator: true,
+        activityType: Location.ActivityType.OtherNavigation,
+        foregroundService: {
+          notificationTitle: "Lumina FieldForce route tracking",
+          notificationBody: "Live field route tracking is active.",
+          killServiceOnDestroy: false,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to start background location.";
+      return { started: false, reason: message };
+    }
   }
 
   await recordGpsRestoredDuringCheckIn(currentUser);
-  if (hadGpsDisabledState || !alreadyStarted) {
+  if (options?.forceRecoveryCapture || hadGpsDisabledState || !alreadyStarted) {
     await captureForegroundRecoveryPoint(currentUser);
   }
-  await flushBackgroundLocationQueue();
+  await flushBackgroundLocationQueue().catch(() => {
+    // Recovery should still report started even if upload waits for network.
+  });
   return { started: true };
 }
 
 export async function stopBackgroundLocationTracking(): Promise<void> {
   if (Platform.OS === "web") return;
-  const started = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+  const started = await hasStartedBackgroundLocationUpdates();
   if (started) {
-    await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+    await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK).catch(() => {
+      // Stopping is best-effort; stale native state will be rechecked on next launch.
+    });
   }
 }
 
@@ -355,6 +396,6 @@ export async function getBackgroundLocationTrackingStatus(): Promise<{
   if (Platform.OS === "web") {
     return { started: false, queuedPoints };
   }
-  const started = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+  const started = await hasStartedBackgroundLocationUpdates();
   return { started, queuedPoints };
 }

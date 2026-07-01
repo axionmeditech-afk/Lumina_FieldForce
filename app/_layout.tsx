@@ -36,6 +36,11 @@ SplashScreen.preventAutoHideAsync();
 
 const LOCATION_RUNTIME_WATCHDOG_MS = 60 * 1000;
 
+interface RuntimeSettingsOptions {
+  forceRecoveryCapture?: boolean;
+  skipBackendAttendance?: boolean;
+}
+
 async function getBackendAttendanceTodayQuiet(userId: string): Promise<AttendanceRecord[]> {
   try {
     return await getTodayAttendance(userId, { skipGlobalLoading: true });
@@ -121,7 +126,7 @@ function AppShell() {
   const { user } = useAuth();
 
   const applyRuntimeSettings = useCallback(
-    async (overrides?: Record<string, string>) => {
+    async (overrides?: Record<string, string>, options?: RuntimeSettingsOptions) => {
       const settings = overrides ?? (await getSettings());
       applyHapticsPolicy(settings.notifications !== "false");
       await initializeDeviceNotifications();
@@ -145,7 +150,7 @@ function AppShell() {
       const [checkedInFlag, localAttendanceRecords, backendAttendanceRecords] = await Promise.all([
         isCheckedIn(),
         getAttendance(),
-        getBackendAttendanceTodayQuiet(user.id),
+        options?.skipBackendAttendance ? Promise.resolve([]) : getBackendAttendanceTodayQuiet(user.id),
       ]);
       const attendanceRecords = [...localAttendanceRecords, ...backendAttendanceRecords];
       const derivedCheckedIn = resolveCheckedInFromRecords(
@@ -163,7 +168,9 @@ function AppShell() {
         return;
       }
 
-      const trackingResult = await ensureBackgroundLocationTracking();
+      const trackingResult = await ensureBackgroundLocationTracking({
+        forceRecoveryCapture: options?.forceRecoveryCapture,
+      });
       if (!trackingResult.started) {
         return;
       }
@@ -180,7 +187,7 @@ function AppShell() {
     let mounted = true;
     void (async () => {
       try {
-        await applyRuntimeSettings();
+        await applyRuntimeSettings(undefined, { forceRecoveryCapture: true });
       } catch {
         // Keep UI stable if runtime settings sync fails.
       }
@@ -193,9 +200,18 @@ function AppShell() {
       });
     });
     const appStateSubscription = AppState.addEventListener("change", (state) => {
-      if (!mounted || state !== "active") return;
-      void applyRuntimeSettings().catch(() => {
-        // Keep UI stable if a resume-triggered sync fails.
+      if (!mounted) return;
+      if (state === "active") {
+        void applyRuntimeSettings(undefined, { forceRecoveryCapture: true }).catch(() => {
+          // Keep UI stable if a resume-triggered sync fails.
+        });
+        return;
+      }
+      void applyRuntimeSettings(undefined, {
+        forceRecoveryCapture: true,
+        skipBackendAttendance: true,
+      }).catch(() => {
+        // Start/refresh foreground tracking before Android backgrounds the JS runtime.
       });
     });
     const trackingWatchdog = setInterval(() => {

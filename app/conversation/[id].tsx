@@ -1410,6 +1410,72 @@ export default function ConversationDetailScreen() {
     void unloadAudio();
   }, [convo?.id, unloadAudio]);
 
+  const transcribeConversationAudio = useCallback(async () => {
+    if (!convo?.audioUri) {
+      Alert.alert("Audio Missing", "Audio file is not available for this conversation.");
+      return;
+    }
+    if (transcriptionBusy) return;
+    setTranscriptionBusy(true);
+    setTranscriptionError(null);
+    try {
+      const audioForTranscription = await resolveConversationAudioPlaybackUri(convo.audioUri, {
+        conversationDate: convo.date,
+      });
+      const transcript = await transcribeConversationAudioFromUri(audioForTranscription);
+      const refreshed = buildConversationFromTranscript({
+        salespersonId: convo.salespersonId,
+        salespersonName: convo.salespersonName,
+        customerName: convo.customerName,
+        transcript,
+        durationMs: parseDurationToMs(convo.duration),
+        audioUri: convo.audioUri,
+        dateISO: convo.date,
+      });
+      const updates: Partial<Conversation> = {
+        transcript,
+        transcriptStatus: "completed",
+        transcriptionError: null,
+        summary: refreshed.summary,
+        keyPhrases: refreshed.keyPhrases,
+        objections: refreshed.objections,
+        improvements: refreshed.improvements,
+        interestScore: refreshed.interestScore,
+        pitchScore: refreshed.pitchScore,
+        confidenceScore: refreshed.confidenceScore,
+        talkListenRatio: refreshed.talkListenRatio,
+        sentiment: refreshed.sentiment,
+        buyingIntent: refreshed.buyingIntent,
+        analysisProvider: "rules",
+      };
+      await updateConversation(convo.id, updates);
+      setConvo((current) => (current && current.id === convo.id ? { ...current, ...updates } : current));
+      if (user) {
+        await addAuditLog({
+          id: `audit_transcribe_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          userId: user.id,
+          userName: user.name,
+          action: "Conversation Audio Transcribed",
+          details: `${convo.customerName} conversation audio was transcribed from saved recording.`,
+          timestamp: new Date().toISOString(),
+          module: "Sales AI",
+        });
+      }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert(
+        convo.transcript?.trim() ? "Transcript Replaced" : "Transcript Created",
+        "The transcript was generated from the saved conversation audio."
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to transcribe audio.";
+      setTranscriptionError(message);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Alert.alert("Transcription Failed", message);
+    } finally {
+      setTranscriptionBusy(false);
+    }
+  }, [convo, transcriptionBusy, user]);
+
   if (!convo) {
     return (
       <AppCanvas>
@@ -1525,72 +1591,6 @@ export default function ConversationDetailScreen() {
       setAudioBusy(false);
     }
   };
-
-  const transcribeConversationAudio = useCallback(async () => {
-    if (!convo?.audioUri) {
-      Alert.alert("Audio Missing", "Audio file is not available for this conversation.");
-      return;
-    }
-    if (transcriptionBusy) return;
-    setTranscriptionBusy(true);
-    setTranscriptionError(null);
-    try {
-      const audioForTranscription = await resolveConversationAudioPlaybackUri(convo.audioUri, {
-        conversationDate: convo.date,
-      });
-      const transcript = await transcribeConversationAudioFromUri(audioForTranscription);
-      const refreshed = buildConversationFromTranscript({
-        salespersonId: convo.salespersonId,
-        salespersonName: convo.salespersonName,
-        customerName: convo.customerName,
-        transcript,
-        durationMs: parseDurationToMs(convo.duration),
-        audioUri: convo.audioUri,
-        dateISO: convo.date,
-      });
-      const updates: Partial<Conversation> = {
-        transcript,
-        transcriptStatus: "completed",
-        transcriptionError: null,
-        summary: refreshed.summary,
-        keyPhrases: refreshed.keyPhrases,
-        objections: refreshed.objections,
-        improvements: refreshed.improvements,
-        interestScore: refreshed.interestScore,
-        pitchScore: refreshed.pitchScore,
-        confidenceScore: refreshed.confidenceScore,
-        talkListenRatio: refreshed.talkListenRatio,
-        sentiment: refreshed.sentiment,
-        buyingIntent: refreshed.buyingIntent,
-        analysisProvider: "rules",
-      };
-      await updateConversation(convo.id, updates);
-      setConvo((current) => (current && current.id === convo.id ? { ...current, ...updates } : current));
-      if (user) {
-        await addAuditLog({
-          id: `audit_transcribe_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          userId: user.id,
-          userName: user.name,
-          action: "Conversation Audio Transcribed",
-          details: `${convo.customerName} conversation audio was transcribed from saved recording.`,
-          timestamp: new Date().toISOString(),
-          module: "Sales AI",
-        });
-      }
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert(
-        convo.transcript?.trim() ? "Transcript Replaced" : "Transcript Created",
-        "The transcript was generated from the saved conversation audio."
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to transcribe audio.";
-      setTranscriptionError(message);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Alert.alert("Transcription Failed", message);
-    } finally {
-      setTranscriptionBusy(false);
-    }
-  }, [convo, transcriptionBusy, user]);
 
   const sentimentColor =
     convo.sentiment === "positive" ? colors.success :
