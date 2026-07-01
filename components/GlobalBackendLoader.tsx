@@ -18,7 +18,7 @@ export function GlobalBackendLoader() {
       const timer = setTimeout(() => setVisible(false), 180);
       return () => clearTimeout(timer);
     }
-    const timer = setTimeout(() => setVisible(true), 220);
+    const timer = setTimeout(() => setVisible(true), 650);
     return () => clearTimeout(timer);
   }, [pendingCount]);
 

@@ -808,8 +808,10 @@ export function RouteMapNative({
     "";
   const canUseGoogleMaps = hasUsableGoogleMapsKey(googleMapsApiKey);
   const mapProvider =
-    configuredMapProvider === "mappls" && isExpoGo ? "osm" : configuredMapProvider;
-  const shouldUseMappls = Platform.OS === "android" && mapProvider === "mappls" && !isExpoGo;
+    configuredMapProvider === "osm" || configuredMapProvider === "openstreetmap" || configuredMapProvider === "maptiler"
+      ? configuredMapProvider
+      : "google";
+  const shouldUseMappls = false;
   const isOsmProvider = mapProvider === "osm" || mapProvider === "openstreetmap";
   const isMaptilerProvider = mapProvider === "maptiler";
   const mapplsClusterId = process.env.EXPO_PUBLIC_MAPPLS_CLUSTER_ID?.trim() || "";
@@ -1361,44 +1363,12 @@ export function RouteMapNative({
   );
 
   useEffect(() => {
-    if (!shouldUseMappls) {
-      setMapplsModule(null);
-      return;
-    }
-    let mounted = true;
-    void import("mappls-map-react-native")
-      .then((module) => {
-        if (!mounted) return;
-        setMapplsModule(module);
-      })
-      .catch(() => {
-        if (!mounted) return;
-        setMapplsModule(null);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [shouldUseMappls]);
+    setMapplsModule(null);
+  }, []);
 
   useEffect(() => {
-    if (!shouldUseTrackingWidget) {
-      setTrackingModule(null);
-      return;
-    }
-    let mounted = true;
-    void import("mappls-tracking-react-native")
-      .then((module) => {
-        if (!mounted) return;
-        setTrackingModule(module);
-      })
-      .catch(() => {
-        if (!mounted) return;
-        setTrackingModule(null);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [shouldUseTrackingWidget]);
+    setTrackingModule(null);
+  }, []);
 
   const hasAndroidMapsKey =
     Platform.OS !== "android" ||

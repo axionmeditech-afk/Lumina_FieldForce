@@ -576,8 +576,13 @@ function buildBodyPreview(text: string): string {
 
 let cachedLastWorkingApiBase: string | null = null;
 
-async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const endGlobalLoading = beginGlobalLoading();
+type ApiRequestInit = RequestInit & {
+  skipGlobalLoading?: boolean;
+};
+
+async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
+  const { skipGlobalLoading, ...requestInit } = init;
+  const endGlobalLoading = skipGlobalLoading ? () => {} : beginGlobalLoading();
   try {
   let apiBases = await getApiBaseUrlCandidates();
   if (cachedLastWorkingApiBase && apiBases.includes(cachedLastWorkingApiBase)) {
@@ -593,13 +598,13 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   for (const apiBase of apiBases) {
-    if (init.signal?.aborted) {
+    if (requestInit.signal?.aborted) {
       throw new Error("Request aborted.");
     }
     const url = `${apiBase}${path}`;
     try {
       const response = await fetch(url, {
-        ...init,
+        ...requestInit,
         headers,
       });
       const text = await response.text();
@@ -666,7 +671,7 @@ async function fetchJson<T>(path: string, init: RequestInit = {}): Promise<T> {
       cachedLastWorkingApiBase = apiBase;
       return (parsed ?? null) as T;
     } catch (error) {
-      if (init.signal?.aborted) {
+      if (requestInit.signal?.aborted) {
         throw error instanceof Error ? error : new Error("Request aborted.");
       }
       const message =
@@ -712,7 +717,7 @@ export interface AccessRequestPayload {
 
 async function fetchJsonWithTimeout<T>(
   path: string,
-  init: RequestInit,
+  init: ApiRequestInit,
   timeoutMs: number
 ): Promise<T> {
   const controller = new AbortController();
@@ -727,9 +732,15 @@ async function fetchJsonWithTimeout<T>(
   }
 }
 
-export async function getRemoteState<T>(key: string): Promise<RemoteStateResponse<T>> {
+export async function getRemoteState<T>(
+  key: string,
+  options?: { skipGlobalLoading?: boolean }
+): Promise<RemoteStateResponse<T>> {
   const encodedKey = encodeURIComponent(key);
-  return fetchJson<RemoteStateResponse<T>>(`/state/${encodedKey}`, { method: "GET" });
+  return fetchJson<RemoteStateResponse<T>>(`/state/${encodedKey}`, {
+    method: "GET",
+    skipGlobalLoading: options?.skipGlobalLoading,
+  });
 }
 
 export async function getNearbyVisitHistory(params: {
@@ -1064,9 +1075,13 @@ export async function attendanceCheckOut(payload: AttendanceCheckPayload): Promi
   );
 }
 
-export async function getTodayAttendance(userId: string): Promise<AttendanceRecord[]> {
+export async function getTodayAttendance(
+  userId: string,
+  options: { skipGlobalLoading?: boolean } = {}
+): Promise<AttendanceRecord[]> {
   return fetchJson<AttendanceRecord[]>(`/attendance/today?user_id=${encodeURIComponent(userId)}`, {
     method: "GET",
+    skipGlobalLoading: options.skipGlobalLoading,
   });
 }
 
@@ -1141,7 +1156,10 @@ export interface LiveMapPoint {
 }
 
 export async function getAdminLiveMapPoints(): Promise<LiveMapPoint[]> {
-  return fetchJson<LiveMapPoint[]>(`/admin/live-map?_ts=${Date.now()}`, { method: "GET" });
+  return fetchJson<LiveMapPoint[]>(`/admin/live-map?_ts=${Date.now()}`, {
+    method: "GET",
+    skipGlobalLoading: true,
+  });
 }
 
 export interface AdminLiveMapRoute {
@@ -1189,6 +1207,7 @@ export async function getAdminLiveMapRoutes(
   });
   return fetchJson<AdminLiveMapRoutesResponse>(`/admin/live-map/routes?${query.toString()}`, {
     method: "GET",
+    skipGlobalLoading: true,
   });
 }
 
@@ -1689,7 +1708,7 @@ export async function getAdminRouteTimeline(
   });
   return fetchJson<AdminRouteTimelineResponse>(
     `/admin/route/${encodeURIComponent(userId)}?${query.toString()}`,
-    { method: "GET" }
+    { method: "GET", skipGlobalLoading: true }
   );
 }
 

@@ -200,9 +200,14 @@ const FALLBACK_SEGMENT_MS = readPositiveIntegerEnv(
 const FALLBACK_POLL_MS = 100;
 const LIVE_HINT_RESTART_DELAY_MS = 180;
 const TRANSCRIBE_LOADING_RETRY_DELAY_MS = 800;
-const VOICE_WAVE_BAR_COUNT = 31;
+const VOICE_WAVE_BAR_COUNT = 21;
 const RECORDING_START_FAILED_MESSAGE = "Recording could not start. Please try again.";
 const TRANSCRIPTION_FAILED_MESSAGE = "Transcription failed. Please try again.";
+const MAX_TRANSCRIPT_CHARS_IN_MEMORY = 24_000;
+const MAX_FINAL_TRANSCRIPT_SEGMENTS = 320;
+const MAX_VISIBLE_CONVERSATIONS = 80;
+const MAX_LOCATION_LOGS_IN_SALES_STATE = 900;
+const MAX_QUICK_SALE_LOGS_IN_SALES_STATE = 500;
 const ROUTE_SEARCH_RESULTS_LIMIT = 20;
 const ROUTE_NAV_WAYPOINT_LIMIT = 6;
 const POS_PAGE_SIZE = 100;
@@ -281,6 +286,27 @@ function normalizeMeteringDbValue(dbValue: number): number {
   if (!Number.isFinite(dbValue)) return 0;
   const normalized = (dbValue + 60) / 60;
   return clamp01(Math.pow(clamp01(normalized), 1.2));
+}
+
+function trimTranscriptForMemory(value: string): string {
+  const cleaned = sanitizeConversationTranscript(value);
+  if (cleaned.length <= MAX_TRANSCRIPT_CHARS_IN_MEMORY) return cleaned;
+  return cleaned.slice(cleaned.length - MAX_TRANSCRIPT_CHARS_IN_MEMORY).trim();
+}
+
+function trimTranscriptSegmentsForMemory(segments: string[]): string[] {
+  const trimmedSegments = segments
+    .filter((entry) => entry.trim().length > 0)
+    .slice(-MAX_FINAL_TRANSCRIPT_SEGMENTS);
+  let totalLength = 0;
+  const output: string[] = [];
+  for (let index = trimmedSegments.length - 1; index >= 0; index -= 1) {
+    const segment = trimmedSegments[index];
+    totalLength += segment.length + 1;
+    if (totalLength > MAX_TRANSCRIPT_CHARS_IN_MEMORY) break;
+    output.unshift(segment);
+  }
+  return output;
 }
 
 function buildVoicePulseBars(frame: number, level: number, peak: number, hasRecentVoice: boolean): number[] {
@@ -1597,8 +1623,8 @@ async function analyzeConversationWithBackendAIForMeeting(input: {
 }
 
 const ROUTE_POINT_INTERVAL_MINUTES = 1;
-const LIVE_ROUTE_POINT_INTERVAL_MINUTES = 0;
-const LIVE_ROUTE_REFRESH_MS = 15 * 1000;
+const LIVE_ROUTE_POINT_INTERVAL_MINUTES = 1;
+const LIVE_ROUTE_REFRESH_MS = 60 * 1000;
 
 function toMs(value: string): number {
   const parsed = new Date(value).getTime();
@@ -1806,6 +1832,10 @@ function downsamplePointsByInterval(points: LocationLog[], intervalMinutes: numb
       sampled.push(point);
       lastIncludedMs = pointMs;
     }
+  }
+  const latestPoint = sorted[sorted.length - 1];
+  if (latestPoint && sampled[sampled.length - 1]?.id !== latestPoint.id) {
+    sampled.push(latestPoint);
   }
   return sampled;
 }
@@ -2350,8 +2380,16 @@ export default function SalesScreen() {
     const remoteAttendance = Array.isArray(remoteAttendanceState.value)
       ? filterCompanyScoped(remoteAttendanceState.value, user.companyId)
       : [];
-    setLocationLogs(dedupeById(logs));
-    setQuickSaleLocationLogs(quickSaleLogs);
+    setLocationLogs(
+      dedupeById(logs)
+        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))
+        .slice(0, MAX_LOCATION_LOGS_IN_SALES_STATE)
+    );
+    setQuickSaleLocationLogs(
+      quickSaleLogs
+        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))
+        .slice(0, MAX_QUICK_SALE_LOGS_IN_SALES_STATE)
+    );
     setAttendanceRecords(dedupeById([...remoteAttendance, ...attendance]));
 
     const salesEmployees = employeeData.filter((entry) => isSalesRole(entry.role) || entry.employeeCategory === "on_field");
@@ -2896,9 +2934,9 @@ export default function SalesScreen() {
     if (!value) return;
     const previous = finalSegmentsRef.current[finalSegmentsRef.current.length - 1];
     if (value !== previous) {
-      finalSegmentsRef.current = [...finalSegmentsRef.current, value];
+      finalSegmentsRef.current = trimTranscriptSegmentsForMemory([...finalSegmentsRef.current, value]);
     }
-    setTranscriptDraft(finalSegmentsRef.current.join(" ").trim());
+    setTranscriptDraft(trimTranscriptForMemory(finalSegmentsRef.current.join(" ").trim()));
   }, []);
 
   const startLiveHintSpeechRecognition = useCallback(() => {
@@ -2960,7 +2998,7 @@ export default function SalesScreen() {
 
     setInterimTranscript(transcript);
     const merged = [...finalSegmentsRef.current, transcript].join(" ").trim();
-    setTranscriptDraft(merged);
+    setTranscriptDraft(trimTranscriptForMemory(merged));
   });
 
   useSpeechRecognitionEvent("volumechange", (event) => {
@@ -3353,7 +3391,7 @@ export default function SalesScreen() {
           const currentTimeline = await getAdminRouteTimeline(
             candidateId,
             todayDateKey,
-            { intervalMinutes: ROUTE_POINT_INTERVAL_MINUTES, raw: true }
+            { intervalMinutes: LIVE_ROUTE_POINT_INTERVAL_MINUTES, raw: false }
           );
           const currentLatestActivity = getTimelineLatestActivityAt(currentTimeline);
           const resolvedLatestActivity = getTimelineLatestActivityAt(resolvedTimeline);
@@ -4162,21 +4200,29 @@ export default function SalesScreen() {
   ]);
 
   const visibleConversations = useMemo(() => {
+    const sortAndLimit = (entries: Conversation[]) =>
+      [...entries]
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .slice(0, MAX_VISIBLE_CONVERSATIONS);
     if (!isAdminViewer) {
-      return conversations.filter(
-        (conversation) =>
-          conversation.salespersonId === user?.id ||
-          conversation.salespersonName === user?.name
+      return sortAndLimit(
+        conversations.filter(
+          (conversation) =>
+            conversation.salespersonId === user?.id ||
+            conversation.salespersonName === user?.name
+        )
       );
     }
-    if (!selectedSalespersonId) return conversations;
+    if (!selectedSalespersonId) return sortAndLimit(conversations);
     const selectedName = normalizeIdentity(selectedSalesperson?.name);
     const currentUserName = normalizeIdentity(user?.name);
-    return conversations.filter(
-      (conversation) =>
-        selectedSalespersonTaskAliases.has(conversation.salespersonId) ||
-        (selectedName && normalizeIdentity(conversation.salespersonName) === selectedName) ||
-        (currentUserName && normalizeIdentity(conversation.salespersonName) === currentUserName)
+    return sortAndLimit(
+      conversations.filter(
+        (conversation) =>
+          selectedSalespersonTaskAliases.has(conversation.salespersonId) ||
+          (selectedName && normalizeIdentity(conversation.salespersonName) === selectedName) ||
+          (currentUserName && normalizeIdentity(conversation.salespersonName) === currentUserName)
+      )
     );
   }, [
     conversations,
@@ -4221,7 +4267,7 @@ export default function SalesScreen() {
     if (!partialTranscript) return finalTranscript;
     if (finalTranscript === partialTranscript) return finalTranscript;
     if (finalTranscript.endsWith(partialTranscript)) return finalTranscript;
-    return `${finalTranscript} ${partialTranscript}`.trim();
+    return trimTranscriptForMemory(`${finalTranscript} ${partialTranscript}`.trim());
   }, [interimTranscript, transcriptDraft]);
 
   const liveTranscriptSignals = useMemo(
@@ -4391,12 +4437,12 @@ export default function SalesScreen() {
         if (!chunk.trim()) continue;
         const previous = finalSegmentsRef.current[finalSegmentsRef.current.length - 1];
         if (chunk !== previous) {
-          finalSegmentsRef.current = [...finalSegmentsRef.current, chunk];
+          finalSegmentsRef.current = trimTranscriptSegmentsForMemory([...finalSegmentsRef.current, chunk]);
           updated = true;
         }
       }
       if (updated) {
-        setTranscriptDraft(finalSegmentsRef.current.join(" ").trim());
+        setTranscriptDraft(trimTranscriptForMemory(finalSegmentsRef.current.join(" ").trim()));
       }
       if (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
         setInterimTranscript("Listening...");
@@ -4582,6 +4628,9 @@ export default function SalesScreen() {
 
   const startRecording = useCallback(
     async (options?: { customerNameOverride?: string; silent?: boolean }): Promise<boolean> => {
+      if (requestBusy || isRecordingStateRef.current || isTranscribingStateRef.current || fallbackLoopRunningRef.current) {
+        return false;
+      }
       const silent = Boolean(options?.silent);
       const resolvedCustomerName = (options?.customerNameOverride ?? customerName).trim();
       if (!resolvedCustomerName) {
@@ -4759,7 +4808,7 @@ export default function SalesScreen() {
         setRequestBusy(false);
       }
     },
-    [customerName, startFallbackRecording]
+    [customerName, requestBusy, startFallbackRecording]
   );
 
   const waitForRecorderIdle = useCallback(async (timeoutMs = 30_000): Promise<boolean> => {
@@ -4803,6 +4852,7 @@ export default function SalesScreen() {
 
   const stopRecording = useCallback(() => {
     if (!isRecording) return;
+    if (fallbackStopRequestedRef.current || isTranscribingStateRef.current) return;
     if (recordingModeRef.current === "audio-fallback" || sessionModeRef.current === "audio-fallback") {
       void stopFallbackRecordingAndTranscribe();
       return;
@@ -4839,7 +4889,7 @@ export default function SalesScreen() {
     }): Promise<Conversation | null> => {
       const silent = Boolean(options?.silent);
       const resolvedCustomerName = (options?.overrideCustomerName ?? customerName).trim();
-      const transcript = sanitizeConversationTranscript((transcriptDraft || interimTranscript).trim());
+      const transcript = trimTranscriptForMemory((transcriptDraft || interimTranscript).trim());
       const minTranscriptLength = Math.max(1, options?.minTranscriptLength ?? 20);
 
       if (!resolvedCustomerName) {
@@ -7980,7 +8030,7 @@ export default function SalesScreen() {
                 placeholderTextColor={colors.textTertiary}
                 value={liveTranscript}
                 onChangeText={(text) => {
-                  setTranscriptDraft(text);
+                  setTranscriptDraft(trimTranscriptForMemory(text));
                   setInterimTranscript("");
                 }}
               />

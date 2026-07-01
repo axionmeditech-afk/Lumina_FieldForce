@@ -22,6 +22,7 @@ import {
   registerApiUser,
   submitAccessRequestToBackend,
 } from "@/lib/attendance-api";
+import { stopBackgroundLocationTracking } from "@/lib/background-location";
 
 interface SignupInput {
   name: string;
@@ -106,14 +107,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [isStandaloneRuntime]
   );
 
+  const clearLocalSession = useCallback(async () => {
+    await stopBackgroundLocationTracking().catch(() => undefined);
+    await logoutUser();
+    setUser(null);
+    setCompany(null);
+  }, []);
+
   const refreshSession = useCallback(async () => {
     const activeUser = await getCurrentUser();
     if (activeUser && isStandaloneRuntime) {
       const token = await getApiToken();
       if (!token) {
-        await logoutUser();
-        setUser(null);
-        setCompany(null);
+        await clearLocalSession();
         return;
       }
 
@@ -131,16 +137,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         const tokenAfterValidation = await getApiToken();
         if (!tokenAfterValidation) {
-          await logoutUser();
-          setUser(null);
-          setCompany(null);
+          await clearLocalSession();
           return;
         }
       } catch (error) {
         if (isApiSessionInvalidError(error)) {
-          await logoutUser();
-          setUser(null);
-          setCompany(null);
+          await clearLocalSession();
           return;
         }
       }
@@ -152,7 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       setCompany(null);
     }
-  }, [isStandaloneRuntime]);
+  }, [clearLocalSession, isStandaloneRuntime]);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -335,10 +337,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await logoutApiSession({ timeoutMs: isStandaloneRuntime ? 6000 : 1600 });
     } finally {
-      await logoutUser();
+      await clearLocalSession();
     }
-    setUser(null);
-    setCompany(null);
   };
 
   const value = { user, company, isLoading, login, signup, updateCompany, refreshSession, logout };

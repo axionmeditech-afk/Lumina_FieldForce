@@ -7,6 +7,7 @@ import { getBatteryLevelPercent } from "@/lib/battery";
 import { maybeSendLocationReminder } from "@/lib/location-reminders";
 import { addLocationLog, getCurrentUser, getSettings } from "@/lib/storage";
 import {
+  hasGpsDisabledDuringCheckIn,
   recordGpsDisabledDuringCheckIn,
   recordGpsRestoredDuringCheckIn,
 } from "@/lib/gps-tracking-alerts";
@@ -313,6 +314,7 @@ export async function ensureBackgroundLocationTracking(): Promise<{
   }
 
   const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+  const hadGpsDisabledState = await hasGpsDisabledDuringCheckIn(currentUser.id);
   if (!alreadyStarted) {
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy: Location.Accuracy.BestForNavigation,
@@ -330,7 +332,9 @@ export async function ensureBackgroundLocationTracking(): Promise<{
   }
 
   await recordGpsRestoredDuringCheckIn(currentUser);
-  await captureForegroundRecoveryPoint(currentUser);
+  if (hadGpsDisabledState || !alreadyStarted) {
+    await captureForegroundRecoveryPoint(currentUser);
+  }
   await flushBackgroundLocationQueue();
   return { started: true };
 }

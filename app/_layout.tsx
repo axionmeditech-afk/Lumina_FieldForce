@@ -15,7 +15,7 @@ import {
   flushBackgroundLocationQueue,
   stopBackgroundLocationTracking,
 } from "@/lib/background-location";
-import { flushAttendanceQueue } from "@/lib/attendance-api";
+import { flushAttendanceQueue, getTodayAttendance } from "@/lib/attendance-api";
 import { getAttendance, getSettings, isCheckedIn, setCheckedIn, subscribeSettingsUpdates } from "@/lib/storage";
 import type { AttendanceRecord } from "@/lib/types";
 import { applyHapticsPolicy } from "@/lib/haptics-policy";
@@ -34,7 +34,15 @@ import {
 
 SplashScreen.preventAutoHideAsync();
 
-const LOCATION_RUNTIME_WATCHDOG_MS = 30 * 1000;
+const LOCATION_RUNTIME_WATCHDOG_MS = 60 * 1000;
+
+async function getBackendAttendanceTodayQuiet(userId: string): Promise<AttendanceRecord[]> {
+  try {
+    return await getTodayAttendance(userId, { skipGlobalLoading: true });
+  } catch {
+    return [];
+  }
+}
 
 function resolveCheckedInFromRecords(
   records: AttendanceRecord[],
@@ -134,7 +142,12 @@ function AppShell() {
         return;
       }
 
-      const [checkedInFlag, attendanceRecords] = await Promise.all([isCheckedIn(), getAttendance()]);
+      const [checkedInFlag, localAttendanceRecords, backendAttendanceRecords] = await Promise.all([
+        isCheckedIn(),
+        getAttendance(),
+        getBackendAttendanceTodayQuiet(user.id),
+      ]);
+      const attendanceRecords = [...localAttendanceRecords, ...backendAttendanceRecords];
       const derivedCheckedIn = resolveCheckedInFromRecords(
         attendanceRecords,
         user.id,

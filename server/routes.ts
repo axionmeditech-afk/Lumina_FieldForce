@@ -1007,6 +1007,10 @@ function downsampleLocationLogsByInterval(
       lastIncludedMs = pointMs;
     }
   }
+  const latestPoint = sorted[sorted.length - 1];
+  if (latestPoint && sampled[sampled.length - 1]?.id !== latestPoint.id) {
+    sampled.push(latestPoint);
+  }
   return sampled;
 }
 

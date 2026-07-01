@@ -120,3 +120,10 @@ export async function recordGpsRestoredDuringCheckIn(
   delete state[userKey];
   await writeState(state);
 }
+
+export async function hasGpsDisabledDuringCheckIn(userId: string): Promise<boolean> {
+  const userKey = toUserKey(userId);
+  if (!userKey) return false;
+  const state = await readState();
+  return Boolean(state[userKey]);
+}

@@ -318,7 +318,8 @@ function buildSelectedUserAliases(
 }
 
 const ROUTE_POINT_INTERVAL_MINUTES = 1;
-const LIVE_ROUTE_POINT_INTERVAL_MINUTES = 0;
+const LIVE_ROUTE_POINT_INTERVAL_MINUTES = 1;
+const ROUTE_POINT_ROW_LIMIT = 80;
 
 interface RouteSessionWindow {
   startAt: string | null;
@@ -390,6 +391,10 @@ function downsamplePointsByInterval(points: LocationLog[], intervalMinutes: numb
       sampled.push(point);
       lastIncludedMs = pointMs;
     }
+  }
+  const latestPoint = sorted[sorted.length - 1];
+  if (latestPoint && sampled[sampled.length - 1]?.id !== latestPoint.id) {
+    sampled.push(latestPoint);
   }
   return sampled;
 }
@@ -648,9 +653,9 @@ export default function RouteTrackingScreen() {
     formatMumbaiDateTime(new Date(), { withSeconds: true })
   );
   const resolvingLocationKeysRef = useRef(new Set<string>());
-  const LIVE_REFRESH_INTERVAL_MS = readPositiveIntegerEnv(
-    "EXPO_PUBLIC_ROUTE_TRACKING_REFRESH_MS",
-    5 * 1000
+  const LIVE_REFRESH_INTERVAL_MS = Math.max(
+    30 * 1000,
+    readPositiveIntegerEnv("EXPO_PUBLIC_ROUTE_TRACKING_REFRESH_MS", 60 * 1000)
   );
   const isExpoGo = Constants.appOwnership === "expo";
   const configuredMapProvider = (process.env.EXPO_PUBLIC_MAP_PROVIDER || "google")
@@ -934,10 +939,10 @@ export default function RouteTrackingScreen() {
         getAttendance(),
         getAttendanceAnomalies(),
         isPrivilegedViewer
-          ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance").catch(() => ({ value: null }))
+          ? getRemoteState<AttendanceRecord[]>("@trackforce_attendance", { skipGlobalLoading: true }).catch(() => ({ value: null }))
           : Promise.resolve({ value: null }),
         isPrivilegedViewer
-          ? getRemoteState<AttendanceAnomaly[]>("@trackforce_attendance_anomalies").catch(() => ({ value: null }))
+          ? getRemoteState<AttendanceAnomaly[]>("@trackforce_attendance_anomalies", { skipGlobalLoading: true }).catch(() => ({ value: null }))
           : Promise.resolve({ value: null }),
       ]);
       const remoteAttendance = Array.isArray(remoteAttendanceState.value)
@@ -960,8 +965,8 @@ export default function RouteTrackingScreen() {
         ? LIVE_ROUTE_POINT_INTERVAL_MINUTES
         : ROUTE_POINT_INTERVAL_MINUTES;
       const routeFetchOptions = {
-        intervalMinutes: ROUTE_POINT_INTERVAL_MINUTES,
-        raw: isLiveRouteDate,
+        intervalMinutes: routePointIntervalMinutes,
+        raw: false,
       };
       const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
       const selectedUserAttendanceAll = mergedAttendanceSnapshot
@@ -1272,6 +1277,62 @@ export default function RouteTrackingScreen() {
       buildUserIdCandidates(selectedUserId, selectedEmployee?.id, user?.id)
     );
 
+    const appendLivePoint = (candidate: unknown): boolean => {
+      const log = candidate as Partial<LocationLog> | null | undefined;
+      if (
+        !log ||
+        typeof log.userId !== "string" ||
+        !watchedUserIds.has(log.userId) ||
+        typeof log.capturedAt !== "string" ||
+        !isMumbaiDateKey(log.capturedAt, selectedDate) ||
+        typeof log.latitude !== "number" ||
+        typeof log.longitude !== "number" ||
+        !Number.isFinite(log.latitude) ||
+        !Number.isFinite(log.longitude)
+      ) {
+        return false;
+      }
+
+      const point: LocationLog = {
+        id: typeof log.id === "string" && log.id ? log.id : `ws_loc_${Date.now()}`,
+        companyId: log.companyId ?? undefined,
+        userId: log.userId,
+        latitude: log.latitude,
+        longitude: log.longitude,
+        accuracy: typeof log.accuracy === "number" ? log.accuracy : null,
+        speed: typeof log.speed === "number" ? log.speed : null,
+        heading: typeof log.heading === "number" ? log.heading : null,
+        batteryLevel: typeof log.batteryLevel === "number" ? log.batteryLevel : null,
+        geofenceId: log.geofenceId ?? null,
+        geofenceName: log.geofenceName ?? null,
+        isInsideGeofence: Boolean(log.isInsideGeofence),
+        capturedAt: log.capturedAt,
+      };
+
+      setTimeline((current) => {
+        const currentEvents = current?.attendanceEvents ?? [];
+        const points = [...(current?.points ?? [])];
+        const existingIndex = points.findIndex((entry) => entry.id === point.id);
+        if (existingIndex >= 0) {
+          points[existingIndex] = point;
+        } else {
+          points.push(point);
+        }
+        const normalizedPoints = normalizePointsForInterval(
+          points.sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)),
+          LIVE_ROUTE_POINT_INTERVAL_MINUTES
+        );
+        const nextTimeline = buildRouteTimeline(selectedUserId, selectedDate, normalizedPoints);
+        return {
+          ...nextTimeline,
+          attendanceEvents: currentEvents,
+          source: current?.source ?? "raw_logs",
+          summaryUpdatedAt: new Date().toISOString(),
+        };
+      });
+      return true;
+    };
+
     const requestLiveRefresh = () => {
       const now = Date.now();
       const elapsed = now - lastRefreshAt;
@@ -1331,8 +1392,7 @@ export default function RouteTrackingScreen() {
           try {
             const data = JSON.parse(String(event.data || "{}"));
             if (data?.type !== "location_update") return;
-            const userId = typeof data?.log?.userId === "string" ? data.log.userId : "";
-            if (!watchedUserIds.has(userId)) return;
+            if (appendLivePoint(data.log)) return;
             requestLiveRefresh();
           } catch {
             // Ignore malformed websocket payloads.
@@ -1576,8 +1636,9 @@ export default function RouteTrackingScreen() {
 
   const routePointRows = useMemo(() => {
     if (!timeline?.points?.length) return [];
-    return [...timeline.points]
-      .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt))
+    const sortedPoints = [...timeline.points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+    const visiblePoints = sortedPoints.slice(-ROUTE_POINT_ROW_LIMIT);
+    return visiblePoints
       .map((point, index, points) => {
         const previous = index > 0 ? points[index - 1] : null;
         const distanceFromPreviousMeters = previous
