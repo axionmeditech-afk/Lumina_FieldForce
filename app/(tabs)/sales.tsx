@@ -4291,6 +4291,10 @@ export default function SalesScreen() {
     if (finalTranscript.endsWith(partialTranscript)) return finalTranscript;
     return trimTranscriptForMemory(`${finalTranscript} ${partialTranscript}`.trim());
   }, [interimTranscript, transcriptDraft]);
+  const canSaveConversationDraft = useMemo(
+    () => Boolean(customerName.trim()) && (liveTranscript.trim().length >= 20 || Boolean(audioUri)),
+    [audioUri, customerName, liveTranscript]
+  );
 
   const liveTranscriptSignals = useMemo(
     () =>
@@ -4422,7 +4426,7 @@ export default function SalesScreen() {
       allowsRecordingIOS: true,
       playsInSilentModeIOS: true,
       shouldDuckAndroid: true,
-      staysActiveInBackground: false,
+      staysActiveInBackground: true,
     });
     fallbackLoopRunningRef.current = true;
     fallbackStopRequestedRef.current = false;
@@ -7976,16 +7980,22 @@ export default function SalesScreen() {
 
               <View style={styles.captureFooter}>
                 <Text style={[styles.captureHint, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                  {audioUri ? "Audio captured and ready." : "You're ready to record."}
+                  {isTranscribingFile
+                    ? "Audio captured. Transcription is running..."
+                    : audioUri && liveTranscript.trim().length >= 20
+                      ? "Audio and transcript are ready."
+                      : audioUri
+                        ? "Audio captured. You can save it even if transcription needs retry."
+                        : "You're ready to record."}
                 </Text>
                 <Pressable
                   onPress={() => void saveConversation()}
-                  disabled={saving || isRecording || isTranscribingFile || !customerName.trim() || liveTranscript.trim().length < 20}
+                  disabled={saving || isRecording || isTranscribingFile || !canSaveConversationDraft}
                   style={({ pressed }) => [
                     styles.saveButton,
                     {
                       backgroundColor: colors.success,
-                      opacity: pressed || saving || isRecording || isTranscribingFile || !customerName.trim() || liveTranscript.trim().length < 20 ? 0.7 : 1,
+                      opacity: pressed || saving || isRecording || isTranscribingFile || !canSaveConversationDraft ? 0.7 : 1,
                     },
                   ]}
                 >

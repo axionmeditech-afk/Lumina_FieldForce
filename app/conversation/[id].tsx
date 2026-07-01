@@ -136,6 +136,78 @@ function formatAudioClock(ms: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function detectAudioMimeType(audioUri: string): string {
+  const lower = audioUri.toLowerCase().split("?")[0] || "";
+  if (lower.endsWith(".m4a") || lower.endsWith(".mp4")) return "audio/m4a";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".aac")) return "audio/aac";
+  if (lower.endsWith(".3gp")) return "audio/3gpp";
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".webm")) return "audio/webm";
+  if (lower.endsWith(".ogg")) return "audio/ogg";
+  if (lower.endsWith(".flac")) return "audio/flac";
+  return "application/octet-stream";
+}
+
+function parseSpeechPayload(body: string): any {
+  const value = body.trim();
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { message: value };
+  }
+}
+
+type DiarizedEntry = {
+  transcript: string;
+  speakerId?: string | null;
+  startTimeSeconds?: number | null;
+  endTimeSeconds?: number | null;
+};
+
+function extractDiarizedEntriesFromSpeechPayload(payload: any): DiarizedEntry[] {
+  const root = payload?.diarizedTranscript || payload?.diarized_transcript;
+  const entries = Array.isArray(root?.entries) ? root.entries : [];
+  return entries
+    .map((entry: any): DiarizedEntry | null => {
+      const transcript = typeof entry?.transcript === "string" ? entry.transcript.trim() : "";
+      if (!transcript) return null;
+      return {
+        transcript,
+        speakerId:
+          typeof entry?.speakerId === "string"
+            ? entry.speakerId.trim()
+            : typeof entry?.speaker_id === "string"
+              ? entry.speaker_id.trim()
+              : null,
+        startTimeSeconds:
+          typeof entry?.startTimeSeconds === "number"
+            ? entry.startTimeSeconds
+            : typeof entry?.start_time_seconds === "number"
+              ? entry.start_time_seconds
+              : null,
+        endTimeSeconds:
+          typeof entry?.endTimeSeconds === "number"
+            ? entry.endTimeSeconds
+            : typeof entry?.end_time_seconds === "number"
+              ? entry.end_time_seconds
+              : null,
+      };
+    })
+    .filter((entry: DiarizedEntry | null): entry is DiarizedEntry => Boolean(entry));
+}
+
+function formatDiarizedSpeechTranscript(entries: DiarizedEntry[]): string {
+  return entries
+    .map((entry) => {
+      const speaker = entry.speakerId?.trim() || "unknown";
+      return `Speaker ${speaker}: ${entry.transcript}`;
+    })
+    .join("\n")
+    .trim();
+}
+
 async function listExistingAudioFilesInDirectory(directoryUri: string, maxDepth = 3, currentDepth = 0): Promise<string[]> {
   try {
     if (currentDepth > maxDepth) return [];
@@ -338,6 +410,80 @@ async function resolveConversationAudioPlaybackUri(
     .slice(2, 8)}${ext}`;
   await FileSystem.copyAsync({ from: normalizedUri, to: targetUri });
   return targetUri;
+}
+
+async function transcribeConversationAudioFromUri(audioUri: string): Promise<string> {
+  const uploadUri = audioUri.startsWith("file://")
+    ? audioUri
+    : await cacheRemoteConversationAudioForPlayback(audioUri);
+  if (!uploadUri.startsWith("file://")) {
+    throw new Error("Audio must be available on this device before transcription.");
+  }
+
+  const info = await FileSystem.getInfoAsync(uploadUri);
+  if (!info.exists) {
+    throw new Error("Audio file is missing on this device.");
+  }
+
+  const query = new URLSearchParams({
+    provider: (process.env.EXPO_PUBLIC_SALES_AI_STT_PROVIDER_ORDER || "google").trim(),
+    model: (
+      process.env.EXPO_PUBLIC_SALES_AI_STT_MODEL ||
+      process.env.EXPO_PUBLIC_GEMINI_MODEL ||
+      process.env.GEMINI_MODEL ||
+      "gemini-2.5-flash-lite"
+    ).trim(),
+    language_code: (process.env.EXPO_PUBLIC_SALES_AI_STT_LANGUAGE_CODE || "en-IN").trim(),
+    with_diarization: "1",
+    with_timestamps: "1",
+    num_speakers: "2",
+    mode: "accurate",
+  });
+  const apiBases = await getApiBaseUrlCandidates();
+  const failures: string[] = [];
+
+  for (const apiBase of apiBases) {
+    try {
+      const uploadResult = await FileSystem.uploadAsync(
+        `${apiBase}/speech/transcribe?${query.toString()}`,
+        uploadUri,
+        {
+          httpMethod: "POST",
+          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+          headers: {
+            Accept: "application/json",
+            "Content-Type": detectAudioMimeType(uploadUri),
+          },
+        }
+      );
+      const payload = parseSpeechPayload(uploadResult.body || "");
+      if (uploadResult.status < 200 || uploadResult.status >= 300) {
+        const message =
+          typeof payload?.message === "string"
+            ? payload.message
+            : typeof payload?.error === "string"
+              ? payload.error
+              : `Speech transcription failed (${uploadResult.status}).`;
+        failures.push(`${apiBase} -> ${message}`);
+        continue;
+      }
+
+      const diarized = extractDiarizedEntriesFromSpeechPayload(payload);
+      const transcript = diarized.length
+        ? formatDiarizedSpeechTranscript(diarized)
+        : typeof payload?.transcript === "string"
+          ? payload.transcript.trim()
+          : typeof payload?.text === "string"
+            ? payload.text.trim()
+            : "";
+      if (transcript) return transcript;
+      failures.push(`${apiBase} -> empty transcript`);
+    } catch (error) {
+      failures.push(`${apiBase} -> ${error instanceof Error ? error.message : "request failed"}`);
+    }
+  }
+
+  throw new Error(failures.length ? failures.join(" | ") : "Speech transcription failed.");
 }
 
 function ScoreGauge({
@@ -907,6 +1053,8 @@ export default function ConversationDetailScreen() {
   const [conversationRefreshing, setConversationRefreshing] = useState(false);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [transcriptionBusy, setTranscriptionBusy] = useState(false);
+  const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
   const [aiModel, setAiModel] = useState("openai/gpt-oss-20b");
   const [audioBusy, setAudioBusy] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
@@ -1378,6 +1526,72 @@ export default function ConversationDetailScreen() {
     }
   };
 
+  const transcribeConversationAudio = useCallback(async () => {
+    if (!convo?.audioUri) {
+      Alert.alert("Audio Missing", "Audio file is not available for this conversation.");
+      return;
+    }
+    if (transcriptionBusy) return;
+    setTranscriptionBusy(true);
+    setTranscriptionError(null);
+    try {
+      const audioForTranscription = await resolveConversationAudioPlaybackUri(convo.audioUri, {
+        conversationDate: convo.date,
+      });
+      const transcript = await transcribeConversationAudioFromUri(audioForTranscription);
+      const refreshed = buildConversationFromTranscript({
+        salespersonId: convo.salespersonId,
+        salespersonName: convo.salespersonName,
+        customerName: convo.customerName,
+        transcript,
+        durationMs: parseDurationToMs(convo.duration),
+        audioUri: convo.audioUri,
+        dateISO: convo.date,
+      });
+      const updates: Partial<Conversation> = {
+        transcript,
+        transcriptStatus: "completed",
+        transcriptionError: null,
+        summary: refreshed.summary,
+        keyPhrases: refreshed.keyPhrases,
+        objections: refreshed.objections,
+        improvements: refreshed.improvements,
+        interestScore: refreshed.interestScore,
+        pitchScore: refreshed.pitchScore,
+        confidenceScore: refreshed.confidenceScore,
+        talkListenRatio: refreshed.talkListenRatio,
+        sentiment: refreshed.sentiment,
+        buyingIntent: refreshed.buyingIntent,
+        analysisProvider: "rules",
+      };
+      await updateConversation(convo.id, updates);
+      setConvo((current) => (current && current.id === convo.id ? { ...current, ...updates } : current));
+      if (user) {
+        await addAuditLog({
+          id: `audit_transcribe_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          userId: user.id,
+          userName: user.name,
+          action: "Conversation Audio Transcribed",
+          details: `${convo.customerName} conversation audio was transcribed from saved recording.`,
+          timestamp: new Date().toISOString(),
+          module: "Sales AI",
+        });
+      }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert(
+        convo.transcript?.trim() ? "Transcript Replaced" : "Transcript Created",
+        "The transcript was generated from the saved conversation audio."
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to transcribe audio.";
+      setTranscriptionError(message);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Alert.alert("Transcription Failed", message);
+    } finally {
+      setTranscriptionBusy(false);
+    }
+  }, [convo, transcriptionBusy, user]);
+
   const sentimentColor =
     convo.sentiment === "positive" ? colors.success :
     convo.sentiment === "neutral" ? colors.warning : colors.danger;
@@ -1557,6 +1771,39 @@ export default function ConversationDetailScreen() {
                     {audioDurationMs > 0 ? formatAudioClock(audioDurationMs) : "--:--"}
                   </Text>
                 </View>
+                <Pressable
+                  onPress={() => void transcribeConversationAudio()}
+                  disabled={transcriptionBusy || audioBusy}
+                  style={({ pressed }) => [
+                    styles.transcribeAudioButton,
+                    {
+                      borderColor: colors.border,
+                      backgroundColor: colors.backgroundElevated,
+                      opacity: pressed || transcriptionBusy || audioBusy ? 0.74 : 1,
+                    },
+                  ]}
+                >
+                  {transcriptionBusy ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <Ionicons name="document-text-outline" size={16} color={colors.primary} />
+                  )}
+                  <Text style={[styles.transcribeAudioButtonText, { color: colors.primary, fontFamily: "Inter_600SemiBold" }]}>
+                    {transcriptionBusy
+                      ? "Transcribing Audio..."
+                      : convo.transcript?.trim()
+                        ? "Re-transcribe Audio"
+                        : "Transcribe Audio"}
+                  </Text>
+                </Pressable>
+                {transcriptionError ? (
+                  <View style={[styles.analysisBanner, { backgroundColor: colors.danger + "12", borderColor: colors.danger + "40" }]}>
+                    <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
+                    <Text style={[styles.analysisBannerText, { color: colors.danger, fontFamily: "Inter_500Medium" }]}>
+                      {transcriptionError}
+                    </Text>
+                  </View>
+                ) : null}
               </View>
             ) : null}
             <View style={styles.metaRow}>
@@ -2087,6 +2334,20 @@ const styles = StyleSheet.create({
   audioProgressFill: {
     height: "100%",
     borderRadius: 999,
+  },
+  transcribeAudioButton: {
+    minHeight: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+  },
+  transcribeAudioButtonText: {
+    fontSize: 12.5,
   },
   metaRow: {
     marginTop: 12,
