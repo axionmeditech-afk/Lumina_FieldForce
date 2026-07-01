@@ -224,19 +224,18 @@ async function readRemoteArray<T>(key: string): Promise<T[] | null> {
 }
 
 async function loadRosterUsers(currentUser: AppUser): Promise<DolibarrUser[]> {
+  let scopedUsers: DolibarrUser[] = [];
   try {
-    const scopedUsers = await getUsersRemote();
-    if (scopedUsers.length > 0) {
-      return scopeUsersToCurrentCompany(scopedUsers, currentUser);
-    }
+    scopedUsers = scopeUsersToCurrentCompany(await getUsersRemote(), currentUser);
   } catch {
-    // Fall back to the generic Dolibarr proxy below.
+    scopedUsers = [];
   }
 
   try {
-    return await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
+    const dolibarrUsers = await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
+    return [...scopedUsers, ...dolibarrUsers];
   } catch {
-    return [];
+    return scopedUsers;
   }
 }
 

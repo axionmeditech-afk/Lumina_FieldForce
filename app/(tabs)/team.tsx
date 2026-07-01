@@ -26,7 +26,6 @@ import {
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import { buildEmployeeIdentityMap, resolveEmployeeByMemberId } from "@/lib/employee-identity";
-import { isSalesRole } from "@/lib/role-access";
 import type { Employee, Task, Team, UserRole } from "@/lib/types";
 
 const LEAD_ROLES: UserRole[] = ["admin", "hr", "manager"];
@@ -262,8 +261,8 @@ export default function TeamScreen() {
     void loadData();
   }, [loadData]);
 
-  const salespersonPool = useMemo(() => {
-    return employees.filter((employee) => isSalesRole(employee.role));
+  const employeePool = useMemo(() => {
+    return employees;
   }, [employees]);
 
   const linkedEmployeeIds = useMemo(() => {
@@ -299,13 +298,13 @@ export default function TeamScreen() {
 
   const filteredEmployees = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return salespersonPool;
-    return salespersonPool.filter((employee) =>
+    if (!q) return employeePool;
+    return employeePool.filter((employee) =>
       employee.name.toLowerCase().includes(q) ||
       employee.department.toLowerCase().includes(q) ||
       employee.branch.toLowerCase().includes(q)
     );
-  }, [salespersonPool, search]);
+  }, [employeePool, search]);
 
   const employeesByIdentity = useMemo(() => buildEmployeeIdentityMap(employees), [employees]);
 
@@ -518,7 +517,7 @@ export default function TeamScreen() {
 
                 <TextInput
                   style={[styles.input, { color: colors.text, borderColor: colors.border, backgroundColor: colors.surface }]}
-                  placeholder="Search sales employees..."
+                  placeholder="Search employees..."
                   placeholderTextColor={colors.textTertiary}
                   value={search}
                   onChangeText={setSearch}
@@ -546,7 +545,7 @@ export default function TeamScreen() {
                     ))
                   ) : (
                     <Text style={[styles.emptyPickerText, { color: colors.textSecondary, fontFamily: "Inter_400Regular" }]}>
-                      No sales employees found.
+                      No employees found.
                     </Text>
                   )}
                 </ScrollView>
