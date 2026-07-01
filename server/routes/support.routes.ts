@@ -9,11 +9,12 @@ export function registerSupportRoutes(app: Express, deps: SupportRouteDeps) {
     normalizeSupportAttachmentType,
     storeSupportAttachmentBinary,
   } = deps;
+  const maxAttachmentMb = Math.max(20, Number(process.env.MAX_SUPPORT_ATTACHMENT_MB || 150));
 
   app.post(
     "/api/support/attachments/upload",
     requireAuth,
-    express.raw({ type: "*/*", limit: "20mb" }),
+    express.raw({ type: "*/*", limit: `${maxAttachmentMb}mb` }),
     async (req, res) => {
       const uploaderId = req.auth?.sub;
       if (!uploaderId) {
@@ -42,7 +43,9 @@ export function registerSupportRoutes(app: Express, deps: SupportRouteDeps) {
         });
         const forwardedProto = firstString(req.header("x-forwarded-proto")) || req.protocol || "https";
         const forwardedHost = firstString(req.header("x-forwarded-host")) || req.get("host") || "";
-        const routedUrlPath = `/api${stored.urlPath}`;
+        const routedUrlPath = stored.urlPath.startsWith("/api/")
+          ? stored.urlPath
+          : `/api${stored.urlPath}`;
         const absoluteUrl = forwardedHost
           ? `${forwardedProto}://${forwardedHost}${routedUrlPath}`
           : routedUrlPath;

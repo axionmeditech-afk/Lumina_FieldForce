@@ -1110,6 +1110,12 @@ async function callGoogleSpeechModel(params: {
     config.encoding = "WEBM_OPUS";
   } else if (lowerMime.includes("mp3") || lowerMime.includes("mpeg")) {
     config.encoding = "MP3";
+  } else if (lowerMime.includes("3gpp") || lowerMime.includes("3gp")) {
+    config.encoding = "AMR_WB";
+    config.sampleRateHertz = 16000;
+  } else if (lowerMime.includes("wav") || lowerMime.includes("x-wav")) {
+    config.encoding = "LINEAR16";
+    config.sampleRateHertz = 16000;
   }
 
   if (params.withDiarization) {
@@ -1127,7 +1133,14 @@ async function callGoogleSpeechModel(params: {
   let gcsUri: string | null = null;
   const storage = new Storage({ credentials });
   const GCS_BUCKET = process.env.GOOGLE_CLOUD_STORAGE_BUCKET || "lumina-audio-123";
-  const fileName = `audio_${Date.now()}_${Math.random().toString(36).substring(7)}${lowerMime.includes("mp3") ? ".mp3" : ".webm"}`;
+  const googleAudioExtension = lowerMime.includes("mp3") || lowerMime.includes("mpeg")
+    ? ".mp3"
+    : lowerMime.includes("3gpp") || lowerMime.includes("3gp")
+      ? ".3gp"
+      : lowerMime.includes("wav") || lowerMime.includes("x-wav")
+        ? ".wav"
+        : ".webm";
+  const fileName = `audio_${Date.now()}_${Math.random().toString(36).substring(7)}${googleAudioExtension}`;
   
   if (params.audio.length > 5 * 1024 * 1024) {
     // If audio is > 5MB, upload to GCS and use longRunningRecognize

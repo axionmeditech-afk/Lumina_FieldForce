@@ -84,6 +84,9 @@ function apiBaseToAssetRoots(apiBase: string): string[] {
 function supportAttachmentPathFromUri(uri: string): string | null {
   const trimmed = uri.trim();
   if (!trimmed) return null;
+  if (trimmed.startsWith("/api/api/support-attachments/")) {
+    return trimmed.replace(/^\/api\/api/i, "");
+  }
   if (trimmed.startsWith("/api/support-attachments/")) {
     return trimmed.replace(/^\/api/i, "");
   }
@@ -92,6 +95,9 @@ function supportAttachmentPathFromUri(uri: string): string | null {
   }
   try {
     const parsed = new URL(trimmed);
+    if (parsed.pathname.startsWith("/api/api/support-attachments/")) {
+      return `${parsed.pathname.replace(/^\/api\/api/i, "")}${parsed.search}`;
+    }
     if (parsed.pathname.startsWith("/api/support-attachments/")) {
       return `${parsed.pathname.replace(/^\/api/i, "")}${parsed.search}`;
     }
@@ -310,6 +316,11 @@ async function resolveConversationAudioPlaybackUri(
 
   const info = await FileSystem.getInfoAsync(normalizedUri);
   if (!info.exists) {
+    const localFallback = await findLocalConversationAudioFallback({
+      audioUri: normalizedUri,
+      conversationDate: context?.conversationDate,
+    });
+    if (localFallback) return localFallback;
     throw new Error("Audio file is missing on this device. Please record or sync the conversation again.");
   }
 
@@ -620,7 +631,7 @@ function buildProductRecommendations(
   if (!products.length) return [];
 
   const recommendations = products
-    .map((product) => {
+    .flatMap((product): Array<ConversationProductRecommendation & { score: number }> => {
       const label = (product.label || product.ref || "Product").trim();
       const ref = (product.ref || "").trim() || null;
       const searchable = normalizeMatcherText(
@@ -630,7 +641,7 @@ function buildProductRecommendations(
         [product.label, product.ref, product.description].filter(Boolean).join(" ")
       );
       const compactSpecificationSearchable = specificationSearchable.replace(/\s+/g, "");
-      if (!searchable && !specificationSearchable) return null;
+      if (!searchable && !specificationSearchable) return [];
 
       const matchedCandidates = attributeCandidates.filter((candidate) => {
         if (candidate.phrase.includes(" ")) {
@@ -649,7 +660,7 @@ function buildProductRecommendations(
         })
         .slice(0, 4)
         .map((token) => toTitleCase(token));
-      if (!matchedCandidates.length && !matchedSpecifications.length) return null;
+      if (!matchedCandidates.length && !matchedSpecifications.length) return [];
 
       const highIntentBoost = convo.buyingIntent === "high" ? 2 : convo.buyingIntent === "medium" ? 1 : 0;
       const keyPhraseMatches = matchedCandidates.filter((entry) => entry.source === "key_phrase");
@@ -680,7 +691,7 @@ function buildProductRecommendations(
                 matchedAttributes.length > 1 ? " and similar needs mentioned in the conversation" : " mentioned in the conversation"
               }.`
             : `${label} matches the conversation requirements.`;
-      return {
+      return [{
         id: String(product.id ?? `${label}_${ref || "product"}`),
         label,
         ref,
@@ -693,15 +704,8 @@ function buildProductRecommendations(
         trendRank: trendStat?.trendRank ?? null,
         reason: [specReason, attributeReason].filter(Boolean).join(" "),
         score,
-      };
+      }];
     })
-    .filter(
-      (
-        item
-      ): item is ConversationProductRecommendation & {
-        score: number;
-      } => Boolean(item)
-    )
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
     .slice(0, 6)
     .map(({ score: _score, ...item }) => item);
@@ -734,13 +738,13 @@ function buildTrendingProductRecommendations(
   const specificationTokens = extractConversationSpecificationTokens(convo);
 
   return trendStats
-    .map((trend) => {
+    .flatMap((trend): Array<ConversationProductRecommendation & { score: number }> => {
       const product =
         (trend.productId ? byId.get(trend.productId) : undefined) ||
         (trend.ref ? byRef.get(normalizeMatcherText(trend.ref)) : undefined) ||
         byLabel.get(normalizeMatcherText(trend.label));
       const productId = String(product?.id ?? trend.key);
-      if (excluded.has(productId)) return null;
+      if (excluded.has(productId)) return [];
 
       const label = product?.label?.trim() || trend.label;
       const ref = product?.ref?.trim() || trend.ref || null;
@@ -785,7 +789,7 @@ function buildTrendingProductRecommendations(
           : matchedKeyPhrases.length > 0
             ? `It connects with key phrases like ${matchedKeyPhrases.slice(0, 2).join(" and ")}.`
             : "";
-      return {
+      return [{
         id: productId,
         label,
         ref,
@@ -798,15 +802,8 @@ function buildTrendingProductRecommendations(
         trendRank: trend.trendRank,
         reason: `${label} is moving fast in recent sales with ${trend.qtySold} units across ${trend.orderCount} orders.${conversationReason ? ` ${conversationReason}` : ""}`,
         score,
-      };
+      }];
     })
-    .filter(
-      (
-        item
-      ): item is ConversationProductRecommendation & {
-        score: number;
-      } => Boolean(item)
-    )
     .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
     .slice(0, 5)
     .map(({ score: _score, ...item }) => item);

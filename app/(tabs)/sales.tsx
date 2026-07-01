@@ -193,10 +193,6 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   return Math.trunc(parsed);
 }
 
-const FALLBACK_SEGMENT_MS = readPositiveIntegerEnv(
-  "EXPO_PUBLIC_SALES_AI_TRANSCRIBE_CHUNK_MS",
-  15_000
-);
 const FALLBACK_POLL_MS = 100;
 const LIVE_HINT_RESTART_DELAY_MS = 180;
 const TRANSCRIBE_LOADING_RETRY_DELAY_MS = 800;
@@ -1117,7 +1113,7 @@ const DEFAULT_STT_PROVIDER_ORDER =
   (process.env.EXPO_PUBLIC_SALES_AI_STT_PROVIDER_ORDER || "google").trim();
 const DEFAULT_STT_LANGUAGE_CODE =
   (process.env.EXPO_PUBLIC_SALES_AI_STT_LANGUAGE_CODE || "en-IN").trim();
-const FORCE_SERVER_TRANSCRIPTION = false;
+const FORCE_SERVER_TRANSCRIPTION = true;
 const SPEECH_API_HEALTH_TIMEOUT_MS = 1600;
 const SPEECH_API_HEALTH_CACHE_TTL_MS = 45_000;
 const speechApiHealthCache = new Map<string, { ok: boolean; checkedAt: number }>();
@@ -1141,6 +1137,36 @@ function getErrorMessage(error: unknown, fallback: string): string {
     return error.trim();
   }
   return fallback;
+}
+
+function buildSalesAiRecordingOptions(): Audio.RecordingOptions {
+  return {
+    ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+    isMeteringEnabled: true,
+    android: {
+      extension: ".3gp",
+      outputFormat: Audio.AndroidOutputFormat.THREE_GPP,
+      audioEncoder: Audio.AndroidAudioEncoder.AMR_WB,
+      sampleRate: 16000,
+      numberOfChannels: 1,
+      bitRate: 23850,
+    },
+    ios: {
+      extension: ".wav",
+      outputFormat: Audio.IOSOutputFormat.LINEARPCM,
+      audioQuality: Audio.IOSAudioQuality.HIGH,
+      sampleRate: 16000,
+      numberOfChannels: 1,
+      bitRate: 256000,
+      linearPCMBitDepth: 16,
+      linearPCMIsBigEndian: false,
+      linearPCMIsFloat: false,
+    },
+    web: {
+      mimeType: "audio/webm",
+      bitsPerSecond: 128000,
+    },
+  };
 }
 
 function parseSpeechPayload(body: string): any {
@@ -2275,11 +2301,7 @@ export default function SalesScreen() {
   const fallbackLoopRunningRef = useRef(false);
   const isTranscriptionUnavailableRef = useRef(false);
   const fallbackStopRequestedRef = useRef(false);
-  const fallbackChunkIndexRef = useRef(0);
-  const fallbackNextChunkToApplyRef = useRef(0);
-  const fallbackChunkBufferRef = useRef<Map<number, string>>(new Map());
   const fallbackChunkAudioUrisRef = useRef<Map<number, string>>(new Map());
-  const fallbackTranscribeTasksRef = useRef<Set<Promise<void>>>(new Set());
   const startFallbackRecordingRef = useRef<(() => Promise<void>) | null>(null);
   const liveHintSpeechActiveRef = useRef(false);
   const liveHintSpeechRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -4409,11 +4431,7 @@ export default function SalesScreen() {
       clearTimeout(liveHintSpeechRestartTimerRef.current);
       liveHintSpeechRestartTimerRef.current = null;
     }
-    fallbackChunkIndexRef.current = 0;
-    fallbackNextChunkToApplyRef.current = 0;
-    fallbackChunkBufferRef.current.clear();
     fallbackChunkAudioUrisRef.current.clear();
-    fallbackTranscribeTasksRef.current.clear();
     recordingModeRef.current = "audio-fallback";
     sessionModeRef.current = "audio-fallback";
     voicePulseFrameRef.current = 0;
@@ -4428,146 +4446,67 @@ export default function SalesScreen() {
       startLiveHintSpeechRecognition();
     }
 
-    const flushFallbackChunks = () => {
-      let updated = false;
-      while (fallbackChunkBufferRef.current.has(fallbackNextChunkToApplyRef.current)) {
-        const chunk = fallbackChunkBufferRef.current.get(fallbackNextChunkToApplyRef.current) ?? "";
-        fallbackChunkBufferRef.current.delete(fallbackNextChunkToApplyRef.current);
-        fallbackNextChunkToApplyRef.current += 1;
-        if (!chunk.trim()) continue;
-        const previous = finalSegmentsRef.current[finalSegmentsRef.current.length - 1];
-        if (chunk !== previous) {
-          finalSegmentsRef.current = trimTranscriptSegmentsForMemory([...finalSegmentsRef.current, chunk]);
-          updated = true;
-        }
-      }
-      if (updated) {
-        setTranscriptDraft(trimTranscriptForMemory(finalSegmentsRef.current.join(" ").trim()));
-      }
-      if (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
-        setInterimTranscript("Listening...");
-      }
-    };
-
-    const queueFallbackTranscription = (uri: string) => {
-      const chunkIndex = fallbackChunkIndexRef.current++;
-      fallbackChunkAudioUrisRef.current.set(chunkIndex, uri);
-      const task = (async () => {
-        try {
-          const transcript = sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(uri));
-          const normalizedTranscript = transcript.trim();
-          fallbackChunkBufferRef.current.set(chunkIndex, normalizedTranscript);
-          if (normalizedTranscript) {
-            markVoiceDetected();
-          }
-          setRecordError(null);
-        } catch (error) {
-          setRecordError("Transcription unavailable. Audio fallback in progress...");
-          fallbackChunkBufferRef.current.set(chunkIndex, "");
-        } finally {
-          flushFallbackChunks();
-        }
-      })();
-      fallbackTranscribeTasksRef.current.add(task);
-      void task.finally(() => {
-        fallbackTranscribeTasksRef.current.delete(task);
-      });
-    };
-
     const runFallbackLoop = async () => {
       try {
-        if (isTranscriptionUnavailableRef.current) {
-          const recording = new Audio.Recording();
-          recording.setProgressUpdateInterval(60);
-          recording.setOnRecordingStatusUpdate((status) => {
-            if (!status.isRecording || !("metering" in status)) return;
-            const metering =
-              typeof status.metering === "number" ? status.metering : Number.NaN;
-            if (!Number.isFinite(metering)) return;
-            updateVoicePulseInput(normalizeMeteringDbValue(metering));
-          });
-          await recording.prepareToRecordAsync({
-            ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
-            isMeteringEnabled: true,
-          });
-          await recording.startAsync();
-          fallbackRecordingRef.current = recording;
+        const recording = new Audio.Recording();
+        recording.setProgressUpdateInterval(60);
+        recording.setOnRecordingStatusUpdate((status) => {
+          if (!status.isRecording || !("metering" in status)) return;
+          const metering = typeof status.metering === "number" ? status.metering : Number.NaN;
+          if (!Number.isFinite(metering)) return;
+          updateVoicePulseInput(normalizeMeteringDbValue(metering));
+        });
+        await recording.prepareToRecordAsync(buildSalesAiRecordingOptions());
+        await recording.startAsync();
+        fallbackRecordingRef.current = recording;
 
-          // Keep recording continuously until stop is requested
-          while (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
-            await wait(FALLBACK_POLL_MS);
-          }
+        while (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
+          await wait(FALLBACK_POLL_MS);
+        }
 
-          let uri: string | null = null;
-          try {
-            await recording.stopAndUnloadAsync();
-            uri = recording.getURI();
-          } catch {
-            uri = recording.getURI();
-          } finally {
-            recording.setOnRecordingStatusUpdate(null);
-            fallbackRecordingRef.current = null;
-          }
+        let uri: string | null = null;
+        try {
+          await recording.stopAndUnloadAsync();
+          uri = recording.getURI();
+        } catch {
+          uri = recording.getURI();
+        } finally {
+          recording.setOnRecordingStatusUpdate(null);
+          fallbackRecordingRef.current = null;
+        }
 
-          if (uri) {
-            setAudioUri(uri);
+        if (uri) {
+          const persistedUri = await persistConversationAudioUri(uri);
+          const durableUri = persistedUri || uri;
+          setAudioUri(durableUri);
+          fallbackChunkAudioUrisRef.current.set(0, durableUri);
+
+          if (isTranscriptionUnavailableRef.current) {
             setTranscriptDraft("Transcription unavailable. Voice recording is preserved.");
-          }
-        } else {
-          while (fallbackLoopRunningRef.current && !fallbackStopRequestedRef.current) {
-            const recording = new Audio.Recording();
-            recording.setProgressUpdateInterval(60);
-            recording.setOnRecordingStatusUpdate((status) => {
-              if (!status.isRecording || !("metering" in status)) return;
-              const metering =
-                typeof status.metering === "number" ? status.metering : Number.NaN;
-              if (!Number.isFinite(metering)) return;
-              updateVoicePulseInput(normalizeMeteringDbValue(metering));
-            });
-            await recording.prepareToRecordAsync({
-              ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
-              isMeteringEnabled: true,
-            });
-            await recording.startAsync();
-            fallbackRecordingRef.current = recording;
-
-            let waited = 0;
-            while (
-              waited < FALLBACK_SEGMENT_MS &&
-              fallbackLoopRunningRef.current &&
-              !fallbackStopRequestedRef.current
-            ) {
-              await wait(FALLBACK_POLL_MS);
-              waited += FALLBACK_POLL_MS;
-            }
-
-            let uri: string | null = null;
+          } else {
+            setIsTranscribingFile(true);
+            setInterimTranscript("Transcribing full recording...");
             try {
-              await recording.stopAndUnloadAsync();
-              uri = recording.getURI();
-            } catch {
-              uri = recording.getURI();
+              const transcript = sanitizeConversationTranscript(await transcribeAudioWithSpeechApi(durableUri));
+              if (transcript) {
+                finalSegmentsRef.current = [transcript];
+                setTranscriptDraft(trimTranscriptForMemory(transcript));
+                setRecordError(null);
+              } else {
+                setTranscriptDraft("Transcription unavailable. Voice recording is preserved.");
+              }
+            } catch (error) {
+              setTranscriptDraft("Transcription unavailable. Voice recording is preserved.");
+              setRecordError(getErrorMessage(error, "Final transcription failed. Audio recording is preserved."));
             } finally {
-              recording.setOnRecordingStatusUpdate(null);
-              fallbackRecordingRef.current = null;
-            }
-
-            if (uri) {
-              setAudioUri(uri);
-              queueFallbackTranscription(uri);
+              setInterimTranscript("");
+              setIsTranscribingFile(false);
             }
           }
         }
       } catch (error) {
         setRecordError(getErrorMessage(error, "Fallback recording loop failed."));
       } finally {
-        const pending = Array.from(fallbackTranscribeTasksRef.current);
-        if (pending.length > 0) {
-          setIsTranscribingFile(true);
-          setInterimTranscript("Finalizing transcript...");
-          await Promise.allSettled(pending);
-          flushFallbackChunks();
-        }
         fallbackLoopRunningRef.current = false;
         fallbackStopRequestedRef.current = false;
         liveHintSpeechActiveRef.current = false;
@@ -4581,8 +4520,6 @@ export default function SalesScreen() {
           // no-op
         }
         fallbackRecordingRef.current = null;
-        fallbackChunkBufferRef.current.clear();
-        fallbackTranscribeTasksRef.current.clear();
         recordingModeRef.current = null;
         sessionModeRef.current = "idle";
         setIsRecording(false);
@@ -4596,7 +4533,7 @@ export default function SalesScreen() {
     };
 
     void runFallbackLoop();
-  }, [markVoiceDetected, startLiveHintSpeechRecognition, updateVoicePulseInput]);
+  }, [startLiveHintSpeechRecognition, updateVoicePulseInput]);
 
   useEffect(() => {
     startFallbackRecordingRef.current = startFallbackRecording;
