@@ -22,6 +22,7 @@ import {
   getAdminLiveMapPoints,
   getAdminLiveMapRoutes,
   getAdminRouteTimeline,
+  getAdminTrackingStatus,
   getApiBaseUrlCandidates,
   getRemoteState,
   reverseGeocodeMappls,
@@ -29,7 +30,11 @@ import {
   type AdminRouteTimelineResponse,
 } from "@/lib/attendance-api";
 import { getBatteryLevelPercent } from "@/lib/battery";
-import { flushBackgroundLocationQueue, queueLocationPoint } from "@/lib/background-location";
+import {
+  ensureBackgroundLocationTracking,
+  flushBackgroundLocationQueue,
+  queueLocationPoint,
+} from "@/lib/background-location";
 import {
   formatMumbaiDateKey,
   formatMumbaiDateTime,
@@ -599,6 +604,11 @@ function mapLivePointToLocationLog(point: LiveMapPoint): LocationLog {
     geofenceName: point.geofenceName ?? null,
     isInsideGeofence: point.isInsideGeofence,
     capturedAt: point.capturedAt,
+    updatedAt: point.updatedAt ?? null,
+    trackingStatus: point.trackingStatus ?? null,
+    trackingStatusReason: point.trackingStatusReason ?? null,
+    queuedPoints: point.queuedPoints ?? null,
+    lastClientSyncErrorAt: point.lastClientSyncErrorAt ?? null,
   };
 }
 
@@ -642,6 +652,7 @@ export default function RouteTrackingScreen() {
   const [mapMode, setMapMode] = useState<"tracking" | "polyline">("tracking");
   const [loading, setLoading] = useState(false);
   const [timeline, setTimeline] = useState<AdminRouteTimelineResponse | null>(null);
+  const [trackingStatusPoint, setTrackingStatusPoint] = useState<LiveMapPoint | null>(null);
   const [plannedStops, setPlannedStops] = useState<PlannedStopPoint[]>([]);
   const [gpsDisabledWindows, setGpsDisabledWindows] = useState<GpsDisabledWindow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -951,7 +962,7 @@ export default function RouteTrackingScreen() {
       const remoteAnomalies = Array.isArray(remoteAnomalyState.value)
         ? filterCompanyScoped(remoteAnomalyState.value, user?.companyId)
         : [];
-      const mergedLogsSnapshot = dedupeById(logsSnapshot);
+      let mergedLogsSnapshot = dedupeById(logsSnapshot);
       const mergedAttendanceSnapshot = dedupeById([...remoteAttendance, ...attendanceSnapshot]);
       const mergedAnomalySnapshot = dedupeById([...remoteAnomalies, ...anomalySnapshot]);
       const aliases = buildSelectedUserAliases(
@@ -968,6 +979,29 @@ export default function RouteTrackingScreen() {
         intervalMinutes: routePointIntervalMinutes,
         raw: false,
       };
+      const remoteCandidates = buildUserIdCandidates(
+        selectedUserId,
+        selectedEmployee?.id,
+        ...Array.from(aliases)
+      );
+      if (isLiveRouteDate) {
+        let freshestStatus: LiveMapPoint | null = null;
+        for (const candidateUserId of remoteCandidates) {
+          const currentStatus = await getAdminTrackingStatus(candidateUserId).catch(() => null);
+          if (
+            currentStatus &&
+            (!freshestStatus ||
+              (currentStatus.updatedAt || currentStatus.capturedAt || "").localeCompare(
+                freshestStatus.updatedAt || freshestStatus.capturedAt || ""
+              ) > 0)
+          ) {
+            freshestStatus = currentStatus;
+          }
+        }
+        setTrackingStatusPoint(freshestStatus);
+      } else {
+        setTrackingStatusPoint(null);
+      }
       const selectedEmployeeNameForAttendance = normalizeIdentity(selectedEmployee?.name);
       const selectedUserAttendanceAll = mergedAttendanceSnapshot
         .filter(
@@ -993,6 +1027,24 @@ export default function RouteTrackingScreen() {
           ? selectedUserAttendance[selectedUserAttendance.length - 1]
           : null;
       const isLocallyTrackingActive = latestLocalSelectedAttendance?.type === "checkin";
+      const canUseCurrentDeviceForSelectedUser =
+        Boolean(user?.id) && (selectedUserId === user.id || aliases.has(user.id));
+
+      if (isLiveRouteDate && isLocallyTrackingActive && canUseCurrentDeviceForSelectedUser) {
+        try {
+          const trackingResult = await ensureBackgroundLocationTracking({
+            forceRecoveryCapture: true,
+          });
+          await flushBackgroundLocationQueue({ force: true }).catch(() => {
+            // offline/API failure: queued points will be retried later.
+          });
+          if (trackingResult.started) {
+            mergedLogsSnapshot = dedupeById(await getLocationLogs());
+          }
+        } catch {
+          // Route timeline can still render from existing local/remote points.
+        }
+      }
 
       let allLocalLogsForAliases = mergedLogsSnapshot
         .filter((log) => aliases.has(log.userId))
@@ -1052,11 +1104,6 @@ export default function RouteTrackingScreen() {
         attendanceEvents: localAttendanceEvents,
       };
 
-      const remoteCandidates = buildUserIdCandidates(
-        selectedUserId,
-        selectedEmployee?.id,
-        ...Array.from(aliases)
-      );
       let remoteTimeline: AdminRouteTimelineResponse | null = null;
       let remoteFailure: unknown = null;
       for (const candidateUserId of remoteCandidates) {
@@ -1762,6 +1809,11 @@ export default function RouteTrackingScreen() {
     () => getOpenGpsDisabledWindows(displayGpsDisabledWindows),
     [displayGpsDisabledWindows]
   );
+  const latestTimelinePoint = useMemo(() => {
+    const points = timeline?.points ?? [];
+    if (!points.length) return null;
+    return [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)).at(-1) ?? null;
+  }, [timeline?.points]);
   const liveProgress = useMemo(() => {
     if (!latestRoutePoint) return null;
     void mumbaiNowLabel;
@@ -1797,6 +1849,101 @@ export default function RouteTrackingScreen() {
   const isTodayRoute = selectedDate === toMumbaiDateKey(new Date());
   const isTrackingVisible = latestAttendanceEvent?.type === "checkin";
   const isCheckedOutView = latestAttendanceEvent?.type === "checkout";
+  const trackingHealth = useMemo(() => {
+    if (!isTodayRoute) return null;
+    void mumbaiNowLabel;
+    const status = trackingStatusPoint?.trackingStatus ?? latestTimelinePoint?.trackingStatus ?? null;
+    const queuedPoints = trackingStatusPoint?.queuedPoints ?? latestTimelinePoint?.queuedPoints ?? 0;
+    const reason = trackingStatusPoint?.trackingStatusReason || latestTimelinePoint?.trackingStatusReason || "";
+    const latestPointMs = latestTimelinePoint
+      ? toMs(latestTimelinePoint.capturedAt)
+      : trackingStatusPoint?.updatedAt
+        ? toMs(trackingStatusPoint.updatedAt)
+        : Number.NaN;
+    const staleMinutes = Number.isFinite(latestPointMs)
+      ? Math.max(0, Math.round((Date.now() - latestPointMs) / 60000))
+      : null;
+    const batteryLevel =
+      typeof latestTimelinePoint?.batteryLevel === "number" && Number.isFinite(latestTimelinePoint.batteryLevel)
+        ? latestTimelinePoint.batteryLevel
+        : null;
+
+    if (!isTrackingVisible) {
+      return {
+        label: isCheckedOutView ? "Checked out" : "Not checked in",
+        detail: isCheckedOutView ? "Route capture is stopped for this user." : "Tracking starts after attendance check-in.",
+        icon: "stop-circle-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.textSecondary,
+      };
+    }
+    if (status === "permission_blocked") {
+      return {
+        label: "Permission blocked",
+        detail: reason || "Location permission is blocked on the field user's phone.",
+        icon: "lock-closed-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.danger,
+      };
+    }
+    if (activeGpsDisabledWindows.length || status === "degraded") {
+      return {
+        label: reason.toLowerCase().includes("location services") ? "GPS off" : "Tracking degraded",
+        detail: reason || "GPS or native background tracking is not fully healthy.",
+        icon: "warning-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.warning,
+      };
+    }
+    if (status === "offline_queueing" || queuedPoints > 0 || trackingStatusPoint?.lastClientSyncErrorAt || latestTimelinePoint?.lastClientSyncErrorAt) {
+      return {
+        label: "Offline but queued",
+        detail: `${queuedPoints > 0 ? `${queuedPoints} GPS points queued. ` : ""}They will sync when network/API recovers.`,
+        icon: "cloud-offline-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.warning,
+      };
+    }
+    if (!latestTimelinePoint) {
+      return {
+        label: "Starting",
+        detail: "Check-in is active. Waiting for the first GPS point.",
+        icon: "radio-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.primary,
+      };
+    }
+    if (staleMinutes !== null && staleMinutes >= 12) {
+      return {
+        label: `No point since ${staleMinutes} min`,
+        detail: "No fresh GPS sample has reached the live map recently.",
+        icon: "time-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.warning,
+      };
+    }
+    if (batteryLevel !== null && batteryLevel <= 20) {
+      return {
+        label: "Battery low",
+        detail: `Field phone battery is ${Math.round(batteryLevel)}%. Tracking may stop if the phone powers down.`,
+        icon: "battery-dead-outline" as keyof typeof Ionicons.glyphMap,
+        color: colors.warning,
+      };
+    }
+    return {
+      label: "Live",
+      detail: staleMinutes === null ? "Receiving GPS points." : `Last GPS point ${staleMinutes} min ago.`,
+      icon: "pulse-outline" as keyof typeof Ionicons.glyphMap,
+      color: colors.success,
+    };
+  }, [
+    activeGpsDisabledWindows.length,
+    colors.danger,
+    colors.primary,
+    colors.success,
+    colors.textSecondary,
+    colors.warning,
+    isCheckedOutView,
+    isTodayRoute,
+    isTrackingVisible,
+    latestTimelinePoint,
+    mumbaiNowLabel,
+    trackingStatusPoint,
+  ]);
   const shouldShowMapStatusOverlay = isTodayRoute && !isTrackingVisible && !hasRoutePoints;
   const mapStatusTitle = isCheckedOutView ? "Checked Out" : "Not Checked In";
   const mapStatusText = isCheckedOutView
@@ -1933,6 +2080,16 @@ export default function RouteTrackingScreen() {
               GPS is currently off during check-in: {activeGpsDisabledWindows
                 .map((window) => `${toTime(window.startAt)} - now`)
                 .join(", ")}
+            </Text>
+          </View>
+        ) : null}
+
+        {trackingHealth ? (
+          <View style={[styles.infoWrap, { backgroundColor: trackingHealth.color + "16", borderColor: trackingHealth.color + "55" }]}>
+            <Ionicons name={trackingHealth.icon} size={16} color={trackingHealth.color} />
+            <Text style={[styles.infoText, { color: trackingHealth.color, fontFamily: "Inter_600SemiBold" }]}>
+              Tracking health: {trackingHealth.label}
+              <Text style={{ fontFamily: "Inter_500Medium" }}> | {trackingHealth.detail}</Text>
             </Text>
           </View>
         ) : null}

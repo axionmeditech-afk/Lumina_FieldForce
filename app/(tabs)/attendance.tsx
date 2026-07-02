@@ -63,6 +63,7 @@ import {
   ensureBackgroundLocationTracking,
   flushBackgroundLocationQueue,
   queueLocationPoint,
+  setBackgroundTrackerState,
   stopBackgroundLocationTracking,
 } from "@/lib/background-location";
 import {
@@ -329,12 +330,33 @@ function makeLocalAttendanceRecord(
   };
 }
 
+function buildAttendanceUserIdAliases(value: string | null | undefined): Set<string> {
+  const aliases = new Set<string>();
+  const normalized = (value || "").trim();
+  if (!normalized) return aliases;
+  aliases.add(normalized);
+  aliases.add(normalized.toLowerCase());
+  if (/^\d+$/.test(normalized)) {
+    aliases.add(`dolibarr_${normalized}`);
+    aliases.add(`dolibarr_${normalized}`.toLowerCase());
+  }
+  const dolibarrMatch = normalized.match(/^dolibarr_(.+)$/i);
+  const rawDolibarrId = dolibarrMatch?.[1]?.trim();
+  if (rawDolibarrId) {
+    aliases.add(rawDolibarrId);
+    aliases.add(rawDolibarrId.toLowerCase());
+  }
+  return aliases;
+}
+
 function resolveCheckedInFromRecords(records: AttendanceRecord[], userId: string, userName?: string): boolean | null {
   const normalizedUserName = (userName || "").trim().toLowerCase();
+  const userIdAliases = buildAttendanceUserIdAliases(userId);
   const latest = records
     .filter(
       (entry) =>
-        entry.userId === userId ||
+        userIdAliases.has((entry.userId || "").trim()) ||
+        userIdAliases.has((entry.userId || "").trim().toLowerCase()) ||
         ((entry.userName || "").trim().toLowerCase() === normalizedUserName && normalizedUserName.length > 0)
     )
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
@@ -1396,16 +1418,21 @@ export default function AttendanceScreen() {
     }
   }, [handleLocationUpdate, refreshLocation, user?.id]);
 
-  const stopTracking = useCallback(() => {
+  const stopTracking = useCallback((options?: { stopBackground?: boolean; checkedOut?: boolean }) => {
     locationWatchRef.current?.remove();
     locationWatchRef.current = null;
     if (heartbeatRef.current) {
       clearInterval(heartbeatRef.current);
       heartbeatRef.current = null;
     }
-    void stopBackgroundLocationTracking().catch(() => {
-      // keep UI stable if background task stop fails
-    });
+    if (options?.stopBackground) {
+      void stopBackgroundLocationTracking({
+        state: options.checkedOut ? "checked_out" : "stopped",
+        reason: options.checkedOut ? "User checked out." : "Tracking stopped.",
+      }).catch(() => {
+        // keep UI stable if background task stop fails
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -1977,6 +2004,9 @@ setOfficeLocationName((current) => current.trim() || result.label);
         await addAttendance(approvalAwareRecord);
         await setCheckedIn(type === "checkin");
         setCheckedInState(type === "checkin");
+        if (type === "checkout") {
+          await setBackgroundTrackerState("checked_out", "User checked out.");
+        }
         if (type === "checkin") {
           try {
             // Seed first route point from the same check-in coordinates for admin route timeline.
@@ -2020,7 +2050,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
           triggerPostCheckInServices();
         }
         if (type === "checkout" && isSalespersonFieldCheckIn) {
-          stopTracking();
+          stopTracking({ stopBackground: true, checkedOut: true });
         }
         void loadBaseData();
         if (requiresApproval) {

@@ -966,10 +966,18 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     }
     const status = resolveApprovalStatus(record);
     if (status === "pending") {
+      await deactivateAuthSession(userId, {
+        deviceId: tokenDeviceId || null,
+        token: extractBearerTokenFromRequest(req) || null,
+      }).catch(() => undefined);
       res.status(403).json({ message: "Your access request is pending admin approval." });
       return;
     }
     if (status === "rejected") {
+      await deactivateAuthSession(userId, {
+        deviceId: tokenDeviceId || null,
+        token: extractBearerTokenFromRequest(req) || null,
+      }).catch(() => undefined);
       res.status(403).json({ message: "Your access request was rejected by admin." });
       return;
     }

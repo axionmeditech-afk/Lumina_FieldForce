@@ -27,7 +27,49 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
     listAttendanceHistoryFromMySql,
     broadcastLocationUpdate,
     getRequestUser,
+    upsertTrackingStatusInMySql,
   } = deps;
+
+  app.post("/api/location/status", requireAuth, async (req, res) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const userId = typeof body.userId === "string" ? body.userId.trim() : "";
+    if (!userId) {
+      res.status(400).json({ message: "userId is required." });
+      return;
+    }
+    if (!ensureUserMatch(req, userId)) {
+      res.status(403).json({ message: "Not authorized to update tracking status." });
+      return;
+    }
+    const requestUser = typeof getRequestUser === "function" ? getRequestUser(req) : null;
+    const companyId = (await resolveRequestCompanyId(req)) ?? requestUser?.companyId ?? null;
+    const trackingStatus =
+      typeof body.trackerStatus === "string"
+        ? body.trackerStatus
+        : typeof body.trackingStatus === "string"
+          ? body.trackingStatus
+          : "unknown";
+    const queuedPointsRaw = Number(body.queuedPoints);
+    const queuedPoints =
+      Number.isFinite(queuedPointsRaw) && queuedPointsRaw >= 0 ? Math.trunc(queuedPointsRaw) : null;
+    const lastClientSyncErrorAt =
+      typeof body.lastClientSyncErrorAt === "string" ? body.lastClientSyncErrorAt : null;
+    await upsertTrackingStatusInMySql?.({
+      companyId,
+      userId,
+      trackingStatus,
+      trackingStatusReason:
+        typeof body.trackerStatusReason === "string"
+          ? body.trackerStatusReason.slice(0, 500)
+          : typeof body.trackingStatusReason === "string"
+            ? body.trackingStatusReason.slice(0, 500)
+            : null,
+      queuedPoints,
+      lastClientSyncErrorAt,
+      updatedAt: typeof body.updatedAt === "string" ? body.updatedAt : new Date().toISOString(),
+    });
+    res.status(202).json({ ok: true });
+  });
 
   app.post("/api/location/log", requireAuth, async (req, res) => {
     const sample = parseLocationSample(req.body);
@@ -39,7 +81,8 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
       res.status(403).json({ message: "Not authorized to post location" });
       return;
     }
-    const companyId = await resolveRequestCompanyId(req);
+    const requestUser = typeof getRequestUser === "function" ? getRequestUser(req) : null;
+    const companyId = (await resolveRequestCompanyId(req)) ?? requestUser?.companyId ?? null;
     const zones = await listGeofencesForUserResolved(sample.userId, {
       companyId,
       role: req.auth?.role ?? null,
@@ -71,6 +114,10 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
       geofenceName: status.activeZone?.name ?? null,
       isInsideGeofence: status.inside,
       capturedAt: sample.capturedAt ?? new Date().toISOString(),
+      trackingStatus: sample.trackerStatus ?? "active",
+      trackingStatusReason: sample.trackerStatusReason ?? null,
+      queuedPoints: sample.queuedPoints ?? null,
+      lastClientSyncErrorAt: sample.lastClientSyncErrorAt ?? null,
     };
     await storage.addLocationLog(log);
     try {
@@ -111,7 +158,8 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
       return;
     }
 
-    const companyId = await resolveRequestCompanyId(req);
+    const requestUser = typeof getRequestUser === "function" ? getRequestUser(req) : null;
+    const companyId = (await resolveRequestCompanyId(req)) ?? requestUser?.companyId ?? null;
     const zoneCache = new Map<string, Geofence[]>();
     const activeAttendanceCache = new Map<string, AttendanceRecord | null>();
     const checkedInTodayCache = new Map<string, boolean>();
@@ -154,7 +202,6 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
             : await storage.findActiveAttendance(entry.userId);
           activeAttendanceCache.set(entry.userId, activeAttendance ?? null);
         }
-        const requestUser = typeof getRequestUser === "function" ? getRequestUser(req) : null;
         const autoCheckoutBlockedForRole =
           req.auth?.role === "salesperson" ||
           requestUser?.role === "salesperson" ||
@@ -268,6 +315,10 @@ export function registerLocationSyncRoutes(app: Express, deps: LocationSyncRoute
         geofenceName: status.activeZone?.name ?? null,
         isInsideGeofence: status.inside,
         capturedAt: entry.capturedAt ?? new Date().toISOString(),
+        trackingStatus: entry.trackerStatus ?? "active",
+        trackingStatusReason: entry.trackerStatusReason ?? null,
+        queuedPoints: entry.queuedPoints ?? null,
+        lastClientSyncErrorAt: entry.lastClientSyncErrorAt ?? null,
       };
       await storage.addLocationLog(log);
       logsToPersist.push(log);

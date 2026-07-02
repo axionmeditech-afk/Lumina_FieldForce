@@ -49,6 +49,25 @@ async function getBackendAttendanceTodayQuiet(userId: string): Promise<Attendanc
   }
 }
 
+function buildUserIdAliases(value: string | null | undefined): Set<string> {
+  const aliases = new Set<string>();
+  const normalized = (value || "").trim();
+  if (!normalized) return aliases;
+  aliases.add(normalized);
+  aliases.add(normalized.toLowerCase());
+  if (/^\d+$/.test(normalized)) {
+    aliases.add(`dolibarr_${normalized}`);
+    aliases.add(`dolibarr_${normalized}`.toLowerCase());
+  }
+  const dolibarrMatch = normalized.match(/^dolibarr_(.+)$/i);
+  const rawDolibarrId = dolibarrMatch?.[1]?.trim();
+  if (rawDolibarrId) {
+    aliases.add(rawDolibarrId);
+    aliases.add(rawDolibarrId.toLowerCase());
+  }
+  return aliases;
+}
+
 function resolveCheckedInFromRecords(
   records: AttendanceRecord[],
   userId: string,
@@ -56,10 +75,12 @@ function resolveCheckedInFromRecords(
   isSalesperson = false
 ): boolean | null {
   const normalizedUserName = (userName || "").trim().toLowerCase();
+  const userIdAliases = buildUserIdAliases(userId);
   const ordered = records
     .filter(
       (entry) =>
-        entry.userId === userId ||
+        userIdAliases.has((entry.userId || "").trim()) ||
+        userIdAliases.has((entry.userId || "").trim().toLowerCase()) ||
         ((entry.userName || "").trim().toLowerCase() === normalizedUserName && normalizedUserName.length > 0)
     )
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -164,7 +185,10 @@ function AppShell() {
         await setCheckedIn(checkedIn);
       }
       if (!checkedIn) {
-        await stopBackgroundLocationTracking();
+        await stopBackgroundLocationTracking({
+          state: "checked_out",
+          reason: "User is checked out.",
+        });
         return;
       }
 

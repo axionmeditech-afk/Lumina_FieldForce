@@ -82,11 +82,19 @@ import { registerBankAccountRoutes } from "@/server/routes/bank-accounts.routes"
 import { registerGeofenceRoutes } from "@/server/routes/geofences.routes";
 
 
-const adminWsClients = new Set<WebSocket>();
+type AdminWsClientMeta = {
+  userId: string;
+  role: string;
+  companyId: string | null;
+};
+
+const adminWsClients = new Map<WebSocket, AdminWsClientMeta>();
 
 export function broadcastAttendanceUpdate(record: AttendanceRecord) {
   const message = JSON.stringify({ type: "attendance_update", record });
-  for (const client of adminWsClients) {
+  const targetCompanyId = normalizeWhitespace(record.companyId || "");
+  for (const [client, meta] of adminWsClients) {
+    if (targetCompanyId && meta.companyId && meta.companyId !== targetCompanyId) continue;
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
@@ -95,7 +103,9 @@ export function broadcastAttendanceUpdate(record: AttendanceRecord) {
 
 export function broadcastLocationUpdate(log: LocationLog) {
   const message = JSON.stringify({ type: "location_update", log });
-  for (const client of adminWsClients) {
+  const targetCompanyId = normalizeWhitespace(log.companyId || "");
+  for (const [client, meta] of adminWsClients) {
+    if (!targetCompanyId || !meta.companyId || meta.companyId !== targetCompanyId) continue;
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
@@ -231,6 +241,15 @@ const REMOTE_LOCATION_LOG_WRITE_LIMIT = 500;
 const LEGACY_LOCATION_LOG_STATE_MAX_BYTES = 1_500_000;
 const ENABLE_LEGACY_LOCATION_LOG_HYDRATION =
   String(process.env.ENABLE_LEGACY_LOCATION_LOG_HYDRATION || "false").toLowerCase() === "true";
+const TRACKER_STATUS_VALUES = new Set([
+  "checked_out",
+  "starting",
+  "active",
+  "degraded",
+  "offline_queueing",
+  "permission_blocked",
+  "stopped",
+]);
 
 function isLocationLogStateKey(key: string): boolean {
   return key === "@trackforce_location_logs";
@@ -948,6 +967,11 @@ function parseLocationSample(value: unknown): {
   heading?: number | null;
   batteryLevel?: number | null;
   capturedAt?: string | null;
+  trackerStatus?: LocationLog["trackingStatus"];
+  trackerStatusReason?: string | null;
+  trackerStateUpdatedAt?: string | null;
+  queuedPoints?: number | null;
+  lastClientSyncErrorAt?: string | null;
 } | null {
   if (!value || typeof value !== "object") return null;
   const body = value as Record<string, unknown>;
@@ -959,6 +983,15 @@ function parseLocationSample(value: unknown): {
     typeof body.capturedAt === "string" && parseIsoDate(body.capturedAt)
       ? body.capturedAt
       : null;
+  const trackerStateUpdatedAt =
+    typeof body.trackerStateUpdatedAt === "string" && parseIsoDate(body.trackerStateUpdatedAt)
+      ? body.trackerStateUpdatedAt
+      : null;
+  const lastClientSyncErrorAt =
+    typeof body.lastClientSyncErrorAt === "string" && parseIsoDate(body.lastClientSyncErrorAt)
+      ? body.lastClientSyncErrorAt
+      : null;
+  const queuedPoints = parseFiniteNumber(body.queuedPoints);
   return {
     userId,
     latitude,
@@ -970,6 +1003,12 @@ function parseLocationSample(value: unknown): {
       parseFiniteNumber(body.batteryLevel ?? body.batteryPercent ?? body.battery_percentage)
     ),
     capturedAt,
+    trackerStatus: normalizeTrackerStatus(body.trackerStatus ?? body.trackingStatus ?? body.tracker_state),
+    trackerStatusReason: firstString(body.trackerStatusReason ?? body.trackingStatusReason).slice(0, 500) || null,
+    trackerStateUpdatedAt,
+    queuedPoints:
+      queuedPoints === null || queuedPoints < 0 ? null : Math.min(100000, Math.trunc(queuedPoints)),
+    lastClientSyncErrorAt,
   };
 }
 
@@ -1012,6 +1051,11 @@ function downsampleLocationLogsByInterval(
     sampled.push(latestPoint);
   }
   return sampled;
+}
+
+function normalizeTrackerStatus(value: unknown): LocationLog["trackingStatus"] {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return TRACKER_STATUS_VALUES.has(normalized) ? (normalized as LocationLog["trackingStatus"]) : null;
 }
 
 interface RouteAttendanceEventLike {
@@ -1117,7 +1161,31 @@ function parseCheckPayload(req: Request): AttendanceCheckPayload | null {
 
 function ensureUserMatch(req: Request, userId: string): boolean {
   if (!req.auth) return false;
-  return req.auth.sub === userId || ["admin", "hr", "manager"].includes(req.auth.role);
+  const buildAliases = (value: string | null | undefined): Set<string> => {
+    const aliases = new Set<string>();
+    const normalized = normalizeWhitespace(value || "");
+    if (!normalized) return aliases;
+    aliases.add(normalized);
+    aliases.add(normalized.toLowerCase());
+    const lower = normalized.toLowerCase();
+    if (lower.startsWith("dolibarr_")) {
+      const raw = normalized.slice("dolibarr_".length);
+      if (raw) {
+        aliases.add(raw);
+        aliases.add(raw.toLowerCase());
+      }
+    } else if (/^\d+$/.test(normalized)) {
+      aliases.add(`dolibarr_${normalized}`);
+      aliases.add(`dolibarr_${normalized}`.toLowerCase());
+    }
+    return aliases;
+  };
+  const authAliases = buildAliases(req.auth.sub);
+  const userAliases = buildAliases(userId);
+  for (const alias of userAliases) {
+    if (authAliases.has(alias)) return true;
+  }
+  return ["admin", "hr", "manager"].includes(req.auth.role);
 }
 
 async function resolveRequestCompanyId(req: Request): Promise<string | null> {
@@ -1126,6 +1194,14 @@ async function resolveRequestCompanyId(req: Request): Promise<string | null> {
   const synced = await syncAuthUserCacheForEmail(email).catch(() => null);
   const cached = getAuthUserByIdentifier(email);
   return synced?.user.companyId ?? cached?.user.companyId ?? null;
+}
+
+async function resolveAuthPayloadCompanyId(payload: { email?: string | null } | null | undefined): Promise<string | null> {
+  const email = normalizeEmailKey(payload?.email);
+  if (!email) return null;
+  const synced = await syncAuthUserCacheForEmail(email).catch(() => null);
+  const cached = getAuthUserByIdentifier(email);
+  return synced?.user.companyId ?? cached?.user.companyId ?? DEFAULT_COMPANY_ID;
 }
 
 function getRequestUser(req: Request): AppUser | null {
@@ -2675,6 +2751,30 @@ async function mergeApprovedAccessRequestIntoUser(
   };
 }
 
+async function hydrateAuthRecordWithAccessRequest(
+  record: AuthUserRecord,
+  latestRequest: AccessRequestRecord | null
+): Promise<AuthUserRecord> {
+  const sourceStatus = resolveApprovalStatus(record);
+  if (sourceStatus !== "approved") {
+    return {
+      ...record,
+      user: {
+        ...record.user,
+        approvalStatus: sourceStatus,
+      },
+      approvalStatus: sourceStatus,
+    };
+  }
+
+  const mergedUser = await mergeApprovedAccessRequestIntoUser(record.user, latestRequest);
+  return {
+    ...record,
+    user: mergedUser,
+    approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
+  };
+}
+
 function getLatestPendingAccessRequestByEmail(email: string): UserAccessRequest | null {
   const normalized = normalizeEmailKey(email);
   let latest: UserAccessRequest | null = null;
@@ -2723,6 +2823,8 @@ let attendanceTableEnsured = false;
 let attendanceLegacyStateHydrated = false;
 let locationLogLegacyStateHydrated = false;
 let locationLogIndexesEnsured = false;
+let locationLatestTableEnsured = false;
+let trackingStatusTableEnsured = false;
 let routeDailySummaryTableEnsured = false;
 let lastLocationLogPruneAt = 0;
 let geofenceTableEnsured = false;
@@ -3724,7 +3826,222 @@ function mapLocationLogRow(row: any): LocationLog {
     geofenceName: row.geofence_name ? String(row.geofence_name) : null,
     isInsideGeofence: Boolean(row.is_inside_geofence),
     capturedAt: new Date(row.captured_at).toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    trackingStatus: normalizeTrackerStatus(row.tracking_status ?? row.status) ?? null,
+    trackingStatusReason: row.tracking_status_reason ? String(row.tracking_status_reason) : null,
+    queuedPoints:
+      row.queued_points === null || row.queued_points === undefined
+        ? null
+        : Number(row.queued_points),
+    lastClientSyncErrorAt: row.last_client_sync_error_at
+      ? new Date(row.last_client_sync_error_at).toISOString()
+      : null,
   };
+}
+
+async function ensureLocationLatestTable(): Promise<void> {
+  if (locationLatestTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_location_latest\` (
+      \`company_id\` VARCHAR(128) NOT NULL,
+      \`user_id\` VARCHAR(128) NOT NULL,
+      \`location_log_id\` VARCHAR(128) NOT NULL,
+      \`latitude\` DOUBLE NOT NULL,
+      \`longitude\` DOUBLE NOT NULL,
+      \`accuracy\` DOUBLE NULL,
+      \`speed\` DOUBLE NULL,
+      \`heading\` DOUBLE NULL,
+      \`battery_level\` DOUBLE NULL,
+      \`geofence_id\` VARCHAR(128) NULL,
+      \`geofence_name\` VARCHAR(255) NULL,
+      \`is_inside_geofence\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`captured_at\` DATETIME NOT NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      \`tracking_status\` VARCHAR(64) NOT NULL DEFAULT 'unknown',
+      \`tracking_status_reason\` TEXT NULL,
+      \`queued_points\` INT NULL,
+      \`last_client_sync_error_at\` DATETIME NULL,
+      PRIMARY KEY (\`company_id\`, \`user_id\`),
+      KEY \`idx_lff_location_latest_company_updated\` (\`company_id\`, \`updated_at\`),
+      KEY \`idx_lff_location_latest_company_captured\` (\`company_id\`, \`captured_at\`)
+    )
+  `);
+  locationLatestTableEnsured = true;
+}
+
+function resolveLocationCompanyId(companyId: string | null | undefined): string {
+  return normalizeWhitespace(companyId || "") || DEFAULT_COMPANY_ID;
+}
+
+function toSqlTimestampOrNull(value: string | null | undefined): string | null {
+  return value ? new Date(value).toISOString().slice(0, 19).replace("T", " ") : null;
+}
+
+async function upsertLocationLatestInMySql(log: LocationLog): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureLocationLatestTable();
+  const conn = await getMySqlPool();
+  const companyId = resolveLocationCompanyId(log.companyId);
+  const capturedAt = toSqlTimestampOrNull(log.capturedAt);
+  if (!capturedAt) return;
+  const updatedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const trackingStatus = normalizeTrackerStatus(log.trackingStatus) || "active";
+  await conn.execute(
+    `INSERT INTO lff_location_latest (
+      company_id, user_id, location_log_id, latitude, longitude, accuracy, speed, heading,
+      battery_level, geofence_id, geofence_name, is_inside_geofence, captured_at, updated_at,
+      tracking_status, tracking_status_reason, queued_points, last_client_sync_error_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      location_log_id = IF(VALUES(captured_at) >= captured_at, VALUES(location_log_id), location_log_id),
+      latitude = IF(VALUES(captured_at) >= captured_at, VALUES(latitude), latitude),
+      longitude = IF(VALUES(captured_at) >= captured_at, VALUES(longitude), longitude),
+      accuracy = IF(VALUES(captured_at) >= captured_at, VALUES(accuracy), accuracy),
+      speed = IF(VALUES(captured_at) >= captured_at, VALUES(speed), speed),
+      heading = IF(VALUES(captured_at) >= captured_at, VALUES(heading), heading),
+      battery_level = IF(VALUES(captured_at) >= captured_at, VALUES(battery_level), battery_level),
+      geofence_id = IF(VALUES(captured_at) >= captured_at, VALUES(geofence_id), geofence_id),
+      geofence_name = IF(VALUES(captured_at) >= captured_at, VALUES(geofence_name), geofence_name),
+      is_inside_geofence = IF(VALUES(captured_at) >= captured_at, VALUES(is_inside_geofence), is_inside_geofence),
+      captured_at = GREATEST(captured_at, VALUES(captured_at)),
+      updated_at = VALUES(updated_at),
+      tracking_status = VALUES(tracking_status),
+      tracking_status_reason = VALUES(tracking_status_reason),
+      queued_points = VALUES(queued_points),
+      last_client_sync_error_at = VALUES(last_client_sync_error_at)`,
+    [
+      companyId,
+      log.userId,
+      log.id,
+      log.latitude,
+      log.longitude,
+      log.accuracy ?? null,
+      log.speed ?? null,
+      log.heading ?? null,
+      log.batteryLevel ?? null,
+      log.geofenceId ?? null,
+      log.geofenceName ?? null,
+      log.isInsideGeofence ? 1 : 0,
+      capturedAt,
+      updatedAt,
+      trackingStatus,
+      log.trackingStatusReason ?? null,
+      log.queuedPoints ?? null,
+      toSqlTimestampOrNull(log.lastClientSyncErrorAt),
+    ]
+  );
+  await upsertTrackingStatusInMySql({
+    companyId,
+    userId: log.userId,
+    trackingStatus,
+    trackingStatusReason: log.trackingStatusReason ?? null,
+    queuedPoints: log.queuedPoints ?? null,
+    lastClientSyncErrorAt: log.lastClientSyncErrorAt ?? null,
+  });
+}
+
+async function upsertLocationLatestBatchInMySql(logs: LocationLog[]): Promise<void> {
+  for (const log of logs) {
+    await upsertLocationLatestInMySql(log);
+  }
+}
+
+async function ensureTrackingStatusTable(): Promise<void> {
+  if (trackingStatusTableEnsured || !isMySqlStateEnabled()) return;
+  const conn = await getMySqlPool();
+  await conn.execute(`
+    CREATE TABLE IF NOT EXISTS \`lff_tracking_status\` (
+      \`company_id\` VARCHAR(128) NOT NULL,
+      \`user_id\` VARCHAR(128) NOT NULL,
+      \`tracking_status\` VARCHAR(64) NOT NULL DEFAULT 'unknown',
+      \`tracking_status_reason\` TEXT NULL,
+      \`queued_points\` INT NULL,
+      \`last_client_sync_error_at\` DATETIME NULL,
+      \`updated_at\` DATETIME NOT NULL,
+      PRIMARY KEY (\`company_id\`, \`user_id\`),
+      KEY \`idx_lff_tracking_status_company_updated\` (\`company_id\`, \`updated_at\`)
+    )
+  `);
+  trackingStatusTableEnsured = true;
+}
+
+async function upsertTrackingStatusInMySql(input: {
+  companyId?: string | null;
+  userId: string;
+  trackingStatus: LocationLog["trackingStatus"];
+  trackingStatusReason?: string | null;
+  queuedPoints?: number | null;
+  lastClientSyncErrorAt?: string | null;
+  updatedAt?: string | null;
+}): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  await ensureTrackingStatusTable();
+  const conn = await getMySqlPool();
+  const updatedAt = toSqlTimestampOrNull(input.updatedAt) ?? new Date().toISOString().slice(0, 19).replace("T", " ");
+  await conn.execute(
+    `INSERT INTO lff_tracking_status (
+      company_id, user_id, tracking_status, tracking_status_reason,
+      queued_points, last_client_sync_error_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      tracking_status = VALUES(tracking_status),
+      tracking_status_reason = VALUES(tracking_status_reason),
+      queued_points = VALUES(queued_points),
+      last_client_sync_error_at = VALUES(last_client_sync_error_at),
+      updated_at = VALUES(updated_at)`,
+    [
+      resolveLocationCompanyId(input.companyId),
+      input.userId,
+      normalizeTrackerStatus(input.trackingStatus) || "unknown",
+      input.trackingStatusReason ?? null,
+      input.queuedPoints ?? null,
+      toSqlTimestampOrNull(input.lastClientSyncErrorAt),
+      updatedAt,
+    ]
+  );
+}
+
+async function listTrackingStatusFromMySql(companyId?: string | null, userId?: string | null): Promise<LocationLog[]> {
+  if (!isMySqlStateEnabled()) return [];
+  await ensureTrackingStatusTable();
+  const conn = await getMySqlPool();
+  const resolvedCompanyId = resolveLocationCompanyId(companyId);
+  const params: any[] = [resolvedCompanyId];
+  let userClause = "";
+  if (userId) {
+    userClause = " AND user_id = ?";
+    params.push(userId);
+  }
+  const [rows] = await conn.query<any[]>(
+    `SELECT
+       CONCAT('tracking_status_', company_id, '_', user_id) AS id,
+       company_id,
+       user_id,
+       NULL AS latitude,
+       NULL AS longitude,
+       NULL AS accuracy,
+       NULL AS speed,
+       NULL AS heading,
+       NULL AS battery_level,
+       NULL AS geofence_id,
+       NULL AS geofence_name,
+       0 AS is_inside_geofence,
+       updated_at AS captured_at,
+       updated_at,
+       tracking_status,
+       tracking_status_reason,
+       queued_points,
+       last_client_sync_error_at
+     FROM lff_tracking_status
+     WHERE company_id = ?${userClause}
+     ORDER BY updated_at DESC
+     LIMIT 5000`,
+    params
+  );
+  return (rows || []).map((row) =>
+    mapLocationLogRow({ ...row, latitude: row.latitude ?? 0, longitude: row.longitude ?? 0 })
+  );
 }
 
 async function listLocationLogsFromMySql(limit = 10000): Promise<LocationLog[]> {
@@ -3781,6 +4098,7 @@ async function insertLocationLogInMySql(log: LocationLog): Promise<void> {
       new Date(log.capturedAt).toISOString().slice(0, 19).replace("T", " "),
     ]
   );
+  await upsertLocationLatestInMySql(log);
 }
 
 async function insertLocationLogsInMySql(logs: LocationLog[]): Promise<void> {
@@ -3826,23 +4144,44 @@ async function insertLocationLogsInMySql(logs: LocationLog[]): Promise<void> {
       values
     );
   }
+  await upsertLocationLatestBatchInMySql(logs);
 }
 
-async function listLocationLogsLatestFromMySql(): Promise<LocationLog[]> {
-  await ensureLocationLogIndexes();
+async function listLocationLogsLatestFromMySql(companyId?: string | null): Promise<LocationLog[]> {
+  const resolvedCompanyId = resolveLocationCompanyId(companyId);
+  await ensureLocationLatestTable();
   const conn = await getMySqlPool();
+  const [latestRows] = await conn.query<any[]>(
+    `SELECT
+       location_log_id AS id, company_id, user_id, latitude, longitude, accuracy, speed, heading,
+       battery_level, geofence_id, geofence_name, is_inside_geofence, captured_at, updated_at,
+       tracking_status, tracking_status_reason, queued_points, last_client_sync_error_at
+     FROM lff_location_latest
+     WHERE company_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 5000`,
+    [resolvedCompanyId]
+  );
+  if (latestRows && latestRows.length > 0) {
+    return latestRows.map(mapLocationLogRow);
+  }
+
+  await ensureLocationLogIndexes();
   let [rows] = await conn.query<any[]>(
     `SELECT logs.*
      FROM lff_location_logs logs
      INNER JOIN (
        SELECT user_id, MAX(captured_at) AS captured_at
        FROM lff_location_logs
+       WHERE COALESCE(company_id, ?) = ?
        GROUP BY user_id
      ) latest
        ON latest.user_id = logs.user_id
       AND latest.captured_at = logs.captured_at
+     WHERE COALESCE(logs.company_id, ?) = ?
      ORDER BY logs.captured_at DESC
-     LIMIT 5000`
+     LIMIT 5000`,
+    [resolvedCompanyId, resolvedCompanyId, resolvedCompanyId, resolvedCompanyId]
   );
   if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
     await hydrateLocationLogsFromLegacyStateIfNeeded();
@@ -3852,35 +4191,43 @@ async function listLocationLogsLatestFromMySql(): Promise<LocationLog[]> {
        INNER JOIN (
          SELECT user_id, MAX(captured_at) AS captured_at
          FROM lff_location_logs
+         WHERE COALESCE(company_id, ?) = ?
          GROUP BY user_id
        ) latest
          ON latest.user_id = logs.user_id
         AND latest.captured_at = logs.captured_at
+       WHERE COALESCE(logs.company_id, ?) = ?
        ORDER BY logs.captured_at DESC
-       LIMIT 5000`
+       LIMIT 5000`,
+      [resolvedCompanyId, resolvedCompanyId, resolvedCompanyId, resolvedCompanyId]
     );
   }
-  return rows.map(mapLocationLogRow);
+  const fallbackRows = rows.map(mapLocationLogRow);
+  void upsertLocationLatestBatchInMySql(fallbackRows).catch(() => {
+    // The fallback response is already available; cache warmup can retry later.
+  });
+  return fallbackRows;
 }
 
-async function listLocationLogsForDateFromMySql(dateKey: string): Promise<LocationLog[]> {
+async function listLocationLogsForDateFromMySql(dateKey: string, companyId?: string | null): Promise<LocationLog[]> {
   const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
+  const resolvedCompanyId = resolveLocationCompanyId(companyId);
   await ensureLocationLogIndexes();
   const conn = await getMySqlPool();
   let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs
-     WHERE captured_at BETWEEN ? AND ?
+     WHERE captured_at BETWEEN ? AND ? AND COALESCE(company_id, ?) = ?
      ORDER BY captured_at ASC`,
-    [range.start, range.end]
+    [range.start, range.end, resolvedCompanyId, resolvedCompanyId]
   );
   if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
     await hydrateLocationLogsFromLegacyStateIfNeeded();
     [rows] = await conn.query<any[]>(
       `SELECT * FROM lff_location_logs
-       WHERE captured_at BETWEEN ? AND ?
+       WHERE captured_at BETWEEN ? AND ? AND COALESCE(company_id, ?) = ?
        ORDER BY captured_at ASC`,
-      [range.start, range.end]
+      [range.start, range.end, resolvedCompanyId, resolvedCompanyId]
     );
   }
   return rows.map(mapLocationLogRow);
@@ -3888,25 +4235,27 @@ async function listLocationLogsForDateFromMySql(dateKey: string): Promise<Locati
 
 async function listLocationLogsForUserDateFromMySql(
   userId: string,
-  dateKey: string
+  dateKey: string,
+  companyId?: string | null
 ): Promise<LocationLog[]> {
   const range = parseDateKeyToUtcRange(dateKey);
   if (!range) return [];
+  const resolvedCompanyId = resolveLocationCompanyId(companyId);
   await ensureLocationLogIndexes();
   const conn = await getMySqlPool();
   let [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_location_logs
-     WHERE user_id = ? AND captured_at BETWEEN ? AND ?
+     WHERE user_id = ? AND captured_at BETWEEN ? AND ? AND COALESCE(company_id, ?) = ?
      ORDER BY captured_at ASC`,
-    [userId, range.start, range.end]
+    [userId, range.start, range.end, resolvedCompanyId, resolvedCompanyId]
   );
   if ((!rows || rows.length === 0) && !locationLogLegacyStateHydrated) {
     await hydrateLocationLogsFromLegacyStateIfNeeded();
     [rows] = await conn.query<any[]>(
       `SELECT * FROM lff_location_logs
-       WHERE user_id = ? AND captured_at BETWEEN ? AND ?
+       WHERE user_id = ? AND captured_at BETWEEN ? AND ? AND COALESCE(company_id, ?) = ?
        ORDER BY captured_at ASC`,
-      [userId, range.start, range.end]
+      [userId, range.start, range.end, resolvedCompanyId, resolvedCompanyId]
     );
   }
   return rows.map(mapLocationLogRow);
@@ -7640,11 +7989,7 @@ async function hydrateAuthUsersFromMySql(): Promise<void> {
     const record = buildAuthRecordFromMySqlRow(row);
     if (!record) continue;
     const latestRequest = latestAccessRequestByEmail.get(normalizeEmailKey(record.user.email)) || null;
-    const hydratedRecord: AuthUserRecord = {
-      ...record,
-      user: await mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
-      approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
-    };
+    const hydratedRecord = await hydrateAuthRecordWithAccessRequest(record, latestRequest);
     setAuthUserRecord(hydratedRecord);
   }
 }
@@ -7763,11 +8108,7 @@ async function syncAuthUserCacheForEmail(email: string): Promise<AuthUserRecord 
       return null;
     }
     const latestRequest = await getLatestAccessRequestByEmailFromMySql(normalized);
-    const hydratedRecord: AuthUserRecord = {
-      ...record,
-      user: await mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
-      approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
-    };
+    const hydratedRecord = await hydrateAuthRecordWithAccessRequest(record, latestRequest);
     setAuthUserRecord(hydratedRecord);
     return hydratedRecord;
   } catch {
@@ -7786,11 +8127,7 @@ async function checkAuthUserForSignup(email: string): Promise<AuthUserRecord | n
     return null;
   }
   const latestRequest = await getLatestAccessRequestByEmailFromMySql(normalized);
-  const hydratedRecord: AuthUserRecord = {
-    ...record,
-    user: await mergeApprovedAccessRequestIntoUser(record.user, latestRequest),
-    approvalStatus: latestRequest?.status === "approved" ? "approved" : record.approvalStatus,
-  };
+  const hydratedRecord = await hydrateAuthRecordWithAccessRequest(record, latestRequest);
   setAuthUserRecord(hydratedRecord);
   return hydratedRecord;
 }
@@ -7994,7 +8331,7 @@ function buildLoginFromEmailAndName(email: string, name: string): string {
 
 async function authenticateCredentials(identifier: string, password: string): Promise<AppUser | null> {
   await initAuthUsersStore();
-  const record = getAuthUserByIdentifier(identifier);
+  const record = (await syncAuthUserCacheForEmail(identifier)) || getAuthUserByIdentifier(identifier);
   if (!record) return null;
   if (!matchesStoredPasswordHash(record.passwordHash, password)) return null;
   if (resolveApprovalStatus(record) !== "approved") return null;
@@ -8297,6 +8634,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     listAttendanceHistoryFromMySql,
     broadcastLocationUpdate,
     getRequestUser,
+    upsertTrackingStatusInMySql,
   });
 
   registerLocationRoutes(app, {
@@ -8304,11 +8642,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     requireRoles,
     firstString,
     ensureUserMatch,
+    resolveRequestCompanyId,
     isMySqlStateEnabled,
     storage,
     listLocationLogsLatestFromMySql,
     listLocationLogsForDateFromMySql,
     listLocationLogsForUserDateFromMySql,
+    listTrackingStatusFromMySql,
     listAttendanceHistoryFromMySql: listAttendanceForUserDateFromMySql,
     toMumbaiDateKey,
     isIsoDateString,
@@ -8491,15 +8831,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // JWT token verify karein
         const payload = await verifyJwt(token);
-        // Sirf admin aur manager ko WebSocket connect karne ki permission
-        if (!payload || (payload.role !== "admin" && payload.role !== "manager")) {
+        // Sirf admin, HR aur manager ko WebSocket connect karne ki permission.
+        if (!payload || (payload.role !== "admin" && payload.role !== "manager" && payload.role !== "hr")) {
           socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
           socket.destroy();
           return;
         }
 
+        const companyId = await resolveAuthPayloadCompanyId(payload);
         wss.handleUpgrade(request, socket, head, (ws) => {
-          wss.emit("connection", ws, request, payload);
+          wss.emit("connection", ws, request, payload, companyId);
         });
       } else {
         socket.destroy();
@@ -8510,8 +8851,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  wss.on("connection", (ws) => {
-    adminWsClients.add(ws);
+  wss.on("connection", (ws, _request, payload: any, companyId?: string | null) => {
+    adminWsClients.set(ws, {
+      userId: normalizeWhitespace(payload?.sub || ""),
+      role: normalizeWhitespace(payload?.role || ""),
+      companyId: normalizeWhitespace(companyId || "") || null,
+    });
 
     let isAlive = true;
     ws.on("pong", () => { isAlive = true; });

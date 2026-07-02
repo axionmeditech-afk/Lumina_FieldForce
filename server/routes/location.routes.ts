@@ -6,6 +6,7 @@ export type LocationRouteDeps = {
   requireRoles: (...roles: any[]) => RequestHandler;
   firstString: (value: unknown) => string;
   ensureUserMatch: (req: any, userId: string) => boolean;
+  resolveRequestCompanyId: (req: any) => Promise<string | null>;
   isMySqlStateEnabled: () => boolean;
   storage: {
     getLocationLogsLatest: () => Promise<LocationLog[]>;
@@ -13,9 +14,10 @@ export type LocationRouteDeps = {
     getLocationLogsForUserDate: (userId: string, date: string) => Promise<LocationLog[]>;
     getAttendanceHistory: (userId: string) => Promise<any[]>;
   };
-  listLocationLogsLatestFromMySql: () => Promise<LocationLog[]>;
-  listLocationLogsForDateFromMySql: (date: string) => Promise<LocationLog[]>;
-  listLocationLogsForUserDateFromMySql: (userId: string, date: string) => Promise<LocationLog[]>;
+  listLocationLogsLatestFromMySql: (companyId?: string | null) => Promise<LocationLog[]>;
+  listLocationLogsForDateFromMySql: (date: string, companyId?: string | null) => Promise<LocationLog[]>;
+  listLocationLogsForUserDateFromMySql: (userId: string, date: string, companyId?: string | null) => Promise<LocationLog[]>;
+  listTrackingStatusFromMySql: (companyId?: string | null, userId?: string | null) => Promise<LocationLog[]>;
   listAttendanceHistoryFromMySql: (userId: string, dateKey: string) => Promise<any[]>;
   toMumbaiDateKey: (date: Date) => string;
   isIsoDateString: (value: string) => boolean;
@@ -50,11 +52,12 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
     "/api/admin/live-map",
     deps.requireAuth,
     deps.requireRoles("admin", "hr", "manager"),
-    async (_req, res) => {
+    async (req, res) => {
       res.set(noStoreHeaders);
+      const companyId = await deps.resolveRequestCompanyId(req);
       if (deps.isMySqlStateEnabled()) {
         try {
-          const latest = await deps.listLocationLogsLatestFromMySql();
+          const latest = await deps.listLocationLogsLatestFromMySql(companyId);
           res.json(latest);
           return;
         } catch (error) {
@@ -62,7 +65,30 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         }
       }
       const latest = await deps.storage.getLocationLogsLatest();
-      res.json(latest);
+      res.json(companyId ? latest.filter((entry) => entry.companyId === companyId) : latest);
+    },
+  );
+
+  app.get(
+    "/api/admin/tracking-status/:id",
+    deps.requireAuth,
+    deps.requireRoles("admin", "hr", "manager", "salesperson"),
+    async (req, res) => {
+      res.set(noStoreHeaders);
+      const userId = deps.firstString(req.params.id);
+      if (!userId) {
+        res.status(400).json({ message: "User id is required" });
+        return;
+      }
+      if (!deps.ensureUserMatch(req, userId)) {
+        res.status(403).json({ message: "Token user mismatch" });
+        return;
+      }
+      const companyId = await deps.resolveRequestCompanyId(req);
+      const rows = deps.isMySqlStateEnabled()
+        ? await deps.listTrackingStatusFromMySql(companyId, userId).catch(() => [])
+        : [];
+      res.json(rows[0] ?? null);
     },
   );
 
@@ -77,6 +103,7 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
       }
+      const companyId = await deps.resolveRequestCompanyId(req);
       const useRawPoints = deps.parseBooleanQuery(req.query.raw, false);
       const intervalMinutes = useRawPoints
         ? 0
@@ -84,13 +111,16 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
       let allPoints: LocationLog[] = [];
       if (deps.isMySqlStateEnabled()) {
         try {
-          allPoints = await deps.listLocationLogsForDateFromMySql(requestedDate);
+          allPoints = await deps.listLocationLogsForDateFromMySql(requestedDate, companyId);
         } catch (error) {
           console.error("Failed to read location logs for date from MySQL", error);
           allPoints = await deps.storage.getLocationLogsForDate(requestedDate);
         }
       } else {
         allPoints = await deps.storage.getLocationLogsForDate(requestedDate);
+      }
+      if (companyId) {
+        allPoints = allPoints.filter((entry) => entry.companyId === companyId);
       }
       const byUser = new Map<string, LocationLog[]>();
       for (const point of allPoints) {
@@ -148,6 +178,7 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
       }
 
       const useRawPoints = deps.parseBooleanQuery(req.query.raw, false);
+      const companyId = await deps.resolveRequestCompanyId(req);
       const intervalMinutes = useRawPoints
         ? 0
         : deps.parseIntervalMinutes(req.query.interval_minutes, 1);
@@ -157,6 +188,7 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
           rawLocationPoints = await deps.listLocationLogsForUserDateFromMySql(
             userId,
             requestedDate,
+            companyId,
           );
         } catch (error) {
           console.error("Failed to read user location logs for date from MySQL", error);
@@ -164,6 +196,9 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         }
       } else {
         rawLocationPoints = await deps.storage.getLocationLogsForUserDate(userId, requestedDate);
+      }
+      if (companyId) {
+        rawLocationPoints = rawLocationPoints.filter((entry) => entry.companyId === companyId);
       }
       const attendance = deps.isMySqlStateEnabled()
         ? await deps

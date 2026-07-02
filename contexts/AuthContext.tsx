@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
+import { AppState } from "react-native";
 import Constants from "expo-constants";
 import type { AppUser, CompanyProfile, UserRole } from "@/lib/types";
 import {
@@ -61,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [company, setCompany] = useState<CompanyProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const lastSessionValidationAtRef = useRef(0);
   const isStandaloneRuntime =
     !__DEV__ && Constants.appOwnership !== "expo" && !Constants.expoConfig?.hostUri;
 
@@ -116,34 +118,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshSession = useCallback(async () => {
     const activeUser = await getCurrentUser();
-    if (activeUser && isStandaloneRuntime) {
-      const token = await getApiToken();
+    const token = activeUser ? await getApiToken() : null;
+    if (activeUser && (isStandaloneRuntime || token)) {
       if (!token) {
-        await clearLocalSession();
-        return;
-      }
-
-      try {
-        const remoteUser = await getAuthenticatedApiUser({
-          timeoutMs: 7000,
-          throwOnInvalidSession: true,
-        });
-        if (remoteUser) {
-          const hydrated = await syncBackendAuthenticatedUser(remoteUser);
-          setUser(hydrated);
-          const activeCompany = await getCurrentCompanyProfile();
-          setCompany(activeCompany);
-          return;
-        }
-        const tokenAfterValidation = await getApiToken();
-        if (!tokenAfterValidation) {
+        if (isStandaloneRuntime) {
           await clearLocalSession();
           return;
         }
-      } catch (error) {
-        if (isApiSessionInvalidError(error)) {
-          await clearLocalSession();
-          return;
+      } else {
+        try {
+          const remoteUser = await getAuthenticatedApiUser({
+            timeoutMs: isStandaloneRuntime ? 7000 : 3500,
+            throwOnInvalidSession: true,
+          });
+          if (remoteUser) {
+            const hydrated = await syncBackendAuthenticatedUser(remoteUser);
+            setUser(hydrated);
+            const activeCompany = await getCurrentCompanyProfile();
+            setCompany(activeCompany);
+            return;
+          }
+          const tokenAfterValidation = await getApiToken();
+          if (!tokenAfterValidation) {
+            await clearLocalSession();
+            return;
+          }
+        } catch (error) {
+          if (isApiSessionInvalidError(error)) {
+            await clearLocalSession();
+            return;
+          }
         }
       }
     }
@@ -164,6 +168,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
     void bootstrap();
   }, [refreshSession]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const validateSessionSoon = () => {
+      const now = Date.now();
+      if (now - lastSessionValidationAtRef.current < 30_000) return;
+      lastSessionValidationAtRef.current = now;
+      void refreshSession();
+    };
+
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        validateSessionSoon();
+      }
+    });
+    const interval = setInterval(validateSessionSoon, 120_000);
+
+    return () => {
+      subscription.remove();
+      clearInterval(interval);
+    };
+  }, [refreshSession, user]);
 
   const login = async (identifier: string, password: string): Promise<{ ok: boolean; message?: string }> => {
     const rawIdentifier = identifier.trim();

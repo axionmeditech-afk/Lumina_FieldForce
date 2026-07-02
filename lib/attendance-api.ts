@@ -1135,11 +1135,46 @@ export async function postLocationBatch(
     heading?: number | null;
     batteryLevel?: number | null;
     capturedAt?: string | null;
+    trackerStatus?:
+      | "checked_out"
+      | "starting"
+      | "active"
+      | "degraded"
+      | "offline_queueing"
+      | "permission_blocked"
+      | "stopped"
+      | null;
+    trackerStatusReason?: string | null;
+    trackerStateUpdatedAt?: string | null;
+    queuedPoints?: number | null;
+    lastClientSyncErrorAt?: string | null;
   }[]
 ): Promise<{ ok: boolean; accepted: number; rejected: number }> {
   return fetchJson<{ ok: boolean; accepted: number; rejected: number }>("/location/batch", {
     method: "POST",
     body: JSON.stringify({ entries }),
+  });
+}
+
+export async function postTrackingStatus(payload: {
+  userId: string;
+  trackerStatus:
+    | "checked_out"
+    | "starting"
+    | "active"
+    | "degraded"
+    | "offline_queueing"
+    | "permission_blocked"
+    | "stopped";
+  trackerStatusReason?: string | null;
+  queuedPoints?: number | null;
+  lastClientSyncErrorAt?: string | null;
+  updatedAt?: string | null;
+}): Promise<void> {
+  await fetchJson<{ ok: boolean }>("/location/status", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    skipGlobalLoading: true,
   });
 }
 
@@ -1153,10 +1188,31 @@ export interface LiveMapPoint {
   geofenceName?: string | null;
   isInsideGeofence: boolean;
   capturedAt: string;
+  updatedAt?: string | null;
+  trackingStatus?:
+    | "checked_out"
+    | "starting"
+    | "active"
+    | "degraded"
+    | "offline_queueing"
+    | "permission_blocked"
+    | "stopped"
+    | "unknown"
+    | null;
+  trackingStatusReason?: string | null;
+  queuedPoints?: number | null;
+  lastClientSyncErrorAt?: string | null;
 }
 
 export async function getAdminLiveMapPoints(): Promise<LiveMapPoint[]> {
   return fetchJson<LiveMapPoint[]>(`/admin/live-map?_ts=${Date.now()}`, {
+    method: "GET",
+    skipGlobalLoading: true,
+  });
+}
+
+export async function getAdminTrackingStatus(userId: string): Promise<LiveMapPoint | null> {
+  return fetchJson<LiveMapPoint | null>(`/admin/tracking-status/${encodeURIComponent(userId)}?_ts=${Date.now()}`, {
     method: "GET",
     skipGlobalLoading: true,
   });

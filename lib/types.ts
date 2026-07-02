@@ -489,6 +489,20 @@ export interface LocationLog {
   geofenceName?: string | null;
   isInsideGeofence: boolean;
   capturedAt: string;
+  updatedAt?: string | null;
+  trackingStatus?:
+    | "checked_out"
+    | "starting"
+    | "active"
+    | "degraded"
+    | "offline_queueing"
+    | "permission_blocked"
+    | "stopped"
+    | "unknown"
+    | null;
+  trackingStatusReason?: string | null;
+  queuedPoints?: number | null;
+  lastClientSyncErrorAt?: string | null;
 }
 
 export interface QuickSaleLocationLog {
