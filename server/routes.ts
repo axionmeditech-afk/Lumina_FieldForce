@@ -57,6 +57,7 @@ import {
   setMySqlStateValue,
 } from "@/server/services/mysql-state";
 import { analyzeConversationWithAI } from "@/lib/aiSalesAnalysis";
+import { haversineDistanceMeters } from "@/lib/geofence";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { isSalesRole } from "@/lib/role-access";
 import { registerAiAnalysisRoutes } from "@/server/routes/ai.routes";
@@ -3126,19 +3127,91 @@ function encodeLocationPolyline(points: LocationLog[]): string {
   return encoded;
 }
 
-function compressRouteSummaryPoints(points: LocationLog[], maxPoints = 720): LocationLog[] {
-  const ordered = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
-  if (ordered.length <= maxPoints) return ordered;
-  const sampled: LocationLog[] = [];
-  const lastIndex = ordered.length - 1;
-  for (let i = 0; i < maxPoints; i++) {
-    const index = Math.round((i / (maxPoints - 1)) * lastIndex);
-    const point = ordered[index];
-    if (!sampled.length || sampled[sampled.length - 1].id !== point.id) {
-      sampled.push(point);
+const ROUTE_SUMMARY_DOUGLAS_PEUCKER_TOLERANCE_METERS = readPositiveIntegerEnv(
+  "ROUTE_SUMMARY_DOUGLAS_PEUCKER_TOLERANCE_METERS",
+  25
+);
+const ROUTE_SUMMARY_MAX_POINTS = readPositiveIntegerEnv("ROUTE_SUMMARY_MAX_POINTS", 720);
+
+function latLngToMeters(point: Pick<LocationLog, "latitude" | "longitude">, originLatitude: number) {
+  const metersPerDegreeLat = 111_320;
+  const metersPerDegreeLng = Math.max(1, 111_320 * Math.cos((originLatitude * Math.PI) / 180));
+  return {
+    x: point.longitude * metersPerDegreeLng,
+    y: point.latitude * metersPerDegreeLat,
+  };
+}
+
+function perpendicularDistanceMeters(
+  point: LocationLog,
+  lineStart: LocationLog,
+  lineEnd: LocationLog
+): number {
+  const originLatitude = (lineStart.latitude + lineEnd.latitude) / 2;
+  const p = latLngToMeters(point, originLatitude);
+  const a = latLngToMeters(lineStart, originLatitude);
+  const b = latLngToMeters(lineEnd, originLatitude);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const segmentLengthSquared = dx * dx + dy * dy;
+  if (segmentLengthSquared <= 0) {
+    return haversineDistanceMeters(point.latitude, point.longitude, lineStart.latitude, lineStart.longitude);
+  }
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / segmentLengthSquared));
+  const projectionX = a.x + t * dx;
+  const projectionY = a.y + t * dy;
+  return Math.hypot(p.x - projectionX, p.y - projectionY);
+}
+
+function douglasPeuckerIndexes(points: LocationLog[], toleranceMeters: number): Set<number> {
+  const keep = new Set<number>([0, points.length - 1]);
+  const stack: [number, number][] = [[0, points.length - 1]];
+
+  while (stack.length) {
+    const [startIndex, endIndex] = stack.pop()!;
+    if (endIndex <= startIndex + 1) continue;
+    let farthestIndex = -1;
+    let farthestDistance = -1;
+    for (let index = startIndex + 1; index < endIndex; index += 1) {
+      const distance = perpendicularDistanceMeters(points[index], points[startIndex], points[endIndex]);
+      if (distance > farthestDistance) {
+        farthestDistance = distance;
+        farthestIndex = index;
+      }
+    }
+    if (farthestIndex > startIndex && farthestDistance > toleranceMeters) {
+      keep.add(farthestIndex);
+      stack.push([startIndex, farthestIndex], [farthestIndex, endIndex]);
     }
   }
+
+  return keep;
+}
+
+function downsampleKeptIndexes(keptIndexes: number[], maxPoints: number): Set<number> {
+  if (keptIndexes.length <= maxPoints) return new Set(keptIndexes);
+  const sampled = new Set<number>([keptIndexes[0], keptIndexes[keptIndexes.length - 1]]);
+  for (let i = 1; i < maxPoints - 1; i += 1) {
+    const index = Math.round((i / (maxPoints - 1)) * (keptIndexes.length - 1));
+    sampled.add(keptIndexes[index]);
+  }
   return sampled;
+}
+
+function compressRouteSummaryPoints(
+  points: LocationLog[],
+  maxPoints = ROUTE_SUMMARY_MAX_POINTS,
+  toleranceMeters = ROUTE_SUMMARY_DOUGLAS_PEUCKER_TOLERANCE_METERS
+): LocationLog[] {
+  const ordered = [...points].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+  if (ordered.length <= maxPoints) return ordered;
+  const validMaxPoints = Math.max(2, maxPoints);
+  const keep = douglasPeuckerIndexes(ordered, Math.max(1, toleranceMeters));
+  const keptIndexes = Array.from(keep).sort((a, b) => a - b);
+  const boundedKeep = downsampleKeptIndexes(keptIndexes, validMaxPoints);
+  return Array.from(boundedKeep)
+    .sort((a, b) => a - b)
+    .map((index) => ordered[index]);
 }
 
 function serializeSummaryPoints(points: LocationLog[]): LocationLog[] {
@@ -3262,16 +3335,22 @@ async function upsertRouteDailySummaryInMySql(
 
 async function getRouteDailySummaryFromMySql(
   userId: string,
-  dateKey: string
+  dateKey: string,
+  companyId?: string | null
 ): Promise<(RouteTimeline & { attendanceEvents: RouteAttendanceSummaryEvent[] }) | null> {
   if (!isMySqlStateEnabled()) return null;
   await ensureRouteDailySummaryTable();
   const conn = await getMySqlPool();
+  const resolvedCompanyId = companyId ? resolveLocationCompanyId(companyId) : null;
+  const companyClause = resolvedCompanyId ? " AND COALESCE(company_id, ?) = ?" : "";
+  const params = resolvedCompanyId
+    ? [userId, dateKey, resolvedCompanyId, resolvedCompanyId]
+    : [userId, dateKey];
   const [rows] = await conn.query<any[]>(
     `SELECT * FROM lff_route_daily_summaries
-     WHERE user_id = ? AND route_date = ?
+     WHERE user_id = ? AND route_date = ?${companyClause}
      LIMIT 1`,
-    [userId, dateKey]
+    params
   );
   const row = rows?.[0];
   if (!row) return null;

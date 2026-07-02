@@ -28,7 +28,7 @@ export type LocationRouteDeps = {
   resolveRouteSessionWindow: (events: any[]) => any;
   filterLocationLogsToSessionWindow: (logs: LocationLog[], sessionWindow: any) => LocationLog[];
   buildRouteTimeline: (userId: string, date: string, points: LocationLog[]) => any;
-  getRouteDailySummaryFromMySql: (userId: string, date: string) => Promise<any | null>;
+  getRouteDailySummaryFromMySql: (userId: string, date: string, companyId?: string | null) => Promise<any | null>;
   upsertRouteDailySummaryInMySql: (
     userId: string,
     date: string,
@@ -176,9 +176,30 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
         return;
       }
+      const companyId = await deps.resolveRequestCompanyId(req);
+      const preferDailySummary =
+        deps.isMySqlStateEnabled() && requestedDate < deps.toMumbaiDateKey(new Date());
+      if (preferDailySummary) {
+        try {
+          const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate, companyId);
+          if (summaryTimeline) {
+            res.json({
+              ...summaryTimeline,
+              intervalMinutes: 0,
+              directions: null,
+              attendanceEvents: summaryTimeline.attendanceEvents ?? [],
+            });
+            return;
+          }
+        } catch (error) {
+          console.warn(
+            "Failed to read historical route daily summary",
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
 
       const useRawPoints = deps.parseBooleanQuery(req.query.raw, false);
-      const companyId = await deps.resolveRequestCompanyId(req);
       const intervalMinutes = useRawPoints
         ? 0
         : deps.parseIntervalMinutes(req.query.interval_minutes, 1);
@@ -228,7 +249,7 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         : deps.downsampleLocationLogsByInterval(windowedPoints, intervalMinutes);
       if (!rawLocationPoints.length && deps.isMySqlStateEnabled()) {
         try {
-          const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate);
+          const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate, companyId);
           if (summaryTimeline) {
             res.json({
               ...summaryTimeline,
@@ -256,18 +277,42 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         },
       };
       if (points.length && deps.isMySqlStateEnabled()) {
-        void deps.upsertRouteDailySummaryInMySql(
+        const summaryWrite = deps.upsertRouteDailySummaryInMySql(
           userId,
           requestedDate,
           { ...timelineWithRawCount, source: "raw_logs" },
           attendanceEvents,
           rawLocationPoints.length,
-        ).catch((error) => {
-          console.warn(
-            "Failed to upsert route daily summary",
-            error instanceof Error ? error.message : error,
-          );
-        });
+        );
+        if (preferDailySummary) {
+          try {
+            await summaryWrite;
+            const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate, companyId);
+            if (summaryTimeline) {
+              res.json({
+                ...summaryTimeline,
+                intervalMinutes: 0,
+                directions: null,
+                attendanceEvents: summaryTimeline.attendanceEvents?.length
+                  ? summaryTimeline.attendanceEvents
+                  : attendanceEvents,
+              });
+              return;
+            }
+          } catch (error) {
+            console.warn(
+              "Failed to build historical route daily summary",
+              error instanceof Error ? error.message : error,
+            );
+          }
+        } else {
+          void summaryWrite.catch((error) => {
+            console.warn(
+              "Failed to upsert route daily summary",
+              error instanceof Error ? error.message : error,
+            );
+          });
+        }
       }
       const directions = await deps.getMapplsDirectionsForLogs(points, {
         resource: deps.firstString(req.query.routing_resource) || null,
