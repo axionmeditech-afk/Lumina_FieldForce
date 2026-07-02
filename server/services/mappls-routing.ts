@@ -138,6 +138,77 @@ function pickEvenlySpaced(points: LocationLog[], maxCount: number): LocationLog[
   return compactSequential(sampled);
 }
 
+function latLngToMeters(point: Pick<LocationLog, "latitude" | "longitude">, originLatitude: number) {
+  const metersPerDegreeLat = 111_320;
+  const metersPerDegreeLng = Math.max(1, 111_320 * Math.cos((originLatitude * Math.PI) / 180));
+  return {
+    x: point.longitude * metersPerDegreeLng,
+    y: point.latitude * metersPerDegreeLat,
+  };
+}
+
+function perpendicularDistanceMeters(
+  point: LocationLog,
+  lineStart: LocationLog,
+  lineEnd: LocationLog
+): number {
+  const originLatitude = (lineStart.latitude + lineEnd.latitude) / 2;
+  const p = latLngToMeters(point, originLatitude);
+  const a = latLngToMeters(lineStart, originLatitude);
+  const b = latLngToMeters(lineEnd, originLatitude);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const segmentLengthSquared = dx * dx + dy * dy;
+  if (segmentLengthSquared <= 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / segmentLengthSquared));
+  const projectionX = a.x + t * dx;
+  const projectionY = a.y + t * dy;
+  return Math.hypot(p.x - projectionX, p.y - projectionY);
+}
+
+function pickShapePreserving(points: LocationLog[], maxCount: number): LocationLog[] {
+  if (points.length <= maxCount) return [...points];
+  if (maxCount < 2) return [points[0]];
+
+  const keep = new Set<number>([0, points.length - 1]);
+  type SegmentCandidate = { start: number; end: number; farthest: number; distance: number };
+
+  const findCandidate = (start: number, end: number): SegmentCandidate | null => {
+    if (end <= start + 1) return null;
+    let farthest = -1;
+    let distance = -1;
+    for (let index = start + 1; index < end; index += 1) {
+      const currentDistance = perpendicularDistanceMeters(points[index], points[start], points[end]);
+      if (currentDistance > distance) {
+        distance = currentDistance;
+        farthest = index;
+      }
+    }
+    return farthest > start ? { start, end, farthest, distance } : null;
+  };
+
+  const queue: SegmentCandidate[] = [];
+  const initial = findCandidate(0, points.length - 1);
+  if (initial) queue.push(initial);
+
+  while (keep.size < maxCount && queue.length) {
+    queue.sort((a, b) => b.distance - a.distance);
+    const next = queue.shift();
+    if (!next || keep.has(next.farthest)) continue;
+    keep.add(next.farthest);
+    const left = findCandidate(next.start, next.farthest);
+    const right = findCandidate(next.farthest, next.end);
+    if (left) queue.push(left);
+    if (right) queue.push(right);
+  }
+
+  const sampled = Array.from(keep)
+    .sort((a, b) => a - b)
+    .map((index) => points[index]);
+
+  return compactSequential(sampled.length >= 2 ? sampled : pickEvenlySpaced(points, maxCount));
+}
+
 function decodePolyline(encoded: string, precision = 6): RoutePathPoint[] {
   const coordinates: RoutePathPoint[] = [];
   let index = 0;
@@ -421,7 +492,7 @@ export async function getMapplsDirectionsForLogs(
   const compacted = compactSequential(rawPoints);
   if (compacted.length < 2) return null;
 
-  const sampled = pickEvenlySpaced(compacted, MAX_ROUTE_POSITIONS);
+  const sampled = pickShapePreserving(compacted, MAX_ROUTE_POSITIONS);
   const baseFallbackPath = toRoutePathFromLogs(sampled);
 
   if (getPreferredRoutingProvider() === "google") {

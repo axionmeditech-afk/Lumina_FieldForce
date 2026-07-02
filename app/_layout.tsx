@@ -13,6 +13,7 @@ import { ThemeProvider, useAppTheme } from "@/contexts/ThemeContext";
 import {
   ensureBackgroundLocationTracking,
   flushBackgroundLocationQueue,
+  recoverStaleBackgroundLocationTracking,
   stopBackgroundLocationTracking,
 } from "@/lib/background-location";
 import { flushAttendanceQueue, getTodayAttendance } from "@/lib/attendance-api";
@@ -226,7 +227,9 @@ function AppShell() {
     const appStateSubscription = AppState.addEventListener("change", (state) => {
       if (!mounted) return;
       if (state === "active") {
-        void applyRuntimeSettings(undefined, { forceRecoveryCapture: true }).catch(() => {
+        void applyRuntimeSettings(undefined, { forceRecoveryCapture: true }).then(() =>
+          recoverStaleBackgroundLocationTracking()
+        ).catch(() => {
           // Keep UI stable if a resume-triggered sync fails.
         });
         return;
@@ -240,7 +243,9 @@ function AppShell() {
     });
     const trackingWatchdog = setInterval(() => {
       if (!mounted || AppState.currentState !== "active") return;
-      void applyRuntimeSettings().catch(() => {
+      void applyRuntimeSettings(undefined, { forceRecoveryCapture: true }).then(() =>
+        recoverStaleBackgroundLocationTracking()
+      ).catch(() => {
         // Keep route tracking self-healing without interrupting navigation.
       });
     }, LOCATION_RUNTIME_WATCHDOG_MS);

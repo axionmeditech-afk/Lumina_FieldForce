@@ -5,7 +5,7 @@ import { Platform } from "react-native";
 import { postLocationBatch, postTrackingStatus } from "@/lib/attendance-api";
 import { getBatteryLevelPercent } from "@/lib/battery";
 import { maybeSendLocationReminder } from "@/lib/location-reminders";
-import { addLocationLog, getCurrentUser, getSettings } from "@/lib/storage";
+import { addLocationLog, getCurrentUser, getSettings, isCheckedIn } from "@/lib/storage";
 import {
   hasGpsDisabledDuringCheckIn,
   recordGpsDisabledDuringCheckIn,
@@ -21,6 +21,10 @@ const BACKGROUND_LAST_FLUSH_ERROR_KEY = "@trackforce_background_last_flush_error
 const BACKGROUND_TRACKER_STATE_KEY = "@trackforce_background_tracker_state_v1";
 const MAX_BATCH_SIZE = 25;
 const RECOVERY_CAPTURE_MIN_INTERVAL_MS = 20 * 1000;
+const BACKGROUND_STALE_EVENT_MS = readPositiveIntegerEnv(
+  "EXPO_PUBLIC_FIELD_FORCE_BACKGROUND_STALE_EVENT_MS",
+  3 * 60 * 1000
+);
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -34,7 +38,7 @@ const BACKGROUND_LOCATION_INTERVAL_MS = readPositiveIntegerEnv(
 );
 const BACKGROUND_LOCATION_DISTANCE_METERS = readPositiveIntegerEnv(
   "EXPO_PUBLIC_FIELD_FORCE_LOCATION_DISTANCE_METERS",
-  5
+  1
 );
 
 export type BackgroundTrackerState =
@@ -488,14 +492,17 @@ export async function ensureBackgroundLocationTracking(options?: {
     try {
       await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
         accuracy: Location.Accuracy.BestForNavigation,
+        mayShowUserSettingsDialog: true,
         timeInterval: BACKGROUND_LOCATION_INTERVAL_MS,
         distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
+        deferredUpdatesInterval: BACKGROUND_LOCATION_INTERVAL_MS,
+        deferredUpdatesDistance: 0,
         pausesUpdatesAutomatically: false,
         showsBackgroundLocationIndicator: true,
         activityType: Location.ActivityType.OtherNavigation,
         foregroundService: {
           notificationTitle: "Lumina FieldForce route tracking",
-          notificationBody: "Live field route tracking is active.",
+          notificationBody: "Keep this notification active for complete live route tracking.",
           killServiceOnDestroy: false,
         },
       });
@@ -515,6 +522,53 @@ export async function ensureBackgroundLocationTracking(options?: {
     // Recovery should still report started even if upload waits for network.
   });
   return { started: true };
+}
+
+export async function recoverStaleBackgroundLocationTracking(): Promise<{
+  recovered: boolean;
+  reason?: string;
+}> {
+  if (Platform.OS === "web") {
+    return { recovered: false, reason: "Background location not supported on web." };
+  }
+  const currentUser = await getCurrentUser().catch(() => null);
+  if (!currentUser) {
+    return { recovered: false, reason: "No authenticated user." };
+  }
+  const checkedIn = await isCheckedIn().catch(() => false);
+  if (!checkedIn) {
+    return { recovered: false, reason: "User is not checked in." };
+  }
+  const settings = await getSettings().catch(() => null);
+  if (settings?.locationTracking === "false") {
+    return { recovered: false, reason: "Tracking disabled in settings." };
+  }
+  const [lastTaskEventAt, lastEnqueuedAt, trackingStatus] = await Promise.all([
+    readLocationHealth(BACKGROUND_LAST_TASK_EVENT_KEY),
+    readLocationHealth(BACKGROUND_LAST_ENQUEUED_KEY),
+    getBackgroundLocationTrackingStatus(),
+  ]);
+  const latestHealthAt = [lastTaskEventAt, lastEnqueuedAt]
+    .map((value) => (value ? new Date(value).getTime() : Number.NaN))
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => b - a)[0];
+  const stale =
+    !Number.isFinite(latestHealthAt) || Date.now() - latestHealthAt > BACKGROUND_STALE_EVENT_MS;
+  if (trackingStatus.started && !stale) {
+    return { recovered: false, reason: "Background tracker is fresh." };
+  }
+
+  await setBackgroundTrackerState(
+    "degraded",
+    stale
+      ? "No fresh background GPS event received; restarting tracker and capturing recovery point."
+      : "Background location service was not running; restarting tracker."
+  );
+  const result = await ensureBackgroundLocationTracking({ forceRecoveryCapture: true });
+  return {
+    recovered: result.started,
+    reason: result.reason,
+  };
 }
 
 export async function stopBackgroundLocationTracking(options?: {

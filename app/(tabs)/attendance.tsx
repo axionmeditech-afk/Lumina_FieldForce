@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
   Linking,
+  Platform,
   TextInput,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -97,6 +98,7 @@ const RELAXED_LOCATION_ACCURACY_METERS = 220;
 const TRACKING_TIME_INTERVAL_MS = 15 * 1000;
 const TRACKING_DISTANCE_INTERVAL_METERS = 0;
 const ROUTE_POINT_PERSIST_INTERVAL_MS = 15 * 1000;
+const BATTERY_OPTIMIZATION_PROMPT_KEY = "@trackforce_battery_optimization_prompt_v1";
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
@@ -886,6 +888,38 @@ export default function AttendanceScreen() {
     void Linking.openSettings();
   }, []);
 
+  const openBatteryOptimizationSettings = useCallback(() => {
+    if (Platform.OS !== "android") return;
+    const sendIntent = (Linking as typeof Linking & {
+      sendIntent?: (action: string, extras?: unknown[]) => Promise<void>;
+    }).sendIntent;
+
+    if (typeof sendIntent === "function") {
+      void sendIntent("android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS").catch(() => {
+        void Linking.openSettings();
+      });
+      return;
+    }
+
+    void Linking.openSettings();
+  }, []);
+
+  const maybePromptBatteryOptimization = useCallback(async () => {
+    if (Platform.OS !== "android") return;
+    const alreadyPrompted = await AsyncStorage.getItem(BATTERY_OPTIMIZATION_PROMPT_KEY);
+    if (alreadyPrompted === "true") return;
+
+    await AsyncStorage.setItem(BATTERY_OPTIMIZATION_PROMPT_KEY, "true");
+    Alert.alert(
+      "Keep Route Tracking Active",
+      "Set Lumina FieldForce battery usage to Unrestricted or Don't optimize so live route tracking keeps running after screen off.",
+      [
+        { text: "Later", style: "cancel" },
+        { text: "Open Settings", onPress: openBatteryOptimizationSettings },
+      ]
+    );
+  }, [openBatteryOptimizationSettings]);
+
   const applyAhmedabadOfficeLocationLock = useCallback(
     (location: LocationObject): LocationObject => location,
     []
@@ -1507,11 +1541,13 @@ export default function AttendanceScreen() {
       const strictLocation = await refreshLocation(true);
       if (!strictLocation) {
         Alert.alert("Location Unavailable", "Could not fetch live GPS location. Please try again.");
+      } else {
+        void maybePromptBatteryOptimization();
       }
     } finally {
       setPermissionLoading(false);
     }
-  }, [refreshLocation, showPermissionBlockedAlert]);
+  }, [maybePromptBatteryOptimization, refreshLocation, showPermissionBlockedAlert]);
 
   const animateSuccess = useCallback(() => {
     successScale.value = withSequence(withTiming(1.04, { duration: 140 }), withTiming(1, { duration: 160 }));
@@ -1520,7 +1556,8 @@ export default function AttendanceScreen() {
   const triggerPostCheckInServices = useCallback(() => {
     const jobs: Promise<unknown>[] = [flushAttendanceQueue(), beginTracking(), refreshLocation()];
     void Promise.allSettled(jobs);
-  }, [beginTracking, refreshLocation]);
+    void maybePromptBatteryOptimization();
+  }, [beginTracking, maybePromptBatteryOptimization, refreshLocation]);
 
   const getFastAttendanceEvidence = useCallback(async () => {
     const cachedLocation = latestLocationRef.current;

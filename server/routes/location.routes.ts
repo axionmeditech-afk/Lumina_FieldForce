@@ -48,6 +48,30 @@ const noStoreHeaders = {
 };
 
 export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
+  const buildRoutingOptions = (req: any) => ({
+    resource: deps.firstString(req.query.routing_resource) || null,
+    profile: deps.firstString(req.query.routing_profile) || null,
+    overview: deps.firstString(req.query.routing_overview) || null,
+    geometries: deps.firstString(req.query.routing_geometries) || null,
+    alternatives: deps.parseBooleanQuery(req.query.routing_alternatives, false),
+    steps: deps.parseBooleanQuery(req.query.routing_steps, true),
+    region: deps.firstString(req.query.routing_region) || null,
+    routeType: deps.parseOptionalInteger(req.query.routing_rtype),
+  });
+
+  const buildRouteDirections = async (points: LocationLog[], req: any) => {
+    if (!Array.isArray(points) || points.length < 2) return null;
+    try {
+      return await deps.getMapplsDirectionsForLogs(points, buildRoutingOptions(req));
+    } catch (error) {
+      console.warn(
+        "Failed to build road-snapped route directions",
+        error instanceof Error ? error.message : error,
+      );
+      return null;
+    }
+  };
+
   app.get(
     "/api/admin/live-map",
     deps.requireAuth,
@@ -183,10 +207,11 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         try {
           const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate, companyId);
           if (summaryTimeline) {
+            const directions = await buildRouteDirections(summaryTimeline.points, req);
             res.json({
               ...summaryTimeline,
               intervalMinutes: 0,
-              directions: null,
+              directions,
               attendanceEvents: summaryTimeline.attendanceEvents ?? [],
             });
             return;
@@ -251,10 +276,11 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
         try {
           const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate, companyId);
           if (summaryTimeline) {
+            const directions = await buildRouteDirections(summaryTimeline.points, req);
             res.json({
               ...summaryTimeline,
               intervalMinutes,
-              directions: null,
+              directions,
               attendanceEvents: summaryTimeline.attendanceEvents?.length
                 ? summaryTimeline.attendanceEvents
                 : attendanceEvents,
@@ -289,10 +315,11 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
             await summaryWrite;
             const summaryTimeline = await deps.getRouteDailySummaryFromMySql(userId, requestedDate, companyId);
             if (summaryTimeline) {
+              const directions = await buildRouteDirections(summaryTimeline.points, req);
               res.json({
                 ...summaryTimeline,
                 intervalMinutes: 0,
-                directions: null,
+                directions,
                 attendanceEvents: summaryTimeline.attendanceEvents?.length
                   ? summaryTimeline.attendanceEvents
                   : attendanceEvents,
@@ -314,16 +341,7 @@ export function registerLocationRoutes(app: Express, deps: LocationRouteDeps) {
           });
         }
       }
-      const directions = await deps.getMapplsDirectionsForLogs(points, {
-        resource: deps.firstString(req.query.routing_resource) || null,
-        profile: deps.firstString(req.query.routing_profile) || null,
-        overview: deps.firstString(req.query.routing_overview) || null,
-        geometries: deps.firstString(req.query.routing_geometries) || null,
-        alternatives: deps.parseBooleanQuery(req.query.routing_alternatives, false),
-        steps: deps.parseBooleanQuery(req.query.routing_steps, true),
-        region: deps.firstString(req.query.routing_region) || null,
-        routeType: deps.parseOptionalInteger(req.query.routing_rtype),
-      });
+      const directions = await buildRouteDirections(points, req);
 
       res.json({
         ...timelineWithRawCount,
