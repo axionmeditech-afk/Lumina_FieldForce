@@ -181,10 +181,10 @@ function AppShell() {
         user.name,
         user.role === "salesperson"
       );
-      const checkedIn = derivedCheckedIn ?? checkedInFlag;
-      if (checkedIn !== checkedInFlag) {
-        await setCheckedIn(checkedIn);
+      if (derivedCheckedIn === true && !checkedInFlag) {
+        await setCheckedIn(true);
       }
+      const checkedIn = checkedInFlag || derivedCheckedIn === true;
       if (!checkedIn) {
         await stopBackgroundLocationTracking({
           state: "checked_out",

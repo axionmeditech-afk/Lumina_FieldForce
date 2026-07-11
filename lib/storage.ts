@@ -3966,19 +3966,29 @@ export async function getGeofences(): Promise<Geofence[]> {
 }
 
 export async function getGeofencesForUser(userId: string): Promise<Geofence[]> {
-  const geofences = await getGeofences();
   const currentUser = await getCurrentUser().catch(() => null);
   const activeCompanyId = await getActiveCompanyId();
+  const allGeofences = await getRawList<Geofence>(KEYS.GEOFENCES);
+  const allowedCompanyIds = new Set(
+    currentUser?.id === userId
+      ? normalizeCompanyIds(currentUser.companyIds, currentUser.companyId)
+      : activeCompanyId
+        ? [activeCompanyId]
+        : []
+  );
+  const geofences = allGeofences.filter((zone) => {
+    const zoneCompanyId = normalizeWhitespace(zone.companyId || "");
+    return !zoneCompanyId || allowedCompanyIds.has(zoneCompanyId);
+  });
   const directZones = geofences.filter((zone) => zone.isActive && zone.assignedEmployeeIds.includes(userId));
   if (currentUser?.id !== userId || currentUser.role !== "employee") {
     return directZones;
   }
 
-  const officeZoneId = activeCompanyId ? `office_${activeCompanyId}` : null;
   const officeZones = geofences.filter((zone) => {
     if (!zone.isActive) return false;
-    if (officeZoneId && zone.id === officeZoneId) return true;
-    return Boolean(activeCompanyId && zone.companyId === activeCompanyId && zone.id.startsWith("office_"));
+    if (Array.from(allowedCompanyIds).some((companyId) => zone.id === `office_${companyId}`)) return true;
+    return Boolean(zone.companyId && allowedCompanyIds.has(zone.companyId) && zone.id.startsWith("office_"));
   });
   const byId = new Map<string, Geofence>();
   for (const zone of [...directZones, ...officeZones]) {

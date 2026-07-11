@@ -10,6 +10,8 @@ export function registerGeofenceRoutes(app: Express, deps: GeofenceRouteDeps) {
     firstString,
     ensureUserMatch,
     resolveRequestCompanyId,
+    getRequestUser,
+    normalizeCompanyIds,
     listGeofencesForUserResolved,
     storage,
     upsertGeofenceInMySql,
@@ -26,8 +28,15 @@ export function registerGeofenceRoutes(app: Express, deps: GeofenceRouteDeps) {
       return;
     }
     const companyId = await resolveRequestCompanyId(req);
+    const requestUser = getRequestUser(req);
+    const companyIds = normalizeCompanyIds([
+      ...(requestUser?.companyIds || []),
+      requestUser?.companyId,
+      companyId,
+    ]);
     const geofences = await listGeofencesForUserResolved(userId, {
       companyId,
+      companyIds,
       role: req.auth?.role ?? null,
     });
     res.json(geofences);

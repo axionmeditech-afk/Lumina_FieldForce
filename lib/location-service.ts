@@ -20,6 +20,7 @@ export interface VerifiedLocationOptions extends AccurateLocationOptions {
   requiredStableSamples?: number;
   maxDriftMeters?: number;
   sampleWaitMs?: number;
+  timeoutMs?: number;
 }
 
 export interface VerifiedLocationEvidence {
@@ -35,11 +36,30 @@ const DEFAULT_LOCATION_ATTEMPTS = 3;
 const SAMPLE_WAIT_MS = 1200;
 const DEFAULT_STABLE_SAMPLES = 2;
 const DEFAULT_MAX_DRIFT_METERS = 55;
+const DEFAULT_LOCATION_TIMEOUT_MS = 15000;
+const MAX_SINGLE_FIX_WAIT_MS = 6000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+export async function getCurrentPositionWithTimeout(
+  options: Location.LocationOptions,
+  timeoutMs = MAX_SINGLE_FIX_WAIT_MS
+): Promise<LocationObject> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      Location.getCurrentPositionAsync(options),
+      new Promise<LocationObject>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("GPS fix timed out.")), Math.max(500, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function getAccuracyScore(location: LocationObject | null): number {
@@ -142,6 +162,8 @@ export async function getVerifiedLocationEvidence(
   );
   const maxDriftMeters = Math.max(10, options?.maxDriftMeters ?? DEFAULT_MAX_DRIFT_METERS);
   const sampleWaitMs = Math.max(300, options?.sampleWaitMs ?? SAMPLE_WAIT_MS);
+  const timeoutMs = Math.max(2000, options?.timeoutMs ?? DEFAULT_LOCATION_TIMEOUT_MS);
+  const deadlineMs = Date.now() + timeoutMs;
 
   const lastKnown = await getLastKnownLocationSafe({ requiredAccuracy: minAccuracyMeters });
 
@@ -162,10 +184,21 @@ export async function getVerifiedLocationEvidence(
   }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const fix = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.BestForNavigation,
-      mayShowUserSettingsDialog: true,
-    });
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) break;
+    let fix: LocationObject;
+    try {
+      fix = await getCurrentPositionWithTimeout(
+        {
+          accuracy: Location.Accuracy.BestForNavigation,
+          mayShowUserSettingsDialog: true,
+        },
+        Math.min(MAX_SINGLE_FIX_WAIT_MS, remainingMs)
+      );
+    } catch {
+      if (Date.now() >= deadlineMs) break;
+      continue;
+    }
     capturedSamples.push(fix);
     if (getAccuracyScore(fix) < getAccuracyScore(best)) {
       best = fix;
@@ -186,8 +219,8 @@ export async function getVerifiedLocationEvidence(
         return buildEvidence(stableSamples, best ?? fix);
       }
     }
-    if (attempt < maxAttempts) {
-      await sleep(sampleWaitMs);
+    if (attempt < maxAttempts && Date.now() < deadlineMs) {
+      await sleep(Math.min(sampleWaitMs, Math.max(0, deadlineMs - Date.now())));
     }
   }
 

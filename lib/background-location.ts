@@ -32,13 +32,19 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   return Math.trunc(parsed);
 }
 
+function readNonNegativeIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.trunc(parsed);
+}
+
 const BACKGROUND_LOCATION_INTERVAL_MS = readPositiveIntegerEnv(
   "EXPO_PUBLIC_FIELD_FORCE_LOCATION_INTERVAL_MS",
   15 * 1000
 );
-const BACKGROUND_LOCATION_DISTANCE_METERS = readPositiveIntegerEnv(
+const BACKGROUND_LOCATION_DISTANCE_METERS = readNonNegativeIntegerEnv(
   "EXPO_PUBLIC_FIELD_FORCE_LOCATION_DISTANCE_METERS",
-  1
+  0
 );
 
 export type BackgroundTrackerState =
@@ -319,6 +325,12 @@ async function handleBackgroundLocations(data: unknown): Promise<void> {
   const currentUser = await getCurrentUser().catch(() => null);
   if (!currentUser) return;
 
+  const checkedIn = await isCheckedIn().catch(() => false);
+  if (!checkedIn) {
+    await setBackgroundTrackerState("checked_out", "Ignoring background GPS because user is checked out.");
+    return;
+  }
+
   const settings = await getSettings().catch(() => null);
   if (settings?.locationTracking === "false") return;
 
@@ -418,6 +430,7 @@ async function captureForegroundRecoveryPoint(user: { id: string }): Promise<boo
 if (Platform.OS !== "web" && !TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
   TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
     if (error) {
+      await setBackgroundTrackerState("degraded", error.message || "Background GPS task error.");
       return;
     }
     try {
@@ -461,6 +474,16 @@ export async function ensureBackgroundLocationTracking(options?: {
     return { started: false, reason: "Tracking disabled in settings." };
   }
 
+  const checkedIn = await isCheckedIn().catch(() => false);
+  if (!checkedIn) {
+    await setBackgroundTrackerState("checked_out", "User is checked out.");
+    await stopBackgroundLocationTracking({
+      state: "checked_out",
+      reason: "User is checked out.",
+    });
+    return { started: false, reason: "User is checked out." };
+  }
+
   let foreground = await Location.getForegroundPermissionsAsync().catch(() => null);
   if (!foreground?.granted && foreground?.canAskAgain) {
     foreground = await Location.requestForegroundPermissionsAsync().catch(() => foreground);
@@ -497,6 +520,7 @@ export async function ensureBackgroundLocationTracking(options?: {
         distanceInterval: BACKGROUND_LOCATION_DISTANCE_METERS,
         deferredUpdatesInterval: BACKGROUND_LOCATION_INTERVAL_MS,
         deferredUpdatesDistance: 0,
+        deferredUpdatesTimeout: Math.max(BACKGROUND_LOCATION_INTERVAL_MS * 2, 30_000),
         pausesUpdatesAutomatically: false,
         showsBackgroundLocationIndicator: true,
         activityType: Location.ActivityType.OtherNavigation,

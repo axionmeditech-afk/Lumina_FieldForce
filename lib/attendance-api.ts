@@ -1034,9 +1034,11 @@ export async function deleteStockist(stockistId: string): Promise<{ id: string }
 }
 
 export async function getUserGeofences(userId: string): Promise<Geofence[]> {
-  return fetchJson<Geofence[]>(`/geofences/user/${encodeURIComponent(userId)}`, {
-    method: "GET",
-  });
+  return fetchJsonWithTimeout<Geofence[]>(
+    `/geofences/user/${encodeURIComponent(userId)}`,
+    { method: "GET" },
+    8000
+  );
 }
 
 export async function createGeofence(payload: Partial<Geofence>): Promise<Geofence> {

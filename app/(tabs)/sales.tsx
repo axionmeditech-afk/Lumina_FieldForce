@@ -65,6 +65,7 @@ import {
   getLocationLogs,
   getQuickSaleLocationLogs,
   getTasks,
+  isCheckedIn,
   resolveAssignedStockistForUser,
   removeTask,
   STORAGE_KEYS,
@@ -79,6 +80,10 @@ import { buildRouteTimeline } from "@/lib/route-analytics";
 import { formatMumbaiDateTime, formatMumbaiTime, getMumbaiDateEndIso, isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
 import { maybeSendLocationReminder, syncLocationReminderCatalog } from "@/lib/location-reminders";
 import { getLastKnownLocationSafe } from "@/lib/location-service";
+import {
+  ensureBackgroundLocationTracking,
+  flushBackgroundLocationQueue,
+} from "@/lib/background-location";
 import { isSalesRole } from "@/lib/role-access";
 import { haversineDistanceMeters } from "@/lib/geofence";
 import type {
@@ -4988,6 +4993,21 @@ export default function SalesScreen() {
     [audioUri, customerName, elapsedMs, interimTranscript, loadData, transcriptDraft, user?.id, user?.name]
   );
 
+  const refreshFieldRouteTracking = useCallback(async () => {
+    if (!user?.id || isAdminViewer) return;
+    const checkedIn = await isCheckedIn().catch(() => false);
+    if (!checkedIn) return;
+
+    const trackingResult = await ensureBackgroundLocationTracking({
+      forceRecoveryCapture: true,
+    });
+    if (trackingResult.started) {
+      await flushBackgroundLocationQueue({ force: true }).catch(() => {
+        // Queued route points will retry from the background task/watchdog.
+      });
+    }
+  }, [isAdminViewer, user?.id]);
+
   const handleVisitArrived = useCallback(
     async (task: Task) => {
       if (!user || isAdminViewer) return;
@@ -5032,6 +5052,7 @@ export default function SalesScreen() {
           module: "Sales Intelligence",
         });
         setActiveVisitTaskId(task.id);
+        void refreshFieldRouteTracking();
         await loadData();
       } catch (error) {
         Alert.alert(
@@ -5047,6 +5068,7 @@ export default function SalesScreen() {
       getBlockingVisitTask,
       isAdminViewer,
       loadData,
+      refreshFieldRouteTracking,
       resolveVisitArrivalSnapshot,
       user,
       visitActionTaskId,
@@ -5091,6 +5113,7 @@ export default function SalesScreen() {
           module: "Sales Intelligence",
         });
         setActiveVisitTaskId(task.id);
+        void refreshFieldRouteTracking();
         void ensureConversationRecommendationProducts().catch(() => {});
         const started = await startRecording({
           customerNameOverride: getVisitLabel(task),
@@ -5122,6 +5145,7 @@ export default function SalesScreen() {
       isAdminViewer,
       setLocalMeetingCaptureTaskId,
       loadData,
+      refreshFieldRouteTracking,
       startRecording,
       user,
       visitActionTaskId,
@@ -5441,6 +5465,7 @@ export default function SalesScreen() {
         timestamp: nowIso,
         module: "Sales Intelligence",
       });
+      void refreshFieldRouteTracking();
       setLocalMeetingCaptureTaskId(null);
       setActiveVisitTaskId(null);
       setDepartureNotesModalVisible(false);
@@ -5479,6 +5504,7 @@ export default function SalesScreen() {
     departureCustomerPhone,
     departureNotesDraft,
     departureNotesTask,
+    refreshFieldRouteTracking,
     isAdminViewer,
     loadData,
     loadPosData,

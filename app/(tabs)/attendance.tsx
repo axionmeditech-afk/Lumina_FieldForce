@@ -69,6 +69,7 @@ import {
 } from "@/lib/background-location";
 import {
   ensureLocationServicesEnabled,
+  getCurrentPositionWithTimeout,
   getLastKnownLocationSafe,
   getVerifiedLocationEvidence,
   getLocationPermissionSnapshot,
@@ -826,6 +827,7 @@ export default function AttendanceScreen() {
   const [collapsedAttendanceCompanyIds, setCollapsedAttendanceCompanyIds] = useState<Set<string>>(new Set());
   const [geofences, setGeofences] = useState<Geofence[]>([]);
   const [geofencesLoaded, setGeofencesLoaded] = useState(false);
+  const [geofenceLoadError, setGeofenceLoadError] = useState<string | null>(null);
   const [evaluation, setEvaluation] = useState<GeofenceEvaluation>({
     inside: false,
     insideConfirmed: false,
@@ -1098,21 +1100,43 @@ export default function AttendanceScreen() {
 
   const loadGeofenceAssignments = useCallback(async () => {
     if (!user?.id) return;
+    setGeofencesLoaded(false);
+    setGeofenceLoadError(null);
     try {
       const cached = await getGeofencesForUser(user.id);
       try {
         const online = await isBackendReachable();
         if (online) {
           const zones = await getUserGeofences(user.id);
-          if (zones.length > 0) {
-            setGeofences(zones);
-            return;
+          await Promise.all(zones.map((zone) => upsertGeofence(zone)));
+          setGeofences(zones.length > 0 ? zones : cached);
+          if (zones.length === 0 && cached.length === 0) {
+            setGeofenceLoadError(
+              "No office location is configured for any company attached to this account."
+            );
           }
+          return;
         }
-      } catch {
-        // fallback handled below
+        setGeofenceLoadError(
+          cached.length > 0
+            ? "Using saved office location while the server is unavailable."
+            : "Attendance server is unavailable. Check your connection and retry."
+        );
+      } catch (error) {
+        setGeofenceLoadError(
+          cached.length > 0
+            ? "Using saved office location because the latest assignment could not be loaded."
+            : error instanceof Error
+              ? error.message
+              : "Office assignment could not be loaded."
+        );
       }
       setGeofences(cached);
+    } catch (error) {
+      setGeofences([]);
+      setGeofenceLoadError(
+        error instanceof Error ? error.message : "Office assignment could not be loaded."
+      );
     } finally {
       setGeofencesLoaded(true);
     }
@@ -1319,6 +1343,7 @@ export default function AttendanceScreen() {
           signalWeak: true,
           warning: "GPS services are disabled",
         });
+        setGpsLoading(false);
         return null;
       }
 
@@ -1359,10 +1384,13 @@ export default function AttendanceScreen() {
       } catch {
         let fallbackLocation: LocationObject | null = null;
         try {
-          fallbackLocation = await ExpoLocation.getCurrentPositionAsync({
-            accuracy: strict ? ExpoLocation.Accuracy.Balanced : ExpoLocation.Accuracy.Low,
-            mayShowUserSettingsDialog: true,
-          });
+          fallbackLocation = await getCurrentPositionWithTimeout(
+            {
+              accuracy: strict ? ExpoLocation.Accuracy.Balanced : ExpoLocation.Accuracy.Low,
+              mayShowUserSettingsDialog: true,
+            },
+            5000
+          );
         } catch {
           // fall through to last-known fallback
         }
@@ -1423,11 +1451,17 @@ export default function AttendanceScreen() {
           signalWeak: true,
           warning: "Unable to fetch current GPS location",
         });
+        setGpsLoading(false);
         return null;
       }
     },
     [applyAhmedabadOfficeLocationLock, checkedInState, handleLocationUpdate, user]
   );
+
+  useEffect(() => {
+    if (!geofencesLoaded || !latestLocationRef.current) return;
+    void handleLocationUpdate(latestLocationRef.current, { skipRoutePersistence: true });
+  }, [geofencesLoaded, geofences, handleLocationUpdate]);
 
   const beginTracking = useCallback(async () => {
     if (!user?.id) return;
@@ -2796,6 +2830,19 @@ setOfficeLocationName((current) => current.trim() || result.label);
         {gpsEvidence ? (
           <Text style={[styles.gpsEvidenceText, { color: colors.textSecondary }]}>{gpsEvidence}</Text>
         ) : null}
+        {geofenceLoadError ? (
+          <Pressable
+            onPress={() => void loadGeofenceAssignments()}
+            disabled={!geofencesLoaded}
+            style={[styles.geofenceErrorRow, { borderColor: colors.warning + "66" }]}
+          >
+            <Ionicons name="warning-outline" size={17} color={colors.warning} />
+            <Text style={[styles.geofenceErrorText, { color: colors.textSecondary }]}>
+              {geofenceLoadError}
+            </Text>
+            <Ionicons name="refresh-outline" size={18} color={colors.primary} />
+          </Pressable>
+        ) : null}
 
         <View style={styles.statRow}>
           <View style={[styles.statCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
@@ -3005,7 +3052,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
           <Text style={[styles.helperWarning, { color: colors.danger }]}>
             {isOfficeGeofenceAttendance
               ? !employeeHasOfficeZone
-                ? "Company office location is not configured yet. Ask admin to add office coordinates in Company creation."
+                ? geofenceLoadError || "Company office location is not configured yet. Ask admin to add office coordinates."
                 : "Move within 500m of the assigned office location to enable employee check-in."
               : "Wait for location to be ready, then verify with face unlock, fingerprint, or device PIN/password to complete secure check-in."}
           </Text>
@@ -3432,6 +3479,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: -6,
     marginBottom: 10,
+  },
+  geofenceErrorRow: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  geofenceErrorText: {
+    flex: 1,
+    fontFamily: "Inter_400Regular",
+    fontSize: 12,
   },
   adminNoticePanel: {
     borderWidth: 1,

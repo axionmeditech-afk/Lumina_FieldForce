@@ -3514,14 +3514,22 @@ async function listCompanyOfficeGeofencesFromMySql(companyId: string | null | un
 
 async function listGeofencesForUserResolved(
   userId: string,
-  options: { companyId?: string | null; role?: UserRole | null } = {}
+  options: { companyId?: string | null; companyIds?: string[]; role?: UserRole | null } = {}
 ): Promise<Geofence[]> {
-  const includeCompanyOffice = options.role === "employee" && Boolean(options.companyId);
+  const authorizedCompanyIds = normalizeCompanyIds([
+    ...(options.companyIds || []),
+    options.companyId,
+  ]);
+  const includeCompanyOffice = options.role === "employee" && authorizedCompanyIds.length > 0;
   if (isMySqlStateEnabled()) {
     try {
       const zones = await listGeofencesForUserFromMySql(userId);
       if (includeCompanyOffice) {
-        const officeZones = await listCompanyOfficeGeofencesFromMySql(options.companyId);
+        const officeZones = (
+          await Promise.all(
+            authorizedCompanyIds.map((companyId) => listCompanyOfficeGeofencesFromMySql(companyId))
+          )
+        ).flat();
         const merged = mergeGeofencesById([...zones, ...officeZones]);
         if (merged.length) return merged;
       }
@@ -3536,7 +3544,9 @@ async function listGeofencesForUserResolved(
   const zones = await storage.listGeofencesForUser(userId);
   if (!includeCompanyOffice) return zones;
   const allZones = await storage.listGeofences();
-  const officeZones = allZones.filter((zone) => isCompanyOfficeGeofence(zone, options.companyId));
+  const officeZones = allZones.filter((zone) =>
+    authorizedCompanyIds.some((companyId) => isCompanyOfficeGeofence(zone, companyId))
+  );
   return mergeGeofencesById([...zones, ...officeZones]);
 }
 
@@ -8688,6 +8698,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     firstString,
     ensureUserMatch,
     resolveRequestCompanyId,
+    getRequestUser,
+    normalizeCompanyIds,
     listGeofencesForUserResolved,
     storage,
     upsertGeofenceInMySql,
