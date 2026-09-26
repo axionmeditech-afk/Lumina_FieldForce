@@ -49,7 +49,6 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     isSalesRole,
     authUsersByEmail,
     DEFAULT_COMPANY_NAME,
-    syncStockistSalespersonAssignmentInMySql,
     normalizeLoginKey,
     buildLoginFromEmailAndName,
     getCompanyIdFromName,
@@ -632,14 +631,6 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
           await upsertAuthUserInMySql(
             recordToPersist,
             reviewedRequest.requestedCompanyName
-          );
-        }
-        const reviewedSalespersonId =
-          action === "approved" && reviewedUser ? reviewedUser.id : authRecord?.user.id || "";
-        if (reviewedSalespersonId) {
-          await syncStockistSalespersonAssignmentInMySql(
-            reviewedSalespersonId,
-            action === "approved" && isSalesRole(finalRole) ? assignedStockistId : null
           );
         }
         if (action === "approved" && reviewedUser?.role === "admin") {

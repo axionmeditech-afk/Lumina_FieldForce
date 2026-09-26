@@ -84,3 +84,5 @@ com.facebook.react.devsupport.BundleDownloader*
 *.key
 *.mobileprovision
 visual_paradigm_icon_sequence_map.txt
+# Local attendance bundle verification
+.attendance-check-*/

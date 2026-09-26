@@ -25,11 +25,7 @@
       "bundleIdentifier": "com.luminafieldforce",
       "buildNumber": "15",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false,
-        "UIBackgroundModes": [
-          "location",
-          "audio"
-        ]
+        "ITSAppUsesNonExemptEncryption": false
       },
       "config": {
         "googleMapsApiKey": "YOUR_GOOGLE_MAPS_IOS_API_KEY"
@@ -41,14 +37,6 @@
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION",
-        "FOREGROUND_SERVICE_MICROPHONE",
-        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-        "RECORD_AUDIO",
-        "POST_NOTIFICATIONS",
-        "WAKE_LOCK",
         "VIBRATE"
       ],
       "adaptiveIcon": {
@@ -59,7 +47,14 @@
         "googleMaps": {
           "apiKey": "YOUR_GOOGLE_MAPS_ANDROID_API_KEY"
         }
-      }
+      },
+      "blockedPermissions": [
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/images/logo.png"
@@ -68,7 +63,6 @@
       "expo-router",
       "expo-font",
       "expo-web-browser",
-      "expo-notifications",
       [
         "expo-local-authentication",
         {
@@ -78,28 +72,10 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Lumina FieldForce uses your location to verify geo-fenced attendance at your assigned branch.",
-          "locationAlwaysAndWhenInUsePermission": "Lumina FieldForce uses your location in background to prevent attendance spoofing and keep secure logs.",
-          "isIosBackgroundLocationEnabled": true,
-          "isAndroidBackgroundLocationEnabled": true,
-          "isAndroidForegroundServiceEnabled": true
-        }
-      ],
-      [
-        "expo-speech-recognition",
-        {
-          "microphonePermission": "Lumina FieldForce needs microphone access to record and transcribe sales conversations.",
-          "speechRecognitionPermission": "Lumina FieldForce uses speech recognition to convert recorded conversations into transcripts.",
-          "androidSpeechServicePackages": [
-            "com.google.android.googlequicksearchbox",
-            "com.google.android.as"
-          ]
-        }
-      ],
-      [
-        "expo-image-picker",
-        {
-          "cameraPermission": "Lumina FieldForce requires camera access for live attendance selfie verification."
+          "locationWhenInUsePermission": "Your location verifies attendance inside your assigned office geofence.",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": false
         }
       ]
     ],

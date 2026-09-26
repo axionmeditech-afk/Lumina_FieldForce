@@ -26,7 +26,6 @@ import type { UserRole } from "@/lib/types";
 
 const SIGNUP_ROLES: { label: string; value: UserRole }[] = [
   { label: "Admin", value: "admin" },
-  { label: "On Field Employee", value: "salesperson" },
   { label: "Employee", value: "employee" },
   { label: "Manager", value: "manager" },
   { label: "HR", value: "hr" },
@@ -45,7 +44,7 @@ export default function LoginScreen() {
   const [companyName, setCompanyName] = useState("");
   const [branch, setBranch] = useState("");
   const [pincode, setPincode] = useState("");
-  const [role, setRole] = useState<UserRole>("salesperson");
+  const [role, setRole] = useState<UserRole>("employee");
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -56,7 +55,7 @@ export default function LoginScreen() {
     return "";
   }, [mode]);
   const selectedRoleLabel = useMemo(
-    () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "On Field Employee",
+    () => SIGNUP_ROLES.find((entry) => entry.value === role)?.label ?? "Employee",
     [role]
   );
   const signInLabel = mode === "signin" ? "Email or Username" : "Email Address";
@@ -74,7 +73,7 @@ export default function LoginScreen() {
         return;
       }
       if (isSalesRole(role) && (!branch.trim() || !pincode.trim())) {
-        Alert.alert("Missing Fields", "Please enter location and pincode for sales staff");
+        Alert.alert("Missing Fields", "Please enter your location and pincode");
         return;
       }
     }
@@ -185,7 +184,7 @@ export default function LoginScreen() {
               >
                 <View style={[styles.heroBadgeDot, { backgroundColor: "#FFFFFF" }]} />
                 <Text style={[styles.heroBadgeText, { color: "#EAF3FF" }]}>
-                  Enterprise sales workspace
+                  Attendance & geofencing
                 </Text>
               </View>
               <Text style={[styles.subtitle, { color: "rgba(240,247,255,0.84)" }]}>{screenSubtitle}</Text>

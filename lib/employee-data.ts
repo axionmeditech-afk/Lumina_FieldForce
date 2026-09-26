@@ -1,23 +1,9 @@
-import type { AppUser, BankAccount, Employee, SalaryRecord } from "@/lib/types";
+import type { AppUser, Employee } from "@/lib/types";
 import {
   getCurrentUser,
   getEmployees as getEmployeesLocal,
 } from "@/lib/storage";
-import {
-  deleteBankAccountRemote,
-  deleteSalaryRecordRemote,
-  getDolibarrUsers,
-  getUsersRemote,
-  type DolibarrUser,
-  listBankAccountsRemote,
-  getRemoteState,
-  listSalaryRecordsRemote,
-  saveBankAccountRemote,
-  setRemoteState,
-  syncBankAccountToDolibarr,
-  saveSalaryRecordRemote,
-  updateSalaryStatusRemote,
-} from "@/lib/attendance-api";
+import { getUsersRemote, type DolibarrUser, getRemoteState, setRemoteState } from "@/lib/attendance-api";
 import { isSystemAdministratorAccount } from "@/lib/attendance-roster";
 
 const EMPLOYEE_STATE_KEY = "@trackforce_employees";
@@ -231,12 +217,7 @@ async function loadRosterUsers(currentUser: AppUser): Promise<DolibarrUser[]> {
     scopedUsers = [];
   }
 
-  try {
-    const dolibarrUsers = await getDolibarrUsers({ limit: 500, sortfield: "lastname", sortorder: "asc" });
-    return [...scopedUsers, ...dolibarrUsers];
-  } catch {
-    return scopedUsers;
-  }
+  return scopedUsers;
 }
 
 function mergeEmployees(
@@ -392,156 +373,4 @@ export async function getEmployees(): Promise<Employee[]> {
   }
 
   return finalEmployees;
-}
-
-export async function getDolibarrEmployees(): Promise<Employee[]> {
-  const currentUser = await getCurrentUser();
-  if (!currentUser || !["admin", "hr", "manager"].includes(currentUser.role)) {
-    return [];
-  }
-  try {
-    const approvedEmployees = await getEmployeesLocal();
-    const scopedEmployees = approvedEmployees.filter(
-      (employee) => employee.companyId === currentUser.companyId
-    );
-    const dolibarrUsers = await loadRosterUsers(currentUser);
-    const dolibarrEmployees = dedupeEmployees(mapDolibarrUsersToEmployees(dolibarrUsers, currentUser));
-    const filteredLocal = filterEmployeesByActiveRoster(scopedEmployees, dolibarrEmployees, currentUser);
-    return mergeEmployees(filteredLocal, dolibarrEmployees, currentUser.companyId, {
-      includeUnmatchedExtras: true,
-    });
-  } catch {
-    return dedupeEmployees(await getEmployeesLocal());
-  }
-}
-
-export async function getSalaries(): Promise<SalaryRecord[]> {
-  const currentUser = await getCurrentUser();
-  if (!currentUser) {
-    return await listSalaryRecordsRemote();
-  }
-
-  if (["admin", "hr", "manager"].includes(currentUser.role)) {
-    return await listSalaryRecordsRemote();
-  }
-
-  return await listSalaryRecordsRemote({
-    userId: currentUser.id,
-    userEmail: currentUser.email,
-    userName: currentUser.name,
-    userLogin: currentUser.login,
-  });
-}
-
-export async function saveSalaryRecord(
-  record: SalaryRecord
-): Promise<{ record: SalaryRecord; synced: boolean; dolibarr?: { ok: boolean; message: string } }> {
-  const currentUser = await getCurrentUser();
-  const companyId = record.companyId || currentUser?.companyId || "company_default";
-  const nextRecord: SalaryRecord = {
-    ...record,
-    companyId,
-  };
-
-  await saveSalaryRecordRemote(nextRecord);
-
-  return {
-    record: nextRecord,
-    synced: true,
-    dolibarr: { ok: true, message: "Salary saved to nmy5_salary." },
-  };
-}
-
-export async function deleteSalaryRecord(id: string): Promise<boolean> {
-  await deleteSalaryRecordRemote(id);
-  return true;
-}
-
-export async function updateSalaryRecordStatus(
-  id: string,
-  status: SalaryRecord["status"]
-): Promise<boolean> {
-  await updateSalaryStatusRemote(id, status);
-  return true;
-}
-
-const BANK_ACCOUNTS_STATE_KEY = "@trackforce_bank_accounts";
-
-export async function getBankAccounts(filters?: {
-  employeeId?: string;
-  employeeEmail?: string;
-  employeeName?: string;
-}): Promise<BankAccount[]> {
-  try {
-    return await listBankAccountsRemote(filters);
-  } catch {
-    const remote = await readRemoteArray<BankAccount>(BANK_ACCOUNTS_STATE_KEY);
-    if (!Array.isArray(remote)) return [];
-    if (!filters?.employeeId && !filters?.employeeEmail && !filters?.employeeName) {
-      return remote;
-    }
-    const email = normalizeEmail(filters.employeeEmail);
-    const name = normalizeIdentity(filters.employeeName);
-    const rawId = normalizeIdentity(filters.employeeId);
-    const altId = rawId.startsWith("dolibarr_") ? rawId.replace("dolibarr_", "") : `dolibarr_${rawId}`;
-    return remote.filter((account) => {
-      const accountEmail = normalizeEmail(account.employeeEmail);
-      const accountName = normalizeIdentity(account.employeeName);
-      const accountId = normalizeIdentity(account.employeeId);
-      return Boolean(
-        (email && accountEmail === email) ||
-          (name && accountName === name) ||
-          (rawId && (accountId === rawId || accountId === altId))
-      );
-    });
-  }
-}
-
-export async function saveBankAccount(
-  account: BankAccount,
-  options?: { syncToDolibarr?: boolean }
-): Promise<{ record: BankAccount; synced: boolean; dolibarr?: { ok: boolean; message: string } }> {
-  await saveBankAccountRemote(account);
-
-  if (options?.syncToDolibarr === false) {
-    await saveBankAccountLocal(account);
-    return { record: account, synced: false };
-  }
-
-  let dolibarrResult: { ok: boolean; message: string } | undefined;
-  try {
-    dolibarrResult = await syncBankAccountToDolibarr(account);
-  } catch (error) {
-    dolibarrResult = {
-      ok: false,
-      message: error instanceof Error ? error.message : "Dolibarr sync failed",
-    };
-  }
-
-  if (!dolibarrResult?.ok) {
-    try {
-      await deleteBankAccountRemote(account.id);
-    } catch (rollbackError) {
-      const rollbackMessage =
-        rollbackError instanceof Error ? rollbackError.message : "Unknown rollback failure.";
-      throw new Error(
-        `${dolibarrResult?.message || "Dolibarr bank account sync failed."} Database rollback may be required: ${rollbackMessage}`
-      );
-    }
-    throw new Error(dolibarrResult?.message || "Dolibarr bank account sync failed.");
-  }
-
-  await saveBankAccountLocal(account);
-
-  return { record: account, synced: true, dolibarr: dolibarrResult };
-}
-
-async function saveBankAccountLocal(account: BankAccount): Promise<void> {
-  // Mocking local storage save for now if needed, but the summary says it's already using state key.
-  // The existing implementation already used setRemoteState.
-}
-
-export async function deleteBankAccount(id: string): Promise<boolean> {
-  await deleteBankAccountRemote(id);
-  return true;
 }

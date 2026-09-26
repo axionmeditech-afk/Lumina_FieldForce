@@ -7,7 +7,7 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
-import { useColorScheme } from "react-native";
+import { useColorScheme, type ColorSchemeName } from "react-native";
 import Colors, { type ThemeMode, type ThemePalette } from "@/constants/colors";
 import { getThemePreference, setThemePreference } from "@/lib/storage";
 
@@ -20,7 +20,7 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-function resolveMode(_mode: ThemeMode, _systemTheme: "light" | "dark" | null | undefined): "light" | "dark" {
+function resolveMode(_mode: ThemeMode, _systemTheme: ColorSchemeName): "light" | "dark" {
   if (_mode === "system") {
     return _systemTheme === "dark" ? "dark" : "light";
   }

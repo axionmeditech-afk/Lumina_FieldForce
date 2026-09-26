@@ -1,6 +1,6 @@
 import { LinearGradient } from "expo-linear-gradient";
-import React, { useEffect, useRef, useState } from "react";
-import { ResizeMode, Video, type AVPlaybackStatus } from "expo-av";
+import React, { useEffect, useRef } from "react";
+
 import {
   ActivityIndicator,
   Animated,
@@ -14,7 +14,6 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 
 const BRAND_NAME = "Lumina FieldForce";
-const START_VIDEO_PLAYBACK_RATE = 1.8;
 
 interface StartScreenProps {
   title?: string;
@@ -34,8 +33,6 @@ export function StartScreen({
   const { colors, isDark } = useAppTheme();
   const pulse = useRef(new Animated.Value(0)).current;
   const orbit = useRef(new Animated.Value(0)).current;
-  const [videoFailed, setVideoFailed] = useState(false);
-  const [videoReady, setVideoReady] = useState(false);
 
   useEffect(() => {
     const pulseLoop = Animated.loop(
@@ -84,33 +81,20 @@ export function StartScreen({
     outputRange: ["0deg", "360deg"],
   });
 
+  useEffect(() => {
+    if (!showVideo) return;
+    const timer = setTimeout(() => onVideoFinish?.(), 2000);
+    return () => clearTimeout(timer);
+  }, [showVideo, onVideoFinish]);
+
   if (showVideo) {
+
     return (
       <View style={[styles.videoRoot, { backgroundColor: "#05070D" }]}>
         <Image
           source={require("../assets/images/logo.png")}
-          style={[styles.videoFallback, videoReady && !videoFailed ? styles.videoFallbackHidden : null]}
+          style={[styles.videoFallback]}
           resizeMode="contain"
-        />
-        <Video
-          source={require("../assets/images/splash-video.mp4")}
-          style={[StyleSheet.absoluteFill, videoFailed ? styles.videoHidden : null]}
-          resizeMode={ResizeMode.CONTAIN}
-          shouldPlay
-          isMuted
-          volume={0}
-          rate={START_VIDEO_PLAYBACK_RATE}
-          shouldCorrectPitch={false}
-          isLooping={false}
-          onReadyForDisplay={() => setVideoReady(true)}
-          onLoad={() => setVideoReady(true)}
-          onPlaybackStatusUpdate={(status: AVPlaybackStatus) => {
-            if (!status.isLoaded) return;
-            if (status.didJustFinish) {
-              onVideoFinish?.();
-            }
-          }}
-          onError={() => setVideoFailed(true)}
         />
       </View>
     );

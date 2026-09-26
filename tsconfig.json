@@ -1,7 +1,6 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "baseUrl": ".",
     "strict": true,
     "paths": {
       "@/*": [
@@ -9,20 +8,21 @@
       ],
       "@shared/*": [
         "./shared/*"
-      ],
-      "mappls-map-react-native": [
-        "./types/mappls-map-react-native"
-      ],
-      "mappls-tracking-react-native": [
-        "./types/mappls-tracking-react-native"
       ]
     }
   },
   "include": [
-    "**/*.ts",
-    "**/*.tsx",
-    ".expo/types/**/*.ts",
-    "expo-env.d.ts"
+    "app/**/*.tsx",
+    "components/**/*.tsx",
+    "contexts/**/*.tsx",
+    "lib/**/*.ts",
+    "constants/**/*.ts",
+    "server/**/*.ts",
+    "shared/**/*.ts",
+    "types/**/*.d.ts",
+    "tests/**/*.ts",
+    "expo-env.d.ts",
+    ".expo/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

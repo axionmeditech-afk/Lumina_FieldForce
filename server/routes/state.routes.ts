@@ -7,20 +7,12 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
     requireAuth,
     firstString,
     isRemoteStateKeyAllowed,
-    isLocationLogStateKey,
-    listLocationLogsFromMySql,
-    REMOTE_LOCATION_LOG_READ_LIMIT,
-    REMOTE_LOCATION_LOG_WRITE_LIMIT,
     isMySqlStateEnabled,
     readRemoteState,
     resolveRequestCompanyId,
     withDefaultCompanyIdForRemoteState,
     writeRemoteState,
     getRequestUser,
-    getMySqlPool,
-    authUsersByEmail,
-    randomUUID,
-    insertNotificationInMySql,
   } = deps;
 
   app.get("/api/state/:key", requireAuth, async (req, res) => {
@@ -35,18 +27,6 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
     }
 
     try {
-      if (isLocationLogStateKey(key)) {
-        const value = await listLocationLogsFromMySql(REMOTE_LOCATION_LOG_READ_LIMIT);
-        res.json({
-          key,
-          value,
-          updatedAt: new Date().toISOString(),
-          source: isMySqlStateEnabled() ? "mysql" : "memory",
-          truncated: true,
-          limit: REMOTE_LOCATION_LOG_READ_LIMIT,
-        });
-        return;
-      }
 
       const rawValue = await readRemoteState(key);
       if (!rawValue) {
@@ -106,19 +86,6 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
     }
 
     try {
-      if (isLocationLogStateKey(key)) {
-        const candidateValue = body.value;
-        const entries = Array.isArray(candidateValue) ? candidateValue : [];
-        if (entries.length > REMOTE_LOCATION_LOG_WRITE_LIMIT) {
-          res.status(413).json({
-            message:
-              "Location log state payload is too large for remote state sync. Use /api/location/batch instead.",
-            limit: REMOTE_LOCATION_LOG_WRITE_LIMIT,
-            received: entries.length,
-          });
-          return;
-        }
-      }
 
       const defaultCompanyId = await resolveRequestCompanyId(req);
       const scopedValue = withDefaultCompanyIdForRemoteState(
@@ -128,42 +95,6 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
       );
       const serialized = JSON.stringify(scopedValue ?? null);
       await writeRemoteState(key, serialized, getRequestUser(req));
-      
-      // --- GPS Disabled Alert Logic ---
-      if (key === "@trackforce_attendance_anomalies" && Array.isArray(scopedValue)) {
-        try {
-          const conn = await getMySqlPool();
-          for (const anom of scopedValue) {
-            if (anom && anom.type === "gps_disabled" && anom.id) {
-              const [existing] = await conn.query("SELECT id FROM lff_notifications WHERE title = ? AND body LIKE ?", ["GPS Disabled Alert", `%${anom.id}%`]);
-              if (!existing || existing.length === 0) {
-                let employeeName = anom.userId;
-                for (const r of authUsersByEmail.values()) {
-                  if (r.user.id === anom.userId) {
-                    employeeName = r.user.name || r.user.login || anom.userId;
-                    break;
-                  }
-                }
-                const notif = {
-                  id: randomUUID(),
-                  title: "GPS Disabled Alert",
-                  body: `Employee ${employeeName} has disabled GPS or Location Services during check-in. Anomaly: ${anom.id}`,
-                  kind: "alert" as const,
-                  audience: "all" as const,
-                  audienceUserIds: [] as string[],
-                  readByIds: [] as string[],
-                  createdById: "system",
-                  createdByName: "System",
-                  createdAt: new Date().toISOString(),
-                };
-                await insertNotificationInMySql(notif);
-              }
-            }
-          }
-        } catch (e) {
-          console.error("Failed to generate GPS disabled alert", e);
-        }
-      }
       // --------------------------------
 
       res.json({

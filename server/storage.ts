@@ -5,16 +5,8 @@ import type {
   AttendancePhoto,
   DolibarrSyncLog,
   Geofence,
-  LocationLog,
 } from "@/lib/types";
 import { isMumbaiDateKey, toMumbaiDateKey } from "@/lib/ist-time";
-
-export interface EmployeeSession {
-  userId: string;
-  userName: string;
-  activeAttendanceId: string | null;
-  deviceId?: string;
-}
 
 export interface DolibarrIntegrationConfig {
   userId: string;
@@ -38,10 +30,6 @@ export interface IStorage {
   getCompanyAttendanceForDate(companyId: string, date: string): Promise<AttendanceRecord[]>;
   addAttendancePhoto(photo: AttendancePhoto): Promise<void>;
   addAnomaly(anomaly: AttendanceAnomaly): Promise<void>;
-  addLocationLog(log: LocationLog): Promise<void>;
-  getLocationLogsForUserDate(userId: string, date: string): Promise<LocationLog[]>;
-  getLocationLogsForDate(date: string): Promise<LocationLog[]>;
-  getLocationLogsLatest(): Promise<LocationLog[]>;
   bindDevice(userId: string, deviceId: string): Promise<{ ok: boolean; mismatch: boolean }>;
   addDolibarrSyncLog(log: DolibarrSyncLog): Promise<void>;
   getDolibarrConfigForUser(userId: string): Promise<DolibarrIntegrationConfig | null>;
@@ -61,7 +49,6 @@ class MemStorage implements IStorage {
   private attendance = new Map<string, AttendanceRecord>();
   private attendancePhotos: AttendancePhoto[] = [];
   private anomalies: AttendanceAnomaly[] = [];
-  private locationLogs: LocationLog[] = [];
   private deviceBindings = new Map<string, string>();
   private dolibarrSyncLogs: DolibarrSyncLog[] = [];
   private dolibarrConfigByUser = new Map<string, DolibarrIntegrationConfig>();
@@ -165,44 +152,6 @@ class MemStorage implements IStorage {
   async addAnomaly(anomaly: AttendanceAnomaly): Promise<void> {
     this.anomalies.unshift(anomaly);
     this.anomalies = this.anomalies.slice(0, 5000);
-  }
-
-  private hasDuplicateLocationLog(next: LocationLog): boolean {
-    return this.locationLogs.some((existing) => {
-      if (existing.userId !== next.userId) return false;
-      if (existing.capturedAt !== next.capturedAt) return false;
-      const latDelta = Math.abs(existing.latitude - next.latitude);
-      const lngDelta = Math.abs(existing.longitude - next.longitude);
-      return latDelta <= 0.000001 && lngDelta <= 0.000001;
-    });
-  }
-
-  async addLocationLog(log: LocationLog): Promise<void> {
-    if (this.hasDuplicateLocationLog(log)) return;
-    this.locationLogs.unshift(log);
-    this.locationLogs = this.locationLogs.slice(0, 10000);
-  }
-
-  async getLocationLogsForUserDate(userId: string, date: string): Promise<LocationLog[]> {
-    return this.locationLogs
-      .filter((log) => log.userId === userId && isMumbaiDateKey(log.capturedAt, date))
-      .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
-  }
-
-  async getLocationLogsForDate(date: string): Promise<LocationLog[]> {
-    return this.locationLogs
-      .filter((log) => isMumbaiDateKey(log.capturedAt, date))
-      .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
-  }
-
-  async getLocationLogsLatest(): Promise<LocationLog[]> {
-    const latestByUser = new Map<string, LocationLog>();
-    for (const log of this.locationLogs) {
-      if (!latestByUser.has(log.userId)) {
-        latestByUser.set(log.userId, log);
-      }
-    }
-    return Array.from(latestByUser.values());
   }
 
   async bindDevice(userId: string, deviceId: string): Promise<{ ok: boolean; mismatch: boolean }> {

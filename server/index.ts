@@ -56,7 +56,7 @@ function setupCors(app: express.Application) {
     }
 
     if (process.env.REPLIT_DOMAINS) {
-      process.env.REPLIT_DOMAINS.split(",").forEach((d) => {
+      process.env.REPLIT_DOMAINS.split(",").forEach((d: string) => {
         origins.add(`https://${d.trim()}`);
       });
     }
@@ -237,20 +237,6 @@ function configureExpoAndLanding(app: express.Application) {
   });
 
   app.use("/assets", express.static(path.resolve(process.cwd(), "assets")));
-  app.use(
-    "/api/support-attachments",
-    express.static(path.resolve(process.cwd(), "server_uploads", "support"), {
-      maxAge: "30d",
-      etag: true,
-    })
-  );
-  app.use(
-    "/support-attachments",
-    express.static(path.resolve(process.cwd(), "server_uploads", "support"), {
-      maxAge: "30d",
-      etag: true,
-    })
-  );
   app.use(express.static(path.resolve(process.cwd(), "static-build/web")));
   app.use(express.static(path.resolve(process.cwd(), "static-build")));
 

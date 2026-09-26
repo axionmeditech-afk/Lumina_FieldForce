@@ -1,9 +1,9 @@
-import React from "react";
+
 import { Pressable, StyleSheet, useWindowDimensions, type ViewStyle } from "react-native";
-import { HugeiconsIcon } from "@hugeicons/react-native";
+import { Ionicons } from "@expo/vector-icons";
 // eslint-disable-next-line import/no-unresolved
-import PanelLeftCloseIcon from "@hugeicons/core-free-icons/PanelLeftCloseIcon";
-import { DrawerActions } from "@react-navigation/native";
+
+import { DrawerActions } from "expo-router/react-navigation";
 import { useNavigation } from "expo-router";
 import { useAppTheme } from "@/contexts/ThemeContext";
 
@@ -18,7 +18,7 @@ type DrawerToggleButtonProps = {
 
 export function DrawerToggleButton({
   style,
-  showOnLargeScreens = false,
+  showOnLargeScreens = true,
   iconColor,
   iconSize = 28,
   disabled = false,
@@ -52,11 +52,10 @@ export function DrawerToggleButton({
         style,
       ]}
     >
-      <HugeiconsIcon
-        icon={PanelLeftCloseIcon}
+      <Ionicons
+        name="menu-outline"
         size={iconSize}
         color={iconColor ?? colors.text}
-        strokeWidth={1.7}
       />
     </Pressable>
   );

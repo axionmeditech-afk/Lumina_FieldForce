@@ -1,8 +1,5 @@
 import * as Location from "expo-location";
 import type { LocationObject } from "expo-location";
-import { Platform } from "react-native";
-
-type LocationUpdateCallback = (location: LocationObject) => void | Promise<void>;
 
 export interface LocationPermissionState {
   foreground: boolean;
@@ -108,47 +105,13 @@ function buildEvidence(samples: LocationObject[], best: LocationObject): Verifie
 
 export async function getLocationPermissionSnapshot(): Promise<LocationPermissionState> {
   const fg = await Location.getForegroundPermissionsAsync();
-  const bg = await Location.getBackgroundPermissionsAsync();
-  return {
-    foreground: fg.granted,
-    background: bg.granted,
-    foregroundCanAskAgain: fg.canAskAgain,
-    backgroundCanAskAgain: bg.canAskAgain,
-  };
+  return { foreground: fg.granted, foregroundCanAskAgain: fg.canAskAgain, background: false, backgroundCanAskAgain: false };
 }
 
-export async function requestLocationPermissionBundle(
-  options?: { requireBackground?: boolean }
-): Promise<LocationPermissionState> {
-  const requireBackground = options?.requireBackground ?? Platform.OS === "android";
-
+export async function requestLocationPermissionBundle(): Promise<LocationPermissionState> {
   let fg = await Location.getForegroundPermissionsAsync();
-  if (!fg.granted && fg.canAskAgain) {
-    fg = await Location.requestForegroundPermissionsAsync();
-  }
-
-  let bg = await Location.getBackgroundPermissionsAsync();
-  if (fg.granted && requireBackground && !bg.granted && bg.canAskAgain) {
-    bg = await Location.requestBackgroundPermissionsAsync();
-  }
-
-  return {
-    foreground: fg.granted,
-    background: bg.granted,
-    foregroundCanAskAgain: fg.canAskAgain,
-    backgroundCanAskAgain: bg.canAskAgain,
-  };
-}
-
-export async function getCurrentAccurateLocation(
-  options?: AccurateLocationOptions
-): Promise<LocationObject> {
-  const evidence = await getVerifiedLocationEvidence({
-    minAccuracyMeters: options?.minAccuracyMeters,
-    maxAttempts: options?.maxAttempts,
-    requiredStableSamples: 1,
-  });
-  return evidence.location;
+  if (!fg.granted && fg.canAskAgain) fg = await Location.requestForegroundPermissionsAsync();
+  return { foreground: fg.granted, foregroundCanAskAgain: fg.canAskAgain, background: false, backgroundCanAskAgain: false };
 }
 
 export async function getVerifiedLocationEvidence(
@@ -239,30 +202,7 @@ export async function getVerifiedLocationEvidence(
 
 export function isMockLocation(location: LocationObject): boolean {
   // `mocked` exists mainly on Android but this keeps fraud detection consistent.
-  return Boolean((location.coords as { mocked?: boolean }).mocked);
-}
-
-export async function startSignificantLocationTracking(
-  onUpdate: LocationUpdateCallback,
-  options?: { timeIntervalMs?: number; distanceIntervalMeters?: number }
-): Promise<Location.LocationSubscription> {
-  const timeIntervalMs = options?.timeIntervalMs ?? 60_000;
-  const distanceIntervalMeters = options?.distanceIntervalMeters ?? 40;
-
-  return Location.watchPositionAsync(
-    {
-      accuracy: Location.Accuracy.BestForNavigation,
-      timeInterval: timeIntervalMs,
-      distanceInterval: distanceIntervalMeters,
-      mayShowUserSettingsDialog: true,
-    },
-    (location) => {
-      // Guard against unhandled promise rejections from async location handlers.
-      void Promise.resolve(onUpdate(location)).catch(() => {
-        // swallow callback errors to keep watcher alive
-      });
-    }
-  );
+  return Boolean(location.mocked || (location.coords as { mocked?: boolean }).mocked);
 }
 
 export async function ensureLocationServicesEnabled(): Promise<boolean> {

@@ -23,7 +23,7 @@ import {
   registerApiUser,
   submitAccessRequestToBackend,
 } from "@/lib/attendance-api";
-import { stopBackgroundLocationTracking } from "@/lib/background-location";
+
 
 interface SignupInput {
   name: string;
@@ -110,7 +110,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const clearLocalSession = useCallback(async () => {
-    await stopBackgroundLocationTracking().catch(() => undefined);
     await logoutUser();
     setUser(null);
     setCompany(null);

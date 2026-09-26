@@ -37,7 +37,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   decorationLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     overflow: "hidden",
   },
   orb: {

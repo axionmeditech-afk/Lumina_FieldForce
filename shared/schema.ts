@@ -104,47 +104,6 @@ export const attendanceAnomalies = pgTable(
   })
 );
 
-export const locationLogs = pgTable(
-  "location_logs",
-  {
-    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    userId: varchar("user_id").notNull(),
-    latitude: doublePrecision("latitude").notNull(),
-    longitude: doublePrecision("longitude").notNull(),
-    accuracy: doublePrecision("accuracy"),
-    speed: doublePrecision("speed"),
-    heading: doublePrecision("heading"),
-    geofenceId: varchar("geofence_id"),
-    geofenceName: text("geofence_name"),
-    isInsideGeofence: boolean("is_inside_geofence").notNull(),
-    capturedAt: timestamp("captured_at").defaultNow().notNull(),
-  },
-  (table) => ({
-    locationUserIdx: index("location_logs_user_id_idx").on(table.userId),
-    locationCapturedIdx: index("location_logs_captured_at_idx").on(table.capturedAt),
-  })
-);
-
-export const routeHalts = pgTable(
-  "route_halts",
-  {
-    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    userId: varchar("user_id").notNull(),
-    routeDate: text("route_date").notNull(),
-    startedAt: timestamp("started_at").notNull(),
-    endedAt: timestamp("ended_at").notNull(),
-    durationMinutes: integer("duration_minutes").notNull(),
-    latitude: doublePrecision("latitude").notNull(),
-    longitude: doublePrecision("longitude").notNull(),
-    label: text("label"),
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-  },
-  (table) => ({
-    routeHaltsUserDateIdx: index("route_halts_user_date_idx").on(table.userId, table.routeDate),
-    routeHaltsStartIdx: index("route_halts_started_at_idx").on(table.startedAt),
-  })
-);
-
 export const dolibarrSyncLogs = pgTable(
   "dolibarr_sync_logs",
   {

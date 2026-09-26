@@ -1,17 +1,6 @@
+import { useIsFocused } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  Pressable,
-  Modal,
-  ActivityIndicator,
-  Alert,
-  Linking,
-  Platform,
-  TextInput,
-} from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Modal, ActivityIndicator, AppState, Alert, Linking, TextInput } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
@@ -24,17 +13,15 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
-import { RouteMapNative, type PlannedStopPoint } from "@/components/RouteMapNative";
+import { GeofenceMap, type GeofenceMapPoint } from "@/components/GeofenceMap";
 import { evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
 import {
   addAttendance,
   addAttendanceAnomaly,
-  addLocationLog,
   getApiToken,
   getAttendance,
   getGeofences,
   getGeofencesForUser,
-  getLocationLogs,
   getSettings,
   isCheckedIn,
   setCheckedIn,
@@ -44,29 +31,8 @@ import {
   upsertGeofence,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import type { AttendanceRecord, Employee, Geofence, GeofenceEvaluation, LocationLog } from "@/lib/types";
-import {
-  attendanceCheckIn,
-  attendanceCheckOut,
-  createGeofence as createGeofenceRemote,
-  flushAttendanceQueue,
-  getApiBaseUrlCandidates,
-  getUserGeofences,
-  getUsersRemote,
-  getCompanyAttendanceToday,
-  queueAttendanceRequest,
-  searchMapplsAutosuggest,
-  searchMapplsTextSearch,
-  updateGeofence as updateGeofenceRemote,
-  type DolibarrUser,
-} from "@/lib/attendance-api";
-import {
-  ensureBackgroundLocationTracking,
-  flushBackgroundLocationQueue,
-  queueLocationPoint,
-  setBackgroundTrackerState,
-  stopBackgroundLocationTracking,
-} from "@/lib/background-location";
+import type { AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
+import { attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
 import {
   ensureLocationServicesEnabled,
   getCurrentPositionWithTimeout,
@@ -75,16 +41,9 @@ import {
   getLocationPermissionSnapshot,
   isMockLocation,
   requestLocationPermissionBundle,
-  startSignificantLocationTracking,
 } from "@/lib/location-service";
 import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
-import { getBatteryLevelPercent } from "@/lib/battery";
-import {
-  recordGpsDisabledDuringCheckIn,
-  recordGpsRestoredDuringCheckIn,
-} from "@/lib/gps-tracking-alerts";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
-import { isBackendReachable } from "@/lib/network";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 import {
@@ -94,12 +53,8 @@ import {
 } from "@/lib/attendance-roster";
 
 const LOCATION_REFRESH_MS = 15 * 1000;
-const STRICT_LOCATION_ACCURACY_METERS = 180;
+const STRICT_LOCATION_ACCURACY_METERS = 120;
 const RELAXED_LOCATION_ACCURACY_METERS = 220;
-const TRACKING_TIME_INTERVAL_MS = 15 * 1000;
-const TRACKING_DISTANCE_INTERVAL_METERS = 0;
-const ROUTE_POINT_PERSIST_INTERVAL_MS = 15 * 1000;
-const BATTERY_OPTIMIZATION_PROMPT_KEY = "@trackforce_battery_optimization_prompt_v1";
 const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
@@ -186,7 +141,7 @@ function getBannerConfig(
       border: colors.border,
       text: colors.textSecondary,
       icon: "time-outline",
-      label: isOfficeGeofence ? "Initializing geofence check..." : "Initializing GPS tracking...",
+      label: isOfficeGeofence ? "Initializing geofence check..." : "Checking location...",
     };
   }
 
@@ -205,7 +160,7 @@ function getBannerConfig(
       border: `${colors.success}55`,
       text: colors.success,
       icon: "checkmark-circle",
-      label: "GPS Tracking Active",
+      label: "Location Verified",
     };
   }
 
@@ -858,11 +813,7 @@ export default function AttendanceScreen() {
   const [adminCurrentLocation, setAdminCurrentLocation] = useState<OfficeLocationSearchResult | null>(null);
   const [adminCurrentLocationBusy, setAdminCurrentLocationBusy] = useState(false);
   const [officeSaving, setOfficeSaving] = useState(false);
-  const [lastStoredLocationLog, setLastStoredLocationLog] = useState<LocationLog | null>(null);
   const prevInsideRef = useRef(false);
-  const locationWatchRef = useRef<{ remove: () => void } | null>(null);
-  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const routePersistLastAtMsRef = useRef<number>(0);
   const latestEvidenceRef = useRef<{
     sampleCount: number;
     sampleWindowMs: number;
@@ -879,48 +830,17 @@ export default function AttendanceScreen() {
   }));
 
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
-  const isEmployeeOfficeAttendance = user?.role === "employee";
-  const isOfficeGeofenceAttendance = isEmployeeOfficeAttendance || geofences.length > 0;
-  const isSalespersonFieldCheckIn = isSalesRole(user?.role) && !isOfficeGeofenceAttendance;
+  const isFocused = useIsFocused();
+  const isEmployeeOfficeAttendance = true;
+  const isOfficeGeofenceAttendance = true;
+  const isSalespersonFieldCheckIn = false;
   const isAdminAttendanceManager = user?.role === "admin";
-  const showAttendanceOfficeAdminPanel = false;
+  const showAttendanceOfficeAdminPanel = isAdminAttendanceManager;
   const todayHeading = "Today's Log";
 
   const openAppSettings = useCallback(() => {
     void Linking.openSettings();
   }, []);
-
-  const openBatteryOptimizationSettings = useCallback(() => {
-    if (Platform.OS !== "android") return;
-    const sendIntent = (Linking as typeof Linking & {
-      sendIntent?: (action: string, extras?: unknown[]) => Promise<void>;
-    }).sendIntent;
-
-    if (typeof sendIntent === "function") {
-      void sendIntent("android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS").catch(() => {
-        void Linking.openSettings();
-      });
-      return;
-    }
-
-    void Linking.openSettings();
-  }, []);
-
-  const maybePromptBatteryOptimization = useCallback(async () => {
-    if (Platform.OS !== "android") return;
-    const alreadyPrompted = await AsyncStorage.getItem(BATTERY_OPTIMIZATION_PROMPT_KEY);
-    if (alreadyPrompted === "true") return;
-
-    await AsyncStorage.setItem(BATTERY_OPTIMIZATION_PROMPT_KEY, "true");
-    Alert.alert(
-      "Keep Route Tracking Active",
-      "Set Lumina FieldForce battery usage to Unrestricted or Don't optimize so live route tracking keeps running after screen off.",
-      [
-        { text: "Later", style: "cancel" },
-        { text: "Open Settings", onPress: openBatteryOptimizationSettings },
-      ]
-    );
-  }, [openBatteryOptimizationSettings]);
 
   const applyAhmedabadOfficeLocationLock = useCallback(
     (location: LocationObject): LocationObject => location,
@@ -1105,23 +1025,15 @@ export default function AttendanceScreen() {
     try {
       const cached = await getGeofencesForUser(user.id);
       try {
-        const online = await isBackendReachable();
-        if (online) {
-          const zones = await getUserGeofences(user.id);
-          await Promise.all(zones.map((zone) => upsertGeofence(zone)));
-          setGeofences(zones.length > 0 ? zones : cached);
-          if (zones.length === 0 && cached.length === 0) {
-            setGeofenceLoadError(
-              "No office location is configured for any company attached to this account."
-            );
-          }
-          return;
+        const zones = await getUserGeofences(user.id);
+        await Promise.all(zones.map((zone) => upsertGeofence(zone)));
+        setGeofences(zones.length > 0 ? zones : cached);
+        if (zones.length === 0 && cached.length === 0) {
+          setGeofenceLoadError(
+            "No office location is configured for any company attached to this account."
+          );
         }
-        setGeofenceLoadError(
-          cached.length > 0
-            ? "Using saved office location while the server is unavailable."
-            : "Attendance server is unavailable. Check your connection and retry."
-        );
+        return;
       } catch (error) {
         setGeofenceLoadError(
           cached.length > 0
@@ -1141,22 +1053,6 @@ export default function AttendanceScreen() {
       setGeofencesLoaded(true);
     }
   }, [user?.id]);
-
-  const loadLatestStoredLocation = useCallback(async () => {
-    if (!user?.id || !isOfficeGeofenceAttendance) {
-      setLastStoredLocationLog(null);
-      return;
-    }
-    try {
-      const logs = await getLocationLogs();
-      const latest = logs
-        .filter((log) => log.userId === user.id)
-        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0] ?? null;
-      setLastStoredLocationLog(latest);
-    } catch {
-      setLastStoredLocationLog(null);
-    }
-  }, [isOfficeGeofenceAttendance, user?.id]);
 
   const loadOfficeZone = useCallback(async () => {
     if (!company?.id) return;
@@ -1195,12 +1091,9 @@ export default function AttendanceScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    routePersistLastAtMsRef.current = 0;
-  }, [user?.id]);
 
   const handleLocationUpdate = useCallback(
-    async (location: LocationObject, options?: { skipRoutePersistence?: boolean }) => {
+    async (location: LocationObject) => {
       if (!user?.id) return;
       const effectiveLocation = applyAhmedabadOfficeLocationLock(location);
       latestLocationRef.current = effectiveLocation;
@@ -1211,7 +1104,6 @@ export default function AttendanceScreen() {
         effectiveLocation.coords.longitude,
         effectiveLocation.coords.accuracy ?? undefined
       );
-      const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
       setEvaluation(nextEvaluation);
       setGpsLoading(false);
       setLocationReady(true);
@@ -1238,55 +1130,6 @@ export default function AttendanceScreen() {
         }
       } else {
         consecutiveOutsideRef.current = 0;
-      }
-
-      const shouldPersistRoutePoint =
-        (!isSalespersonFieldCheckIn || checkedInState) && !options?.skipRoutePersistence;
-      const nowMs = Date.now();
-      const canPersistRoutePoint =
-        shouldPersistRoutePoint &&
-        (routePersistLastAtMsRef.current <= 0 ||
-          nowMs - routePersistLastAtMsRef.current >= ROUTE_POINT_PERSIST_INTERVAL_MS);
-      if (canPersistRoutePoint) {
-        routePersistLastAtMsRef.current = nowMs;
-        void (async () => {
-          const capturedAt = new Date(nowMs).toISOString();
-          const locationLog: LocationLog = {
-            id: `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            userId: user.id,
-            latitude: effectiveLocation.coords.latitude,
-            longitude: effectiveLocation.coords.longitude,
-            accuracy: effectiveLocation.coords.accuracy ?? null,
-            speed: effectiveLocation.coords.speed ?? null,
-            heading: effectiveLocation.coords.heading ?? null,
-            batteryLevel,
-            geofenceId: nextEvaluation.activeZone?.id ?? null,
-            geofenceName: nextEvaluation.activeZone?.name ?? null,
-            isInsideGeofence: nextEvaluation.inside,
-            capturedAt,
-          };
-          try {
-            await addLocationLog(locationLog);
-            setLastStoredLocationLog(locationLog);
-          } catch {
-            // never fail active session because local location persistence failed
-          }
-          try {
-            await queueLocationPoint({
-              userId: user.id,
-              latitude: effectiveLocation.coords.latitude,
-              longitude: effectiveLocation.coords.longitude,
-              accuracy: effectiveLocation.coords.accuracy ?? null,
-              speed: effectiveLocation.coords.speed ?? null,
-              heading: effectiveLocation.coords.heading ?? null,
-              batteryLevel,
-              capturedAt,
-            });
-            await flushBackgroundLocationQueue({ force: true });
-          } catch {
-            // offline/API failure: point is persisted in queue for retry.
-          }
-        })();
       }
 
       const shouldPrompt =
@@ -1320,14 +1163,9 @@ export default function AttendanceScreen() {
   );
 
   const refreshLocation = useCallback(
-    async (strict = false, options?: { skipRoutePersistence?: boolean }) => {
+    async (strict = false) => {
       const enabled = await ensureLocationServicesEnabled();
       if (!enabled) {
-        if (checkedInState && user?.id) {
-          void recordGpsDisabledDuringCheckIn(user, "Device location services are off.").catch(() => {
-            // GPS-off audit/notification must not block attendance UI recovery.
-          });
-        }
         latestEvidenceRef.current = null;
         latestLocationRef.current = null;
         latestLocationCapturedAtMsRef.current = 0;
@@ -1359,11 +1197,6 @@ export default function AttendanceScreen() {
           ...evidence,
           location: effectiveLocation,
         };
-        if (checkedInState && user?.id) {
-          void recordGpsRestoredDuringCheckIn(user).catch(() => {
-            // GPS restore audit is best-effort.
-          });
-        }
         latestEvidenceRef.current = {
           sampleCount: effectiveEvidence.sampleCount,
           sampleWindowMs: effectiveEvidence.sampleWindowMs,
@@ -1379,7 +1212,7 @@ export default function AttendanceScreen() {
             effectiveEvidence.averageAccuracyMeters ?? "?"
           }m`
         );
-        await handleLocationUpdate(effectiveEvidence.location, options);
+        await handleLocationUpdate(effectiveEvidence.location);
         return effectiveEvidence;
       } catch {
         let fallbackLocation: LocationObject | null = null;
@@ -1404,11 +1237,6 @@ export default function AttendanceScreen() {
 
         if (fallbackLocation) {
           const effectiveFallbackLocation = applyAhmedabadOfficeLocationLock(fallbackLocation);
-          if (checkedInState && user?.id) {
-            void recordGpsRestoredDuringCheckIn(user).catch(() => {
-              // GPS restore audit is best-effort.
-            });
-          }
           const fallbackAccuracy =
             typeof effectiveFallbackLocation.coords.accuracy === "number" &&
             Number.isFinite(effectiveFallbackLocation.coords.accuracy)
@@ -1426,7 +1254,7 @@ export default function AttendanceScreen() {
               fallbackAccuracy !== null ? `+/-${fallbackAccuracy}m` : "accuracy unknown"
             }`
           );
-          await handleLocationUpdate(effectiveFallbackLocation, options);
+          await handleLocationUpdate(effectiveFallbackLocation);
           return {
             location: effectiveFallbackLocation,
             sampleCount: 1,
@@ -1460,54 +1288,13 @@ export default function AttendanceScreen() {
 
   useEffect(() => {
     if (!geofencesLoaded || !latestLocationRef.current) return;
-    void handleLocationUpdate(latestLocationRef.current, { skipRoutePersistence: true });
+    void handleLocationUpdate(latestLocationRef.current);
   }, [geofencesLoaded, geofences, handleLocationUpdate]);
-
-  const beginTracking = useCallback(async () => {
-    if (!user?.id) return;
-    if (locationWatchRef.current || heartbeatRef.current) return;
-    void ensureBackgroundLocationTracking().catch(() => {
-      // foreground tracking can still continue even if background registration fails
-    });
-    try {
-      locationWatchRef.current = await startSignificantLocationTracking(handleLocationUpdate, {
-        timeIntervalMs: TRACKING_TIME_INTERVAL_MS,
-        distanceIntervalMeters: TRACKING_DISTANCE_INTERVAL_METERS,
-      });
-    } catch {
-      // watch fallback: periodic polling only
-    }
-    if (!heartbeatRef.current) {
-      heartbeatRef.current = setInterval(() => {
-        void refreshLocation().catch(() => {
-          // keep heartbeat alive even if one refresh attempt fails
-        });
-      }, LOCATION_REFRESH_MS);
-    }
-  }, [handleLocationUpdate, refreshLocation, user?.id]);
-
-  const stopTracking = useCallback((options?: { stopBackground?: boolean; checkedOut?: boolean }) => {
-    locationWatchRef.current?.remove();
-    locationWatchRef.current = null;
-    if (heartbeatRef.current) {
-      clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
-    }
-    if (options?.stopBackground) {
-      void stopBackgroundLocationTracking({
-        state: options.checkedOut ? "checked_out" : "stopped",
-        reason: options.checkedOut ? "User checked out." : "Tracking stopped.",
-      }).catch(() => {
-        // keep UI stable if background task stop fails
-      });
-    }
-  }, []);
 
   useEffect(() => {
     if (!user?.id) return;
     void loadBaseData();
     void loadGeofenceAssignments();
-    void loadLatestStoredLocation();
     if (isAdminAttendanceManager) {
       void loadOfficeZone();
     }
@@ -1516,40 +1303,31 @@ export default function AttendanceScreen() {
     isAdminAttendanceManager,
     loadBaseData,
     loadGeofenceAssignments,
-    loadLatestStoredLocation,
     loadOfficeZone,
     user?.id,
   ]);
 
+  // Refresh the geofence preview only while this screen is visible and the app is active.
   useEffect(() => {
-    if (!user?.id) return;
-    const shouldTrackEmployeeOffice =
-      isOfficeGeofenceAttendance && geofences.length > 0 && !checkedInState;
-    const shouldTrackLive = checkedInState || !locationReady || shouldTrackEmployeeOffice;
-    if (shouldTrackLive) {
-      void refreshLocation();
-      void beginTracking();
-    } else {
-      stopTracking();
-    }
-    return () => {
-      stopTracking();
+    if (!user?.id || !isFocused || permissionExplainerOpen) return;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight || AppState.currentState !== "active") return;
+      inFlight = true;
+      try { await refreshLocation(); } finally { inFlight = false; }
     };
-  }, [
-    beginTracking,
-    checkedInState,
-    geofences.length,
-    isOfficeGeofenceAttendance,
-    locationReady,
-    refreshLocation,
-    stopTracking,
-    user?.id,
-  ]);
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, LOCATION_REFRESH_MS);
+    const subscription = AppState.addEventListener("change", state => {
+      if (state === "active") void refresh();
+    });
+    return () => { clearInterval(timer); subscription.remove(); };
+  }, [isFocused, permissionExplainerOpen, refreshLocation, user?.id]);
 
   const requestPermissions = useCallback(async () => {
     setPermissionLoading(true);
     try {
-      const locationPermission = await requestLocationPermissionBundle({ requireBackground: true });
+      const locationPermission = await requestLocationPermissionBundle();
       if (!locationPermission.foreground) {
         if (!locationPermission.foregroundCanAskAgain) {
           showPermissionBlockedAlert();
@@ -1575,23 +1353,15 @@ export default function AttendanceScreen() {
       const strictLocation = await refreshLocation(true);
       if (!strictLocation) {
         Alert.alert("Location Unavailable", "Could not fetch live GPS location. Please try again.");
-      } else {
-        void maybePromptBatteryOptimization();
       }
     } finally {
       setPermissionLoading(false);
     }
-  }, [maybePromptBatteryOptimization, refreshLocation, showPermissionBlockedAlert]);
+  }, [refreshLocation, showPermissionBlockedAlert]);
 
   const animateSuccess = useCallback(() => {
     successScale.value = withSequence(withTiming(1.04, { duration: 140 }), withTiming(1, { duration: 160 }));
   }, [successScale]);
-
-  const triggerPostCheckInServices = useCallback(() => {
-    const jobs: Promise<unknown>[] = [flushAttendanceQueue(), beginTracking(), refreshLocation()];
-    void Promise.allSettled(jobs);
-    void maybePromptBatteryOptimization();
-  }, [beginTracking, maybePromptBatteryOptimization, refreshLocation]);
 
   const getFastAttendanceEvidence = useCallback(async () => {
     const cachedLocation = latestLocationRef.current;
@@ -1601,7 +1371,7 @@ export default function AttendanceScreen() {
         ? cachedLocation.coords.accuracy
         : Number.POSITIVE_INFINITY;
 
-    if (cachedLocation && cachedAgeMs <= 20_000 && cachedAccuracy <= 250) {
+    if (cachedLocation && cachedAgeMs <= 20_000 && cachedAccuracy <= STRICT_LOCATION_ACCURACY_METERS && (latestEvidenceRef.current?.sampleCount ?? 0) >= MIN_STABLE_LOCATION_SAMPLES) {
       const roundedAccuracy = Number.isFinite(cachedAccuracy) ? Math.round(cachedAccuracy) : null;
       return {
         location: cachedLocation,
@@ -1612,7 +1382,7 @@ export default function AttendanceScreen() {
       };
     }
 
-    return refreshLocation(false, { skipRoutePersistence: true });
+    return refreshLocation(true);
   }, [refreshLocation]);
 
   const searchOfficeLocations = useCallback(async (
@@ -1792,7 +1562,7 @@ export default function AttendanceScreen() {
     if (!isAdminAttendanceManager) return;
     setAdminCurrentLocationBusy(true);
     try {
-      const permission = await requestLocationPermissionBundle({ requireBackground: false });
+      const permission = await requestLocationPermissionBundle();
       if (!permission.foreground) {
         if (!permission.foregroundCanAskAgain) {
           showPermissionBlockedAlert();
@@ -1866,7 +1636,6 @@ export default function AttendanceScreen() {
         updatedAt: now,
       };
 
-      await upsertGeofence(nextOfficeZone);
       try {
         if (officeZone?.id) {
           await updateGeofenceRemote(nextOfficeZone.id, nextOfficeZone);
@@ -1874,8 +1643,10 @@ export default function AttendanceScreen() {
           await createGeofenceRemote(nextOfficeZone);
         }
       } catch {
-        await createGeofenceRemote(nextOfficeZone).catch(() => undefined);
+        await createGeofenceRemote(nextOfficeZone);
       }
+      await upsertGeofence(nextOfficeZone);
+      await loadGeofenceAssignments();
       await updateCompany({
         attendanceZoneLabel: nextOfficeZone.name,
         primaryBranch: company.primaryBranch || "Main Branch",
@@ -1902,6 +1673,7 @@ export default function AttendanceScreen() {
   }, [
     company,
     isAdminAttendanceManager,
+    loadGeofenceAssignments,
     officeLocationName,
     officeZone,
     updateCompany,
@@ -1973,11 +1745,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
           }
         }
 
-        if (type === "checkin") {
-          // Start location tracking immediately after successful device authentication.
-          void Promise.allSettled([beginTracking(), refreshLocation()]);
-        }
-
         const postCaptureEvidence = preCaptureEvidence;
         const postCaptureLocation = postCaptureEvidence.location;
 
@@ -1987,6 +1754,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
           postCaptureLocation.coords.longitude,
           postCaptureLocation.coords.accuracy ?? undefined
         );
+        if (type === "checkin" && (!geofences.length || !finalEvaluation.inside || finalEvaluation.signalWeak)) {
+          throw new Error("Move inside your assigned office geofence with a clear GPS signal to check in.");
+        }
+        if (isMockLocation(postCaptureLocation)) throw new Error("Disable mock location before marking attendance.");
         const finalZoneName = finalEvaluation.activeZone?.name ?? "Unassigned Zone";
 
         const security = await securityPromise;
@@ -2037,28 +1808,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
         let record: AttendanceRecord;
         try {
           record = type === "checkin" ? await attendanceCheckIn(payload) : await attendanceCheckOut(payload);
-        } catch {
-          await queueAttendanceRequest({ type, payload });
-          record = makeLocalAttendanceRecord(
-            user.id,
-            user.name,
-            type,
-            payload.latitude,
-            payload.longitude,
-            finalEvaluation,
-            null,
-            payload.deviceId,
-            payload.notes
-          );
-          await addAttendanceAnomaly({
-            id: `anomaly_${Date.now()}`,
-            userId: user.id,
-            attendanceId: record.id,
-            type: "offline_backfill",
-            severity: "medium",
-            details: `${type.toUpperCase()} queued after API sync fallback`,
-            createdAt: new Date().toISOString(),
-          });
+        } catch (error) {
+          throw error;
         }
 
         // Attendance approvals are disabled; onboarding approval already happens at signup request stage.
@@ -2075,54 +1826,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
         await addAttendance(approvalAwareRecord);
         await setCheckedIn(type === "checkin");
         setCheckedInState(type === "checkin");
-        if (type === "checkout") {
-          await setBackgroundTrackerState("checked_out", "User checked out.");
-        }
-        if (type === "checkin") {
-          try {
-            // Seed first route point from the same check-in coordinates for admin route timeline.
-            const batteryLevel = await getBatteryLevelPercent({ maxAgeMs: 0 });
-            const checkInLocationLog: LocationLog = {
-              id: `loc_checkin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-              userId: user.id,
-              latitude: payload.latitude,
-              longitude: payload.longitude,
-              accuracy: payload.locationAccuracyMeters ?? null,
-              speed: null,
-              heading: null,
-              batteryLevel,
-              geofenceId: payload.geofenceId ?? null,
-              geofenceName: payload.geofenceName ?? null,
-              isInsideGeofence: payload.isInsideGeofence,
-              capturedAt: capturedAtClient,
-            };
-            await addLocationLog(checkInLocationLog);
-            setLastStoredLocationLog(checkInLocationLog);
-            await queueLocationPoint({
-              userId: user.id,
-              latitude: payload.latitude,
-              longitude: payload.longitude,
-              accuracy: payload.locationAccuracyMeters ?? null,
-              speed: null,
-              heading: null,
-              batteryLevel,
-              capturedAt: capturedAtClient,
-            });
-            void flushBackgroundLocationQueue({ force: true }).catch(() => {
-              // queue will retry sync on next heartbeat/background flush.
-            });
-            const seededAtMs = new Date(capturedAtClient).getTime();
-            if (Number.isFinite(seededAtMs)) {
-              routePersistLastAtMsRef.current = seededAtMs;
-            }
-          } catch {
-            // Route seeding must never block attendance check-in completion.
-          }
-          triggerPostCheckInServices();
-        }
-        if (type === "checkout" && isSalespersonFieldCheckIn) {
-          stopTracking({ stopBackground: true, checkedOut: true });
-        }
         void loadBaseData();
         if (requiresApproval) {
           Alert.alert(
@@ -2143,7 +1846,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
     },
     [
       animateSuccess,
-      beginTracking,
       checkedInState,
       geofences,
       getFastAttendanceEvidence,
@@ -2151,8 +1853,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
       loadBaseData,
       openAppSettings,
       refreshLocation,
-      stopTracking,
-      triggerPostCheckInServices,
       user?.id,
       user?.name,
     ]
@@ -2218,8 +1918,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
       : "outside";
   const banner = getBannerConfig(bannerType, colors, isOfficeGeofenceAttendance, geofences.length > 0);
   const zoneName = isSalespersonFieldCheckIn
-    ? "Field Route Tracking"
-    : evaluation.activeZone?.name ?? (isOfficeGeofenceAttendance ? "Office not set" : "No zone");
+    ? "Office Geofence"
+    : evaluation.activeZone?.name ??
+      geofences[0]?.name ??
+      (isOfficeGeofenceAttendance ? "Office not configured" : "No zone");
   const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
   const canSubmitAction = (selectedDate === toMumbaiDateKey(new Date())) && (checkedInState ? locationReady : canCheckIn);
   const employeeDistanceLabel =
@@ -2227,8 +1929,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
       ? formatDistance(evaluation.nearestDistanceMeters)
       : null;
   const lastStoredLocationLabel =
-    isOfficeGeofenceAttendance && lastStoredLocationLog
-      ? `${lastStoredLocationLog.latitude.toFixed(5)}, ${lastStoredLocationLog.longitude.toFixed(5)}`
+    latestLocationRef.current
+      ? `${latestLocationRef.current.coords.latitude.toFixed(5)}, ${latestLocationRef.current.coords.longitude.toFixed(5)}`
       : null;
   const adminCheckedInCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_in").length;
   const adminCheckedOutCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_out").length;
@@ -2286,18 +1988,15 @@ setOfficeLocationName((current) => current.trim() || result.label);
       });
     }
   }, [company?.id, adminAttendanceGroups]);
-  const officeMapPlannedStops = useMemo<PlannedStopPoint[]>(() => {
-    const stops: PlannedStopPoint[] = [];
+  const officeMapPlannedStops = useMemo<GeofenceMapPoint[]>(() => {
+    const stops: GeofenceMapPoint[] = [];
     if (officeLocationDraft) {
       const officeMarkerName = officeLocationName.trim() || officeLocationDraft.label;
       stops.push({
         id: "attendance_office_location",
         label: officeMarkerName,
-        customerName: officeMarkerName,
         latitude: officeLocationDraft.latitude,
         longitude: officeLocationDraft.longitude,
-        status: "in_progress",
-        markerKind: "planned_stop",
         summary: `Office geofence radius: ${OFFICE_ATTENDANCE_RADIUS_METERS}m`,
         detail: officeLocationDraft.address || `${officeLocationDraft.latitude.toFixed(5)}, ${officeLocationDraft.longitude.toFixed(5)}`,
       });
@@ -2312,11 +2011,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
       stops.push({
         id: "attendance_current_location",
         label: "Current Location",
-        customerName: "Current Location",
         latitude: adminCurrentLocation.latitude,
         longitude: adminCurrentLocation.longitude,
-        status: "pending",
-        markerKind: "planned_stop",
         summary: "Your device GPS position",
         detail: adminCurrentLocation.address || `${adminCurrentLocation.latitude.toFixed(5)}, ${adminCurrentLocation.longitude.toFixed(5)}`,
       });
@@ -2513,10 +2209,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
             <Text style={[styles.modalTitle, { color: colors.text }]}>Enable Secure Attendance</Text>
             <Text style={[styles.modalText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
-                ? "Tap Grant Permissions to allow location. Sales check-in will start live GPS route tracking with battery level."
+                ? "Tap Grant Permissions to allow location. Your location is used to verify attendance inside your assigned office."
                 : isOfficeGeofenceAttendance
                   ? `Tap Grant Permissions to allow location. Check-in unlocks only within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of the company office.`
-                : "Tap Grant Permissions to allow location. Secure check-in uses face unlock, fingerprint, or device PIN/password verification and starts live location tracking."}
+                : "Tap Grant Permissions to allow location. Secure check-in uses face unlock, fingerprint, or device PIN/password verification and verifies your office location."}
             </Text>
             <Pressable
               style={[styles.modalButton, { backgroundColor: colors.primary, opacity: permissionLoading ? 0.86 : 1 }]}
@@ -2574,10 +2270,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
         <Text style={[styles.title, { color: colors.text }]}>Secure Attendance</Text>
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
           {isSalespersonFieldCheckIn
-            ? `${company?.name || "Company"} time-based check-in with live GPS + battery tracking`
+            ? `${company?.name || "Company"} geofenced attendance`
             : isOfficeGeofenceAttendance
               ? `${company?.name || "Company"} office check-in within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of assigned location`
-            : `${company?.name || "Company"} device-authenticated secure check-in with live location tracking`}
+            : `${company?.name || "Company"} secure geofenced attendance`}
         </Text>
 
         {/* Date Selector UI */}
@@ -2815,14 +2511,18 @@ setOfficeLocationName((current) => current.trim() || result.label);
             <Text style={[styles.bannerText, { color: banner.text }]}>{banner.label}</Text>
             <Text style={[styles.bannerSubText, { color: colors.textSecondary }]}>
               {isSalespersonFieldCheckIn
-                ? "Route and battery tracking will start automatically after check-in."
+                ? "Location is verified when you mark attendance."
                 : isOfficeGeofenceAttendance
                   ? employeeDistanceLabel
                     ? `Office distance: ${employeeDistanceLabel}. Last GPS: ${lastStoredLocationLabel ?? "saving..."}.`
+                    : geofences.length > 0
+                      ? lastStoredLocationLabel
+                        ? `Assigned office: ${geofences[0].name}. Last GPS: ${lastStoredLocationLabel}. Waiting for live GPS.`
+                        : `Assigned office: ${geofences[0].name}. Waiting for live GPS.`
                     : lastStoredLocationLabel
                       ? `Last GPS: ${lastStoredLocationLabel}. Waiting for assigned office location.`
                       : "Waiting for assigned office location and live GPS."
-                : "Live route and battery tracking starts immediately after device authentication."}
+                : "Your location is verified for attendance after device authentication."}
             </Text>
           </View>
           {gpsLoading ? <ActivityIndicator size="small" color={colors.primary} /> : null}
@@ -2943,10 +2643,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
             ) : null}
             <View style={[styles.officeMapWrap, { borderColor: colors.borderLight, backgroundColor: colors.surfaceSecondary }]}>
               {officeMapPlannedStops.length ? (
-                <RouteMapNative
-                  points={[]}
-                  halts={[]}
-                  plannedStops={officeMapPlannedStops}
+                <GeofenceMap
+                  points={officeMapPlannedStops}
                   colors={colors}
                   height={220}
                 />
@@ -2957,7 +2655,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
                     Select office location
                   </Text>
                   <Text style={[styles.officeMapFallbackText, { color: colors.textSecondary }]}>
-                    Search a place or tap Current Location to preview it on the same map used by Sales AI.
+                    Search a place or tap Current Location to preview it on the office map.
                   </Text>
                 </View>
               )}
@@ -3053,7 +2751,9 @@ setOfficeLocationName((current) => current.trim() || result.label);
             {isOfficeGeofenceAttendance
               ? !employeeHasOfficeZone
                 ? geofenceLoadError || "Company office location is not configured yet. Ask admin to add office coordinates."
-                : "Move within 500m of the assigned office location to enable employee check-in."
+                : !locationReady
+                  ? "Waiting for a current GPS fix. Check-in will enable after your live location is verified."
+                  : "Move within 500m of the assigned office location to enable employee check-in."
               : "Wait for location to be ready, then verify with face unlock, fingerprint, or device PIN/password to complete secure check-in."}
           </Text>
         ) : null}

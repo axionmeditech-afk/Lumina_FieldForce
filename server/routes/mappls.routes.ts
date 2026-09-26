@@ -9,11 +9,8 @@ export function registerMapplsRoutes(app: Express, deps: MapplsRouteDeps) {
     parseCoordinatePair,
     parseOptionalQueryFloat,
     parseOptionalInteger,
-    parseBooleanQuery,
-    parseCoordinatesList,
     searchMapplsPlaces,
     reverseGeocodeMapplsCoordinates,
-    getMapplsDirectionsForCoordinates,
   } = deps;
 
   app.get("/api/mappls/places/autosuggest", requireAuth, async (req, res) => {
@@ -118,68 +115,6 @@ export function registerMapplsRoutes(app: Express, deps: MapplsRouteDeps) {
       return;
     }
     res.json(response);
-  });
-
-  app.get("/api/mappls/route/preview", requireAuth, async (req, res) => {
-    const origin =
-      parseCoordinatePair(firstString(req.query.origin)) ||
-      (() => {
-        const lat = parseOptionalQueryFloat(req.query.origin_latitude ?? req.query.origin_lat);
-        const lng = parseOptionalQueryFloat(
-          req.query.origin_longitude ?? req.query.origin_lng ?? req.query.origin_lon
-        );
-        if (lat === null || lng === null) return null;
-        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-        return { latitude: lat, longitude: lng };
-      })();
-    const destination =
-      parseCoordinatePair(firstString(req.query.destination)) ||
-      (() => {
-        const lat = parseOptionalQueryFloat(req.query.destination_latitude ?? req.query.destination_lat);
-        const lng = parseOptionalQueryFloat(
-          req.query.destination_longitude ?? req.query.destination_lng ?? req.query.destination_lon
-        );
-        if (lat === null || lng === null) return null;
-        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-        return { latitude: lat, longitude: lng };
-      })();
-    const waypoints = parseCoordinatesList(firstString(req.query.waypoints));
-
-    if (!origin || !destination) {
-      res.status(400).json({
-        message:
-          "origin and destination are required. Use origin=lat,lng and destination=lat,lng.",
-      });
-      return;
-    }
-
-    const routePoints = [origin, ...waypoints, destination];
-    const directions = await getMapplsDirectionsForCoordinates(routePoints, {
-      resource: firstString(req.query.resource) || null,
-      profile: firstString(req.query.profile) || null,
-      overview: firstString(req.query.overview) || null,
-      geometries: firstString(req.query.geometries) || null,
-      alternatives: parseBooleanQuery(req.query.alternatives, false),
-      steps: parseBooleanQuery(req.query.steps, true),
-      region: firstString(req.query.region) || null,
-      routeType: parseOptionalInteger(req.query.rtype),
-    });
-
-    if (!directions) {
-      res.status(400).json({
-        message: "Mappls routing API key missing. Configure MAPPLS_ROUTING_API_KEY in server env.",
-      });
-      return;
-    }
-
-    res.json({
-      provider: "mappls",
-      origin,
-      destination,
-      waypointCount: waypoints.length,
-      routePointCount: routePoints.length,
-      directions,
-    });
   });
 
 

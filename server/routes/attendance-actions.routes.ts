@@ -1,5 +1,5 @@
 import type { Express } from "express";
-import type { AttendanceRecord, LocationLog } from "@/lib/types";
+import type { AttendanceRecord } from "@/lib/types";
 
 export type AttendanceActionRouteDeps = Record<string, any>;
 
@@ -25,7 +25,6 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
     randomUUID,
     insertAttendanceInMySql,
     broadcastAttendanceUpdate,
-    insertLocationLogInMySql,
     resolveDolibarrConfigForUser,
     syncAttendanceWithDolibarr,
   } = deps;
@@ -153,9 +152,9 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
       role: req.auth?.role ?? null,
     });
     const zoneStatus = resolveGeofenceStatus(payload, userZones);
-    const isEmployeeOfficeAttendance = req.auth?.role === "employee";
-    const isFieldSalespersonAttendance = req.auth?.role === "salesperson";
-    const allowOverride = isFieldSalespersonAttendance || (zoneStatus.activeZone?.allowOverride ?? false);
+    const isEmployeeOfficeAttendance = true;
+    const isFieldSalespersonAttendance = false;
+    const allowOverride = false;
     const insideZone = zoneStatus.insideConfirmed || (isEmployeeOfficeAttendance && zoneStatus.inside);
 
     if (isEmployeeOfficeAttendance && userZones.length === 0) {
@@ -226,26 +225,6 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
       console.error("Failed to persist attendance check-in in MySQL", error);
     }
     broadcastAttendanceUpdate(attendanceRecord);
-    const checkInLocationLog: LocationLog = {
-      id: randomUUID(),
-      companyId: companyId ?? undefined,
-      userId: payload.userId,
-      latitude: payload.latitude,
-      longitude: payload.longitude,
-      accuracy: null,
-      speed: null,
-      heading: null,
-      geofenceId: attendanceRecord.geofenceId ?? null,
-      geofenceName: attendanceRecord.geofenceName ?? null,
-      isInsideGeofence: attendanceRecord.isInsideGeofence ?? false,
-      capturedAt: now,
-    };
-    await storage.addLocationLog(checkInLocationLog);
-    try {
-      await insertLocationLogInMySql(checkInLocationLog);
-    } catch (error) {
-      console.error("Failed to persist check-in location log in MySQL", error);
-    }
 
     if (photoUrl) {
       await storage.addAttendancePhoto({
@@ -423,27 +402,6 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
       console.error("Failed to persist attendance check-out in MySQL", error);
     }
     broadcastAttendanceUpdate(checkoutRecord);
-    const checkOutLocationLog: LocationLog = {
-      id: randomUUID(),
-      companyId: companyId ?? undefined,
-      userId: payload.userId,
-      latitude: payload.latitude,
-      longitude: payload.longitude,
-      accuracy: null,
-      speed: null,
-      heading: null,
-      batteryLevel: null,
-      geofenceId: checkoutRecord.geofenceId ?? null,
-      geofenceName: checkoutRecord.geofenceName ?? null,
-      isInsideGeofence: checkoutRecord.isInsideGeofence ?? false,
-      capturedAt: now,
-    };
-    await storage.addLocationLog(checkOutLocationLog);
-    try {
-      await insertLocationLogInMySql(checkOutLocationLog);
-    } catch (error) {
-      console.error("Failed to persist check-out location log in MySQL", error);
-    }
     if (photoUrl) {
       await storage.addAttendancePhoto({
         id: randomUUID(),
