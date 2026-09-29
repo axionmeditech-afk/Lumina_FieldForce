@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
-import type { AppUser, AttendanceCheckPayload, AttendanceRecord, Geofence, UserAccessRequest, UserRole } from "@/lib/types";
+import type { AppUser, AttendanceCheckPayload, AttendanceRecord, CompanyProfile, Geofence, UserAccessRequest, UserRole } from "@/lib/types";
 import Constants from "expo-constants";
 import {
   getApiToken,
@@ -695,6 +695,31 @@ export async function reviewAdminAccessRequest(payload: {
       }),
     }
   );
+}
+
+export async function getCompanyProfilesRemote(): Promise<CompanyProfile[]> {
+  return fetchJson<CompanyProfile[]>("/companies", {
+    method: "GET",
+  });
+}
+
+export async function createCompanyProfileRemote(
+  payload: Partial<CompanyProfile> & { name: string }
+): Promise<CompanyProfile> {
+  return fetchJson<CompanyProfile>("/companies", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateCompanyProfileRemote(
+  companyId: string,
+  payload: Partial<CompanyProfile>
+): Promise<CompanyProfile> {
+  return fetchJson<CompanyProfile>(`/companies/${encodeURIComponent(companyId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getUserGeofences(userId: string): Promise<Geofence[]> {

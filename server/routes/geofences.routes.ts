@@ -55,7 +55,12 @@ export function registerGeofenceRoutes(app: Express, deps: GeofenceRouteDeps) {
         const companyId = current?.companyId || patch.companyId || await resolveRequestCompanyId(req);
         const user = getRequestUser(req);
         const allowed = normalizeCompanyIds([...(user?.companyIds || []), user?.companyId]);
-        if (!companyId || !allowed.includes(companyId) || (patch.companyId && patch.companyId !== companyId)) {
+        const canManageAnyCompany = user?.role === "admin";
+        if (
+          !companyId ||
+          (!canManageAnyCompany && !allowed.includes(companyId)) ||
+          (patch.companyId && patch.companyId !== companyId)
+        ) {
           res.status(403).json({ message: "Company access denied" }); return;
         }
         const now = new Date().toISOString();
