@@ -79,6 +79,11 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
       return;
     }
 
+    if (key === "@trackforce_attendance" || key === "@trackforce_geofences") {
+      res.status(403).json({ message: "Use the validated attendance and geofence endpoints." });
+      return;
+    }
+
     const body = req.body as { value?: unknown };
     if (!("value" in (body || {}))) {
       res.status(400).json({ message: "State value is required." });

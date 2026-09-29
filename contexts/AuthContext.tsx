@@ -1,3 +1,4 @@
+import { stopAttendanceGeofence } from "@/lib/attendance-background";
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from "react";
 import { AppState } from "react-native";
 import Constants from "expo-constants";
@@ -110,6 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const clearLocalSession = useCallback(async () => {
+    await stopAttendanceGeofence().catch(console.warn);
     await logoutUser();
     setUser(null);
     setCompany(null);

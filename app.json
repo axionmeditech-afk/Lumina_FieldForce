@@ -37,7 +37,8 @@
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
-        "VIBRATE"
+        "VIBRATE",
+        "ACCESS_BACKGROUND_LOCATION"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#0F172A",
@@ -49,7 +50,6 @@
         }
       },
       "blockedPermissions": [
-        "android.permission.ACCESS_BACKGROUND_LOCATION",
         "android.permission.FOREGROUND_SERVICE_LOCATION",
         "android.permission.FOREGROUND_SERVICE_MICROPHONE",
         "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
@@ -73,9 +73,10 @@
         "expo-location",
         {
           "locationWhenInUsePermission": "Your location verifies attendance inside your assigned office geofence.",
-          "isIosBackgroundLocationEnabled": false,
-          "isAndroidBackgroundLocationEnabled": false,
-          "isAndroidForegroundServiceEnabled": false
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": false,
+          "locationAlwaysAndWhenInUsePermission": "Allow background location to automatically check out when you leave your office during an active attendance session."
         }
       ]
     ],

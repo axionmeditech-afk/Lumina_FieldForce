@@ -123,7 +123,7 @@ const REMOTE_STATE_TIMEOUT_MS = IS_STANDALONE_RUNTIME ? 9000 : 3200;
 const REMOTE_STATE_API_CANDIDATES_TTL_MS = 10_000;
 const REMOTE_STATE_FETCH_CACHE_TTL_MS = 3_000;
 const REMOTE_STATE_PENDING_WRITES_KEY = "@trackforce_remote_state_pending_writes";
-const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([KEYS.EMPLOYEES, KEYS.ATTENDANCE, KEYS.AUDIT_LOGS, KEYS.SETTINGS, KEYS.GEOFENCES, KEYS.TEAMS, KEYS.ATTENDANCE_PHOTOS, KEYS.ATTENDANCE_ANOMALIES]);
+const REMOTE_STATE_ALLOWED_KEYS = new Set<string>([KEYS.EMPLOYEES, KEYS.AUDIT_LOGS, KEYS.SETTINGS, KEYS.TEAMS, KEYS.ATTENDANCE_PHOTOS, KEYS.ATTENDANCE_ANOMALIES]);
 
 interface PendingRemoteStateWrite {
   key: string;
@@ -1842,18 +1842,9 @@ export async function getAttendance(): Promise<AttendanceRecord[]> {
 }
 
 export async function addAttendance(record: AttendanceRecord): Promise<void> {
-  const companyId = await getActiveCompanyId();
-  const records = await getRawList<AttendanceRecord>(KEYS.ATTENDANCE);
-  records.unshift(
-    withCompanyId(
-      {
-        ...record,
-        approvalStatus: record.approvalStatus ?? "approved",
-      },
-      companyId
-    )
-  );
-  await setItem(KEYS.ATTENDANCE, records);
+  const records = (await getRawList<AttendanceRecord>(KEYS.ATTENDANCE)).filter(entry => entry.id !== record.id);
+  records.unshift(record);
+  await setItem(KEYS.ATTENDANCE, records.slice(0, 1000));
 }
 
 export async function updateAttendanceApproval(

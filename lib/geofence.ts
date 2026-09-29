@@ -1,7 +1,8 @@
 import type { Geofence, GeofenceEvaluation } from "@/lib/types";
 
 const EARTH_RADIUS_METERS = 6371000;
-const WEAK_SIGNAL_THRESHOLD_METERS = 220;
+export const MAX_ATTENDANCE_ACCURACY_METERS = 120;
+export const GEOFENCE_EXIT_MARGIN_METERS = 30;
 export const MIN_GEOFENCE_CAPTURE_RADIUS_METERS = 500;
 
 function toRadians(degrees: number): number {
@@ -23,7 +24,7 @@ export function haversineDistanceMeters(
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.sin(dLng / 2) * Math.sin(dLng / 2) * Math.cos(lat1) * Math.cos(lat2);
 
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const c = 2 * Math.atan2(Math.sqrt(Math.min(1, Math.max(0, a))), Math.sqrt(Math.max(0, 1 - a)));
   return EARTH_RADIUS_METERS * c;
 }
 
@@ -34,7 +35,8 @@ function isWithinWorkingHours(zone: Geofence, now = new Date()): boolean {
 
   const [startH, startM] = zone.workingHoursStart.split(":").map(Number);
   const [endH, endM] = zone.workingHoursEnd.split(":").map(Number);
-  const minutesNow = now.getHours() * 60 + now.getMinutes();
+  const ist = new Date(now.getTime() + 330 * 60_000);
+  const minutesNow = ist.getUTCHours() * 60 + ist.getUTCMinutes();
   const startMinutes = startH * 60 + startM;
   const endMinutes = endH * 60 + endM;
 
@@ -54,7 +56,7 @@ function normalizeAccuracy(accuracyMeters?: number): number | null {
 function getConfidenceBufferMeters(accuracyMeters?: number): number {
   const accuracy = normalizeAccuracy(accuracyMeters);
   if (accuracy === null) return 15;
-  return Math.max(10, Math.min(35, Math.round(accuracy * 0.5)));
+  return Math.max(10, Math.ceil(accuracy));
 }
 
 export function getEffectiveGeofenceRadiusMeters(zone: Pick<Geofence, "radiusMeters">): number {
@@ -66,11 +68,12 @@ export function evaluateGeofenceStatus(
   geofences: Geofence[],
   latitude: number,
   longitude: number,
-  accuracyMeters?: number
+  accuracyMeters?: number,
+  ignoreSchedule = false
 ): GeofenceEvaluation {
   const normalizedAccuracy = normalizeAccuracy(accuracyMeters);
   const signalWeak =
-    normalizedAccuracy !== null ? normalizedAccuracy > WEAK_SIGNAL_THRESHOLD_METERS : false;
+    normalizedAccuracy === null || normalizedAccuracy > MAX_ATTENDANCE_ACCURACY_METERS;
 
   if (!geofences.length) {
     return {
@@ -101,14 +104,15 @@ export function evaluateGeofenceStatus(
 
   for (const zone of geofences) {
     if (!zone.isActive) continue;
-    if (!isWithinWorkingHours(zone)) continue;
+    if (!ignoreSchedule && !isWithinWorkingHours(zone)) continue;
+    if (!validCoordinates(zone.latitude, zone.longitude) || !validCoordinates(latitude, longitude)) continue;
 
     const distance = haversineDistanceMeters(latitude, longitude, zone.latitude, zone.longitude);
     const effectiveRadiusMeters = getEffectiveGeofenceRadiusMeters(zone);
     const distanceFromBoundary = effectiveRadiusMeters - distance;
     const confirmedInside =
       distance <= effectiveRadiusMeters &&
-      (distance + confidenceBufferMeters <= effectiveRadiusMeters || confidenceBufferMeters <= 10);
+      !signalWeak && distance + confidenceBufferMeters <= effectiveRadiusMeters;
 
     if (distance < nearestDistanceMeters) {
       nearestDistanceMeters = distance;
@@ -119,7 +123,7 @@ export function evaluateGeofenceStatus(
       if (
         !insideMatch ||
         (confirmedInside && !insideMatch.confirmed) ||
-        distance < insideMatch.distanceMeters
+        (confirmedInside === insideMatch.confirmed && distance < insideMatch.distanceMeters)
       ) {
         insideMatch = {
           zone,
@@ -165,4 +169,14 @@ export function formatDistance(distanceMeters: number): string {
   if (!Number.isFinite(distanceMeters)) return "N/A";
   if (distanceMeters < 1000) return `${Math.round(distanceMeters)} m`;
   return `${(distanceMeters / 1000).toFixed(2)} km`;
+}
+
+export function validCoordinates(latitude: number, longitude: number): boolean {
+  return Number.isFinite(latitude) && Number.isFinite(longitude) && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180;
+}
+
+export function isConfidentlyOutside(zone: Geofence, latitude: number, longitude: number, accuracy: number): boolean {
+  return validCoordinates(latitude, longitude) && Number.isFinite(accuracy) && accuracy > 0 && accuracy <= 50 &&
+    haversineDistanceMeters(latitude, longitude, zone.latitude, zone.longitude) - accuracy >
+    getEffectiveGeofenceRadiusMeters(zone) + GEOFENCE_EXIT_MARGIN_METERS;
 }

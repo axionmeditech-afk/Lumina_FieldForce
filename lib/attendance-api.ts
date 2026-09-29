@@ -1,3 +1,5 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Crypto from "expo-crypto";
 import type { AppUser, AttendanceCheckPayload, AttendanceRecord, Geofence, UserAccessRequest, UserRole } from "@/lib/types";
 import Constants from "expo-constants";
 import {
@@ -342,6 +344,10 @@ function buildBodyPreview(text: string): string {
 
 let cachedLastWorkingApiBase: string | null = null;
 
+class ApiHttpError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 type ApiRequestInit = RequestInit & {
   skipGlobalLoading?: boolean;
 };
@@ -363,6 +369,7 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
     throw new ApiAuthRequiredError();
   }
 
+  if (requestInit.method && !["GET", "HEAD"].includes(requestInit.method.toUpperCase())) apiBases = apiBases.slice(0, 1);
   for (const apiBase of apiBases) {
     if (requestInit.signal?.aborted) {
       throw new Error("Request aborted.");
@@ -422,7 +429,7 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
           );
           continue;
         }
-        throw new Error(messageFromJson || text || `HTTP ${response.status}`);
+        throw new ApiHttpError(messageFromJson || text || `HTTP ${response.status}`, response.status);
       }
       if (!isValid) {
         const preview = buildBodyPreview(text);
@@ -712,26 +719,30 @@ export async function updateGeofence(zoneId: string, payload: Partial<Geofence>)
   });
 }
 
-export async function attendanceCheckIn(payload: AttendanceCheckPayload): Promise<AttendanceRecord> {
-  return fetchJsonWithTimeout<AttendanceRecord>(
-    "/attendance/checkin",
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-    6500
-  );
+async function submitAttendanceAction(type: "checkin" | "checkout", payload: AttendanceCheckPayload): Promise<AttendanceRecord> {
+  const key = `@attendance_request:${payload.userId}:${type}`;
+  const automatic = payload.actionSource === "geofence_exit";
+  const saved = automatic ? null : await AsyncStorage.getItem(key);
+  const requestId = saved || payload.requestId || Crypto.randomUUID();
+  if (!automatic) await AsyncStorage.setItem(key, requestId);
+  try {
+    const record = await fetchJsonWithTimeout<AttendanceRecord>(`/attendance/${type}`, {
+      method: "POST", skipGlobalLoading: automatic,
+      body: JSON.stringify({ ...payload, requestId }),
+    }, 70000);
+    if (!automatic) await AsyncStorage.removeItem(key);
+    return record;
+  } catch (error) {
+    if (!automatic && error instanceof ApiHttpError && error.status >= 400 && error.status < 500) await AsyncStorage.removeItem(key);
+    throw error;
+  }
 }
 
+export async function attendanceCheckIn(payload: AttendanceCheckPayload): Promise<AttendanceRecord> {
+  return submitAttendanceAction("checkin", payload);
+}
 export async function attendanceCheckOut(payload: AttendanceCheckPayload): Promise<AttendanceRecord> {
-  return fetchJsonWithTimeout<AttendanceRecord>(
-    "/attendance/checkout",
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-    6500
-  );
+  return submitAttendanceAction("checkout", payload);
 }
 
 export async function getCompanyAttendanceToday(companyId?: string, date?: string): Promise<AttendanceRecord[]> {
@@ -739,9 +750,7 @@ export async function getCompanyAttendanceToday(companyId?: string, date?: strin
   if (companyId) params.push(`company_id=${encodeURIComponent(companyId)}`);
   if (date) params.push(`date=${encodeURIComponent(date)}`);
   const query = params.length > 0 ? `?${params.join("&")}` : "";
-  return fetchJson<AttendanceRecord[]>(`/attendance/company/today${query}`, {
-    method: "GET",
-  });
+  return fetchJsonWithTimeout<AttendanceRecord[]>(`/attendance/company/today${query}`, { method: "GET", skipGlobalLoading: true }, 70000);
 }
 
 export interface MapplsPlaceSuggestion {
@@ -810,18 +819,26 @@ export async function searchMapplsTextSearch(
   });
 }
 
+const MAX_QUEUE_RETRIES = 5;
+
 export async function flushAttendanceQueue(): Promise<void> {
   const settings = await getSettings();
   if (settings.offlineMode === "true" || settings.autoSync === "false") {
     return;
   }
 
-  const queue = await getAttendanceQueue<QueueItem>();
+  const queue = await getAttendanceQueue<QueueItem & { _retries?: number }>();
   if (!queue.length) return;
 
-  const remaining: QueueItem[] = [];
+  const remaining: (QueueItem & { _retries?: number })[] = [];
   for (let index = 0; index < queue.length; index += 1) {
     const entry = queue[index];
+    const retries = entry._retries ?? 0;
+    // Drop items that have exceeded max retries
+    if (retries >= MAX_QUEUE_RETRIES) {
+      console.warn(`Dropping queued ${entry.type} after ${retries} failed attempts`, entry.payload.requestId);
+      continue;
+    }
     try {
       if (entry.type === "checkin") {
         await attendanceCheckIn(entry.payload);
@@ -829,8 +846,9 @@ export async function flushAttendanceQueue(): Promise<void> {
         await attendanceCheckOut(entry.payload);
       }
     } catch (error) {
-      remaining.push(entry);
+      remaining.push({ ...entry, _retries: retries + 1 });
       if (isApiAuthRequiredError(error)) {
+        // Auth required — preserve remaining items as-is (no retry increment)
         remaining.push(...queue.slice(index + 1));
         break;
       }
@@ -847,4 +865,12 @@ export async function getUsersRemote(options?: { companyId?: string | null }): P
   const query = params.toString();
   const data = await fetchJson<{ items?: DolibarrUser[] }>(`/users${query ? `?${query}` : ""}`, { method: "GET" });
   return Array.isArray(data.items) ? data.items : [];
+}
+
+export async function getAttendanceStatus(date?: string): Promise<{ records: AttendanceRecord[]; active: AttendanceRecord | null }> {
+  return fetchJsonWithTimeout(`/attendance/status${date ? `?date=${encodeURIComponent(date)}` : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
+}
+
+export async function getCompanyAttendanceMonth(companyId: string | undefined, month: string): Promise<AttendanceRecord[]> {
+  return fetchJsonWithTimeout(`/attendance/company/today?month=${encodeURIComponent(month)}${companyId ? `&company_id=${encodeURIComponent(companyId)}` : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
 }

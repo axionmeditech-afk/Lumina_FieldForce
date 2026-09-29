@@ -68,7 +68,8 @@ function getRosterIdentityKeys(identity: AttendanceRosterIdentity): string[] {
   }
 
   const name = normalizeIdentity(identity.name).replace(/\s+/g, " ");
-  if (name) keys.push(`name:${role}:${name}`);
+  // Display names are not unique employee identities.
+  if (!rawId && !email && name) keys.push(`name:${role}:${name}`);
   return keys;
 }
 

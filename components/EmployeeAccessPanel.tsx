@@ -1,17 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Alert, Button, ScrollView, Text, View } from "react-native";
-import { Redirect } from "expo-router";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Alert, Button, Text, View } from "react-native";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
-import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { getAdminAccessRequests, reviewAdminAccessRequest } from "@/lib/attendance-api";
 import type { UserAccessRequest } from "@/lib/types";
 
-export default function EmployeeAccess() {
+export function EmployeeAccessPanel() {
   const { user, company } = useAuth();
   const { colors } = useAppTheme();
-  const insets = useSafeAreaInsets();
   const [requests, setRequests] = useState<UserAccessRequest[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -23,7 +19,7 @@ export default function EmployeeAccess() {
     finally { setBusy(false); }
   }, [user?.role]);
   useEffect(() => { void load(); }, [load]);
-  if (user?.role !== "admin") return <Redirect href="/(tabs)/attendance" />;
+  if (user?.role !== "admin") return null;
   const review = async (requestId: string, action: "approved" | "rejected") => {
     if (!company?.id) { Alert.alert("Company required", "Select an active company before reviewing access."); return; }
     setBusy(true);
@@ -34,8 +30,7 @@ export default function EmployeeAccess() {
     } catch (e) { Alert.alert("Review failed", e instanceof Error ? e.message : "Please retry."); }
     finally { setBusy(false); }
   };
-  return <ScrollView style={{ backgroundColor: colors.background }} contentContainerStyle={{ padding: 24, paddingTop: insets.top + 20, gap: 18 }}>
-    <DrawerToggleButton />
+  return <View style={{ gap: 18 }}>
     <Text style={{ fontSize: 28, color: colors.text }}>Employee Access</Text>
     <Text style={{ color: colors.textSecondary }}>Approve employees for attendance at {company?.name}.</Text>
     <Button title={busy ? "Loading…" : "Refresh"} disabled={busy} onPress={() => void load()} />
@@ -47,5 +42,5 @@ export default function EmployeeAccess() {
       <Button title="Approve as employee" disabled={busy} onPress={() => void review(request.id, "approved")} />
       <Button title="Reject" disabled={busy} color={colors.danger} onPress={() => void review(request.id, "rejected")} />
     </View>)}
-  </ScrollView>;
+  </View>;
 }

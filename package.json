@@ -44,6 +44,7 @@
     "expo-router": "~57.0.23",
     "expo-splash-screen": "~57.0.9",
     "expo-status-bar": "~57.0.1",
+    "expo-task-manager": "~57.0.20",
     "expo-web-browser": "~57.0.3",
     "express": "^5.0.1",
     "fs-extra": "^11.3.4",

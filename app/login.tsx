@@ -17,7 +17,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import Animated, { FadeInDown, FadeInUp } from "react-native-reanimated";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
@@ -144,8 +143,7 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <Animated.View
-            entering={FadeInUp.duration(600)}
+          <View
             style={[styles.header, { paddingTop: insets.top + 8 }]}
           >
             <View style={styles.heroGlowLayer} pointerEvents="none">
@@ -189,10 +187,9 @@ export default function LoginScreen() {
               </View>
               <Text style={[styles.subtitle, { color: "rgba(240,247,255,0.84)" }]}>{screenSubtitle}</Text>
             </View>
-          </Animated.View>
+          </View>
 
-          <Animated.View
-            entering={FadeInDown.duration(600).delay(200)}
+          <View
             style={[
               styles.formContainer,
               {
@@ -433,7 +430,7 @@ export default function LoginScreen() {
                   : "New accounts stay pending until admin approval."}
               </Text>
             </View>
-          </Animated.View>
+          </View>
         </ScrollView>
       </KeyboardAvoidingView>
     </AppCanvas>

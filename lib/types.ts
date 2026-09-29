@@ -222,6 +222,9 @@ export interface DolibarrSyncLog {
 }
 
 export interface AttendanceCheckPayload {
+  requestId?: string;
+  actionSource?: "manual" | "geofence_exit";
+  activeAttendanceId?: string;
   userId: string;
   userName: string;
   latitude: number;

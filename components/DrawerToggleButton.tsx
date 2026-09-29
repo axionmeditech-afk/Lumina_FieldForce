@@ -1,6 +1,6 @@
 
 import { Pressable, StyleSheet, useWindowDimensions, type ViewStyle } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 // eslint-disable-next-line import/no-unresolved
 
 import { DrawerActions } from "expo-router/react-navigation";

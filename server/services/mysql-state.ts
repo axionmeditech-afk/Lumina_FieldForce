@@ -59,7 +59,7 @@ function buildPoolConfig(): PoolOptions | null {
     connectionLimit: 12,
     connectTimeout: toPositiveInteger(process.env.MYSQL_CONNECT_TIMEOUT_MS, 5000),
     waitForConnections: true,
-    queueLimit: 0,
+    queueLimit: 100,
     namedPlaceholders: true,
     charset: "utf8mb4",
     timezone: "+00:00",

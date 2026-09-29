@@ -1,3 +1,4 @@
+import { isUsableLocationSample } from "./location-evidence";
 import * as Location from "expo-location";
 import type { LocationObject } from "expo-location";
 
@@ -32,7 +33,7 @@ const DEFAULT_MIN_ACCURACY_METERS = 100;
 const DEFAULT_LOCATION_ATTEMPTS = 3;
 const SAMPLE_WAIT_MS = 1200;
 const DEFAULT_STABLE_SAMPLES = 2;
-const DEFAULT_MAX_DRIFT_METERS = 55;
+const DEFAULT_MAX_DRIFT_METERS = 50;
 const DEFAULT_LOCATION_TIMEOUT_MS = 15000;
 const MAX_SINGLE_FIX_WAIT_MS = 6000;
 
@@ -46,17 +47,22 @@ export async function getCurrentPositionWithTimeout(
   options: Location.LocationOptions,
   timeoutMs = MAX_SINGLE_FIX_WAIT_MS
 ): Promise<LocationObject> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      Location.getCurrentPositionAsync(options),
-      new Promise<LocationObject>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("GPS fix timed out.")), Math.max(500, timeoutMs));
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return new Promise<LocationObject>((resolve, reject) => {
+    let finished = false;
+    let subscription: Location.LocationSubscription | undefined;
+    const finish = (location?: LocationObject, error?: Error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      subscription?.remove();
+      if (location) resolve(location); else reject(error);
+    };
+    const timer = setTimeout(() => finish(undefined, new Error("GPS fix timed out.")), Math.max(500, timeoutMs));
+    void Location.watchPositionAsync({ ...options, timeInterval: 1000, distanceInterval: 0 },
+      location => finish(location), error => finish(undefined, new Error(error)))
+      .then(value => { subscription = value; if (finished) value.remove(); })
+      .catch(error => finish(undefined, error));
+  });
 }
 
 function getAccuracyScore(location: LocationObject | null): number {
@@ -128,23 +134,11 @@ export async function getVerifiedLocationEvidence(
   const timeoutMs = Math.max(2000, options?.timeoutMs ?? DEFAULT_LOCATION_TIMEOUT_MS);
   const deadlineMs = Date.now() + timeoutMs;
 
-  const lastKnown = await getLastKnownLocationSafe({ requiredAccuracy: minAccuracyMeters });
-
-  let best: LocationObject | null = lastKnown;
+  const startedAt = Date.now();
+  let best: LocationObject | null = null;
   const capturedSamples: LocationObject[] = [];
   const stableSamples: LocationObject[] = [];
   let previousStable: LocationObject | null = null;
-
-  if (lastKnown) {
-    capturedSamples.push(lastKnown);
-    if (getAccuracyScore(lastKnown) <= minAccuracyMeters) {
-      stableSamples.push(lastKnown);
-      previousStable = lastKnown;
-      if (stableSamples.length >= requiredStableSamples) {
-        return buildEvidence(stableSamples, lastKnown);
-      }
-    }
-  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const remainingMs = deadlineMs - Date.now();
@@ -162,6 +156,11 @@ export async function getVerifiedLocationEvidence(
       if (Date.now() >= deadlineMs) break;
       continue;
     }
+    if (!isUsableLocationSample(fix, Date.now(), minAccuracyMeters) || fix.timestamp < startedAt - 1000 ||
+        capturedSamples.some(sample => sample.timestamp === fix.timestamp)) {
+      await sleep(Math.min(sampleWaitMs, Math.max(0, deadlineMs - Date.now())));
+      continue;
+    }
     capturedSamples.push(fix);
     if (getAccuracyScore(fix) < getAccuracyScore(best)) {
       best = fix;
@@ -170,7 +169,7 @@ export async function getVerifiedLocationEvidence(
       if (!previousStable) {
         stableSamples.push(fix);
         previousStable = fix;
-      } else if (distanceBetweenMeters(previousStable, fix) <= maxDriftMeters) {
+      } else if (stableSamples.every(sample => distanceBetweenMeters(sample, fix) <= maxDriftMeters)) {
         stableSamples.push(fix);
         previousStable = fix;
       } else {
@@ -179,7 +178,7 @@ export async function getVerifiedLocationEvidence(
         previousStable = fix;
       }
       if (stableSamples.length >= requiredStableSamples) {
-        return buildEvidence(stableSamples, best ?? fix);
+        return buildEvidence(stableSamples, fix);
       }
     }
     if (attempt < maxAttempts && Date.now() < deadlineMs) {

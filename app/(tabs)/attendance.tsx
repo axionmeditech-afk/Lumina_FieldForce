@@ -1,10 +1,11 @@
+import * as Crypto from "expo-crypto";
+import { isUsableLocationSample } from "@/lib/location-evidence";
 import { useIsFocused } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Modal, ActivityIndicator, AppState, Alert, Linking, TextInput } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Haptics from "expo-haptics";
-import Animated, { useAnimatedStyle, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import * as ExpoLocation from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { LocationObject } from "expo-location";
@@ -32,7 +33,7 @@ import {
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import type { AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
-import { attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
+import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
 import {
   ensureLocationServicesEnabled,
   getCurrentPositionWithTimeout,
@@ -44,6 +45,7 @@ import {
 } from "@/lib/location-service";
 import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
+import { startAttendanceGeofence, stopAttendanceGeofence, retryPendingAttendanceExit } from "@/lib/attendance-background";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 import {
@@ -61,8 +63,6 @@ const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
 const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
-const AUTO_CHECKOUT_ON_GEOFENCE_EXIT =
-  (process.env.EXPO_PUBLIC_AUTO_CHECKOUT_ON_GEOFENCE_EXIT || "false").trim().toLowerCase() === "true";
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -70,10 +70,7 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   return Math.trunc(parsed);
 }
 
-const ADMIN_ATTENDANCE_REFRESH_MS = readPositiveIntegerEnv(
-  "EXPO_PUBLIC_ATTENDANCE_REFRESH_MS",
-  5 * 1000
-);
+const ADMIN_ATTENDANCE_REFRESH_MS = Math.max(30000, readPositiveIntegerEnv("EXPO_PUBLIC_ATTENDANCE_REFRESH_MS", 30000));
 
 type BannerType = "inside" | "outside" | "weak" | "boundary" | "loading";
 
@@ -413,7 +410,7 @@ function buildMonthlyAttendanceSummary(
   for (const employee of roster) {
     const nameKey = normalizeAttendanceIdentity(employee.name);
     const roleKey = normalizeAttendanceIdentity(employee.role);
-    const groupKey = nameKey ? `name:${roleKey}:${nameKey}` : `id:${employee.id}`;
+    const groupKey = `id:${employee.id.replace(/^dolibarr_/, "")}`;
     const existing = employeeGroups.get(groupKey);
     if (existing) {
       existing.ids.add(employee.id);
@@ -437,7 +434,7 @@ function buildMonthlyAttendanceSummary(
       const entries = attendance.filter(
         (entry) =>
           toMumbaiDateKey(entry.timestamp) === dateKey &&
-          (ids.has(entry.userId) || names.has(normalizeAttendanceIdentity(entry.userName)))
+          Array.from(ids).some(id => id.replace(/^dolibarr_/, "") === entry.userId.replace(/^dolibarr_/, ""))
       );
       if (entries.some((entry) => entry.type === "checkin")) {
         presentDays += 1;
@@ -586,7 +583,7 @@ function buildAdminAttendanceStatuses(
     if (!employee.companyId || employee.companyId === "workspace_default") continue;
     const nameKey = normalizeAttendanceIdentity(employee.name);
     const roleKey = normalizeAttendanceIdentity(employeeRole);
-    const groupKey = nameKey ? `name:${roleKey}:${nameKey}` : `id:${employee.id}`;
+    const groupKey = `id:${employee.id.replace(/^dolibarr_/, "")}`;
     const existing = employeeGroups.get(groupKey);
     if (existing) {
       existing.ids.add(employee.id);
@@ -614,7 +611,7 @@ function buildAdminAttendanceStatuses(
       .filter(
         (entry) =>
           toMumbaiDateKey(entry.timestamp) === today &&
-          (ids.has(entry.userId) || names.has(normalizeAttendanceIdentity(entry.userName)))
+          Array.from(ids).some(id => id.replace(/^dolibarr_/, "") === entry.userId.replace(/^dolibarr_/, ""))
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const latest = entries[entries.length - 1] ?? null;
@@ -676,13 +673,21 @@ function useAttendanceWebSocket(
 
     let ws: WebSocket | null = null;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    let pongTimeout: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
     let connecting = false;
     let attempt = 0;
 
+    const clearHeartbeat = () => {
+      if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+      if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
+    };
+
     const scheduleReconnect = () => {
       if (closed) return;
-      const delay = Math.min(1000 * 2 ** attempt, 30000);
+      clearHeartbeat();
+      const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30000);
       attempt++;
       reconnectTimeout = setTimeout(() => {
         void connect(0);
@@ -718,13 +723,25 @@ function useAttendanceWebSocket(
         ws.onopen = () => {
           opened = true;
           clearTimeout(openTimeout);
-          attempt = 0; 
+          attempt = 0;
+          // Heartbeat: ping every 25s, expect pong within 10s
+          heartbeatInterval = setInterval(() => {
+            if (ws?.readyState === WebSocket.OPEN) {
+              try { ws.send(JSON.stringify({ type: "ping" })); } catch { /* ignore */ }
+              pongTimeout = setTimeout(() => {
+                // No pong received — connection is stale, force reconnect
+                ws?.close();
+              }, 10000);
+            }
+          }, 25000);
           void loadBaseData();
         };
 
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+            // Clear pong timeout on any message (server is alive)
+            if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
             if (data.type === "attendance_update") {
               void loadBaseData();
             }
@@ -735,6 +752,7 @@ function useAttendanceWebSocket(
 
         ws.onclose = () => {
           clearTimeout(openTimeout);
+          clearHeartbeat();
           if (closed) return;
           if (!opened && candidateIndex < wsUrls.length - 1) {
             void connect(candidateIndex + 1);
@@ -758,6 +776,7 @@ function useAttendanceWebSocket(
 
     return () => {
       closed = true;
+      clearHeartbeat();
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) {
         ws.onclose = null; 
@@ -823,12 +842,14 @@ export default function AttendanceScreen() {
   const latestLocationCapturedAtMsRef = useRef<number>(0);
   const officeSearchRequestIdRef = useRef(0);
   const loadBaseDataRequestRef = useRef(0);
-  const successScale = useSharedValue(1);
-
-  const pulseStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: successScale.value }],
-  }));
-
+  const loadInFlightRef = useRef(false);
+  const reloadPendingRef = useRef(false);
+  const latestLoadRef = useRef<(() => Promise<void>) | null>(null);
+  const queuedLoadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rosterCacheRef = useRef<{ key: string; at: number; employees: Employee[] } | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [appActive, setAppActive] = useState(AppState.currentState === "active");
+  useEffect(() => { const sub = AppState.addEventListener("change", state => setAppActive(state === "active")); return () => sub.remove(); }, []);
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
   const isFocused = useIsFocused();
   const isEmployeeOfficeAttendance = true;
@@ -859,132 +880,74 @@ export default function AttendanceScreen() {
   }, [openAppSettings]);
 
   const loadBaseData = useCallback(async () => {
-    if (!user?.id) return;
+    if (!user?.id || !isFocused || !appActive) return;
+    if (loadInFlightRef.current) { reloadPendingRef.current = true; return; }
+    loadInFlightRef.current = true;
     const requestId = ++loadBaseDataRequestRef.current;
-    const shouldLoadRoster = canReviewSignIns || isAdminAttendanceManager;
-    const dateKey = selectedDate;
-    const companyId = company?.id || undefined;
-
-    // SVR Cache Phase
-    if (isAdminAttendanceManager) {
-      try {
-        const cacheKey = `@attendance_cache_status_${companyId || "workspace"}_${dateKey}`;
-        const rosterKey = `@attendance_cache_roster_${companyId || "workspace"}`;
-        const [cachedStatusRaw, cachedRosterRaw] = await Promise.all([
-          AsyncStorage.getItem(cacheKey),
-          AsyncStorage.getItem(rosterKey),
-        ]);
-        if (requestId === loadBaseDataRequestRef.current) {
-          let cachedRecords: AttendanceRecord[] = [];
-          let cachedEmployees: Employee[] = [];
-          if (cachedStatusRaw) cachedRecords = JSON.parse(cachedStatusRaw);
-          if (cachedRosterRaw) cachedEmployees = JSON.parse(cachedRosterRaw);
-          if (cachedEmployees.length > 0) {
-            setAdminAttendanceStatuses(buildAdminAttendanceStatuses(cachedRecords, cachedEmployees, user.id, dateKey));
-          } else {
-            setAdminAttendanceStatuses([]);
-          }
-        }
-      } catch (e) {
-        console.warn("AsyncStorage get cache failed", e);
+    const companyId = company?.id;
+    const rosterKey = `${user.id}:${companyId || ""}`;
+    try {
+      const cache = rosterCacheRef.current;
+      const ROSTER_CACHE_TTL_MS = 120_000; // 2 minutes (was 5 min)
+      const [status, companyAttendance, employees] = await Promise.all([
+        getAttendanceStatus(selectedDate),
+        isAdminAttendanceManager || canReviewSignIns ? getCompanyAttendanceToday(companyId, selectedDate) : Promise.resolve([]),
+        isAdminAttendanceManager || canReviewSignIns
+          ? cache?.key === rosterKey && Date.now() - cache.at < ROSTER_CACHE_TTL_MS
+            ? Promise.resolve(cache.employees)
+            : loadAttendanceRoster({ id: companyId, name: company?.name })
+          : Promise.resolve([] as Employee[]),
+      ]);
+      if (requestId !== loadBaseDataRequestRef.current) return;
+      rosterCacheRef.current = { key: rosterKey, at: cache?.key === rosterKey && cache.employees === employees ? cache.at : Date.now(), employees };
+      setRecords(status.records);
+      if (status.active) await AsyncStorage.removeItem(`@attendance_request:${user.id}:checkin`);
+      else await AsyncStorage.removeItem(`@attendance_request:${user.id}:checkout`);
+      setCheckedInState(Boolean(status.active));
+      await setCheckedIn(Boolean(status.active));
+      if (isAdminAttendanceManager || canReviewSignIns) {
+        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id, selectedDate));
       }
-    }
-
-    const [localAttendance, companyAttendance, currentCheckIn, employees] = await Promise.all([
-      getAttendance(),
-      isAdminAttendanceManager
-        ? getCompanyAttendanceToday(companyId, dateKey).catch(() => [] as AttendanceRecord[])
-        : Promise.resolve([] as AttendanceRecord[]),
-      isCheckedIn(),
-      shouldLoadRoster
-        ? loadAttendanceRoster({ id: companyId, name: company?.name }).catch(() => [] as Employee[])
-        : Promise.resolve([] as Employee[]),
-    ]);
-    if (requestId !== loadBaseDataRequestRef.current) return;
-
-    // Filter local user records to match selected date
-    const userRecords = localAttendance.filter(
-      (entry) =>
-        (entry.userId === user.id ||
-        normalizeAttendanceIdentity(entry.userName) === normalizeAttendanceIdentity(user.name)) &&
-        toMumbaiDateKey(entry.timestamp) === dateKey
-    );
-    setRecords(userRecords);
-
-    if (shouldLoadRoster) {
-      if (isAdminAttendanceManager) {
-        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id, dateKey));
-        // Save SVR Cache
-        try {
-          const cacheKey = `@attendance_cache_status_${companyId || "workspace"}_${dateKey}`;
-          const rosterKey = `@attendance_cache_roster_${companyId || "workspace"}`;
-          await Promise.all([
-            AsyncStorage.setItem(cacheKey, JSON.stringify(companyAttendance)),
-            AsyncStorage.setItem(rosterKey, JSON.stringify(employees)),
-          ]);
-        } catch (e) {}
-      }
-      if (!canReviewSignIns) {
-        setPendingSignIns([]);
-      } else {
-        const employeeById = new Map(employees.map((employee) => [employee.id, employee]));
-        const employeeByName = new Map(
-          employees.map((employee) => [normalizeAttendanceIdentity(employee.name), employee])
-        );
-        const pending = localAttendance
-          .filter((entry) => {
-            if (entry.type !== "checkin") return false;
-            if (toMumbaiDateKey(entry.timestamp) !== dateKey) return false;
-            if ((entry.approvalStatus ?? "approved") !== "pending") return false;
-            if (entry.userId === user.id) return false;
-            const matchedEmployee =
-              employeeById.get(entry.userId) ?? employeeByName.get(normalizeAttendanceIdentity(entry.userName));
-            if (!matchedEmployee) return false;
-            const recordRole = matchedEmployee.role;
-            return recordRole !== "admin" && recordRole !== "manager";
-          })
-          .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-        setPendingSignIns(pending);
-      }
-    } else {
       setPendingSignIns([]);
-      setAdminAttendanceStatuses([]);
+      setDataError(null);
+    } catch (error) {
+      if (requestId === loadBaseDataRequestRef.current) setDataError(error instanceof Error ? error.message : "Attendance refresh failed. Showing last confirmed data.");
+    } finally {
+      loadInFlightRef.current = false;
+      if (reloadPendingRef.current) {
+        reloadPendingRef.current = false;
+        queuedLoadTimer.current = setTimeout(() => { void latestLoadRef.current?.(); }, 500);
+      }
     }
-    const derivedCheckIn = resolveCheckedInFromRecords(localAttendance, user.id, user.name);
-    const resolvedCheckIn = derivedCheckIn ?? currentCheckIn;
-    setCheckedInState(resolvedCheckIn);
-    if (resolvedCheckIn !== currentCheckIn) {
-      await setCheckedIn(resolvedCheckIn);
-    }
-  }, [canReviewSignIns, company?.id, company?.name, isAdminAttendanceManager, user?.id, user?.name, selectedDate]);
-  // === WEBSOCKET HOOK CALL ===
-  // Note: user?.role 'admin' ya 'manager' dono ke liye check kiya hai
-  useAttendanceWebSocket(isAdminAttendanceManager || user?.role === "manager", loadBaseData);
-  // ============================
+  }, [user?.id, company?.id, company?.name, selectedDate, isAdminAttendanceManager, canReviewSignIns, isFocused, appActive]);
 
   useEffect(() => {
-    return subscribeStorageUpdates((event) => {
-      if (event.key !== STORAGE_KEYS.ATTENDANCE && event.key !== STORAGE_KEYS.EMPLOYEES) return;
-      void loadBaseData();
-    });
+    latestLoadRef.current = loadBaseData;
+    return () => { latestLoadRef.current = null; if (queuedLoadTimer.current) clearTimeout(queuedLoadTimer.current); };
   }, [loadBaseData]);
-
+  useAttendanceWebSocket((isAdminAttendanceManager || canReviewSignIns) && isFocused && appActive, loadBaseData);
+  // Smart polling: Admin/manager gets interval polling; employees only refresh on mount + foreground
   useEffect(() => {
-    if (!user?.id || (!canReviewSignIns && !isAdminAttendanceManager)) return;
-    const interval = setInterval(() => {
-      void loadBaseData();
-    }, ADMIN_ATTENDANCE_REFRESH_MS);
-    return () => clearInterval(interval);
-  }, [canReviewSignIns, isAdminAttendanceManager, loadBaseData, user?.id]);
-
-  useEffect(() => {
-    setRecords([]);
-    setPendingSignIns([]);
-    if (isAdminAttendanceManager) {
-      setAdminAttendanceStatuses([]);
-    }
     void loadBaseData();
-  }, [isAdminAttendanceManager, selectedDate, loadBaseData]);
+    const needsPolling = isAdminAttendanceManager || canReviewSignIns;
+    const timer = needsPolling
+      ? setInterval(() => { void loadBaseData(); }, ADMIN_ATTENDANCE_REFRESH_MS)
+      : null;
+    return () => { ++loadBaseDataRequestRef.current; if (timer) clearInterval(timer); };
+  }, [loadBaseData, isAdminAttendanceManager, canReviewSignIns]);
+  // Event-driven reload on storage changes (replaces the wasteful 2s retry loop)
+  useEffect(() => {
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = subscribeStorageUpdates(event => {
+      if (event.key === STORAGE_KEYS.EMPLOYEES) rosterCacheRef.current = null;
+      if (event.key === STORAGE_KEYS.ATTENDANCE || event.key === STORAGE_KEYS.EMPLOYEES) {
+        // Debounce: wait 500ms after last event before reloading
+        if (reloadTimer) clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(() => { void loadBaseData(); }, 500);
+      }
+    });
+    return () => { unsubscribe(); if (reloadTimer) clearTimeout(reloadTimer); };
+  }, [loadBaseData]);
 
   const loadMonthlySummary = useCallback(
     async (monthKey = datePickerMonthKey) => {
@@ -993,14 +956,10 @@ export default function AttendanceScreen() {
       try {
         const companyId = company?.id || undefined;
         const [employees, recordsByDay] = await Promise.all([
-          loadAttendanceRoster({ id: companyId, name: company?.name }).catch(() => [] as Employee[]),
-          Promise.all(
-            getMonthDateKeys(monthKey).map((dateKey) =>
-              getCompanyAttendanceToday(companyId, dateKey).catch(() => [] as AttendanceRecord[])
-            )
-          ),
+          loadAttendanceRoster({ id: companyId, name: company?.name }),
+          getCompanyAttendanceMonth(companyId, monthKey),
         ]);
-        setMonthlySummary(buildMonthlyAttendanceSummary(monthKey, recordsByDay.flat(), employees));
+        setMonthlySummary(buildMonthlyAttendanceSummary(monthKey, recordsByDay, employees));
       } catch (error) {
         Alert.alert(
           "Monthly Summary Failed",
@@ -1026,8 +985,9 @@ export default function AttendanceScreen() {
       const cached = await getGeofencesForUser(user.id);
       try {
         const zones = await getUserGeofences(user.id);
-        await Promise.all(zones.map((zone) => upsertGeofence(zone)));
-        setGeofences(zones.length > 0 ? zones : cached);
+        for (const zone of zones) await upsertGeofence(zone);
+        setGeofences(zones);
+
         if (zones.length === 0 && cached.length === 0) {
           setGeofenceLoadError(
             "No office location is configured for any company attached to this account."
@@ -1044,6 +1004,7 @@ export default function AttendanceScreen() {
         );
       }
       setGeofences(cached);
+
     } catch (error) {
       setGeofences([]);
       setGeofenceLoadError(
@@ -1096,8 +1057,9 @@ export default function AttendanceScreen() {
     async (location: LocationObject) => {
       if (!user?.id) return;
       const effectiveLocation = applyAhmedabadOfficeLocationLock(location);
+      if (!isUsableLocationSample(effectiveLocation, Date.now(), RELAXED_LOCATION_ACCURACY_METERS)) { setLocationReady(false); return; }
       latestLocationRef.current = effectiveLocation;
-      latestLocationCapturedAtMsRef.current = Date.now();
+      latestLocationCapturedAtMsRef.current = effectiveLocation.timestamp;
       const nextEvaluation = evaluateGeofenceStatus(
         geofences,
         effectiveLocation.coords.latitude,
@@ -1107,30 +1069,6 @@ export default function AttendanceScreen() {
       setEvaluation(nextEvaluation);
       setGpsLoading(false);
       setLocationReady(true);
-
-      const canTriggerAutoCheckout =
-        AUTO_CHECKOUT_ON_GEOFENCE_EXIT &&
-        !isSalesRole(user?.role) &&
-        !isSalespersonFieldCheckIn &&
-        checkedInState &&
-        isOfficeGeofenceAttendance &&
-        geofencesLoaded &&
-        geofences.length > 0 &&
-        nextEvaluation.nearestDistanceMeters !== Number.POSITIVE_INFINITY;
-
-      if (canTriggerAutoCheckout && !nextEvaluation.inside && !nextEvaluation.signalWeak && (effectiveLocation.coords.accuracy ?? 100) < 50) {
-        if (nextEvaluation.nearestDistanceMeters > 500) {
-          consecutiveOutsideRef.current += 1;
-          if (consecutiveOutsideRef.current >= 5) {
-            void submitAttendance("checkout", { isAuto: true, silent: true });
-            consecutiveOutsideRef.current = 0;
-          }
-        } else {
-          consecutiveOutsideRef.current = 0;
-        }
-      } else {
-        consecutiveOutsideRef.current = 0;
-      }
 
       const shouldPrompt =
         isConfirmedInsideZone(nextEvaluation) &&
@@ -1190,7 +1128,7 @@ export default function AttendanceScreen() {
           minAccuracyMeters: strict ? STRICT_LOCATION_ACCURACY_METERS : RELAXED_LOCATION_ACCURACY_METERS,
           maxAttempts: strict ? 8 : 5,
           requiredStableSamples: strict ? MIN_STABLE_LOCATION_SAMPLES : 1,
-          maxDriftMeters: strict ? Math.max(STABLE_LOCATION_MAX_DRIFT_METERS, 120) : 180,
+          maxDriftMeters: strict ? 50 : 100,
         });
         const effectiveLocation = applyAhmedabadOfficeLocationLock(evidence.location);
         const effectiveEvidence = {
@@ -1203,7 +1141,7 @@ export default function AttendanceScreen() {
           bestAccuracyMeters: effectiveEvidence.bestAccuracyMeters,
         };
         latestLocationRef.current = effectiveEvidence.location;
-        latestLocationCapturedAtMsRef.current = Date.now();
+        latestLocationCapturedAtMsRef.current = effectiveEvidence.location.timestamp;
         setGpsEvidence(
           `GPS lock: ${effectiveEvidence.sampleCount} samples / ${Math.max(
             1,
@@ -1215,6 +1153,7 @@ export default function AttendanceScreen() {
         await handleLocationUpdate(effectiveEvidence.location);
         return effectiveEvidence;
       } catch {
+        if (strict) { latestEvidenceRef.current = null; return null; }
         let fallbackLocation: LocationObject | null = null;
         try {
           fallbackLocation = await getCurrentPositionWithTimeout(
@@ -1230,12 +1169,12 @@ export default function AttendanceScreen() {
 
         if (!fallbackLocation) {
           fallbackLocation = await getLastKnownLocationSafe({
-            maxAgeMs: 20 * 60 * 1000,
+            maxAgeMs: 20_000,
             requiredAccuracy: strict ? 450 : 1200,
           });
         }
 
-        if (fallbackLocation) {
+        if (fallbackLocation && isUsableLocationSample(fallbackLocation, Date.now(), RELAXED_LOCATION_ACCURACY_METERS)) {
           const effectiveFallbackLocation = applyAhmedabadOfficeLocationLock(fallbackLocation);
           const fallbackAccuracy =
             typeof effectiveFallbackLocation.coords.accuracy === "number" &&
@@ -1248,7 +1187,7 @@ export default function AttendanceScreen() {
             bestAccuracyMeters: fallbackAccuracy,
           };
           latestLocationRef.current = effectiveFallbackLocation;
-          latestLocationCapturedAtMsRef.current = Date.now();
+          latestLocationCapturedAtMsRef.current = effectiveFallbackLocation.timestamp;
           setGpsEvidence(
             `GPS fallback: ${
               fallbackAccuracy !== null ? `+/-${fallbackAccuracy}m` : "accuracy unknown"
@@ -1293,15 +1232,13 @@ export default function AttendanceScreen() {
 
   useEffect(() => {
     if (!user?.id) return;
-    void loadBaseData();
     void loadGeofenceAssignments();
     if (isAdminAttendanceManager) {
       void loadOfficeZone();
     }
-    void flushAttendanceQueue();
+
   }, [
     isAdminAttendanceManager,
-    loadBaseData,
     loadGeofenceAssignments,
     loadOfficeZone,
     user?.id,
@@ -1312,7 +1249,7 @@ export default function AttendanceScreen() {
     if (!user?.id || !isFocused || permissionExplainerOpen) return;
     let inFlight = false;
     const refresh = async () => {
-      if (inFlight || AppState.currentState !== "active") return;
+      if (inFlight || attendanceSubmissionInProgressRef.current || AppState.currentState !== "active") return;
       inFlight = true;
       try { await refreshLocation(); } finally { inFlight = false; }
     };
@@ -1358,10 +1295,6 @@ export default function AttendanceScreen() {
       setPermissionLoading(false);
     }
   }, [refreshLocation, showPermissionBlockedAlert]);
-
-  const animateSuccess = useCallback(() => {
-    successScale.value = withSequence(withTiming(1.04, { duration: 140 }), withTiming(1, { duration: 160 }));
-  }, [successScale]);
 
   const getFastAttendanceEvidence = useCallback(async () => {
     const cachedLocation = latestLocationRef.current;
@@ -1578,10 +1511,7 @@ export default function AttendanceScreen() {
         return;
       }
 
-      const position = await ExpoLocation.getCurrentPositionAsync({
-        accuracy: ExpoLocation.Accuracy.High,
-        mayShowUserSettingsDialog: true,
-      });
+      const { location: position } = await getVerifiedLocationEvidence({ minAccuracyMeters: 50, requiredStableSamples: 2, maxAttempts: 6 });
       const accuracy =
         typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
           ? Math.round(position.coords.accuracy)
@@ -1642,9 +1572,7 @@ export default function AttendanceScreen() {
         } else {
           await createGeofenceRemote(nextOfficeZone);
         }
-      } catch {
-        await createGeofenceRemote(nextOfficeZone);
-      }
+      } catch (error) { throw error; }
       await upsertGeofence(nextOfficeZone);
       await loadGeofenceAssignments();
       await updateCompany({
@@ -1687,6 +1615,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
     setOfficeSearchResults([]);
   }, []);
 
+  const lastSubmitRequestIdRef = useRef<string | null>(null);
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout", options?: { isAuto?: boolean, silent?: boolean }) => {
       if (!user?.id) return;
@@ -1698,7 +1627,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
       if (!options?.silent) setActionLoading(true);
       try {
         const isAuto = options?.isAuto === true;
-        const biometricRequired = !isAuto;
+        const biometricRequired = true;
         let biometricVerified = false;
         let biometricType: string | null = null;
         let biometricFailureReason: string | null = null;
@@ -1745,7 +1674,11 @@ setOfficeLocationName((current) => current.trim() || result.label);
           }
         }
 
-        const postCaptureEvidence = preCaptureEvidence;
+        // GPS freshness gate: reject cached location older than 20s
+        const gpsCacheAgeMs = Date.now() - preCaptureEvidence.location.timestamp;
+        const postCaptureEvidence = (isUsableLocationSample(preCaptureEvidence.location) && gpsCacheAgeMs <= 20_000)
+          ? preCaptureEvidence
+          : await getVerifiedLocationEvidence({ requiredStableSamples: 2, maxAttempts: 6 });
         const postCaptureLocation = postCaptureEvidence.location;
 
         const finalEvaluation = evaluateGeofenceStatus(
@@ -1754,14 +1687,14 @@ setOfficeLocationName((current) => current.trim() || result.label);
           postCaptureLocation.coords.longitude,
           postCaptureLocation.coords.accuracy ?? undefined
         );
-        if (type === "checkin" && (!geofences.length || !finalEvaluation.inside || finalEvaluation.signalWeak)) {
+        if (type === "checkin" && (!geofences.length || !finalEvaluation.insideConfirmed || finalEvaluation.signalWeak)) {
           throw new Error("Move inside your assigned office geofence with a clear GPS signal to check in.");
         }
         if (isMockLocation(postCaptureLocation)) throw new Error("Disable mock location before marking attendance.");
         const finalZoneName = finalEvaluation.activeZone?.name ?? "Unassigned Zone";
 
         const security = await securityPromise;
-        const capturedAtClient = new Date().toISOString();
+        const capturedAtClient = new Date(postCaptureLocation.timestamp).toISOString();
         const accuracyMeters = postCaptureLocation.coords.accuracy;
         const roundedAccuracyMeters =
           typeof accuracyMeters === "number" && Number.isFinite(accuracyMeters)
@@ -1776,7 +1709,12 @@ setOfficeLocationName((current) => current.trim() || result.label);
             ? `Identity:${biometricType || "verified"}`
             : "Identity:optional_or_off",
         ].join(" | ");
+        const thisRequestId = Crypto.randomUUID();
+        // Client-side dedup: prevent re-submitting the same request
+        if (lastSubmitRequestIdRef.current === thisRequestId) return;
+        lastSubmitRequestIdRef.current = thisRequestId;
         const payload = {
+          requestId: thisRequestId,
           userId: user.id,
           userName: user.name,
           latitude: postCaptureLocation.coords.latitude,
@@ -1826,6 +1764,11 @@ setOfficeLocationName((current) => current.trim() || result.label);
         await addAttendance(approvalAwareRecord);
         await setCheckedIn(type === "checkin");
         setCheckedInState(type === "checkin");
+        if (type === "checkout") await stopAttendanceGeofence().catch(console.warn);
+        else {
+          const enabled = await startAttendanceGeofence(record, geofences).catch(() => false);
+          if (!enabled) Alert.alert("Check-in saved", "For automatic checkout while the phone is locked, enable background location in Account. A native app build is required.");
+        }
         void loadBaseData();
         if (requiresApproval) {
           Alert.alert(
@@ -1835,7 +1778,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
         }
         if (!options?.silent) {
           void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-          animateSuccess();
+
         }
       } catch (error) {
         if (!options?.silent) Alert.alert("Attendance Failed", error instanceof Error ? error.message : "Unknown error");
@@ -1845,7 +1788,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
       }
     },
     [
-      animateSuccess,
       checkedInState,
       geofences,
       getFastAttendanceEvidence,
@@ -1906,7 +1848,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
   }, [records]);
 
   const employeeHasOfficeZone = !isOfficeGeofenceAttendance || geofences.length > 0;
-  const employeeInsideOfficeZone = !isOfficeGeofenceAttendance || evaluation.inside;
+  const employeeInsideOfficeZone = !isOfficeGeofenceAttendance || evaluation.insideConfirmed;
   const bannerType: BannerType = (!geofencesLoaded || !locationReady)
     ? "loading"
     : evaluation.signalWeak
@@ -1923,7 +1865,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
       geofences[0]?.name ??
       (isOfficeGeofenceAttendance ? "Office not configured" : "No zone");
   const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
-  const canSubmitAction = (selectedDate === toMumbaiDateKey(new Date())) && (checkedInState ? locationReady : canCheckIn);
+  const canSubmitAction = !dataError && (selectedDate === toMumbaiDateKey(new Date())) && (checkedInState ? locationReady : canCheckIn);
   const employeeDistanceLabel =
     isOfficeGeofenceAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
       ? formatDistance(evaluation.nearestDistanceMeters)
@@ -2042,7 +1984,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
               },
             ]}
           >
-            <ScrollView
+            {dataError ? <Pressable onPress={() => void loadBaseData()}><Text style={{ color: colors.danger, padding: 12 }}>Sync unavailable: {dataError} Tap to retry.</Text></Pressable> : null}
+      <ScrollView
               style={styles.datePickerScroll}
               contentContainerStyle={styles.datePickerScrollContent}
               showsVerticalScrollIndicator={false}
@@ -2708,7 +2651,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
           </View>
         ) : null}
 
-        <Animated.View style={pulseStyle}>
+        <View>
           <Pressable
             disabled={actionLoading || permissionLoading || permissionExplainerOpen || !canSubmitAction}
             onPress={() => void submitAttendance(checkedInState ? "checkout" : "checkin")}
@@ -2744,7 +2687,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
               )}
             </LinearGradient>
           </Pressable>
-        </Animated.View>
+        </View>
 
         {!checkedInState && !canCheckIn ? (
           <Text style={[styles.helperWarning, { color: colors.danger }]}>
