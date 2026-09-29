@@ -10,12 +10,10 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import {
   ActivityIndicator,
   LayoutAnimation,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  UIManager,
   View,
   useWindowDimensions,
 } from "react-native";
@@ -24,10 +22,6 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 
 const DRAWER_WIDTH = 396;
-
-if (Platform.OS === "android") {
-  UIManager.setLayoutAnimationEnabledExperimental?.(true);
-}
 
 function getDrawerPalette(isDark: boolean) {
   if (isDark) {
