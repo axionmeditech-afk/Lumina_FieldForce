@@ -1126,9 +1126,11 @@ export default function AttendanceScreen() {
       try {
         const evidence = await getVerifiedLocationEvidence({
           minAccuracyMeters: strict ? STRICT_LOCATION_ACCURACY_METERS : RELAXED_LOCATION_ACCURACY_METERS,
-          maxAttempts: strict ? 8 : 5,
+          maxAttempts: strict ? 10 : 5,
           requiredStableSamples: strict ? MIN_STABLE_LOCATION_SAMPLES : 1,
           maxDriftMeters: strict ? 50 : 100,
+          sampleWaitMs: strict ? 900 : undefined,
+          timeoutMs: strict ? 30_000 : undefined,
         });
         const effectiveLocation = applyAhmedabadOfficeLocationLock(evidence.location);
         const effectiveEvidence = {
@@ -1295,6 +1297,32 @@ export default function AttendanceScreen() {
       setPermissionLoading(false);
     }
   }, [refreshLocation, showPermissionBlockedAlert]);
+
+  const ensureAttendanceLocationPreflight = useCallback(async () => {
+    const locationPermission = await requestLocationPermissionBundle();
+    if (!locationPermission.foreground) {
+      if (!locationPermission.foregroundCanAskAgain) {
+        showPermissionBlockedAlert();
+      } else {
+        Alert.alert(
+          "Location Required",
+          "Allow precise location permission, then try attendance again."
+        );
+      }
+      return false;
+    }
+
+    const gpsEnabled = await ensureLocationServicesEnabled();
+    if (!gpsEnabled) {
+      Alert.alert(
+        "Turn On GPS",
+        "Please enable device location services, keep the app open for a few seconds, then try again."
+      );
+      return false;
+    }
+    setPermissionExplainerOpen(false);
+    return true;
+  }, [showPermissionBlockedAlert]);
 
   const getFastAttendanceEvidence = useCallback(async () => {
     const cachedLocation = latestLocationRef.current;
@@ -1632,9 +1660,19 @@ setOfficeLocationName((current) => current.trim() || result.label);
         let biometricType: string | null = null;
         let biometricFailureReason: string | null = null;
 
+        const locationReadyForAttendance = await ensureAttendanceLocationPreflight();
+        if (!locationReadyForAttendance) {
+          return;
+        }
+
         const preCaptureEvidence = await getFastAttendanceEvidence();
         if (!preCaptureEvidence) {
-          if (!options?.silent) Alert.alert("Location Unavailable", "Unable to fetch live GPS location. Please try again.");
+          if (!options?.silent) {
+            Alert.alert(
+              "Location Unavailable",
+              "Unable to fetch a stable live GPS lock. Keep the app open, move near a window or open area, ensure Precise Location is enabled, then try again."
+            );
+          }
           return;
         }
 
@@ -1789,6 +1827,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
     },
     [
       checkedInState,
+      ensureAttendanceLocationPreflight,
       geofences,
       getFastAttendanceEvidence,
       isSalespersonFieldCheckIn,

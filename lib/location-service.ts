@@ -49,18 +49,38 @@ export async function getCurrentPositionWithTimeout(
 ): Promise<LocationObject> {
   return new Promise<LocationObject>((resolve, reject) => {
     let finished = false;
+    let pendingSources = 2;
+    let lastError: Error | null = null;
     let subscription: Location.LocationSubscription | undefined;
-    const finish = (location?: LocationObject, error?: Error) => {
+    const finish = (location?: LocationObject, error?: Error, final = false) => {
       if (finished) return;
+      if (location) {
+        finished = true;
+        clearTimeout(timer);
+        subscription?.remove();
+        resolve(location);
+        return;
+      }
+      if (error) lastError = error;
+      if (!final) {
+        pendingSources -= 1;
+        if (pendingSources > 0) return;
+      }
       finished = true;
       clearTimeout(timer);
       subscription?.remove();
-      if (location) resolve(location); else reject(error);
+      reject(lastError ?? error ?? new Error("GPS fix timed out."));
     };
-    const timer = setTimeout(() => finish(undefined, new Error("GPS fix timed out.")), Math.max(500, timeoutMs));
+    const timer = setTimeout(
+      () => finish(undefined, new Error("GPS fix timed out."), true),
+      Math.max(500, timeoutMs)
+    );
     void Location.watchPositionAsync({ ...options, timeInterval: 1000, distanceInterval: 0 },
       location => finish(location), error => finish(undefined, new Error(error)))
       .then(value => { subscription = value; if (finished) value.remove(); })
+      .catch(error => finish(undefined, error));
+    void Location.getCurrentPositionAsync(options)
+      .then(location => finish(location))
       .catch(error => finish(undefined, error));
   });
 }
