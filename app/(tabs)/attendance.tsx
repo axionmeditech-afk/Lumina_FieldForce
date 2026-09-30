@@ -58,6 +58,8 @@ const LOCATION_REFRESH_MS = 15 * 1000;
 const STRICT_LOCATION_ACCURACY_METERS = 120;
 const RELAXED_LOCATION_ACCURACY_METERS = 220;
 const MIN_STABLE_LOCATION_SAMPLES = 2;
+const STRICT_LOCATION_CACHE_MS = 45 * 1000;
+const STRICT_LOCATION_WARMUP_MIN_INTERVAL_MS = 20 * 1000;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
 const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 const OFFICE_LOCATION_SEARCH_LIMIT = 15;
@@ -840,6 +842,8 @@ export default function AttendanceScreen() {
   } | null>(null);
   const latestLocationRef = useRef<LocationObject | null>(null);
   const latestLocationCapturedAtMsRef = useRef<number>(0);
+  const strictWarmupInFlightRef = useRef(false);
+  const lastStrictWarmupAtRef = useRef(0);
   const officeSearchRequestIdRef = useRef(0);
   const loadBaseDataRequestRef = useRef(0);
   const loadInFlightRef = useRef(false);
@@ -1332,7 +1336,7 @@ export default function AttendanceScreen() {
         ? cachedLocation.coords.accuracy
         : Number.POSITIVE_INFINITY;
 
-    if (cachedLocation && cachedAgeMs <= 20_000 && cachedAccuracy <= STRICT_LOCATION_ACCURACY_METERS && (latestEvidenceRef.current?.sampleCount ?? 0) >= MIN_STABLE_LOCATION_SAMPLES) {
+    if (cachedLocation && cachedAgeMs <= STRICT_LOCATION_CACHE_MS && cachedAccuracy <= STRICT_LOCATION_ACCURACY_METERS && (latestEvidenceRef.current?.sampleCount ?? 0) >= MIN_STABLE_LOCATION_SAMPLES) {
       const roundedAccuracy = Number.isFinite(cachedAccuracy) ? Math.round(cachedAccuracy) : null;
       return {
         location: cachedLocation,
@@ -1665,7 +1669,23 @@ setOfficeLocationName((current) => current.trim() || result.label);
           return;
         }
 
-        const preCaptureEvidence = await getFastAttendanceEvidence();
+        const locationEvidencePromise = getFastAttendanceEvidence();
+        const biometricPromise = biometricRequired
+          ? verifyBiometricForAttendance(type, {
+              userId: user.id,
+              enforceDaily: false,
+            })
+          : Promise.resolve({
+              success: true,
+              method: null,
+              errorMessage: null,
+              errorCode: null,
+            });
+
+        const [preCaptureEvidence, biometricResult] = await Promise.all([
+          locationEvidencePromise,
+          biometricPromise,
+        ]);
         if (!preCaptureEvidence) {
           if (!options?.silent) {
             Alert.alert(
@@ -1679,11 +1699,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
         const securityPromise = getClientSecurityStatus(isMockLocation(preCaptureEvidence.location));
 
         if (biometricRequired) {
-          const biometricResult = await verifyBiometricForAttendance(type, {
-            userId: user.id,
-            // Always ask biometric for each action (check-in and check-out).
-            enforceDaily: false,
-          });
           biometricType = biometricResult.method;
           biometricVerified = biometricResult.success;
           if (!biometricResult.success) {
@@ -1712,9 +1727,13 @@ setOfficeLocationName((current) => current.trim() || result.label);
           }
         }
 
-        // GPS freshness gate: reject cached location older than 20s
+        // GPS freshness gate: accept only a fresh strict two-sample lock.
         const gpsCacheAgeMs = Date.now() - preCaptureEvidence.location.timestamp;
-        const postCaptureEvidence = (isUsableLocationSample(preCaptureEvidence.location) && gpsCacheAgeMs <= 20_000)
+        const postCaptureEvidence = (
+          isUsableLocationSample(preCaptureEvidence.location, Date.now(), STRICT_LOCATION_ACCURACY_METERS) &&
+          gpsCacheAgeMs <= STRICT_LOCATION_CACHE_MS &&
+          preCaptureEvidence.sampleCount >= MIN_STABLE_LOCATION_SAMPLES
+        )
           ? preCaptureEvidence
           : await getVerifiedLocationEvidence({ requiredStableSamples: 2, maxAttempts: 6 });
         const postCaptureLocation = postCaptureEvidence.location;
@@ -1905,6 +1924,61 @@ setOfficeLocationName((current) => current.trim() || result.label);
       (isOfficeGeofenceAttendance ? "Office not configured" : "No zone");
   const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
   const canSubmitAction = !dataError && (selectedDate === toMumbaiDateKey(new Date())) && (checkedInState ? locationReady : canCheckIn);
+
+  useEffect(() => {
+    if (
+      !user?.id ||
+      !isFocused ||
+      permissionExplainerOpen ||
+      !geofencesLoaded ||
+      !employeeHasOfficeZone ||
+      selectedDate !== toMumbaiDateKey(new Date())
+    ) {
+      return;
+    }
+
+    const warmStrictLocation = () => {
+      if (attendanceSubmissionInProgressRef.current || AppState.currentState !== "active") return;
+      const cachedLocation = latestLocationRef.current;
+      const cachedAgeMs = Date.now() - latestLocationCapturedAtMsRef.current;
+      const cachedAccuracy =
+        typeof cachedLocation?.coords.accuracy === "number" && Number.isFinite(cachedLocation.coords.accuracy)
+          ? cachedLocation.coords.accuracy
+          : Number.POSITIVE_INFINITY;
+      const hasFreshStrictEvidence =
+        cachedLocation &&
+        cachedAgeMs <= STRICT_LOCATION_CACHE_MS &&
+        cachedAccuracy <= STRICT_LOCATION_ACCURACY_METERS &&
+        (latestEvidenceRef.current?.sampleCount ?? 0) >= MIN_STABLE_LOCATION_SAMPLES;
+      if (hasFreshStrictEvidence) return;
+      if (strictWarmupInFlightRef.current) return;
+      if (Date.now() - lastStrictWarmupAtRef.current < STRICT_LOCATION_WARMUP_MIN_INTERVAL_MS) return;
+
+      strictWarmupInFlightRef.current = true;
+      lastStrictWarmupAtRef.current = Date.now();
+      void refreshLocation(true).finally(() => {
+        strictWarmupInFlightRef.current = false;
+      });
+    };
+
+    const timer = setTimeout(warmStrictLocation, 700);
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") warmStrictLocation();
+    });
+    return () => {
+      clearTimeout(timer);
+      subscription.remove();
+    };
+  }, [
+    employeeHasOfficeZone,
+    geofencesLoaded,
+    isFocused,
+    permissionExplainerOpen,
+    refreshLocation,
+    selectedDate,
+    user?.id,
+  ]);
+
   const employeeDistanceLabel =
     isOfficeGeofenceAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
       ? formatDistance(evaluation.nearestDistanceMeters)
