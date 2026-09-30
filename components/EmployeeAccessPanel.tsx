@@ -4,9 +4,12 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import {
+  deleteUserRemote,
   getAdminAccessRequests,
   getCompanyProfilesRemote,
+  getUsersRemote,
   reviewAdminAccessRequest,
+  type DolibarrUser,
 } from "@/lib/attendance-api";
 import type { CompanyProfile, UserAccessRequest, UserRole } from "@/lib/types";
 
@@ -20,15 +23,43 @@ function getRequestLabel(request: UserAccessRequest): string {
   return request.requestedCompanyName?.trim() || request.requestedBranch?.trim() || "New registration";
 }
 
+function getEmployeeId(employee: DolibarrUser): string {
+  return String(employee.id || employee.rowid || employee.user_id || employee.email || employee.login || "").trim();
+}
+
+function getEmployeeName(employee: DolibarrUser): string {
+  return (
+    employee.name?.trim() ||
+    `${employee.firstname || ""} ${employee.lastname || ""}`.trim() ||
+    employee.email?.trim() ||
+    employee.login?.trim() ||
+    "Employee"
+  );
+}
+
+function getEmployeeEmail(employee: DolibarrUser): string {
+  return String(employee.email || "").trim().toLowerCase();
+}
+
+function getEmployeeRole(employee: DolibarrUser): UserRole {
+  const role = employee.role;
+  if (role === "admin" || role === "hr" || role === "manager" || role === "salesperson" || role === "employee") {
+    return role;
+  }
+  return employee.admin === true || employee.admin === 1 || employee.admin === "1" ? "admin" : "employee";
+}
+
 export function EmployeeAccessPanel() {
   const { user, company, refreshSession } = useAuth();
   const { colors } = useAppTheme();
   const [requests, setRequests] = useState<UserAccessRequest[]>([]);
+  const [employees, setEmployees] = useState<DolibarrUser[]>([]);
   const [companies, setCompanies] = useState<CompanyProfile[]>([]);
   const [selectedRoleByRequest, setSelectedRoleByRequest] = useState<Record<string, UserRole>>({});
   const [selectedCompanyIdsByRequest, setSelectedCompanyIdsByRequest] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState(false);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const isAdmin = user?.role === "admin";
@@ -38,12 +69,14 @@ export function EmployeeAccessPanel() {
     setBusy(true);
     setError("");
     try {
-      const [pending, companyList] = await Promise.all([
+      const [pending, companyList, employeeList] = await Promise.all([
         getAdminAccessRequests("pending"),
         getCompanyProfilesRemote().catch(() => [] as CompanyProfile[]),
+        getUsersRemote({ companyId: company?.id }).catch(() => [] as DolibarrUser[]),
       ]);
       setRequests(pending);
       setCompanies(companyList);
+      setEmployees(employeeList);
       setSelectedRoleByRequest((current) => {
         const next = { ...current };
         for (const request of pending) {
@@ -89,6 +122,20 @@ export function EmployeeAccessPanel() {
     () => new Map(companies.map((item) => [item.id, item])),
     [companies],
   );
+  const deletableEmployees = useMemo(
+    () =>
+      employees.filter((employee) => {
+        const id = getEmployeeId(employee);
+        const email = getEmployeeEmail(employee);
+        const role = getEmployeeRole(employee);
+        if (!id && !email) return false;
+        if (role === "admin") return false;
+        if (user?.id && id === user.id) return false;
+        if (user?.email && email && email === normalize(user.email)) return false;
+        return true;
+      }),
+    [employees, user?.email, user?.id],
+  );
 
   if (!isAdmin) return null;
 
@@ -131,6 +178,45 @@ export function EmployeeAccessPanel() {
     } finally {
       setReviewingId(null);
     }
+  };
+
+  const confirmDeleteEmployee = (employee: DolibarrUser) => {
+    const id = getEmployeeId(employee);
+    const name = getEmployeeName(employee);
+    const email = getEmployeeEmail(employee);
+    if (!id && !email) {
+      Alert.alert("Cannot delete", "This employee record is missing both id and email.");
+      return;
+    }
+    Alert.alert(
+      "Delete employee?",
+      `Remove ${name} from app access and office geofence assignments? Previous attendance logs will stay in reports.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            const deleteKey = id || email;
+            if (deletingId) return;
+            setDeletingId(deleteKey);
+            try {
+              await deleteUserRemote(id || email, {
+                email,
+                login: employee.login ? String(employee.login) : null,
+                companyId: employee.companyId || company?.id || null,
+                name,
+              });
+              await Promise.all([load(), refreshSession()]);
+            } catch (event) {
+              Alert.alert("Delete failed", event instanceof Error ? event.message : "Please retry.");
+            } finally {
+              setDeletingId(null);
+            }
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -259,6 +345,73 @@ export function EmployeeAccessPanel() {
                 <Text style={styles.actionButtonText}>Reject</Text>
               </Pressable>
             </View>
+          </View>
+        );
+      })}
+
+      <View style={[styles.sectionDivider, { backgroundColor: colors.borderLight }]} />
+
+      <View style={styles.subHeaderRow}>
+        <View style={styles.headerCopy}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Current Employees</Text>
+          <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
+            Remove app access for employees who should no longer use attendance.
+          </Text>
+        </View>
+        <Text style={[styles.countBadge, { color: colors.primary, backgroundColor: `${colors.primary}12` }]}>
+          {deletableEmployees.length}
+        </Text>
+      </View>
+
+      {!busy && !error && !deletableEmployees.length ? (
+        <View style={[styles.emptyBox, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+          <Ionicons name="people-outline" size={22} color={colors.textTertiary} />
+          <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No deletable employees found.</Text>
+        </View>
+      ) : null}
+
+      {deletableEmployees.map((employee) => {
+        const id = getEmployeeId(employee);
+        const email = getEmployeeEmail(employee);
+        const name = getEmployeeName(employee);
+        const role = getEmployeeRole(employee);
+        const deleteKey = id || email;
+        const isDeleting = deletingId === deleteKey;
+        return (
+          <View key={`${employee.companyId || company?.id || "company"}:${deleteKey}`} style={[styles.employeeCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+            <View style={styles.employeeAvatar}>
+              <Text style={[styles.employeeAvatarText, { color: colors.primary }]}>
+                {name.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("") || "E"}
+              </Text>
+            </View>
+            <View style={styles.employeeCopy}>
+              <Text style={[styles.requestName, { color: colors.text }]} numberOfLines={1}>{name}</Text>
+              <Text style={[styles.requestMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+                {email || employee.login || "No email"} - {role}
+              </Text>
+              <Text style={[styles.requestMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+                {employee.companyName || company?.name || "Company"}{employee.branch ? ` - ${employee.branch}` : ""}
+              </Text>
+            </View>
+            <Pressable
+              disabled={Boolean(deletingId)}
+              onPress={() => confirmDeleteEmployee(employee)}
+              style={({ pressed }) => [
+                styles.deleteButton,
+                {
+                  borderColor: `${colors.danger}44`,
+                  backgroundColor: `${colors.danger}10`,
+                  opacity: deletingId || pressed ? 0.72 : 1,
+                },
+              ]}
+            >
+              {isDeleting ? (
+                <ActivityIndicator color={colors.danger} size="small" />
+              ) : (
+                <Ionicons name="trash-outline" size={17} color={colors.danger} />
+              )}
+              <Text style={[styles.deleteText, { color: colors.danger }]}>Delete</Text>
+            </Pressable>
           </View>
         );
       })}
@@ -394,5 +547,68 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontFamily: "Inter_700Bold",
     fontSize: 13,
+  },
+  sectionDivider: {
+    height: 1,
+    borderRadius: 999,
+    marginVertical: 2,
+  },
+  subHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  sectionTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 17,
+  },
+  countBadge: {
+    minWidth: 34,
+    minHeight: 28,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    textAlign: "center",
+    textAlignVertical: "center",
+    fontFamily: "Inter_700Bold",
+    fontSize: 12,
+  },
+  employeeCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  employeeAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(14,95,216,0.12)",
+  },
+  employeeAvatarText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 13,
+  },
+  employeeCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  deleteButton: {
+    minHeight: 38,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  deleteText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 12,
   },
 });

@@ -3116,6 +3116,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerUserRoutes(app, {
     getMySqlPool,
     requireAuth,
+    requireRoles,
     getRequestUser,
     normalizeWhitespace,
     normalizeCompanyIds,
@@ -3130,6 +3131,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     isSalesRole,
     normalizeDepartmentForRole,
     DEFAULT_COMPANY_ID,
+    removeAuthUserByEmail,
+    deactivateAuthSession,
+    randomUUID,
   });
 
   const httpServer = createServer(app);

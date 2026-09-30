@@ -892,6 +892,26 @@ export async function getUsersRemote(options?: { companyId?: string | null }): P
   return Array.isArray(data.items) ? data.items : [];
 }
 
+export async function deleteUserRemote(
+  userId: string,
+  payload?: {
+    email?: string | null;
+    login?: string | null;
+    companyId?: string | null;
+    name?: string | null;
+  }
+): Promise<{ ok: boolean; deleted?: { id?: string; email?: string | null; name?: string | null } }> {
+  return fetchJson(`/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+    body: JSON.stringify({
+      email: payload?.email || undefined,
+      login: payload?.login || undefined,
+      companyId: payload?.companyId || undefined,
+      name: payload?.name || undefined,
+    }),
+  });
+}
+
 export async function getAttendanceStatus(date?: string): Promise<{ records: AttendanceRecord[]; active: AttendanceRecord | null }> {
   return fetchJsonWithTimeout(`/attendance/status${date ? `?date=${encodeURIComponent(date)}` : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
 }

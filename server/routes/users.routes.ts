@@ -4,6 +4,7 @@ export function registerUserRoutes(app: Express, deps: Record<string, any>) {
 const {
     getMySqlPool,
     requireAuth,
+    requireRoles,
     getRequestUser,
     normalizeWhitespace,
     normalizeCompanyIds,
@@ -18,6 +19,9 @@ const {
     isSalesRole,
     normalizeDepartmentForRole,
     DEFAULT_COMPANY_ID,
+    removeAuthUserByEmail,
+    deactivateAuthSession,
+    randomUUID,
   } = deps;
 app.get("/api/users", requireAuth, async (req, res) => {
     try {
@@ -196,6 +200,209 @@ app.get("/api/users", requireAuth, async (req, res) => {
       res.json({ items: Array.from(mappedByScope.values()) });
     } catch (e) {
       res.json({ items: [] });
+    }
+  });
+
+app.delete("/api/users/:id", requireAuth, requireRoles("admin"), async (req, res) => {
+    const targetId = normalizeWhitespace(String(req.params.id || ""));
+    const body = (req.body || {}) as {
+      email?: unknown;
+      login?: unknown;
+      companyId?: unknown;
+      name?: unknown;
+    };
+    const targetEmail = normalizeEmail(typeof body.email === "string" ? body.email : "");
+    const targetLogin = normalizeLoginKey(typeof body.login === "string" ? body.login : "");
+    const requestedCompanyId = normalizeWhitespace(typeof body.companyId === "string" ? body.companyId : "");
+    const targetName = normalizeWhitespace(typeof body.name === "string" ? body.name : "");
+    const requestUser = getRequestUser(req);
+    const reviewerId = normalizeWhitespace(requestUser?.id || req.auth?.sub || "admin");
+    const reviewerName = normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin");
+
+    if (!targetId && !targetEmail && !targetLogin) {
+      res.status(400).json({ message: "Employee id or email is required." });
+      return;
+    }
+    if (
+      (targetId && requestUser?.id && targetId === requestUser.id) ||
+      (targetEmail && requestUser?.email && targetEmail === normalizeEmail(requestUser.email)) ||
+      (targetLogin && requestUser?.login && targetLogin === normalizeLoginKey(requestUser.login))
+    ) {
+      res.status(400).json({ message: "You cannot delete your own admin account." });
+      return;
+    }
+
+    try {
+      const conn = await getMySqlPool();
+      const lookupEmail = targetEmail || "__none__";
+      const lookupLogin = targetLogin || "__none__";
+      const lookupId = targetId || "__none__";
+      const [rows] = await conn.query(
+        `SELECT rowid, login, email, firstname, lastname, admin, statut
+         FROM nmy5_user
+         WHERE CAST(rowid AS CHAR) = ?
+            OR LOWER(TRIM(email)) = ?
+            OR LOWER(TRIM(login)) = ?
+         LIMIT 1`,
+        [lookupId, lookupEmail, lookupLogin]
+      );
+      const dolibarrUser = rows?.[0] || null;
+      const resolvedUserId = normalizeWhitespace(String(dolibarrUser?.rowid || (targetId.includes("@") ? "" : targetId) || ""));
+      const resolvedEmail = normalizeEmail(String(dolibarrUser?.email || targetEmail || ""));
+      const resolvedLogin = normalizeLoginKey(String(dolibarrUser?.login || targetLogin || ""));
+      const resolvedName =
+        targetName ||
+        normalizeWhitespace(`${dolibarrUser?.firstname || ""} ${dolibarrUser?.lastname || ""}`) ||
+        resolvedEmail ||
+        resolvedLogin ||
+        resolvedUserId;
+      const companyId = requestedCompanyId || requestUser?.companyId || DEFAULT_COMPANY_ID;
+
+      if (!resolvedUserId && !resolvedEmail && !resolvedLogin) {
+        res.status(404).json({ message: "Employee not found." });
+        return;
+      }
+      if (Number(dolibarrUser?.admin || 0) === 1) {
+        res.status(400).json({ message: "Admin accounts cannot be deleted from the employee list." });
+        return;
+      }
+
+      if (dolibarrUser?.rowid) {
+        await conn.execute(
+          `UPDATE nmy5_user
+           SET statut = 0, employee = 0, tms = NOW()
+           WHERE rowid = ?`,
+          [dolibarrUser.rowid]
+        );
+      }
+
+      if (resolvedEmail) {
+        await conn.execute(
+          `UPDATE lff_access_requests
+           SET status = 'rejected',
+               assigned_company_ids_json = '[]',
+               reviewed_at = NOW(),
+               reviewed_by_id = ?,
+               reviewed_by_name = ?,
+               review_comment = TRIM(CONCAT(COALESCE(review_comment, ''), '\nDeleted by admin on ', NOW()))
+           WHERE LOWER(TRIM(email)) = ?`,
+          [reviewerId, reviewerName, resolvedEmail]
+        ).catch(() => undefined);
+      }
+
+      const userWhereParts: string[] = [];
+      const userWhereValues: string[] = [];
+      if (resolvedUserId) {
+        userWhereParts.push("id = ?");
+        userWhereValues.push(resolvedUserId);
+      }
+      if (resolvedEmail) {
+        userWhereParts.push("LOWER(TRIM(email)) = ?");
+        userWhereValues.push(resolvedEmail);
+      }
+      if (userWhereParts.length) {
+        await conn.execute(`DELETE FROM lff_users WHERE ${userWhereParts.join(" OR ")}`, userWhereValues).catch(() => undefined);
+      }
+
+      const employeeWhereParts: string[] = [];
+      const employeeWhereValues: string[] = [];
+      if (resolvedUserId) {
+        employeeWhereParts.push("id = ?");
+        employeeWhereValues.push(resolvedUserId);
+      }
+      if (resolvedEmail) {
+        employeeWhereParts.push("LOWER(TRIM(email)) = ?");
+        employeeWhereValues.push(resolvedEmail);
+      }
+      if (companyId) {
+        employeeWhereParts.push("(company_id = ? AND LOWER(TRIM(name)) = ?)");
+        employeeWhereValues.push(companyId, resolvedName.toLowerCase());
+      }
+      if (employeeWhereParts.length) {
+        await conn.execute(`DELETE FROM lff_employees WHERE ${employeeWhereParts.join(" OR ")}`, employeeWhereValues).catch(() => undefined);
+      }
+
+      if (resolvedUserId) {
+        await deactivateAuthSession(resolvedUserId).catch(() => undefined);
+        await conn.execute(
+          `UPDATE lff_auth_sessions
+           SET is_active = 0, last_logout_at = NOW(), updated_at = NOW()
+           WHERE user_id = ? OR LOWER(TRIM(email)) = ?`,
+          [resolvedUserId, resolvedEmail || "__none__"]
+        ).catch(() => undefined);
+      }
+
+      if (resolvedUserId || resolvedEmail) {
+        const [latestRows] = await conn.query(
+          `SELECT id, type, company_id, geofence_id, geofence_name
+           FROM lff_attendance
+           WHERE user_id = ?
+           ORDER BY \`timestamp\` DESC
+           LIMIT 1`,
+          [resolvedUserId]
+        ).catch(() => [[] as any[]]);
+        const latest = latestRows?.[0] || null;
+        if (latest?.type === "checkin") {
+          await conn.execute(
+            `INSERT INTO lff_attendance (
+              id, user_id, user_name, company_id, type, \`timestamp\`, timestamp_server,
+              geofence_id, geofence_name, source, notes, approval_status
+            ) VALUES (?, ?, ?, ?, 'checkout', NOW(), NOW(), ?, ?, 'manual', ?, 'approved')`,
+            [
+              randomUUID(),
+              resolvedUserId,
+              resolvedName,
+              latest.company_id || companyId || null,
+              latest.geofence_id || null,
+              latest.geofence_name || null,
+              `System checkout because employee was deleted by ${reviewerName}.`,
+            ]
+          ).catch(() => undefined);
+        }
+      }
+
+      const removableIds = new Set(
+        [resolvedUserId, targetId, resolvedUserId ? `dolibarr_${resolvedUserId}` : "", resolvedEmail]
+          .map((item) => normalizeWhitespace(String(item || "")))
+          .filter(Boolean)
+      );
+      if (removableIds.size) {
+        const [geofenceRows] = await conn.query(
+          `SELECT id, assigned_employee_ids_json FROM lff_geofences`
+        ).catch(() => [[] as any[]]);
+        for (const row of geofenceRows || []) {
+          const raw = String(row.assigned_employee_ids_json || "[]");
+          let parsed: string[] = [];
+          try {
+            const value = JSON.parse(raw);
+            parsed = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+          } catch {
+            parsed = [];
+          }
+          const next = parsed.filter((id) => !removableIds.has(normalizeWhitespace(id)));
+          if (next.length !== parsed.length) {
+            await conn.execute(
+              `UPDATE lff_geofences SET assigned_employee_ids_json = ?, updated_at = NOW() WHERE id = ?`,
+              [JSON.stringify(next), row.id]
+            ).catch(() => undefined);
+          }
+        }
+      }
+
+      if (resolvedEmail) removeAuthUserByEmail(resolvedEmail);
+
+      res.json({
+        ok: true,
+        deleted: {
+          id: resolvedUserId || targetId,
+          email: resolvedEmail || null,
+          name: resolvedName,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({
+        message: error instanceof Error ? error.message : "Unable to delete employee.",
+      });
     }
   });
 }
