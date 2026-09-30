@@ -68,9 +68,11 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             res.status(409).json({ message: "User already checked in", active }); return;
           }
           if (type === "checkout" && !active) { reject("No active check-in found for checkout"); return; }
-          if (active?.deviceId && active.deviceId !== payload.deviceId) {
-            res.status(403).json({ message: "Check out using the device used to check in." }); return;
-          }
+          const manualCheckoutFromDifferentDevice =
+            type === "checkout" &&
+            !automatic &&
+            Boolean(active?.deviceId) &&
+            active.deviceId !== payload.deviceId;
           if (automatic) {
             const activeZone = zones.find((item: any) => item.id === active.geofenceId);
             if (!req.auth?.deviceId || active.deviceId !== req.auth.deviceId || payload.activeAttendanceId !== active.id ||
@@ -85,6 +87,12 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           }
           // Keep the real server time for overnight shifts; never backdate a checkout.
           const now = new Date().toISOString();
+          const notes = manualCheckoutFromDifferentDevice
+            ? [
+                payload.notes,
+                `Manual checkout allowed from replacement device. Check-in device=${active.deviceId}; checkout device=${payload.deviceId}.`,
+              ].filter(Boolean).join(" | ")
+            : payload.notes;
           const record: AttendanceRecord = {
             id: recordId, userId: payload.userId, userName: payload.userName,
             companyId: (type === "checkout" ? active.companyId : zone.activeZone?.companyId) || companyId || undefined,
@@ -92,7 +100,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             location: { lat: payload.latitude, lng: payload.longitude },
             geofenceId: zone.activeZone?.id || null, geofenceName: zone.activeZone?.name || null,
             deviceId: payload.deviceId, isInsideGeofence: zone.insideConfirmed,
-            notes: payload.notes, source: "mobile", approvalStatus: "approved",
+            notes, source: "mobile", approvalStatus: "approved",
           };
           // Durable persistence is the success boundary. Never fall back to memory on a DB failure.
           if (database) await deps.insertAttendanceInMySql(record);
