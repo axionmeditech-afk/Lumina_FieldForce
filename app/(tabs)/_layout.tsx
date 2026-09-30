@@ -9,6 +9,7 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import {
   ActivityIndicator,
+  Alert,
   LayoutAnimation,
   Pressable,
   ScrollView,
@@ -95,15 +96,18 @@ function CustomDrawerContent(
   props: DrawerContentComponentProps & { isLargeScreen: boolean },
 ) {
   const { colors, isDark } = useAppTheme();
-  const { user, company } = useAuth();
+  const { user, company, logout } = useAuth();
   const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
   const scrollRef = useRef<ScrollView | null>(null);
+  const signingOutRef = useRef(false);
   const activeRouteKey = props.state.routes[props.state.index]?.key;
   const previousRouteKey = useRef(activeRouteKey);
   const palette = getDrawerPalette(isDark);
   const brandLabel = company?.name?.trim() || "Lumina";
   const roleLabel = (user?.role ?? "staff").toUpperCase();
   const branchLabel = company?.primaryBranch ?? user?.branch ?? "Workspace";
+  const panelMinHeight = Math.max(520, height - insets.top - insets.bottom - 30);
 
   useEffect(() => {
     if (!activeRouteKey || previousRouteKey.current === activeRouteKey) return;
@@ -111,6 +115,30 @@ function CustomDrawerContent(
     scrollRef.current?.scrollTo({ y: 0, animated: true });
     previousRouteKey.current = activeRouteKey;
   }, [activeRouteKey]);
+
+  const confirmSignOut = () => {
+    if (signingOutRef.current) return;
+    Alert.alert(
+      "Sign out?",
+      "You will need to sign in again to use attendance and geofencing.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Sign out",
+          style: "destructive",
+          onPress: async () => {
+            signingOutRef.current = true;
+            try {
+              await logout();
+            } catch (error) {
+              signingOutRef.current = false;
+              Alert.alert("Sign out failed", error instanceof Error ? error.message : "Please retry.");
+            }
+          },
+        },
+      ],
+    );
+  };
 
   return (
     <DrawerContentScrollView
@@ -131,6 +159,7 @@ function CustomDrawerContent(
             backgroundColor: palette.panelBackground,
             borderColor: palette.panelBorder,
             shadowColor: colors.cardShadow,
+            minHeight: panelMinHeight,
           },
         ]}
       >
@@ -181,14 +210,34 @@ function CustomDrawerContent(
           <DrawerItemList {...props} />
         </View>
 
-        <View style={[styles.footerDivider, { backgroundColor: palette.footerLine }]} />
-        <View style={styles.footerBlock}>
-          <Text style={[styles.footerText, { color: palette.footerText }]}>
-            {company?.name ?? "Lumina FieldForce"}
-          </Text>
-          <Text style={[styles.footerMeta, { color: palette.footerMeta }]}>
-            Attendance and geofencing operations
-          </Text>
+        <View style={styles.sidebarSpacer} />
+
+        <View style={styles.sidebarBottom}>
+          <Pressable
+            onPress={confirmSignOut}
+            accessibilityRole="button"
+            accessibilityLabel="Sign out"
+            style={({ pressed }) => [
+              styles.drawerSignOut,
+              {
+                borderColor: `${colors.danger}38`,
+                backgroundColor: pressed ? `${colors.danger}18` : `${colors.danger}10`,
+              },
+            ]}
+          >
+            <Ionicons name="log-out-outline" size={20} color={colors.danger} />
+            <Text style={[styles.drawerSignOutText, { color: colors.danger }]}>Sign out</Text>
+          </Pressable>
+
+          <View style={[styles.footerDivider, { backgroundColor: palette.footerLine }]} />
+          <View style={styles.footerBlock}>
+            <Text style={[styles.footerText, { color: palette.footerText }]} numberOfLines={1}>
+              {company?.name ?? "Lumina FieldForce"}
+            </Text>
+            <Text style={[styles.footerMeta, { color: palette.footerMeta }]}>
+              Attendance and geofencing operations
+            </Text>
+          </View>
         </View>
       </View>
     </DrawerContentScrollView>
@@ -373,10 +422,30 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     marginBottom: 10,
   },
+  sidebarSpacer: {
+    flex: 1,
+    minHeight: 22,
+  },
+  sidebarBottom: {
+    marginTop: 18,
+  },
+  drawerSignOut: {
+    minHeight: 52,
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  drawerSignOutText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 15,
+  },
   footerDivider: {
     height: 1,
     borderRadius: 999,
-    marginTop: 18,
+    marginTop: 16,
     marginBottom: 16,
   },
   footerBlock: {
