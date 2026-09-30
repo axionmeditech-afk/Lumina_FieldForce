@@ -448,23 +448,22 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
         return;
       }
 
-      if (currentRequest.requestedRole === "admin") {
-        const canApproveAdminRequest = await isDolibarrSuperuserReviewer(req);
-        if (!canApproveAdminRequest) {
-          res.status(403).json({
-            message:
-              "Admin access requests can only be approved by Dolibarr superuser (primary admin account).",
-          });
-          return;
-        }
-      }
-
       const now = new Date().toISOString();
       const approvedRole =
         action === "approved"
           ? normalizeRole(body?.role || currentRequest.requestedRole)
           : null;
       const finalRole = approvedRole || currentRequest.requestedRole;
+      if (action === "approved" && finalRole === "admin") {
+        const canApproveAdminRequest = await isDolibarrSuperuserReviewer(req);
+        if (!canApproveAdminRequest) {
+          res.status(403).json({
+            message:
+              "Admin access can only be approved by Dolibarr superuser (primary admin account).",
+          });
+          return;
+        }
+      }
       const isSalespersonApproval = action === "approved" && isSalesRole(finalRole);
       const assignedCompanyIds =
         action === "approved" ? normalizeCompanyIds(body?.companyIds) : [];

@@ -6,14 +6,17 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import {
   deleteUserRemote,
   getAdminAccessRequests,
+  getCompanyGeofences,
   getCompanyProfilesRemote,
   getUsersRemote,
   reviewAdminAccessRequest,
   type DolibarrUser,
+  updateGeofence,
+  updateUserAccessRemote,
 } from "@/lib/attendance-api";
-import type { CompanyProfile, UserAccessRequest, UserRole } from "@/lib/types";
+import type { CompanyProfile, Geofence, UserAccessRequest, UserRole } from "@/lib/types";
 
-const ASSIGNABLE_ROLES: UserRole[] = ["employee", "salesperson", "manager", "hr"];
+const ASSIGNABLE_ROLES: UserRole[] = ["employee", "salesperson", "manager", "hr", "admin"];
 
 function normalize(value: string): string {
   return value.trim().toLowerCase();
@@ -49,17 +52,33 @@ function getEmployeeRole(employee: DolibarrUser): UserRole {
   return employee.admin === true || employee.admin === 1 || employee.admin === "1" ? "admin" : "employee";
 }
 
+function getEmployeeCompanyIds(employee: DolibarrUser, fallbackCompanyId?: string | null): string[] {
+  const ids = [
+    ...(Array.isArray(employee.assignedCompanyIds) ? employee.assignedCompanyIds : []),
+    employee.companyId,
+    fallbackCompanyId,
+  ]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(ids));
+}
+
 export function EmployeeAccessPanel() {
   const { user, company, refreshSession } = useAuth();
   const { colors } = useAppTheme();
   const [requests, setRequests] = useState<UserAccessRequest[]>([]);
   const [employees, setEmployees] = useState<DolibarrUser[]>([]);
+  const [geofences, setGeofences] = useState<Geofence[]>([]);
   const [companies, setCompanies] = useState<CompanyProfile[]>([]);
   const [selectedRoleByRequest, setSelectedRoleByRequest] = useState<Record<string, UserRole>>({});
   const [selectedCompanyIdsByRequest, setSelectedCompanyIdsByRequest] = useState<Record<string, string[]>>({});
+  const [selectedRoleByEmployee, setSelectedRoleByEmployee] = useState<Record<string, UserRole>>({});
+  const [selectedCompanyIdsByEmployee, setSelectedCompanyIdsByEmployee] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState(false);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [savingAccessId, setSavingAccessId] = useState<string | null>(null);
+  const [savingGeofenceId, setSavingGeofenceId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const isAdmin = user?.role === "admin";
@@ -69,14 +88,16 @@ export function EmployeeAccessPanel() {
     setBusy(true);
     setError("");
     try {
-      const [pending, companyList, employeeList] = await Promise.all([
+      const [pending, companyList, employeeList, geofenceList] = await Promise.all([
         getAdminAccessRequests("pending"),
         getCompanyProfilesRemote().catch(() => [] as CompanyProfile[]),
         getUsersRemote({ companyId: company?.id }).catch(() => [] as DolibarrUser[]),
+        getCompanyGeofences(company?.id).catch(() => [] as Geofence[]),
       ]);
       setRequests(pending);
       setCompanies(companyList);
       setEmployees(employeeList);
+      setGeofences(geofenceList);
       setSelectedRoleByRequest((current) => {
         const next = { ...current };
         for (const request of pending) {
@@ -107,6 +128,34 @@ export function EmployeeAccessPanel() {
         }
         return next;
       });
+      setSelectedRoleByEmployee((current) => {
+        const next = { ...current };
+        for (const employee of employeeList) {
+          const employeeKey = getEmployeeId(employee) || getEmployeeEmail(employee);
+          if (!employeeKey) continue;
+          if (!next[employeeKey]) next[employeeKey] = getEmployeeRole(employee);
+        }
+        for (const employeeKey of Object.keys(next)) {
+          if (!employeeList.some((employee) => (getEmployeeId(employee) || getEmployeeEmail(employee)) === employeeKey)) {
+            delete next[employeeKey];
+          }
+        }
+        return next;
+      });
+      setSelectedCompanyIdsByEmployee((current) => {
+        const next = { ...current };
+        for (const employee of employeeList) {
+          const employeeKey = getEmployeeId(employee) || getEmployeeEmail(employee);
+          if (!employeeKey) continue;
+          if (!next[employeeKey]?.length) next[employeeKey] = getEmployeeCompanyIds(employee, company?.id);
+        }
+        for (const employeeKey of Object.keys(next)) {
+          if (!employeeList.some((employee) => (getEmployeeId(employee) || getEmployeeEmail(employee)) === employeeKey)) {
+            delete next[employeeKey];
+          }
+        }
+        return next;
+      });
     } catch (event) {
       setError(event instanceof Error ? event.message : "Unable to load pending registrations.");
     } finally {
@@ -122,19 +171,21 @@ export function EmployeeAccessPanel() {
     () => new Map(companies.map((item) => [item.id, item])),
     [companies],
   );
-  const deletableEmployees = useMemo(
+  const managedEmployees = useMemo(
     () =>
       employees.filter((employee) => {
         const id = getEmployeeId(employee);
         const email = getEmployeeEmail(employee);
-        const role = getEmployeeRole(employee);
         if (!id && !email) return false;
-        if (role === "admin") return false;
         if (user?.id && id === user.id) return false;
         if (user?.email && email && email === normalize(user.email)) return false;
         return true;
       }),
     [employees, user?.email, user?.id],
+  );
+  const deletableEmployeeCount = useMemo(
+    () => managedEmployees.filter((employee) => getEmployeeRole(employee) !== "admin").length,
+    [managedEmployees],
   );
 
   if (!isAdmin) return null;
@@ -146,6 +197,16 @@ export function EmployeeAccessPanel() {
         ? selected.filter((id) => id !== companyId)
         : [...selected, companyId];
       return { ...current, [requestId]: next };
+    });
+  };
+
+  const toggleEmployeeCompany = (employeeKey: string, companyId: string) => {
+    setSelectedCompanyIdsByEmployee((current) => {
+      const selected = current[employeeKey] || [];
+      const next = selected.includes(companyId)
+        ? selected.filter((id) => id !== companyId)
+        : [...selected, companyId];
+      return { ...current, [employeeKey]: next };
     });
   };
 
@@ -217,6 +278,71 @@ export function EmployeeAccessPanel() {
         },
       ],
     );
+  };
+
+  const saveEmployeeAccess = (employee: DolibarrUser) => {
+    const id = getEmployeeId(employee);
+    const email = getEmployeeEmail(employee);
+    const name = getEmployeeName(employee);
+    const employeeKey = id || email;
+    const role = selectedRoleByEmployee[employeeKey] || getEmployeeRole(employee);
+    const companyIds = selectedCompanyIdsByEmployee[employeeKey] || [];
+    if (!employeeKey) {
+      Alert.alert("Cannot update", "This employee record is missing both id and email.");
+      return;
+    }
+    if (!companyIds.length) {
+      Alert.alert("Company required", "Select at least one company before saving access.");
+      return;
+    }
+    const performSave = async () => {
+      if (savingAccessId) return;
+      setSavingAccessId(employeeKey);
+      try {
+        await updateUserAccessRemote(id || email, {
+          email,
+          login: employee.login ? String(employee.login) : null,
+          name,
+          role,
+          companyIds,
+        });
+        await Promise.all([load(), refreshSession()]);
+      } catch (event) {
+        Alert.alert("Access update failed", event instanceof Error ? event.message : "Please retry.");
+      } finally {
+        setSavingAccessId(null);
+      }
+    };
+    if (role === "admin") {
+      Alert.alert(
+        "Make this user admin?",
+        `${name} will get admin access after server verification. Only the primary admin can grant this role.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Make Admin", onPress: () => void performSave() },
+        ],
+      );
+      return;
+    }
+    void performSave();
+  };
+
+  const toggleGeofenceEmployee = async (zone: Geofence, employee: DolibarrUser) => {
+    const employeeId = getEmployeeId(employee);
+    if (!employeeId || savingGeofenceId) return;
+    const assigned = zone.assignedEmployeeIds || [];
+    const nextAssigned = assigned.includes(employeeId)
+      ? assigned.filter((id) => id !== employeeId)
+      : [...assigned, employeeId];
+    setSavingGeofenceId(zone.id);
+    try {
+      const updated = await updateGeofence(zone.id, { assignedEmployeeIds: nextAssigned });
+      setGeofences((current) => current.map((item) => (item.id === zone.id ? updated : item)));
+    } catch (event) {
+      Alert.alert("Geofence update failed", event instanceof Error ? event.message : "Please retry.");
+    } finally {
+      setSavingGeofenceId(null);
+    }
   };
 
   return (
@@ -359,59 +485,199 @@ export function EmployeeAccessPanel() {
           </Text>
         </View>
         <Text style={[styles.countBadge, { color: colors.primary, backgroundColor: `${colors.primary}12` }]}>
-          {deletableEmployees.length}
+          {managedEmployees.length}
         </Text>
       </View>
 
-      {!busy && !error && !deletableEmployees.length ? (
+      {!busy && !error && !managedEmployees.length ? (
         <View style={[styles.emptyBox, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
           <Ionicons name="people-outline" size={22} color={colors.textTertiary} />
-          <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No deletable employees found.</Text>
+          <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No employees found.</Text>
         </View>
       ) : null}
 
-      {deletableEmployees.map((employee) => {
+      {managedEmployees.map((employee) => {
         const id = getEmployeeId(employee);
         const email = getEmployeeEmail(employee);
         const name = getEmployeeName(employee);
-        const role = getEmployeeRole(employee);
         const deleteKey = id || email;
+        const role = selectedRoleByEmployee[deleteKey] || getEmployeeRole(employee);
+        const selectedCompanies = selectedCompanyIdsByEmployee[deleteKey] || [];
+        const canDelete = getEmployeeRole(employee) !== "admin";
         const isDeleting = deletingId === deleteKey;
+        const isSavingAccess = savingAccessId === deleteKey;
         return (
           <View key={`${employee.companyId || company?.id || "company"}:${deleteKey}`} style={[styles.employeeCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
-            <View style={styles.employeeAvatar}>
-              <Text style={[styles.employeeAvatarText, { color: colors.primary }]}>
-                {name.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("") || "E"}
-              </Text>
+            <View style={styles.employeeTopRow}>
+              <View style={styles.employeeAvatar}>
+                <Text style={[styles.employeeAvatarText, { color: colors.primary }]}>
+                  {name.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("") || "E"}
+                </Text>
+              </View>
+              <View style={styles.employeeCopy}>
+                <Text style={[styles.requestName, { color: colors.text }]} numberOfLines={1}>{name}</Text>
+                <Text style={[styles.requestMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+                  {email || employee.login || "No email"} - current {getEmployeeRole(employee)}
+                </Text>
+                <Text style={[styles.requestMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+                  {employee.companyName || company?.name || "Company"}{employee.branch ? ` - ${employee.branch}` : ""}
+                </Text>
+              </View>
             </View>
-            <View style={styles.employeeCopy}>
-              <Text style={[styles.requestName, { color: colors.text }]} numberOfLines={1}>{name}</Text>
-              <Text style={[styles.requestMeta, { color: colors.textSecondary }]} numberOfLines={1}>
-                {email || employee.login || "No email"} - {role}
-              </Text>
-              <Text style={[styles.requestMeta, { color: colors.textSecondary }]} numberOfLines={1}>
-                {employee.companyName || company?.name || "Company"}{employee.branch ? ` - ${employee.branch}` : ""}
-              </Text>
+
+            <Text style={[styles.groupLabel, { color: colors.textSecondary }]}>Role access</Text>
+            <View style={styles.chipRow}>
+              {ASSIGNABLE_ROLES.map((item) => {
+                const active = role === item;
+                return (
+                  <Pressable
+                    key={`${deleteKey}:role:${item}`}
+                    onPress={() => setSelectedRoleByEmployee((current) => ({ ...current, [deleteKey]: item }))}
+                    style={[
+                      styles.chip,
+                      {
+                        borderColor: active ? colors.primary : colors.border,
+                        backgroundColor: active ? `${colors.primary}16` : colors.backgroundElevated,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
+                      {item}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
-            <Pressable
-              disabled={Boolean(deletingId)}
-              onPress={() => confirmDeleteEmployee(employee)}
-              style={({ pressed }) => [
-                styles.deleteButton,
-                {
-                  borderColor: `${colors.danger}44`,
-                  backgroundColor: `${colors.danger}10`,
-                  opacity: deletingId || pressed ? 0.72 : 1,
-                },
-              ]}
-            >
-              {isDeleting ? (
-                <ActivityIndicator color={colors.danger} size="small" />
-              ) : (
-                <Ionicons name="trash-outline" size={17} color={colors.danger} />
-              )}
-              <Text style={[styles.deleteText, { color: colors.danger }]}>Delete</Text>
-            </Pressable>
+
+            <Text style={[styles.groupLabel, { color: colors.textSecondary }]}>Company access</Text>
+            <View style={styles.chipRow}>
+              {companies.map((item) => {
+                const active = selectedCompanies.includes(item.id);
+                return (
+                  <Pressable
+                    key={`${deleteKey}:company:${item.id}`}
+                    onPress={() => toggleEmployeeCompany(deleteKey, item.id)}
+                    style={[
+                      styles.chip,
+                      {
+                        borderColor: active ? colors.success : colors.border,
+                        backgroundColor: active ? `${colors.success}16` : colors.backgroundElevated,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.chipText, { color: active ? colors.success : colors.textSecondary }]}>
+                      {item.name}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={styles.actionRow}>
+              <Pressable
+                disabled={Boolean(savingAccessId)}
+                onPress={() => saveEmployeeAccess(employee)}
+                style={({ pressed }) => [
+                  styles.actionButton,
+                  { backgroundColor: colors.primary, opacity: savingAccessId || pressed ? 0.75 : 1 },
+                ]}
+              >
+                {isSavingAccess ? <ActivityIndicator color="#FFFFFF" size="small" /> : null}
+                <Text style={styles.actionButtonText}>{isSavingAccess ? "Saving" : "Save Access"}</Text>
+              </Pressable>
+              {canDelete ? (
+                <Pressable
+                  disabled={Boolean(deletingId)}
+                  onPress={() => confirmDeleteEmployee(employee)}
+                  style={({ pressed }) => [
+                    styles.deleteButton,
+                    {
+                      borderColor: `${colors.danger}44`,
+                      backgroundColor: `${colors.danger}10`,
+                      opacity: deletingId || pressed ? 0.72 : 1,
+                    },
+                  ]}
+                >
+                  {isDeleting ? (
+                    <ActivityIndicator color={colors.danger} size="small" />
+                  ) : (
+                    <Ionicons name="trash-outline" size={17} color={colors.danger} />
+                  )}
+                  <Text style={[styles.deleteText, { color: colors.danger }]}>Delete</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        );
+      })}
+
+      <View style={[styles.sectionDivider, { backgroundColor: colors.borderLight }]} />
+
+      <View style={styles.subHeaderRow}>
+        <View style={styles.headerCopy}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Office Geofence Assignments</Text>
+          <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
+            Assign employees to the saved office GPS zones.
+          </Text>
+        </View>
+        <Text style={[styles.countBadge, { color: colors.primary, backgroundColor: `${colors.primary}12` }]}>
+          {geofences.length}
+        </Text>
+      </View>
+
+      {!busy && !error && !geofences.length ? (
+        <View style={[styles.emptyBox, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+          <Ionicons name="location-outline" size={22} color={colors.warning} />
+          <Text style={[styles.emptyText, { color: colors.textSecondary }]}>No office geofence saved yet.</Text>
+        </View>
+      ) : null}
+
+      {geofences.map((zone) => {
+        const assigned = zone.assignedEmployeeIds || [];
+        const isSaving = savingGeofenceId === zone.id;
+        return (
+          <View key={zone.id} style={[styles.requestCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
+            <View style={styles.requestTopRow}>
+              <View style={styles.requestCopy}>
+                <Text style={[styles.requestName, { color: colors.text }]}>{zone.name}</Text>
+                <Text style={[styles.requestMeta, { color: colors.textSecondary }]}>
+                  Radius {Math.round(zone.radiusMeters)}m - {assigned.length} assigned
+                </Text>
+                {!assigned.length ? (
+                  <Text style={[styles.warningText, { color: colors.warning }]}>
+                    No employee assigned. Auto-checkout cannot monitor anyone here.
+                  </Text>
+                ) : null}
+              </View>
+              {isSaving ? <ActivityIndicator color={colors.primary} /> : null}
+            </View>
+
+            <View style={styles.chipRow}>
+              {managedEmployees.map((employee) => {
+                const employeeId = getEmployeeId(employee);
+                if (!employeeId) return null;
+                const active = assigned.includes(employeeId);
+                return (
+                  <Pressable
+                    key={`${zone.id}:${employeeId}`}
+                    disabled={Boolean(savingGeofenceId)}
+                    onPress={() => void toggleGeofenceEmployee(zone, employee)}
+                    style={[
+                      styles.chip,
+                      {
+                        borderColor: active ? colors.success : colors.border,
+                        backgroundColor: active ? `${colors.success}16` : colors.backgroundElevated,
+                        opacity: savingGeofenceId ? 0.72 : 1,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.chipText, { color: active ? colors.success : colors.textSecondary }]}>
+                      {getEmployeeName(employee)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
           </View>
         );
       })}
@@ -542,6 +808,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
+    flexDirection: "row",
+    gap: 8,
   },
   actionButtonText: {
     color: "#FFFFFF",
@@ -577,6 +845,9 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     borderWidth: 1,
     padding: 12,
+    gap: 10,
+  },
+  employeeTopRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -610,5 +881,10 @@ const styles = StyleSheet.create({
   deleteText: {
     fontFamily: "Inter_700Bold",
     fontSize: 12,
+  },
+  warningText: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 12,
+    lineHeight: 17,
   },
 });

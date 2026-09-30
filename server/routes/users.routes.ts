@@ -22,6 +22,9 @@ const {
     removeAuthUserByEmail,
     deactivateAuthSession,
     randomUUID,
+    getCompanyProfilesByIds,
+    isDolibarrSuperuserReviewer,
+    forceDolibarrAdminPrivilegesForUserIdentity,
   } = deps;
 app.get("/api/users", requireAuth, async (req, res) => {
     try {
@@ -402,6 +405,231 @@ app.delete("/api/users/:id", requireAuth, requireRoles("admin"), async (req, res
     } catch (error) {
       res.status(500).json({
         message: error instanceof Error ? error.message : "Unable to delete employee.",
+      });
+    }
+  });
+
+app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (req, res) => {
+    const targetId = normalizeWhitespace(String(req.params.id || ""));
+    const body = (req.body || {}) as {
+      email?: unknown;
+      login?: unknown;
+      name?: unknown;
+      role?: unknown;
+      companyIds?: unknown;
+    };
+    const targetEmail = normalizeEmail(typeof body.email === "string" ? body.email : "");
+    const targetLogin = normalizeLoginKey(typeof body.login === "string" ? body.login : "");
+    const targetName = normalizeWhitespace(typeof body.name === "string" ? body.name : "");
+    const nextRole = normalizeRole(body.role);
+    const nextCompanyIds = normalizeCompanyIds(body.companyIds);
+    const requestUser = getRequestUser(req);
+
+    if (!targetId && !targetEmail && !targetLogin) {
+      res.status(400).json({ message: "Employee id or email is required." });
+      return;
+    }
+    if (!nextCompanyIds.length) {
+      res.status(400).json({ message: "Select at least one company." });
+      return;
+    }
+    if (
+      (targetId && requestUser?.id && targetId === requestUser.id) ||
+      (targetEmail && requestUser?.email && targetEmail === normalizeEmail(requestUser.email)) ||
+      (targetLogin && requestUser?.login && targetLogin === normalizeLoginKey(requestUser.login))
+    ) {
+      res.status(400).json({ message: "You cannot change your own role or company access." });
+      return;
+    }
+    if (nextRole === "admin") {
+      const canPromoteAdmin = await isDolibarrSuperuserReviewer(req);
+      if (!canPromoteAdmin) {
+        res.status(403).json({
+          message: "Only the primary admin can grant admin access.",
+        });
+        return;
+      }
+    }
+
+    try {
+      const selectedCompaniesById = await getCompanyProfilesByIds(nextCompanyIds);
+      const missingCompanyIds = nextCompanyIds.filter((companyId: string) => !selectedCompaniesById.has(companyId));
+      if (missingCompanyIds.length > 0) {
+        res.status(400).json({ message: "One or more selected companies are invalid." });
+        return;
+      }
+
+      const primaryCompany = selectedCompaniesById.get(nextCompanyIds[0]);
+      if (!primaryCompany) {
+        res.status(400).json({ message: "Primary company is invalid." });
+        return;
+      }
+
+      const conn = await getMySqlPool();
+      const [rows] = await conn.query(
+        `SELECT rowid, login, email, firstname, lastname, admin
+         FROM nmy5_user
+         WHERE CAST(rowid AS CHAR) = ?
+            OR LOWER(TRIM(email)) = ?
+            OR LOWER(TRIM(login)) = ?
+         LIMIT 1`,
+        [
+          targetId || "__none__",
+          targetEmail || "__none__",
+          targetLogin || "__none__",
+        ]
+      );
+      const dolibarrUser = rows?.[0] || null;
+      const resolvedUserId = normalizeWhitespace(String(dolibarrUser?.rowid || (targetId.includes("@") ? "" : targetId) || ""));
+      const resolvedEmail = normalizeEmail(String(dolibarrUser?.email || targetEmail || ""));
+      const resolvedLogin = normalizeLoginKey(String(dolibarrUser?.login || targetLogin || ""));
+      const resolvedName =
+        targetName ||
+        normalizeWhitespace(`${dolibarrUser?.firstname || ""} ${dolibarrUser?.lastname || ""}`) ||
+        resolvedEmail ||
+        resolvedLogin ||
+        resolvedUserId;
+      if (!resolvedUserId && !resolvedEmail && !resolvedLogin) {
+        res.status(404).json({ message: "Employee not found." });
+        return;
+      }
+
+      const isAdminRole = nextRole === "admin";
+      const isSalespersonRole = isSalesRole(nextRole);
+      const employeeCategory = isAdminRole ? null : isSalespersonRole ? "on_field" : "fixed_location";
+      const jobLabel =
+        nextRole === "admin"
+          ? "Admin"
+          : nextRole === "hr"
+            ? "HR"
+            : nextRole === "manager"
+              ? "Manager"
+              : isSalespersonRole
+                ? "On Field Sales"
+                : "Fixed Location Employee";
+
+      if (resolvedUserId || resolvedEmail || resolvedLogin) {
+        await conn.execute(
+          `UPDATE nmy5_user
+           SET admin = ?, employee = ?, job = ?, statut = 1, tms = NOW()
+           WHERE CAST(rowid AS CHAR) = ?
+              OR LOWER(TRIM(email)) = ?
+              OR LOWER(TRIM(login)) = ?`,
+          [
+            isAdminRole ? 1 : 0,
+            isAdminRole ? 0 : 1,
+            jobLabel,
+            resolvedUserId || "__none__",
+            resolvedEmail || "__none__",
+            resolvedLogin || "__none__",
+          ]
+        );
+      }
+
+      if (resolvedUserId && !isAdminRole) {
+        try {
+          const [profileUpdate] = await conn.execute(
+            `UPDATE nmy5_hrm_employee_profile SET employee_category = ? WHERE fk_user = ?`,
+            [employeeCategory, resolvedUserId]
+          );
+          const affected = Number((profileUpdate as { affectedRows?: number })?.affectedRows || 0);
+          if (affected === 0) {
+            await conn.execute(
+              `INSERT INTO nmy5_hrm_employee_profile (fk_user, employee_category) VALUES (?, ?)`,
+              [resolvedUserId, employeeCategory]
+            );
+          }
+        } catch {
+          // Some Dolibarr installs do not have the HRM profile table. The job/admin fields above remain authoritative.
+        }
+      }
+
+      if (resolvedEmail) {
+        await conn.execute(
+          `UPDATE lff_access_requests
+           SET status = 'approved',
+               approved_role = ?,
+               assigned_company_ids_json = ?,
+               reviewed_at = NOW(),
+               reviewed_by_id = ?,
+               reviewed_by_name = ?,
+               review_comment = TRIM(CONCAT(COALESCE(review_comment, ''), '\nAccess updated by admin on ', NOW()))
+           WHERE LOWER(TRIM(email)) = ?`,
+          [
+            nextRole,
+            JSON.stringify(nextCompanyIds),
+            normalizeWhitespace(requestUser?.id || req.auth?.sub || "admin"),
+            normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin"),
+            resolvedEmail,
+          ]
+        ).catch(() => undefined);
+      }
+
+      const companyIdsJson = JSON.stringify(nextCompanyIds);
+      const department = normalizeDepartmentForRole(nextRole, String(dolibarrUser?.job || ""));
+      const updateValues = [
+        nextRole,
+        primaryCompany.id,
+        primaryCompany.name,
+        companyIdsJson,
+        department,
+        primaryCompany.primaryBranch || requestUser?.branch || "Main Branch",
+      ];
+      await conn.execute(
+        `UPDATE lff_users
+         SET role = ?, company_id = ?, company_name = ?, company_ids_json = ?,
+             department = ?, branch = ?, approval_status = 'approved', updated_at = NOW()
+         WHERE id = ? OR LOWER(TRIM(email)) = ?`,
+        [...updateValues, resolvedUserId || "__none__", resolvedEmail || "__none__"]
+      ).catch(() => undefined);
+      await conn.execute(
+        `UPDATE lff_employees
+         SET role = ?, company_id = ?, department = ?, branch = ?
+         WHERE id = ? OR LOWER(TRIM(email)) = ?`,
+        [
+          nextRole,
+          primaryCompany.id,
+          department,
+          primaryCompany.primaryBranch || requestUser?.branch || "Main Branch",
+          resolvedUserId || "__none__",
+          resolvedEmail || "__none__",
+        ]
+      ).catch(() => undefined);
+
+      if (resolvedEmail) removeAuthUserByEmail(resolvedEmail);
+      if (resolvedUserId) await deactivateAuthSession(resolvedUserId).catch(() => undefined);
+      if (isAdminRole) {
+        await forceDolibarrAdminPrivilegesForUserIdentity({
+          id: resolvedUserId,
+          name: resolvedName,
+          email: resolvedEmail,
+          login: resolvedLogin || undefined,
+          role: "admin",
+          companyId: primaryCompany.id,
+          companyName: primaryCompany.name,
+          companyIds: nextCompanyIds,
+          department,
+          branch: primaryCompany.primaryBranch || requestUser?.branch || "Main Branch",
+          phone: "",
+          joinDate: new Date().toISOString().slice(0, 10),
+        });
+      }
+
+      res.json({
+        ok: true,
+        user: {
+          id: resolvedUserId || targetId,
+          email: resolvedEmail,
+          name: resolvedName,
+          role: nextRole,
+          companyId: primaryCompany.id,
+          companyName: primaryCompany.name,
+          companyIds: nextCompanyIds,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({
+        message: error instanceof Error ? error.message : "Unable to update employee access.",
       });
     }
   });

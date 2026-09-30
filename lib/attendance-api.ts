@@ -730,6 +730,11 @@ export async function getUserGeofences(userId: string): Promise<Geofence[]> {
   );
 }
 
+export async function getCompanyGeofences(companyId?: string | null): Promise<Geofence[]> {
+  const query = companyId ? `?companyId=${encodeURIComponent(companyId)}` : "";
+  return fetchJsonWithTimeout<Geofence[]>(`/geofences${query}`, { method: "GET" }, 10000);
+}
+
 export async function createGeofence(payload: Partial<Geofence>): Promise<Geofence> {
   return fetchJson<Geofence>("/geofences", {
     method: "POST",
@@ -909,6 +914,22 @@ export async function deleteUserRemote(
       companyId: payload?.companyId || undefined,
       name: payload?.name || undefined,
     }),
+  });
+}
+
+export async function updateUserAccessRemote(
+  userId: string,
+  payload: {
+    email?: string | null;
+    login?: string | null;
+    name?: string | null;
+    role: UserRole;
+    companyIds: string[];
+  }
+): Promise<{ ok: boolean; user?: DolibarrUser }> {
+  return fetchJson(`/users/${encodeURIComponent(userId)}/access`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
   });
 }
 

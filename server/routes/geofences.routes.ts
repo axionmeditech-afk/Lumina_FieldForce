@@ -15,9 +15,29 @@ export function registerGeofenceRoutes(app: Express, deps: GeofenceRouteDeps) {
     getRequestUser,
     normalizeCompanyIds,
     listGeofencesForUserResolved,
+    listGeofencesForCompanyResolved,
     storage,
     upsertGeofenceInMySql,
   } = deps;
+
+  app.get("/api/geofences", requireAuth, requireRoles("admin", "hr", "manager"), async (req, res) => {
+    const requestedCompanyId = firstString(req.query.companyId);
+    const resolvedCompanyId = requestedCompanyId || await resolveRequestCompanyId(req);
+    const user = getRequestUser(req);
+    const allowedCompanyIds = normalizeCompanyIds([...(user?.companyIds || []), user?.companyId]);
+    const canManageAnyCompany = user?.role === "admin";
+    if (!resolvedCompanyId || (!canManageAnyCompany && !allowedCompanyIds.includes(resolvedCompanyId))) {
+      res.status(403).json({ message: "Company access denied" });
+      return;
+    }
+    try {
+      const zones = await listGeofencesForCompanyResolved(resolvedCompanyId);
+      res.json(zones);
+    } catch (error) {
+      console.error("Office geofence list failed", error);
+      res.status(503).json({ message: "Office geofences could not be loaded." });
+    }
+  });
 
   app.get("/api/geofences/user/:id", requireAuth, async (req, res) => {
     const userId = firstString((req.params as Record<string, string>).id);

@@ -1132,6 +1132,26 @@ async function listCompanyOfficeGeofencesFromMySql(companyId: string | null | un
   return rows.map(mapGeofenceRow);
 }
 
+async function listGeofencesForCompanyResolved(companyId: string | null | undefined): Promise<Geofence[]> {
+  const normalizedCompanyId = normalizeWhitespace(companyId || "");
+  if (!normalizedCompanyId) return [];
+  if (isMySqlStateEnabled()) {
+    await ensureGeofenceTable();
+    const conn = await getMySqlPool();
+    const [rows] = await conn.query<any[]>(
+      `SELECT * FROM lff_geofences
+       WHERE company_id = ?
+       ORDER BY is_active DESC, updated_at DESC`,
+      [normalizedCompanyId]
+    );
+    return rows.map(mapGeofenceRow);
+  }
+  const zones = await storage.listGeofences();
+  return zones
+    .filter((zone) => zone.companyId === normalizedCompanyId)
+    .sort((a, b) => Number(b.isActive) - Number(a.isActive) || b.updatedAt.localeCompare(a.updatedAt));
+}
+
 async function listGeofencesForUserResolved(
   userId: string,
   options: { companyId?: string | null; companyIds?: string[]; role?: UserRole | null } = {}
@@ -3056,6 +3076,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     getRequestUser,
     normalizeCompanyIds,
     listGeofencesForUserResolved,
+    listGeofencesForCompanyResolved,
     storage,
     upsertGeofenceInMySql,
   });
@@ -3134,6 +3155,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     removeAuthUserByEmail,
     deactivateAuthSession,
     randomUUID,
+    getCompanyProfilesByIds,
+    isDolibarrSuperuserReviewer,
+    forceDolibarrAdminPrivilegesForUserIdentity,
   });
 
   const httpServer = createServer(app);
