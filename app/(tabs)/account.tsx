@@ -129,9 +129,16 @@ export default function Account() {
             </View>
           </View>
 
+          <View style={styles.titleBlock}>
+            <Text style={[styles.title, { color: colors.text }]}>Account & Access</Text>
+            <Text style={[styles.titleSubtitle, { color: colors.textSecondary }]}>
+              Profile, company and access controls
+            </Text>
+          </View>
+
           <View style={styles.greetingRow}>
             <Text style={[styles.greetingText, { color: colors.textSecondary }]}>{getGreeting()},</Text>
-            <Text style={[styles.readyText, { color: colors.success }]}>Attendance ready</Text>
+            <Text style={[styles.readyText, { color: colors.success }]}>Signed in</Text>
           </View>
 
           <View style={styles.profileRow}>
@@ -151,7 +158,6 @@ export default function Account() {
               )}
             </View>
             <View style={styles.profileCopy}>
-              <Text style={[styles.title, { color: colors.text }]}>Account & Access</Text>
               <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
                 {userName}
               </Text>
@@ -218,13 +224,13 @@ export default function Account() {
             </View>
             <View style={styles.cardCopy}>
               <View style={styles.cardTitleRow}>
-                <Text style={[styles.cardTitle, { color: colors.text }]}>Auto-checkout helper</Text>
+                <Text style={[styles.cardTitle, { color: colors.text }]}>Background Auto-Checkout</Text>
                 <View style={[styles.betaPill, { backgroundColor: `${colors.success}14` }]}>
                   <Text style={[styles.betaPillText, { color: colors.success }]}>Geofence</Text>
                 </View>
               </View>
               <Text style={[styles.cardSubtitle, { color: colors.textSecondary }]}>
-                Background exit monitor starts only when you have an active check-in and a saved office boundary.
+                Starts after check-in and uses the saved office boundary for checkout.
               </Text>
             </View>
           </View>
@@ -232,8 +238,8 @@ export default function Account() {
           <View style={styles.checklist}>
             {[
               "Active check-in required",
-              "Uses saved office geofence",
-              "Best with Always location permission",
+              "Saved office geofence required",
+              "Always location permission recommended",
             ].map((item) => (
               <View key={item} style={styles.checkRow}>
                 <Ionicons name="checkmark-circle" size={17} color={colors.success} />
@@ -339,6 +345,9 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
     fontSize: 12,
   },
+  titleBlock: {
+    gap: 4,
+  },
   greetingRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -383,12 +392,18 @@ const styles = StyleSheet.create({
   },
   title: {
     fontFamily: "Inter_700Bold",
-    fontSize: 28,
-    letterSpacing: -0.4,
+    fontSize: 30,
+    letterSpacing: -0.5,
+  },
+  titleSubtitle: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 13,
+    lineHeight: 18,
   },
   name: {
     fontFamily: "Inter_700Bold",
-    fontSize: 17,
+    fontSize: 21,
+    letterSpacing: -0.2,
   },
   meta: {
     fontFamily: "Inter_400Regular",
