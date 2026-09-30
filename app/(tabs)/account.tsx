@@ -1,5 +1,6 @@
-import React, { useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useMemo, useState } from "react";
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppCanvas } from "../../components/AppCanvas";
@@ -19,33 +20,65 @@ function formatRole(role?: string | null): string {
     .join(" ");
 }
 
+function getInitials(name?: string | null): string {
+  const parts = (name || "Lumina FieldForce")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+  return parts.map((part) => part.charAt(0).toUpperCase()).join("") || "LF";
+}
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
 export default function Account() {
   const { user, company, logout } = useAuth();
   const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
-  const [busy, setBusy] = useState(false);
+  const [autoCheckoutBusy, setAutoCheckoutBusy] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const isAdmin = user?.role === "admin";
+  const userName = user?.name?.trim() || "Lumina User";
+  const companyName = company?.name?.trim() || user?.companyName?.trim() || "Workspace";
+  const branchName = company?.primaryBranch?.trim() || user?.branch?.trim() || "Main Branch";
+  const roleLabel = formatRole(user?.role);
+  const initials = useMemo(() => getInitials(userName), [userName]);
 
   const signOut = async () => {
-    setBusy(true);
+    if (signingOut) return;
+    setSigningOut(true);
     try {
       await logout();
     } catch (error) {
       Alert.alert("Sign out", error instanceof Error ? error.message : "Please retry.");
     } finally {
-      setBusy(false);
+      setSigningOut(false);
     }
   };
 
   const enableBackgroundCheckout = async () => {
-    setBusy(true);
+    if (autoCheckoutBusy) return;
+    setAutoCheckoutBusy(true);
     try {
       const { active } = await getAttendanceStatus();
       if (!active) {
         Alert.alert("Check in first", "Background geofencing is enabled only for an active attendance session.");
         return;
       }
-      const enabled = await startAttendanceGeofence(active, await getUserGeofences(active.userId), true);
+      const geofences = await getUserGeofences(active.userId);
+      if (!geofences.length) {
+        Alert.alert(
+          "Office geofence missing",
+          "Ask admin to save your office geofence first. Auto-checkout needs one active office boundary.",
+        );
+        return;
+      }
+      const enabled = await startAttendanceGeofence(active, geofences, true);
       Alert.alert(
         enabled ? "Auto-checkout enabled" : "Background location unavailable",
         enabled
@@ -55,7 +88,7 @@ export default function Account() {
     } catch (error) {
       Alert.alert("Setup failed", error instanceof Error ? error.message : "Please retry.");
     } finally {
-      setBusy(false);
+      setAutoCheckoutBusy(false);
     }
   };
 
@@ -71,58 +104,160 @@ export default function Account() {
           },
         ]}
       >
-        <View
-          style={[
-            styles.hero,
-            {
-              borderColor: colors.border,
-              backgroundColor: isDark ? "rgba(13,22,40,0.92)" : "rgba(255,255,255,0.92)",
-            },
-          ]}
+        <LinearGradient
+          colors={isDark ? ["#14233A", "#0D1628", "#0B1220"] : ["#FFFFFF", "#F7FBFF", "#EEF5FF"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[styles.hero, { borderColor: colors.border, shadowColor: colors.cardShadow }]}
         >
+          <LinearGradient
+            pointerEvents="none"
+            colors={
+              isDark
+                ? ["rgba(99,166,255,0.46)", "rgba(32,200,143,0.18)"]
+                : ["rgba(14,95,216,0.18)", "rgba(25,139,244,0.08)"]
+            }
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.heroGlow}
+          />
           <View style={styles.heroTop}>
             <DrawerToggleButton />
-            <View style={[styles.rolePill, { backgroundColor: `${colors.primary}14` }]}>
+            <View style={[styles.rolePill, { backgroundColor: `${colors.primary}14`, borderColor: `${colors.primary}22` }]}>
               <Ionicons name="shield-checkmark-outline" size={14} color={colors.primary} />
-              <Text style={[styles.rolePillText, { color: colors.primary }]}>{formatRole(user?.role)}</Text>
+              <Text style={[styles.rolePillText, { color: colors.primary }]}>{roleLabel}</Text>
             </View>
           </View>
+
+          <View style={styles.greetingRow}>
+            <Text style={[styles.greetingText, { color: colors.textSecondary }]}>{getGreeting()},</Text>
+            <Text style={[styles.readyText, { color: colors.success }]}>Attendance ready</Text>
+          </View>
+
           <View style={styles.profileRow}>
-            <View style={[styles.avatar, { backgroundColor: `${colors.primary}16` }]}>
-              <Text style={[styles.avatarText, { color: colors.primary }]}>
-                {(user?.name || "LF").trim().slice(0, 2).toUpperCase()}
-              </Text>
+            <View
+              style={[
+                styles.avatar,
+                {
+                  backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "#FFFFFF",
+                  borderColor: isDark ? "rgba(255,255,255,0.14)" : "rgba(14,95,216,0.10)",
+                },
+              ]}
+            >
+              {user?.avatar ? (
+                <Image source={{ uri: user.avatar }} style={styles.avatarImage} />
+              ) : (
+                <Text style={[styles.avatarText, { color: colors.primary }]}>{initials}</Text>
+              )}
             </View>
             <View style={styles.profileCopy}>
               <Text style={[styles.title, { color: colors.text }]}>Account & Access</Text>
-              <Text style={[styles.name, { color: colors.text }]}>{user?.name || "Lumina User"}</Text>
-              <Text style={[styles.meta, { color: colors.textSecondary }]}>{user?.email}</Text>
-              <Text style={[styles.meta, { color: colors.textSecondary }]}>
-                {company?.name || user?.companyName || "Workspace"} - {company?.primaryBranch || user?.branch || "Main Branch"}
+              <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
+                {userName}
+              </Text>
+              <Text style={[styles.meta, { color: colors.textSecondary }]} numberOfLines={1}>
+                {user?.email || "Signed in user"}
+              </Text>
+              <Text style={[styles.meta, { color: colors.textSecondary }]} numberOfLines={2}>
+                {companyName} - {branchName}
               </Text>
             </View>
           </View>
-        </View>
 
-        <View style={[styles.card, { borderColor: colors.border, backgroundColor: colors.backgroundElevated }]}>
+          <View style={styles.statusGrid}>
+            <View
+              style={[
+                styles.statusChip,
+                {
+                  borderColor: colors.borderLight,
+                  backgroundColor: isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.72)",
+                },
+              ]}
+            >
+              <Ionicons name="business-outline" size={16} color={colors.primary} />
+              <View style={styles.statusCopy}>
+                <Text style={[styles.statusLabel, { color: colors.textTertiary }]}>Company</Text>
+                <Text style={[styles.statusValue, { color: colors.text }]} numberOfLines={1}>
+                  {companyName}
+                </Text>
+              </View>
+            </View>
+            <View
+              style={[
+                styles.statusChip,
+                {
+                  borderColor: colors.borderLight,
+                  backgroundColor: isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.72)",
+                },
+              ]}
+            >
+              <Ionicons name="location-outline" size={16} color={colors.success} />
+              <View style={styles.statusCopy}>
+                <Text style={[styles.statusLabel, { color: colors.textTertiary }]}>Office zone</Text>
+                <Text style={[styles.statusValue, { color: colors.text }]} numberOfLines={1}>
+                  {branchName}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </LinearGradient>
+
+        <View
+          style={[
+            styles.card,
+            {
+              borderColor: colors.border,
+              backgroundColor: colors.backgroundElevated,
+              shadowColor: colors.cardShadow,
+            },
+          ]}
+        >
           <View style={styles.cardHeader}>
-            <Ionicons name="navigate-circle-outline" size={22} color={colors.primary} />
+            <View style={[styles.cardIcon, { backgroundColor: `${colors.primary}14` }]}>
+              <Ionicons name="navigate-circle-outline" size={24} color={colors.primary} />
+            </View>
             <View style={styles.cardCopy}>
-              <Text style={[styles.cardTitle, { color: colors.text }]}>Background Auto-Checkout</Text>
+              <View style={styles.cardTitleRow}>
+                <Text style={[styles.cardTitle, { color: colors.text }]}>Auto-checkout helper</Text>
+                <View style={[styles.betaPill, { backgroundColor: `${colors.success}14` }]}>
+                  <Text style={[styles.betaPillText, { color: colors.success }]}>Geofence</Text>
+                </View>
+              </View>
               <Text style={[styles.cardSubtitle, { color: colors.textSecondary }]}>
-                Works only during an active check-in and uses the saved office geofence.
+                Background exit monitor starts only when you have an active check-in and a saved office boundary.
               </Text>
             </View>
           </View>
+
+          <View style={styles.checklist}>
+            {[
+              "Active check-in required",
+              "Uses saved office geofence",
+              "Best with Always location permission",
+            ].map((item) => (
+              <View key={item} style={styles.checkRow}>
+                <Ionicons name="checkmark-circle" size={17} color={colors.success} />
+                <Text style={[styles.checkText, { color: colors.textSecondary }]}>{item}</Text>
+              </View>
+            ))}
+          </View>
+
           <Pressable
-            disabled={busy}
+            disabled={autoCheckoutBusy}
             onPress={() => void enableBackgroundCheckout()}
             style={({ pressed }) => [
               styles.primaryButton,
-              { backgroundColor: colors.primary, opacity: busy || pressed ? 0.76 : 1 },
+              { backgroundColor: colors.primary, opacity: autoCheckoutBusy || pressed ? 0.76 : 1 },
             ]}
           >
-            <Text style={styles.primaryButtonText}>Enable background auto-checkout</Text>
+            {autoCheckoutBusy ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Ionicons name="radio-outline" size={18} color="#FFFFFF" />
+            )}
+            <Text style={styles.primaryButtonText}>
+              {autoCheckoutBusy ? "Checking setup..." : "Enable auto-checkout"}
+            </Text>
           </Pressable>
         </View>
 
@@ -134,20 +269,24 @@ export default function Account() {
         ) : null}
 
         <Pressable
-          disabled={busy}
+          disabled={signingOut}
           onPress={() => void signOut()}
           style={({ pressed }) => [
             styles.signOutButton,
             {
               borderColor: `${colors.danger}44`,
               backgroundColor: `${colors.danger}10`,
-              opacity: busy || pressed ? 0.74 : 1,
+              opacity: signingOut || pressed ? 0.74 : 1,
             },
           ]}
         >
-          <Ionicons name="log-out-outline" size={18} color={colors.danger} />
+          {signingOut ? (
+            <ActivityIndicator color={colors.danger} size="small" />
+          ) : (
+            <Ionicons name="log-out-outline" size={18} color={colors.danger} />
+          )}
           <Text style={[styles.signOutText, { color: colors.danger }]}>
-            {busy ? "Working..." : "Sign out"}
+            {signingOut ? "Signing out..." : "Sign out"}
           </Text>
         </Pressable>
       </ScrollView>
@@ -164,10 +303,23 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   hero: {
-    borderRadius: 26,
+    borderRadius: 30,
     borderWidth: 1,
     padding: 18,
-    gap: 14,
+    gap: 16,
+    overflow: "hidden",
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 4,
+  },
+  heroGlow: {
+    position: "absolute",
+    top: -90,
+    right: -100,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
   },
   heroTop: {
     flexDirection: "row",
@@ -177,6 +329,7 @@ const styles = StyleSheet.create({
   rolePill: {
     minHeight: 34,
     borderRadius: 999,
+    borderWidth: 1,
     paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
@@ -186,61 +339,156 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
     fontSize: 12,
   },
+  greetingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+  greetingText: {
+    flex: 1,
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+  },
+  readyText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 12,
+  },
   profileRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 14,
   },
   avatar: {
-    width: 66,
-    height: 66,
-    borderRadius: 33,
+    width: 78,
+    height: 78,
+    borderRadius: 39,
+    borderWidth: 6,
     alignItems: "center",
     justifyContent: "center",
+    overflow: "hidden",
+  },
+  avatarImage: {
+    width: "100%",
+    height: "100%",
   },
   avatarText: {
     fontFamily: "Inter_700Bold",
-    fontSize: 20,
+    fontSize: 22,
   },
   profileCopy: {
     flex: 1,
+    minWidth: 0,
     gap: 3,
   },
   title: {
     fontFamily: "Inter_700Bold",
-    fontSize: 24,
+    fontSize: 28,
+    letterSpacing: -0.4,
   },
   name: {
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 16,
+    fontFamily: "Inter_700Bold",
+    fontSize: 17,
   },
   meta: {
     fontFamily: "Inter_400Regular",
     fontSize: 13,
     lineHeight: 18,
   },
+  statusGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  statusChip: {
+    flexGrow: 1,
+    flexBasis: 180,
+    minHeight: 58,
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  statusCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  statusLabel: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 11,
+    textTransform: "uppercase",
+  },
+  statusValue: {
+    marginTop: 2,
+    fontFamily: "Inter_700Bold",
+    fontSize: 13,
+  },
   card: {
     borderRadius: 24,
     borderWidth: 1,
     padding: 18,
-    gap: 14,
+    gap: 16,
+    shadowOpacity: 0.1,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 9 },
+    elevation: 3,
   },
   cardHeader: {
     flexDirection: "row",
     gap: 12,
   },
+  cardIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   cardCopy: {
     flex: 1,
+    minWidth: 0,
     gap: 3,
+  },
+  cardTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
   },
   cardTitle: {
     fontFamily: "Inter_700Bold",
-    fontSize: 17,
+    fontSize: 18,
+  },
+  betaPill: {
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  betaPillText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 10.5,
   },
   cardSubtitle: {
     fontFamily: "Inter_400Regular",
     fontSize: 13,
     lineHeight: 18,
+  },
+  checklist: {
+    gap: 8,
+  },
+  checkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  checkText: {
+    flex: 1,
+    fontFamily: "Inter_500Medium",
+    fontSize: 12.5,
+    lineHeight: 17,
   },
   primaryButton: {
     minHeight: 48,
@@ -248,6 +496,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 14,
+    flexDirection: "row",
+    gap: 8,
   },
   primaryButtonText: {
     color: "#FFFFFF",
