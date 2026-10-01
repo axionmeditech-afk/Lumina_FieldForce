@@ -769,12 +769,13 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
   );
 
   app.post("/api/auth/login", async (req, res) => {
-    const { email, login, username, identifier, password } = req.body as {
+    const { email, login, username, identifier, password, replaceSession } = req.body as {
       email?: string;
       login?: string;
       username?: string;
       identifier?: string;
       password?: string;
+      replaceSession?: boolean;
     };
     const rawIdentifier =
       (identifier || "").trim() ||
@@ -823,6 +824,9 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
 
     const deviceId = resolveDeviceIdFromRequest(req);
     try {
+      if (replaceSession === true) {
+        await deactivateAuthSession(user.id);
+      }
       const token = await issueDeviceScopedAuthToken(user, deviceId);
       res.json({ token, user });
     } catch (error) {
@@ -839,12 +843,13 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
   });
 
   app.post("/api/auth/token", async (req, res) => {
-    const { email, login, username, identifier, password } = req.body as {
+    const { email, login, username, identifier, password, replaceSession } = req.body as {
       email?: string;
       login?: string;
       username?: string;
       identifier?: string;
       password?: string;
+      replaceSession?: boolean;
     };
     const rawIdentifier =
       (identifier || "").trim() ||
@@ -891,6 +896,9 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     }
     const deviceId = resolveDeviceIdFromRequest(req);
     try {
+      if (replaceSession === true) {
+        await deactivateAuthSession(user.id);
+      }
       const token = await issueDeviceScopedAuthToken(user, deviceId);
       res.json({ token });
     } catch (error) {

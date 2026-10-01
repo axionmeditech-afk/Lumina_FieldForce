@@ -130,14 +130,31 @@ function buildEvidence(samples: LocationObject[], best: LocationObject): Verifie
 }
 
 export async function getLocationPermissionSnapshot(): Promise<LocationPermissionState> {
-  const fg = await Location.getForegroundPermissionsAsync();
-  return { foreground: fg.granted, foregroundCanAskAgain: fg.canAskAgain, background: false, backgroundCanAskAgain: false };
+  const [fg, bg] = await Promise.all([
+    Location.getForegroundPermissionsAsync(),
+    Location.getBackgroundPermissionsAsync().catch(() => null),
+  ]);
+  return {
+    foreground: fg.granted,
+    foregroundCanAskAgain: fg.canAskAgain,
+    background: Boolean(bg?.granted),
+    backgroundCanAskAgain: Boolean(bg?.canAskAgain),
+  };
 }
 
 export async function requestLocationPermissionBundle(): Promise<LocationPermissionState> {
   let fg = await Location.getForegroundPermissionsAsync();
   if (!fg.granted && fg.canAskAgain) fg = await Location.requestForegroundPermissionsAsync();
-  return { foreground: fg.granted, foregroundCanAskAgain: fg.canAskAgain, background: false, backgroundCanAskAgain: false };
+  let bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  if (fg.granted && !bg?.granted && bg?.canAskAgain) {
+    bg = await Location.requestBackgroundPermissionsAsync().catch(() => bg);
+  }
+  return {
+    foreground: fg.granted,
+    foregroundCanAskAgain: fg.canAskAgain,
+    background: Boolean(bg?.granted),
+    backgroundCanAskAgain: Boolean(bg?.canAskAgain),
+  };
 }
 
 export async function getVerifiedLocationEvidence(

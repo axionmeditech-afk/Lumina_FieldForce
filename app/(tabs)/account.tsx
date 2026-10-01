@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -10,7 +10,8 @@ import { EmployeeAccessPanel } from "../../components/EmployeeAccessPanel";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { getAttendanceStatus, getUserGeofences } from "@/lib/attendance-api";
-import { startAttendanceGeofence } from "@/lib/attendance-background";
+import { getAttendanceGeofenceRuntimeStatus, startAttendanceGeofence } from "@/lib/attendance-background";
+import { getLocationPermissionSnapshot, requestLocationPermissionBundle } from "@/lib/location-service";
 
 function formatRole(role?: string | null): string {
   if (!role) return "Employee";
@@ -36,11 +37,15 @@ function getGreeting(): string {
   return "Good evening";
 }
 
+type AutoCheckoutSetupState = "checking" | "idle" | "enabled" | "needs_permission" | "needs_checkin" | "unavailable";
+
 export default function Account() {
   const { user, company, logout } = useAuth();
   const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const [autoCheckoutBusy, setAutoCheckoutBusy] = useState(false);
+  const [autoCheckoutState, setAutoCheckoutState] = useState<AutoCheckoutSetupState>("checking");
+  const [autoCheckoutHint, setAutoCheckoutHint] = useState("Checking background setup...");
   const [signingOut, setSigningOut] = useState(false);
   const isAdmin = user?.role === "admin";
   const userName = user?.name?.trim() || "Lumina User";
@@ -48,6 +53,59 @@ export default function Account() {
   const branchName = company?.primaryBranch?.trim() || user?.branch?.trim() || "Main Branch";
   const roleLabel = formatRole(user?.role);
   const initials = useMemo(() => getInitials(userName), [userName]);
+
+  const refreshAutoCheckoutSetup = useCallback(async () => {
+    try {
+      const [runtime, permission, status] = await Promise.all([
+        getAttendanceGeofenceRuntimeStatus(),
+        getLocationPermissionSnapshot(),
+        getAttendanceStatus().catch(() => ({ active: null })),
+      ]);
+      if (!runtime.available) {
+        setAutoCheckoutState("unavailable");
+        setAutoCheckoutHint("Install the APK/native build to use background auto-checkout.");
+        return;
+      }
+      if (!permission.foreground || !permission.background) {
+        setAutoCheckoutState("needs_permission");
+        setAutoCheckoutHint("Allow location all the time from permission settings.");
+        return;
+      }
+      if (runtime.fullyEnabled) {
+        setAutoCheckoutState("enabled");
+        setAutoCheckoutHint("Enabled. Office exit will be checked in the background during active attendance.");
+        return;
+      }
+      if (!status.active) {
+        setAutoCheckoutState("needs_checkin");
+        setAutoCheckoutHint("Check in first, then enable auto-checkout for that attendance session.");
+        return;
+      }
+      setAutoCheckoutState("idle");
+      setAutoCheckoutHint("Ready. Enable it after check-in to monitor your saved office boundary.");
+    } catch {
+      setAutoCheckoutState("idle");
+      setAutoCheckoutHint("Tap enable to verify permissions and start background monitoring.");
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void refreshAutoCheckoutSetup();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [refreshAutoCheckoutSetup]);
+
+  const openPermissionSettings = useCallback(() => {
+    Alert.alert(
+      "Enable background access",
+      "In App Info, set Location to “Allow all the time”. For better reliability, also set Battery usage to Unrestricted if your phone shows that option.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Open Settings", onPress: () => void Linking.openSettings() },
+      ],
+    );
+  }, []);
 
   const signOut = async () => {
     if (signingOut) return;
@@ -63,15 +121,31 @@ export default function Account() {
 
   const enableBackgroundCheckout = async () => {
     if (autoCheckoutBusy) return;
+    if (autoCheckoutState === "enabled") {
+      Alert.alert("Auto-checkout enabled", "Background geofence monitoring is already active for your current check-in.");
+      return;
+    }
     setAutoCheckoutBusy(true);
     try {
+      const permission = await requestLocationPermissionBundle();
+      if (!permission.foreground || !permission.background) {
+        setAutoCheckoutState("needs_permission");
+        setAutoCheckoutHint("Background location is off. Enable “Allow all the time” in app settings.");
+        openPermissionSettings();
+        return;
+      }
+
       const { active } = await getAttendanceStatus();
       if (!active) {
+        setAutoCheckoutState("needs_checkin");
+        setAutoCheckoutHint("Check in first, then enable auto-checkout.");
         Alert.alert("Check in first", "Background geofencing is enabled only for an active attendance session.");
         return;
       }
       const geofences = await getUserGeofences(active.userId);
       if (!geofences.length) {
+        setAutoCheckoutState("idle");
+        setAutoCheckoutHint("Office geofence missing. Ask admin to save your office location first.");
         Alert.alert(
           "Office geofence missing",
           "Ask admin to save your office geofence first. Auto-checkout needs one active office boundary.",
@@ -79,18 +153,43 @@ export default function Account() {
         return;
       }
       const enabled = await startAttendanceGeofence(active, geofences, true);
-      Alert.alert(
-        enabled ? "Auto-checkout enabled" : "Background location unavailable",
-        enabled
-          ? "Your checked-in office is now monitored while the app is in the background."
-          : "Use a native app build and enable Always / Allow all the time location permission in device settings.",
-      );
+      if (enabled) {
+        setAutoCheckoutState("enabled");
+        setAutoCheckoutHint("Enabled. Office exit will be checked in the background during this check-in.");
+        Alert.alert("Auto-checkout enabled", "Your checked-in office is now monitored in the background.");
+      } else {
+        setAutoCheckoutState("needs_permission");
+        setAutoCheckoutHint("Background service did not start. Check location and battery settings.");
+        openPermissionSettings();
+      }
     } catch (error) {
       Alert.alert("Setup failed", error instanceof Error ? error.message : "Please retry.");
     } finally {
       setAutoCheckoutBusy(false);
+      void refreshAutoCheckoutSetup();
     }
   };
+
+  const autoCheckoutStatusTone =
+    autoCheckoutState === "enabled"
+      ? colors.success
+      : autoCheckoutState === "needs_permission" || autoCheckoutState === "unavailable"
+        ? colors.warning
+        : colors.primary;
+  const autoCheckoutButtonLabel =
+    autoCheckoutBusy
+      ? "Checking setup..."
+      : autoCheckoutState === "enabled"
+        ? "Enabled"
+        : autoCheckoutState === "needs_permission"
+          ? "Open permission settings"
+          : "Enable auto-checkout";
+  const autoCheckoutButtonIcon =
+    autoCheckoutState === "enabled"
+      ? "checkmark-circle"
+      : autoCheckoutState === "needs_permission"
+        ? "settings-outline"
+        : "radio-outline";
 
   return (
     <AppCanvas>
@@ -225,12 +324,14 @@ export default function Account() {
             <View style={styles.cardCopy}>
               <View style={styles.cardTitleRow}>
                 <Text style={[styles.cardTitle, { color: colors.text }]}>Background Auto-Checkout</Text>
-                <View style={[styles.betaPill, { backgroundColor: `${colors.success}14` }]}>
-                  <Text style={[styles.betaPillText, { color: colors.success }]}>Geofence</Text>
+                <View style={[styles.betaPill, { backgroundColor: `${autoCheckoutStatusTone}14` }]}>
+                  <Text style={[styles.betaPillText, { color: autoCheckoutStatusTone }]}>
+                    {autoCheckoutState === "enabled" ? "Enabled" : "Geofence"}
+                  </Text>
                 </View>
               </View>
               <Text style={[styles.cardSubtitle, { color: colors.textSecondary }]}>
-                Starts after check-in and uses the saved office boundary for checkout.
+                {autoCheckoutHint}
               </Text>
             </View>
           </View>
@@ -239,7 +340,8 @@ export default function Account() {
             {[
               "Active check-in required",
               "Saved office geofence required",
-              "Always location permission recommended",
+              "Allow all the time location required",
+              "Keep battery unrestricted for best reliability",
             ].map((item) => (
               <View key={item} style={styles.checkRow}>
                 <Ionicons name="checkmark-circle" size={17} color={colors.success} />
@@ -250,19 +352,28 @@ export default function Account() {
 
           <Pressable
             disabled={autoCheckoutBusy}
-            onPress={() => void enableBackgroundCheckout()}
+            onPress={() => {
+              if (autoCheckoutState === "needs_permission") {
+                openPermissionSettings();
+                return;
+              }
+              void enableBackgroundCheckout();
+            }}
             style={({ pressed }) => [
               styles.primaryButton,
-              { backgroundColor: colors.primary, opacity: autoCheckoutBusy || pressed ? 0.76 : 1 },
+              {
+                backgroundColor: autoCheckoutState === "enabled" ? colors.success : colors.primary,
+                opacity: autoCheckoutBusy || pressed ? 0.76 : 1,
+              },
             ]}
           >
             {autoCheckoutBusy ? (
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
-              <Ionicons name="radio-outline" size={18} color="#FFFFFF" />
+              <Ionicons name={autoCheckoutButtonIcon} size={18} color="#FFFFFF" />
             )}
             <Text style={styles.primaryButtonText}>
-              {autoCheckoutBusy ? "Checking setup..." : "Enable auto-checkout"}
+              {autoCheckoutButtonLabel}
             </Text>
           </Pressable>
         </View>

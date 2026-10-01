@@ -18,7 +18,9 @@ import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { getAttendanceStatus, getCompanyAttendanceToday } from "@/lib/attendance-api";
+import { isSystemAdministratorAccount } from "@/lib/attendance-roster";
 import { formatMumbaiDateKey, formatMumbaiTime, toMumbaiDateKey } from "@/lib/ist-time";
+import { getAttendance } from "@/lib/storage";
 import type { AttendanceRecord } from "@/lib/types";
 
 type DashboardSnapshot = {
@@ -47,6 +49,9 @@ type ActionCard = {
 };
 
 const SUPERVISOR_ROLES = new Set(["admin", "hr", "manager"]);
+const SUPERVISOR_REFRESH_MS = 45_000;
+const EMPLOYEE_REFRESH_MS = 90_000;
+const MIN_REFRESH_GAP_MS = 12_000;
 
 function getUserInitials(name?: string | null): string {
   const parts = (name || "LF")
@@ -72,6 +77,23 @@ function getLatestByUser(records: AttendanceRecord[]): Map<string, AttendanceRec
   return latest;
 }
 
+function getActiveAttendanceForUser(records: AttendanceRecord[], userId?: string): AttendanceRecord | null {
+  if (!userId) return null;
+  const latest = records
+    .filter((record) => record.userId === userId)
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
+  return latest?.type === "checkin" ? latest : null;
+}
+
+function getTodayCompanyRecords(records: AttendanceRecord[], companyId?: string | null): AttendanceRecord[] {
+  const today = toMumbaiDateKey(new Date());
+  return records.filter((record) => {
+    if (toMumbaiDateKey(record.timestamp) !== today) return false;
+    if (!companyId) return true;
+    return !record.companyId || record.companyId === companyId;
+  });
+}
+
 function formatRecordTitle(record: AttendanceRecord, ownUserId?: string): string {
   const actor = record.userId === ownUserId ? "You" : record.userName || "Employee";
   return `${actor} ${record.type === "checkin" ? "checked in" : "checked out"}`;
@@ -89,52 +111,87 @@ export default function Dashboard() {
   const insets = useSafeAreaInsets();
   const focused = useIsFocused();
   const busyRef = useRef(false);
+  const lastRefreshAtRef = useRef(0);
+  const hasSnapshotRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
 
   const isSupervisor = SUPERVISOR_ROLES.has(user?.role || "");
+  const isSuperAdminAttendanceExempt = user ? isSystemAdministratorAccount(user) : false;
+  const activeCompanyId = company?.id || "";
   const todayKey = toMumbaiDateKey(new Date());
   const todayLabel = formatMumbaiDateKey(todayKey);
 
-  const refresh = useCallback(async () => {
+  const hydrateFromCache = useCallback(async () => {
+    if (!user) return;
+    try {
+      const cachedRecords = await getAttendance();
+      setSnapshot((current) => {
+        if (current && current.records.length >= cachedRecords.length) return current;
+        hasSnapshotRef.current = true;
+        return {
+          records: cachedRecords.filter((record) => record.userId === user.id),
+          active: getActiveAttendanceForUser(cachedRecords, user.id),
+          companyRecords: isSupervisor ? getTodayCompanyRecords(cachedRecords, activeCompanyId) : [],
+          syncedAt: current?.syncedAt || "Cached",
+        };
+      });
+    } catch {
+      // Cache hydration is best-effort; network refresh still runs.
+    }
+  }, [activeCompanyId, isSupervisor, user]);
+
+  const refresh = useCallback(async (force = false) => {
     if (!user || busyRef.current || AppState.currentState !== "active") return;
+    if (!force && Date.now() - lastRefreshAtRef.current < MIN_REFRESH_GAP_MS) return;
     busyRef.current = true;
-    setBusy(true);
+    lastRefreshAtRef.current = Date.now();
+    setBusy(force || !hasSnapshotRef.current);
     try {
       const [status, companyRecords] = await Promise.all([
         getAttendanceStatus(),
-        isSupervisor ? getCompanyAttendanceToday(company?.id) : Promise.resolve([]),
+        isSupervisor ? getCompanyAttendanceToday(activeCompanyId) : Promise.resolve([]),
       ]);
-      setSnapshot({
+      const nextSnapshot = {
         records: status.records,
         active: status.active,
         companyRecords,
         syncedAt: formatMumbaiTime(new Date(), { includeZoneLabel: true }),
-      });
+      };
+      hasSnapshotRef.current = true;
+      setSnapshot(nextSnapshot);
       setError("");
     } catch (event) {
       setError(event instanceof Error ? event.message : "Unable to refresh attendance");
+      if (!hasSnapshotRef.current) void hydrateFromCache();
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
-  }, [company?.id, isSupervisor, user]);
+  }, [activeCompanyId, hydrateFromCache, isSupervisor, user]);
 
   useEffect(() => {
     if (!focused) return;
-    void refresh();
+    const initialTimer = setTimeout(() => {
+      void hydrateFromCache();
+      void refresh();
+    }, 0);
     const timer = setInterval(() => {
       void refresh();
-    }, 30000);
+    }, isSupervisor ? SUPERVISOR_REFRESH_MS : EMPLOYEE_REFRESH_MS);
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") void refresh();
+      if (state === "active") {
+        void hydrateFromCache();
+        void refresh();
+      }
     });
     return () => {
+      clearTimeout(initialTimer);
       clearInterval(timer);
       subscription.remove();
     };
-  }, [focused, refresh]);
+  }, [focused, hydrateFromCache, isSupervisor, refresh]);
 
   const teamLatest = useMemo(
     () => getLatestByUser(snapshot?.companyRecords || []),
@@ -164,11 +221,18 @@ export default function Dashboard() {
 
   const heroInsights = useMemo(() => {
     const ownStatus = snapshot?.active ? "Checked in" : snapshot ? "Checked out" : "Loading";
+    if (isSuperAdminAttendanceExempt) {
+      return [
+        { id: "owner", label: "My status", value: "Owner" },
+        { id: "team", label: "Team active", value: snapshot ? String(checkedInNow) : "--" },
+        { id: "verified", label: "Verified logs", value: snapshot ? String(verifiedToday) : "--" },
+      ];
+    }
     if (isSupervisor) {
       return [
+        { id: "status", label: "My status", value: ownStatus },
         { id: "team", label: "Team active", value: snapshot ? String(checkedInNow) : "--" },
-        { id: "out", label: "Checked out", value: snapshot ? String(checkedOutToday) : "--" },
-        { id: "verified", label: "Verified logs", value: snapshot ? String(verifiedToday) : "--" },
+        { id: "verified", label: "Team logs", value: snapshot ? String(verifiedToday) : "--" },
       ];
     }
     return [
@@ -181,13 +245,50 @@ export default function Dashboard() {
     checkedOutToday,
     company?.attendanceZoneLabel,
     isSupervisor,
+    isSuperAdminAttendanceExempt,
     snapshot,
     verifiedToday,
   ]);
 
   const metricCards = useMemo<MetricCard[]>(() => {
+    if (isSuperAdminAttendanceExempt) {
+      return [
+        {
+          id: "owner",
+          label: "Owner Mode",
+          value: "Owner",
+          hint: "Attendance is not required for the workspace owner",
+          icon: "shield-checkmark-outline",
+          tone: colors.primary,
+        },
+        {
+          id: "active",
+          label: "Active Now",
+          value: snapshot ? String(checkedInNow) : "--",
+          hint: "Employees currently checked in",
+          icon: "radio-button-on-outline",
+          tone: colors.success,
+        },
+        {
+          id: "logs",
+          label: "Team Logs",
+          value: snapshot ? String(snapshot.companyRecords.length) : "--",
+          hint: `Records for ${todayLabel}`,
+          icon: "document-text-outline",
+          tone: colors.warning,
+        },
+      ];
+    }
     if (isSupervisor) {
       return [
+        {
+          id: "status",
+          label: "My Status",
+          value: snapshot?.active ? "IN" : snapshot ? "OUT" : "--",
+          hint: snapshot?.active?.geofenceName || "Your own attendance is required",
+          icon: "finger-print-outline",
+          tone: snapshot?.active ? colors.success : colors.textTertiary,
+        },
         {
           id: "active",
           label: "Active Now",
@@ -245,6 +346,7 @@ export default function Dashboard() {
     colors,
     error,
     isSupervisor,
+    isSuperAdminAttendanceExempt,
     snapshot,
     todayLabel,
     verifiedToday,
@@ -276,7 +378,7 @@ export default function Dashboard() {
     <AppCanvas>
       <ScrollView
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={busy} onRefresh={() => void refresh()} tintColor={colors.primary} />}
+        refreshControl={<RefreshControl refreshing={busy} onRefresh={() => void refresh(true)} tintColor={colors.primary} />}
         contentContainerStyle={[
           styles.scrollContent,
           {

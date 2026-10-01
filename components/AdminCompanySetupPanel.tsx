@@ -88,7 +88,10 @@ export function AdminCompanySetupPanel() {
   }, [isAdmin]);
 
   useEffect(() => {
-    void loadCompanies();
+    const timer = setTimeout(() => {
+      void loadCompanies();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [loadCompanies]);
 
   const canSave = useMemo(
@@ -191,7 +194,7 @@ export function AdminCompanySetupPanel() {
     }
   }, [query]);
 
-  const useCurrentLocation = useCallback(async () => {
+  const applyCurrentLocation = useCallback(async () => {
     setLocating(true);
     try {
       const permission = await requestLocationPermissionBundle();
@@ -358,7 +361,7 @@ export function AdminCompanySetupPanel() {
 
       <Pressable
         disabled={locating}
-        onPress={() => void useCurrentLocation()}
+        onPress={() => void applyCurrentLocation()}
         style={({ pressed }) => [
           styles.secondaryButton,
           { borderColor: colors.border, backgroundColor: colors.surface, opacity: pressed || locating ? 0.78 : 1 },

@@ -219,6 +219,11 @@ app.delete("/api/users/:id", requireAuth, requireRoles("admin"), async (req, res
     const requestedCompanyId = normalizeWhitespace(typeof body.companyId === "string" ? body.companyId : "");
     const targetName = normalizeWhitespace(typeof body.name === "string" ? body.name : "");
     const requestUser = getRequestUser(req);
+    const requesterId = normalizeWhitespace(requestUser?.id || req.auth?.sub || "").replace(/^dolibarr_/i, "");
+    const requesterEmail = normalizeEmail(requestUser?.email || req.auth?.email || "");
+    const requesterLogin = normalizeLoginKey(
+      String(requestUser?.login || (requesterEmail ? requesterEmail.split("@")[0] : "") || "")
+    );
     const reviewerId = normalizeWhitespace(requestUser?.id || req.auth?.sub || "admin");
     const reviewerName = normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin");
 
@@ -405,6 +410,134 @@ app.delete("/api/users/:id", requireAuth, requireRoles("admin"), async (req, res
     } catch (error) {
       res.status(500).json({
         message: error instanceof Error ? error.message : "Unable to delete employee.",
+      });
+    }
+  });
+
+app.post("/api/users/:id/reset-session", requireAuth, requireRoles("admin"), async (req, res) => {
+    const targetId = normalizeWhitespace(String(req.params.id || ""));
+    const body = (req.body || {}) as {
+      email?: unknown;
+      login?: unknown;
+      name?: unknown;
+    };
+    const targetEmail = normalizeEmail(typeof body.email === "string" ? body.email : "");
+    const targetLogin = normalizeLoginKey(typeof body.login === "string" ? body.login : "");
+    const targetName = normalizeWhitespace(typeof body.name === "string" ? body.name : "");
+    const requestUser = getRequestUser(req);
+    const requesterId = normalizeWhitespace(requestUser?.id || req.auth?.sub || "").replace(/^dolibarr_/i, "");
+    const requesterEmail = normalizeEmail(requestUser?.email || req.auth?.email || "");
+    const requesterLogin = normalizeLoginKey(
+      String(requestUser?.login || (requesterEmail ? requesterEmail.split("@")[0] : "") || "")
+    );
+    const reviewerId = normalizeWhitespace(requestUser?.id || req.auth?.sub || "admin");
+    const reviewerName = normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin");
+
+    if (!targetId && !targetEmail && !targetLogin) {
+      res.status(400).json({ message: "Employee id or email is required." });
+      return;
+    }
+    if (
+      (targetId && requesterId && targetId.replace(/^dolibarr_/i, "") === requesterId) ||
+      (targetEmail && requesterEmail && targetEmail === requesterEmail) ||
+      (targetLogin && requesterLogin && targetLogin === requesterLogin)
+    ) {
+      res.status(400).json({ message: "You cannot reset your own active admin session." });
+      return;
+    }
+
+    try {
+      const conn = await getMySqlPool();
+      const normalizedTargetId = targetId.replace(/^dolibarr_/i, "");
+      const lookupEmail = targetEmail || "__none__";
+      const lookupLogin = targetLogin || "__none__";
+      const lookupId = normalizedTargetId || "__none__";
+      const [rows] = await conn.query(
+        `SELECT rowid, login, email, firstname, lastname, admin, statut
+         FROM nmy5_user
+         WHERE CAST(rowid AS CHAR) = ?
+            OR LOWER(TRIM(email)) = ?
+            OR LOWER(TRIM(login)) = ?
+         LIMIT 1`,
+        [lookupId, lookupEmail, lookupLogin]
+      ).catch(() => [[] as any[]]);
+      const dolibarrUser = rows?.[0] || null;
+      const resolvedUserId = normalizeWhitespace(
+        String(dolibarrUser?.rowid || (normalizedTargetId.includes("@") ? "" : normalizedTargetId) || "")
+      );
+      const resolvedEmail = normalizeEmail(String(dolibarrUser?.email || targetEmail || ""));
+      const resolvedLogin = normalizeLoginKey(String(dolibarrUser?.login || targetLogin || ""));
+      const resolvedName =
+        targetName ||
+        normalizeWhitespace(`${dolibarrUser?.firstname || ""} ${dolibarrUser?.lastname || ""}`) ||
+        resolvedEmail ||
+        resolvedLogin ||
+        resolvedUserId;
+
+      if (!resolvedUserId && !resolvedEmail && !resolvedLogin) {
+        res.status(404).json({ message: "Employee not found." });
+        return;
+      }
+      if (
+        (resolvedUserId && requesterId && resolvedUserId === requesterId) ||
+        (resolvedEmail && requesterEmail && resolvedEmail === requesterEmail) ||
+        (resolvedLogin && requesterLogin && resolvedLogin === requesterLogin)
+      ) {
+        res.status(400).json({ message: "You cannot reset your own active admin session." });
+        return;
+      }
+
+      if (resolvedUserId) {
+        await deactivateAuthSession(resolvedUserId).catch(() => undefined);
+      }
+
+      const whereParts: string[] = [];
+      const whereValues: string[] = [];
+      for (const idCandidate of [resolvedUserId, resolvedUserId ? `dolibarr_${resolvedUserId}` : "", targetId]) {
+        const value = normalizeWhitespace(idCandidate);
+        if (value) {
+          whereParts.push("user_id = ?");
+          whereValues.push(value);
+        }
+      }
+      if (resolvedEmail) {
+        whereParts.push("LOWER(TRIM(email)) = ?");
+        whereValues.push(resolvedEmail);
+      }
+      if (whereParts.length) {
+        await conn.execute(
+          `UPDATE lff_auth_sessions
+           SET is_active = 0,
+               last_logout_at = NOW(),
+               updated_at = NOW()
+           WHERE is_active = 1 AND (${whereParts.join(" OR ")})`,
+          whereValues
+        ).catch(() => undefined);
+      }
+
+      await conn.execute(
+        `INSERT INTO lff_audit_logs (id, actor_id, actor_name, action, entity_type, entity_id, details_json, created_at)
+         VALUES (?, ?, ?, 'reset_employee_session', 'user', ?, ?, NOW())`,
+        [
+          randomUUID(),
+          reviewerId,
+          reviewerName,
+          resolvedUserId || resolvedEmail || targetId,
+          JSON.stringify({ email: resolvedEmail || null, login: resolvedLogin || null, name: resolvedName }),
+        ]
+      ).catch(() => undefined);
+
+      res.json({
+        ok: true,
+        reset: {
+          id: resolvedUserId || targetId,
+          email: resolvedEmail || null,
+          name: resolvedName,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({
+        message: error instanceof Error ? error.message : "Unable to reset employee session.",
       });
     }
   });

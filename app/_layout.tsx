@@ -1,6 +1,5 @@
 import { AppState } from "react-native";
 import { reconcileAttendanceGeofence } from "@/lib/attendance-background";
-import "@/lib/attendance-background";
 import React, { useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
@@ -20,13 +19,14 @@ import { Inter_700Bold } from "@expo-google-fonts/inter/700Bold";
 SplashScreen.preventAutoHideAsync();
 function AppShell() {
   const { user } = useAuth();
+  const userId = user?.id || "";
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     const reconcile = () => { void reconcileAttendanceGeofence().catch(console.warn); };
     reconcile();
     const sub = AppState.addEventListener("change", state => { if (state === "active") reconcile(); });
     return () => sub.remove();
-  }, [user?.id]);
+  }, [userId]);
   const { colors, isDark } = useAppTheme();
   useEffect(() => { void retireLegacyLocationTracking().catch(console.warn); }, []);
   return <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
@@ -43,16 +43,11 @@ export default function RootLayout() {
     Inter_600SemiBold,
     Inter_700Bold,
   });
-  const [appReady, setAppReady] = useState(false);
+  const [fallbackReady, setFallbackReady] = useState(false);
+  const appReady = fontsLoaded || fallbackReady;
 
   useEffect(() => {
-    if (fontsLoaded) {
-      setAppReady(true);
-    }
-  }, [fontsLoaded]);
-
-  useEffect(() => {
-    const fallback = setTimeout(() => setAppReady(true), 4000);
+    const fallback = setTimeout(() => setFallbackReady(true), 4000);
     return () => clearTimeout(fallback);
   }, []);
 

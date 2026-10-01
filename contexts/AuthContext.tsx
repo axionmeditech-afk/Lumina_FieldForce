@@ -254,7 +254,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return {
         ok: false,
         message:
-          "This account is already signed in on another device. Sign out from the previous device before signing in here.",
+          "This account is already signed in on another device. Sign out from that device first, then try again.",
       };
     }
     if (token) {

@@ -39,16 +39,21 @@ function isReservedAdministratorIdentity(value: unknown): boolean {
 }
 
 export function isSystemAdministratorAccount(identity: AttendanceRosterIdentity): boolean {
-  if (normalizeIdentity(identity.role) === "admin") return true;
-  if (isEnabledFlag(identity.admin) || isEnabledFlag(identity.isAdmin)) return true;
-
+  const rawId = normalizeIdentity(identity.id == null ? "" : String(identity.id)).replace(/^dolibarr_/, "");
+  if (rawId === "1") return true;
   const emailLocalPart = normalizeIdentity(identity.email).split("@")[0] || "";
   return [identity.login, emailLocalPart, identity.name].some(isReservedAdministratorIdentity);
 }
 
 export function isAttendanceRosterMember(identity: AttendanceRosterIdentity): boolean {
   const role = normalizeIdentity(identity.role);
-  return (role === "employee" || role === "salesperson") && !isSystemAdministratorAccount(identity);
+  return (
+    role === "employee" ||
+    role === "salesperson" ||
+    role === "manager" ||
+    role === "hr" ||
+    role === "admin"
+  ) && !isSystemAdministratorAccount(identity);
 }
 
 function getRosterIdentityKeys(identity: AttendanceRosterIdentity): string[] {

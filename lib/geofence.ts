@@ -176,7 +176,7 @@ export function validCoordinates(latitude: number, longitude: number): boolean {
 }
 
 export function isConfidentlyOutside(zone: Geofence, latitude: number, longitude: number, accuracy: number): boolean {
-  return validCoordinates(latitude, longitude) && Number.isFinite(accuracy) && accuracy > 0 && accuracy <= 50 &&
+  return validCoordinates(latitude, longitude) && Number.isFinite(accuracy) && accuracy > 0 && accuracy <= MAX_ATTENDANCE_ACCURACY_METERS &&
     haversineDistanceMeters(latitude, longitude, zone.latitude, zone.longitude) - accuracy >
     getEffectiveGeofenceRadiusMeters(zone) + GEOFENCE_EXIT_MARGIN_METERS;
 }

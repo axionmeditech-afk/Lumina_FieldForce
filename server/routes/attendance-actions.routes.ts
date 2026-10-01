@@ -53,7 +53,8 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           if (!Number.isFinite(accuracy) || accuracy <= 0 || accuracy > deps.MAX_LOCATION_ACCURACY_METERS) {
             reject("Location accuracy is weak. Enable precise location, move near open sky and retry."); return;
           }
-          if (!Number.isInteger(payload.locationSampleCount) || payload.locationSampleCount < deps.MIN_LOCATION_SAMPLE_COUNT) {
+          const minimumSampleCount = automatic ? 1 : deps.MIN_LOCATION_SAMPLE_COUNT;
+          if (!Number.isInteger(payload.locationSampleCount) || payload.locationSampleCount < minimumSampleCount) {
             reject("Stable GPS verification failed. Wait for lock and retry."); return;
           }
           const capturedAt = deps.parseIsoDate(payload.capturedAtClient);

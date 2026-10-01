@@ -474,6 +474,7 @@ interface AuthRequestOptions {
   timeoutMs?: number;
   throwOnDeviceLock?: boolean;
   throwOnInvalidSession?: boolean;
+  replaceSession?: boolean;
 }
 
 export interface AccessRequestPayload {
@@ -536,13 +537,14 @@ export async function issueApiToken(
   }
   const deviceId = await getOrCreateDeviceId();
   const payload = cleanIdentifier.includes("@")
-    ? { email: cleanIdentifier, password, deviceId }
+    ? { email: cleanIdentifier, password, deviceId, replaceSession: options?.replaceSession === true }
     : {
         email: cleanIdentifier,
         login: cleanIdentifier,
         username: cleanIdentifier,
         password,
         deviceId,
+        replaceSession: options?.replaceSession === true,
       };
   try {
     const result = await fetchJsonWithTimeout<{ token: string }>(
@@ -912,6 +914,24 @@ export async function deleteUserRemote(
       email: payload?.email || undefined,
       login: payload?.login || undefined,
       companyId: payload?.companyId || undefined,
+      name: payload?.name || undefined,
+    }),
+  });
+}
+
+export async function resetUserSessionRemote(
+  userId: string,
+  payload?: {
+    email?: string | null;
+    login?: string | null;
+    name?: string | null;
+  }
+): Promise<{ ok: boolean; reset?: { id?: string; email?: string | null; name?: string | null } }> {
+  return fetchJson(`/users/${encodeURIComponent(userId)}/reset-session`, {
+    method: "POST",
+    body: JSON.stringify({
+      email: payload?.email || undefined,
+      login: payload?.login || undefined,
       name: payload?.name || undefined,
     }),
   });

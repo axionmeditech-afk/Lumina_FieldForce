@@ -9,6 +9,7 @@ import {
   getCompanyGeofences,
   getCompanyProfilesRemote,
   getUsersRemote,
+  resetUserSessionRemote,
   reviewAdminAccessRequest,
   type DolibarrUser,
   updateGeofence,
@@ -77,11 +78,15 @@ export function EmployeeAccessPanel() {
   const [busy, setBusy] = useState(false);
   const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [resettingId, setResettingId] = useState<string | null>(null);
   const [savingAccessId, setSavingAccessId] = useState<string | null>(null);
   const [savingGeofenceId, setSavingGeofenceId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const isAdmin = user?.role === "admin";
+  const activeCompanyId = company?.id || "";
+  const currentUserId = user?.id || "";
+  const currentUserEmail = user?.email ? normalize(user.email) : "";
 
   const load = useCallback(async () => {
     if (!isAdmin) return;
@@ -91,8 +96,8 @@ export function EmployeeAccessPanel() {
       const [pending, companyList, employeeList, geofenceList] = await Promise.all([
         getAdminAccessRequests("pending"),
         getCompanyProfilesRemote().catch(() => [] as CompanyProfile[]),
-        getUsersRemote({ companyId: company?.id }).catch(() => [] as DolibarrUser[]),
-        getCompanyGeofences(company?.id).catch(() => [] as Geofence[]),
+        getUsersRemote({ companyId: activeCompanyId || undefined }).catch(() => [] as DolibarrUser[]),
+        getCompanyGeofences(activeCompanyId || undefined).catch(() => [] as Geofence[]),
       ]);
       setRequests(pending);
       setCompanies(companyList);
@@ -117,8 +122,8 @@ export function EmployeeAccessPanel() {
             : null;
           next[request.id] = requestedCompany?.id
             ? [requestedCompany.id]
-            : company?.id
-              ? [company.id]
+            : activeCompanyId
+              ? [activeCompanyId]
               : companyList[0]?.id
                 ? [companyList[0].id]
                 : [];
@@ -147,7 +152,7 @@ export function EmployeeAccessPanel() {
         for (const employee of employeeList) {
           const employeeKey = getEmployeeId(employee) || getEmployeeEmail(employee);
           if (!employeeKey) continue;
-          if (!next[employeeKey]?.length) next[employeeKey] = getEmployeeCompanyIds(employee, company?.id);
+          if (!next[employeeKey]?.length) next[employeeKey] = getEmployeeCompanyIds(employee, activeCompanyId);
         }
         for (const employeeKey of Object.keys(next)) {
           if (!employeeList.some((employee) => (getEmployeeId(employee) || getEmployeeEmail(employee)) === employeeKey)) {
@@ -161,10 +166,13 @@ export function EmployeeAccessPanel() {
     } finally {
       setBusy(false);
     }
-  }, [company?.id, isAdmin]);
+  }, [activeCompanyId, isAdmin]);
 
   useEffect(() => {
-    void load();
+    const timer = setTimeout(() => {
+      void load();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [load]);
 
   const companyById = useMemo(
@@ -177,15 +185,11 @@ export function EmployeeAccessPanel() {
         const id = getEmployeeId(employee);
         const email = getEmployeeEmail(employee);
         if (!id && !email) return false;
-        if (user?.id && id === user.id) return false;
-        if (user?.email && email && email === normalize(user.email)) return false;
+        if (currentUserId && id === currentUserId) return false;
+        if (currentUserEmail && email && email === currentUserEmail) return false;
         return true;
       }),
-    [employees, user?.email, user?.id],
-  );
-  const deletableEmployeeCount = useMemo(
-    () => managedEmployees.filter((employee) => getEmployeeRole(employee) !== "admin").length,
-    [managedEmployees],
+    [currentUserEmail, currentUserId, employees],
   );
 
   if (!isAdmin) return null;
@@ -325,6 +329,45 @@ export function EmployeeAccessPanel() {
       return;
     }
     void performSave();
+  };
+
+  const confirmResetEmployeeSession = (employee: DolibarrUser) => {
+    const id = getEmployeeId(employee);
+    const email = getEmployeeEmail(employee);
+    const name = getEmployeeName(employee);
+    const employeeKey = id || email;
+    if (!employeeKey) {
+      Alert.alert("Cannot reset", "This employee record is missing both id and email.");
+      return;
+    }
+    Alert.alert(
+      "Reset device session?",
+      `${name} will be signed out from their current device. They can sign in again on the correct/new device after this reset.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: async () => {
+            if (resettingId) return;
+            setResettingId(employeeKey);
+            try {
+              await resetUserSessionRemote(id || email, {
+                email,
+                login: employee.login ? String(employee.login) : null,
+                name,
+              });
+              Alert.alert("Session reset", `${name} can now sign in on the correct device.`);
+              void load().catch(() => undefined);
+            } catch (event) {
+              Alert.alert("Reset failed", event instanceof Error ? event.message : "Please retry.");
+            } finally {
+              setResettingId(null);
+            }
+          },
+        },
+      ],
+    );
   };
 
   const toggleGeofenceEmployee = async (zone: Geofence, employee: DolibarrUser) => {
@@ -505,6 +548,7 @@ export function EmployeeAccessPanel() {
         const selectedCompanies = selectedCompanyIdsByEmployee[deleteKey] || [];
         const canDelete = getEmployeeRole(employee) !== "admin";
         const isDeleting = deletingId === deleteKey;
+        const isResetting = resettingId === deleteKey;
         const isSavingAccess = savingAccessId === deleteKey;
         return (
           <View key={`${employee.companyId || company?.id || "company"}:${deleteKey}`} style={[styles.employeeCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
@@ -582,8 +626,33 @@ export function EmployeeAccessPanel() {
                   { backgroundColor: colors.primary, opacity: savingAccessId || pressed ? 0.75 : 1 },
                 ]}
               >
-                {isSavingAccess ? <ActivityIndicator color="#FFFFFF" size="small" /> : null}
+                {isSavingAccess ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : (
+                  <Ionicons name="save-outline" size={15} color="#FFFFFF" />
+                )}
                 <Text style={styles.actionButtonText}>{isSavingAccess ? "Saving" : "Save Access"}</Text>
+              </Pressable>
+              <Pressable
+                disabled={Boolean(resettingId)}
+                onPress={() => confirmResetEmployeeSession(employee)}
+                style={({ pressed }) => [
+                  styles.resetButton,
+                  {
+                    borderColor: `${colors.warning}55`,
+                    backgroundColor: `${colors.warning}12`,
+                    opacity: resettingId || pressed ? 0.72 : 1,
+                  },
+                ]}
+              >
+                {isResetting ? (
+                  <ActivityIndicator color={colors.warning} size="small" />
+                ) : (
+                  <Ionicons name="phone-portrait-outline" size={17} color={colors.warning} />
+                )}
+                <Text style={[styles.resetText, { color: colors.warning }]}>
+                  {isResetting ? "Resetting" : "Reset Session"}
+                </Text>
               </Pressable>
               {canDelete ? (
                 <Pressable
@@ -799,22 +868,24 @@ const styles = StyleSheet.create({
   },
   actionRow: {
     flexDirection: "row",
-    gap: 10,
-    marginTop: 2,
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
   },
   actionButton: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 16,
+    minHeight: 36,
+    borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     flexDirection: "row",
-    gap: 8,
+    gap: 6,
+    paddingHorizontal: 12,
   },
   actionButtonText: {
     color: "#FFFFFF",
     fontFamily: "Inter_700Bold",
-    fontSize: 13,
+    fontSize: 12,
   },
   sectionDivider: {
     height: 1,
@@ -870,15 +941,30 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   deleteButton: {
-    minHeight: 38,
-    borderRadius: 14,
+    minHeight: 36,
+    borderRadius: 12,
     borderWidth: 1,
-    paddingHorizontal: 10,
+    paddingHorizontal: 11,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  resetButton: {
+    minHeight: 36,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     gap: 6,
   },
   deleteText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 12,
+  },
+  resetText: {
     fontFamily: "Inter_700Bold",
     fontSize: 12,
   },

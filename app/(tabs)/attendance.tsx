@@ -512,8 +512,10 @@ function mapAttendanceUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?
   const role =
     user.role === "salesperson" || rawCategory === "on_field"
       ? "salesperson"
-      : user.role === "employee" || rawCategory === "fixed_location"
-        ? "employee"
+      : user.role === "admin" || user.role === "manager" || user.role === "hr" || user.role === "employee"
+        ? user.role
+        : rawCategory === "fixed_location"
+          ? "employee"
         : null;
   if (!role) return null;
 
@@ -528,7 +530,16 @@ function mapAttendanceUserToEmployee(user: DolibarrUser, fallbackCompany?: { id?
     name,
     role,
     employeeCategory: role === "salesperson" ? "on_field" : "fixed_location",
-    department: role === "salesperson" ? "On Field Employees" : "Office Employees",
+    department:
+      role === "salesperson"
+        ? "On Field Employees"
+        : role === "admin"
+          ? "Administration"
+          : role === "manager"
+            ? "Management"
+            : role === "hr"
+              ? "HR"
+              : "Office Employees",
     status: "active",
     email: (user.email || "").trim().toLowerCase(),
     phone: (user.phone || "").trim(),
@@ -788,7 +799,65 @@ function useAttendanceWebSocket(
   }, [isAdminOrManager, loadBaseData]);
 }
 // === WEBSOCKET HOOK DEFINITION END ===
+type AttendanceScreenErrorBoundaryProps = {
+  children: React.ReactNode;
+  onReset: () => void;
+};
+
+type AttendanceScreenErrorBoundaryState = {
+  error: Error | null;
+};
+
+class AttendanceScreenErrorBoundary extends React.PureComponent<
+  AttendanceScreenErrorBoundaryProps,
+  AttendanceScreenErrorBoundaryState
+> {
+  state: AttendanceScreenErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): AttendanceScreenErrorBoundaryState {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    console.warn("Attendance screen recovered from a render error", error.message);
+  }
+
+  reset = () => {
+    this.setState({ error: null });
+    this.props.onReset();
+  };
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <AppCanvas>
+        <View style={styles.recoveryWrap}>
+          <View style={styles.recoveryCard}>
+            <Ionicons name="shield-checkmark-outline" size={34} color="#2563EB" />
+            <Text style={styles.recoveryTitle}>Attendance recovered safely</Text>
+            <Text style={styles.recoveryText}>
+              The page hit a temporary rendering issue. Your attendance data is safe. Tap retry to reload the screen.
+            </Text>
+            <Pressable style={styles.recoveryButton} onPress={this.reset}>
+              <Text style={styles.recoveryButtonText}>Try again</Text>
+            </Pressable>
+          </View>
+        </View>
+      </AppCanvas>
+    );
+  }
+}
+
 export default function AttendanceScreen() {
+  const [screenKey, setScreenKey] = useState(0);
+  return (
+    <AttendanceScreenErrorBoundary onReset={() => setScreenKey((value) => value + 1)}>
+      <AttendanceScreenContent key={screenKey} />
+    </AttendanceScreenErrorBoundary>
+  );
+}
+
+function AttendanceScreenContent() {
   const { user, company, updateCompany } = useAuth();
   const [selectedDate, setSelectedDate] = useState(() => toMumbaiDateKey(new Date()));
   const [datePickerOpen, setDatePickerOpen] = useState(false);
@@ -842,6 +911,7 @@ export default function AttendanceScreen() {
   } | null>(null);
   const latestLocationRef = useRef<LocationObject | null>(null);
   const latestLocationCapturedAtMsRef = useRef<number>(0);
+  const [lastStoredLocationLabel, setLastStoredLocationLabel] = useState<string | null>(null);
   const strictWarmupInFlightRef = useRef(false);
   const lastStrictWarmupAtRef = useRef(0);
   const officeSearchRequestIdRef = useRef(0);
@@ -853,9 +923,15 @@ export default function AttendanceScreen() {
   const rosterCacheRef = useRef<{ key: string; at: number; employees: Employee[] } | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [appActive, setAppActive] = useState(AppState.currentState === "active");
+  const [clockNowMs, setClockNowMs] = useState(() => Date.now());
   useEffect(() => { const sub = AppState.addEventListener("change", state => setAppActive(state === "active")); return () => sub.remove(); }, []);
   const canReviewSignIns = canReviewAttendanceSignIns(user?.role);
   const isFocused = useIsFocused();
+  const activeUserId = user?.id || "";
+  const activeUserName = user?.name || "";
+  const activeCompanyId = company?.id || "";
+  const activeCompanyName = company?.name || "";
+  const isSuperAdminAttendanceExempt = user ? isSystemAdministratorAccount(user) : false;
   const isEmployeeOfficeAttendance = true;
   const isOfficeGeofenceAttendance = true;
   const isSalespersonFieldCheckIn = false;
@@ -863,8 +939,22 @@ export default function AttendanceScreen() {
   const showAttendanceOfficeAdminPanel = isAdminAttendanceManager;
   const todayHeading = "Today's Log";
 
+  useEffect(() => {
+    const timer = setInterval(() => setClockNowMs(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
   const openAppSettings = useCallback(() => {
     void Linking.openSettings();
+  }, []);
+
+  const rememberLatestLocation = useCallback((location: LocationObject | null) => {
+    latestLocationRef.current = location;
+    setLastStoredLocationLabel(
+      location
+        ? `${location.coords.latitude.toFixed(5)}, ${location.coords.longitude.toFixed(5)}`
+        : null
+    );
   }, []);
 
   const applyAhmedabadOfficeLocationLock = useCallback(
@@ -884,12 +974,12 @@ export default function AttendanceScreen() {
   }, [openAppSettings]);
 
   const loadBaseData = useCallback(async () => {
-    if (!user?.id || !isFocused || !appActive) return;
+    if (!activeUserId || !isFocused || !appActive) return;
     if (loadInFlightRef.current) { reloadPendingRef.current = true; return; }
     loadInFlightRef.current = true;
     const requestId = ++loadBaseDataRequestRef.current;
-    const companyId = company?.id;
-    const rosterKey = `${user.id}:${companyId || ""}`;
+    const companyId = activeCompanyId || undefined;
+    const rosterKey = `${activeUserId}:${companyId || ""}`;
     try {
       const cache = rosterCacheRef.current;
       const ROSTER_CACHE_TTL_MS = 120_000; // 2 minutes (was 5 min)
@@ -899,18 +989,18 @@ export default function AttendanceScreen() {
         isAdminAttendanceManager || canReviewSignIns
           ? cache?.key === rosterKey && Date.now() - cache.at < ROSTER_CACHE_TTL_MS
             ? Promise.resolve(cache.employees)
-            : loadAttendanceRoster({ id: companyId, name: company?.name })
+            : loadAttendanceRoster({ id: companyId, name: activeCompanyName })
           : Promise.resolve([] as Employee[]),
       ]);
       if (requestId !== loadBaseDataRequestRef.current) return;
       rosterCacheRef.current = { key: rosterKey, at: cache?.key === rosterKey && cache.employees === employees ? cache.at : Date.now(), employees };
       setRecords(status.records);
-      if (status.active) await AsyncStorage.removeItem(`@attendance_request:${user.id}:checkin`);
-      else await AsyncStorage.removeItem(`@attendance_request:${user.id}:checkout`);
+      if (status.active) await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkin`);
+      else await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkout`);
       setCheckedInState(Boolean(status.active));
       await setCheckedIn(Boolean(status.active));
       if (isAdminAttendanceManager || canReviewSignIns) {
-        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, user.id, selectedDate));
+        setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, activeUserId, selectedDate));
       }
       setPendingSignIns([]);
       setDataError(null);
@@ -923,7 +1013,7 @@ export default function AttendanceScreen() {
         queuedLoadTimer.current = setTimeout(() => { void latestLoadRef.current?.(); }, 500);
       }
     }
-  }, [user?.id, company?.id, company?.name, selectedDate, isAdminAttendanceManager, canReviewSignIns, isFocused, appActive]);
+  }, [activeCompanyId, activeCompanyName, activeUserId, selectedDate, isAdminAttendanceManager, canReviewSignIns, isFocused, appActive]);
 
   useEffect(() => {
     latestLoadRef.current = loadBaseData;
@@ -958,9 +1048,9 @@ export default function AttendanceScreen() {
       if (!isAdminAttendanceManager) return;
       setMonthlySummaryLoading(true);
       try {
-        const companyId = company?.id || undefined;
+        const companyId = activeCompanyId || undefined;
         const [employees, recordsByDay] = await Promise.all([
-          loadAttendanceRoster({ id: companyId, name: company?.name }),
+          loadAttendanceRoster({ id: companyId, name: activeCompanyName }),
           getCompanyAttendanceMonth(companyId, monthKey),
         ]);
         setMonthlySummary(buildMonthlyAttendanceSummary(monthKey, recordsByDay, employees));
@@ -973,22 +1063,25 @@ export default function AttendanceScreen() {
         setMonthlySummaryLoading(false);
       }
     },
-    [company?.id, company?.name, datePickerMonthKey, isAdminAttendanceManager]
+    [activeCompanyId, activeCompanyName, datePickerMonthKey, isAdminAttendanceManager]
   );
 
   useEffect(() => {
     if (!datePickerOpen || !isAdminAttendanceManager) return;
-    void loadMonthlySummary(datePickerMonthKey);
+    const timer = setTimeout(() => {
+      void loadMonthlySummary(datePickerMonthKey);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [datePickerMonthKey, datePickerOpen, isAdminAttendanceManager, loadMonthlySummary]);
 
   const loadGeofenceAssignments = useCallback(async () => {
-    if (!user?.id) return;
+    if (!activeUserId) return;
     setGeofencesLoaded(false);
     setGeofenceLoadError(null);
     try {
-      const cached = await getGeofencesForUser(user.id);
+      const cached = await getGeofencesForUser(activeUserId);
       try {
-        const zones = await getUserGeofences(user.id);
+        const zones = await getUserGeofences(activeUserId);
         for (const zone of zones) await upsertGeofence(zone);
         setGeofences(zones);
 
@@ -1017,15 +1110,15 @@ export default function AttendanceScreen() {
     } finally {
       setGeofencesLoaded(true);
     }
-  }, [user?.id]);
+  }, [activeUserId]);
 
   const loadOfficeZone = useCallback(async () => {
-    if (!company?.id) return;
+    if (!activeCompanyId) return;
     const zones = await getGeofences();
-    const expectedId = `office_${company.id}`;
+    const expectedId = `office_${activeCompanyId}`;
     const currentOfficeZone =
       zones.find((zone) => zone.id === expectedId) ||
-      zones.find((zone) => zone.companyId === company.id && zone.name === `${company.name} Main Office`) ||
+      zones.find((zone) => zone.companyId === activeCompanyId && zone.name === `${activeCompanyName} Main Office`) ||
       null;
     setOfficeZone(currentOfficeZone);
     if (currentOfficeZone) {
@@ -1038,7 +1131,7 @@ export default function AttendanceScreen() {
         longitude: currentOfficeZone.longitude,
       });
     }
-  }, [company?.id, company?.name]);
+  }, [activeCompanyId, activeCompanyName]);
 
   useEffect(() => {
     let active = true;
@@ -1062,7 +1155,7 @@ export default function AttendanceScreen() {
       if (!user?.id) return;
       const effectiveLocation = applyAhmedabadOfficeLocationLock(location);
       if (!isUsableLocationSample(effectiveLocation, Date.now(), RELAXED_LOCATION_ACCURACY_METERS)) { setLocationReady(false); return; }
-      latestLocationRef.current = effectiveLocation;
+      rememberLatestLocation(effectiveLocation);
       latestLocationCapturedAtMsRef.current = effectiveLocation.timestamp;
       const nextEvaluation = evaluateGeofenceStatus(
         geofences,
@@ -1077,6 +1170,7 @@ export default function AttendanceScreen() {
       const shouldPrompt =
         isConfirmedInsideZone(nextEvaluation) &&
         !checkedInState &&
+        !isSuperAdminAttendanceExempt &&
         !prevInsideRef.current &&
         isWithinZoneShift(nextEvaluation.activeZone);
       prevInsideRef.current = isConfirmedInsideZone(nextEvaluation);
@@ -1100,6 +1194,8 @@ export default function AttendanceScreen() {
       geofencesLoaded,
       isOfficeGeofenceAttendance,
       isSalespersonFieldCheckIn,
+      isSuperAdminAttendanceExempt,
+      rememberLatestLocation,
       user?.id,
     ]
   );
@@ -1109,7 +1205,7 @@ export default function AttendanceScreen() {
       const enabled = await ensureLocationServicesEnabled();
       if (!enabled) {
         latestEvidenceRef.current = null;
-        latestLocationRef.current = null;
+        rememberLatestLocation(null);
         latestLocationCapturedAtMsRef.current = 0;
         setGpsEvidence("");
         setLocationReady(false);
@@ -1146,7 +1242,7 @@ export default function AttendanceScreen() {
           sampleWindowMs: effectiveEvidence.sampleWindowMs,
           bestAccuracyMeters: effectiveEvidence.bestAccuracyMeters,
         };
-        latestLocationRef.current = effectiveEvidence.location;
+        rememberLatestLocation(effectiveEvidence.location);
         latestLocationCapturedAtMsRef.current = effectiveEvidence.location.timestamp;
         setGpsEvidence(
           `GPS lock: ${effectiveEvidence.sampleCount} samples / ${Math.max(
@@ -1192,7 +1288,7 @@ export default function AttendanceScreen() {
             sampleWindowMs: 0,
             bestAccuracyMeters: fallbackAccuracy,
           };
-          latestLocationRef.current = effectiveFallbackLocation;
+          rememberLatestLocation(effectiveFallbackLocation);
           latestLocationCapturedAtMsRef.current = effectiveFallbackLocation.timestamp;
           setGpsEvidence(
             `GPS fallback: ${
@@ -1210,7 +1306,7 @@ export default function AttendanceScreen() {
         }
 
         latestEvidenceRef.current = null;
-        latestLocationRef.current = null;
+        rememberLatestLocation(null);
         latestLocationCapturedAtMsRef.current = 0;
         setGpsEvidence("");
         setLocationReady(false);
@@ -1228,7 +1324,7 @@ export default function AttendanceScreen() {
         return null;
       }
     },
-    [applyAhmedabadOfficeLocationLock, checkedInState, handleLocationUpdate, user]
+    [applyAhmedabadOfficeLocationLock, checkedInState, handleLocationUpdate, rememberLatestLocation, user]
   );
 
   useEffect(() => {
@@ -1237,22 +1333,25 @@ export default function AttendanceScreen() {
   }, [geofencesLoaded, geofences, handleLocationUpdate]);
 
   useEffect(() => {
-    if (!user?.id) return;
-    void loadGeofenceAssignments();
-    if (isAdminAttendanceManager) {
-      void loadOfficeZone();
-    }
+    if (!activeUserId) return;
+    const timer = setTimeout(() => {
+      void loadGeofenceAssignments();
+      if (isAdminAttendanceManager) {
+        void loadOfficeZone();
+      }
+    }, 0);
 
+    return () => clearTimeout(timer);
   }, [
+    activeUserId,
     isAdminAttendanceManager,
     loadGeofenceAssignments,
     loadOfficeZone,
-    user?.id,
   ]);
 
   // Refresh the geofence preview only while this screen is visible and the app is active.
   useEffect(() => {
-    if (!user?.id || !isFocused || permissionExplainerOpen) return;
+    if (!user?.id || !isFocused || permissionExplainerOpen || isSuperAdminAttendanceExempt) return;
     let inFlight = false;
     const refresh = async () => {
       if (inFlight || attendanceSubmissionInProgressRef.current || AppState.currentState !== "active") return;
@@ -1265,7 +1364,7 @@ export default function AttendanceScreen() {
       if (state === "active") void refresh();
     });
     return () => { clearInterval(timer); subscription.remove(); };
-  }, [isFocused, permissionExplainerOpen, refreshLocation, user?.id]);
+  }, [isFocused, isSuperAdminAttendanceExempt, permissionExplainerOpen, refreshLocation, user?.id]);
 
   const requestPermissions = useCallback(async () => {
     setPermissionLoading(true);
@@ -1511,9 +1610,11 @@ export default function AttendanceScreen() {
     const query = officeSearchQuery.trim();
     if (query.length < OFFICE_LOCATION_SEARCH_MIN_CHARS) {
       officeSearchRequestIdRef.current += 1;
-      setOfficeSearchResults([]);
-      setOfficeSearchBusy(false);
-      return;
+      const timer = setTimeout(() => {
+        setOfficeSearchResults([]);
+        setOfficeSearchBusy(false);
+      }, 0);
+      return () => clearTimeout(timer);
     }
 
     const timer = setTimeout(() => {
@@ -1558,7 +1659,7 @@ export default function AttendanceScreen() {
       const currentLocationDraft: OfficeLocationSearchResult = {
         ...currentLocation,
         id: "admin_current_location_draft",
-        label: officeLocationName.trim() || `${company?.name || "Company"} Main Office`,
+        label: officeLocationName.trim() || `${activeCompanyName || "Company"} Main Office`,
       };
       setAdminCurrentLocation(currentLocation);
       setOfficeLocationDraft(currentLocationDraft);
@@ -1570,7 +1671,7 @@ export default function AttendanceScreen() {
     } finally {
       setAdminCurrentLocationBusy(false);
     }
-  }, [company?.name, isAdminAttendanceManager, officeLocationName, showPermissionBlockedAlert]);
+  }, [activeCompanyName, isAdminAttendanceManager, officeLocationName, showPermissionBlockedAlert]);
 
   const saveOfficeLocation = useCallback(async (selectedLocation: OfficeLocationSearchResult) => {
     if (!user?.id || !company?.id || !isAdminAttendanceManager) return;
@@ -1651,6 +1752,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout", options?: { isAuto?: boolean, silent?: boolean }) => {
       if (!user?.id) return;
+      if (isSuperAdminAttendanceExempt) return;
       if (attendanceSubmissionInProgressRef.current !== null) return;
       if (type === "checkout" && !checkedInState) return;
       if (type === "checkin" && checkedInState) return;
@@ -1823,8 +1925,13 @@ setOfficeLocationName((current) => current.trim() || result.label);
         setCheckedInState(type === "checkin");
         if (type === "checkout") await stopAttendanceGeofence().catch(console.warn);
         else {
-          const enabled = await startAttendanceGeofence(record, geofences).catch(() => false);
-          if (!enabled) Alert.alert("Check-in saved", "For automatic checkout while the phone is locked, enable background location in Account. A native app build is required.");
+          const enabled = await startAttendanceGeofence(record, geofences, true).catch(() => false);
+          if (!enabled) {
+            Alert.alert(
+              "Check-in saved",
+              "Auto-checkout needs Always/Background location permission. Enable it from Account or Android App Settings so the app can check out while locked."
+            );
+          }
         }
         void loadBaseData();
         if (requiresApproval) {
@@ -1850,6 +1957,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
       geofences,
       getFastAttendanceEvidence,
       isSalespersonFieldCheckIn,
+      isSuperAdminAttendanceExempt,
       loadBaseData,
       openAppSettings,
       refreshLocation,
@@ -1860,12 +1968,12 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
   const handleSignInApproval = useCallback(
     async (attendanceId: string, status: "approved" | "rejected") => {
-      if (!user?.id || !canReviewSignIns) return;
+      if (!activeUserId || !canReviewSignIns) return;
       setApprovalActionId(attendanceId);
       try {
         const updated = await updateAttendanceApproval(attendanceId, status, {
-          id: user.id,
-          name: user.name,
+          id: activeUserId,
+          name: activeUserName,
         });
         if (!updated) {
           Alert.alert("Not Found", "This sign-in request is no longer available.");
@@ -1880,7 +1988,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
         setApprovalActionId(null);
       }
     },
-    [canReviewSignIns, loadBaseData, user?.id, user?.name]
+    [activeUserId, activeUserName, canReviewSignIns, loadBaseData]
   );
 
   const workingHours = useMemo(() => {
@@ -1900,10 +2008,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
       }
     }
     if (checkInTime) {
-      minutes += (Date.now() - checkInTime.getTime()) / 60000;
+      minutes += (clockNowMs - checkInTime.getTime()) / 60000;
     }
     return `${Math.max(0, Math.floor(minutes / 60))}h ${Math.max(0, Math.floor(minutes % 60))}m`;
-  }, [records]);
+  }, [clockNowMs, records]);
 
   const employeeHasOfficeZone = !isOfficeGeofenceAttendance || geofences.length > 0;
   const employeeInsideOfficeZone = !isOfficeGeofenceAttendance || evaluation.insideConfirmed;
@@ -1923,12 +2031,17 @@ setOfficeLocationName((current) => current.trim() || result.label);
       geofences[0]?.name ??
       (isOfficeGeofenceAttendance ? "Office not configured" : "No zone");
   const canCheckIn = locationReady && employeeHasOfficeZone && employeeInsideOfficeZone;
-  const canSubmitAction = !dataError && (selectedDate === toMumbaiDateKey(new Date())) && (checkedInState ? locationReady : canCheckIn);
+  const canSubmitAction =
+    !isSuperAdminAttendanceExempt &&
+    !dataError &&
+    selectedDate === toMumbaiDateKey(new Date()) &&
+    (checkedInState ? locationReady : canCheckIn);
 
   useEffect(() => {
     if (
       !user?.id ||
       !isFocused ||
+      isSuperAdminAttendanceExempt ||
       permissionExplainerOpen ||
       !geofencesLoaded ||
       !employeeHasOfficeZone ||
@@ -1973,6 +2086,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
     employeeHasOfficeZone,
     geofencesLoaded,
     isFocused,
+    isSuperAdminAttendanceExempt,
     permissionExplainerOpen,
     refreshLocation,
     selectedDate,
@@ -1982,10 +2096,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
   const employeeDistanceLabel =
     isOfficeGeofenceAttendance && Number.isFinite(evaluation.nearestDistanceMeters)
       ? formatDistance(evaluation.nearestDistanceMeters)
-      : null;
-  const lastStoredLocationLabel =
-    latestLocationRef.current
-      ? `${latestLocationRef.current.coords.latitude.toFixed(5)}, ${latestLocationRef.current.coords.longitude.toFixed(5)}`
       : null;
   const adminCheckedInCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_in").length;
   const adminCheckedOutCount = adminAttendanceStatuses.filter((entry) => entry.status === "checked_out").length;
@@ -2029,6 +2139,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
 
   useEffect(() => {
     if (company?.id && adminAttendanceGroups.length > 0) {
+      const timer = setTimeout(() => {
       setCollapsedAttendanceCompanyIds((current) => {
         const next = new Set(current);
         // Ensure active company is open (not collapsed)
@@ -2041,7 +2152,10 @@ setOfficeLocationName((current) => current.trim() || result.label);
         }
         return next;
       });
+      }, 0);
+      return () => clearTimeout(timer);
     }
+    return undefined;
   }, [company?.id, adminAttendanceGroups]);
   const officeMapPlannedStops = useMemo<GeofenceMapPoint[]>(() => {
     const stops: GeofenceMapPoint[] = [];
@@ -2259,7 +2373,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
         </View>
       </Modal>
 
-      <Modal visible={permissionExplainerOpen && !isAdminAttendanceManager} transparent animationType="slide">
+      <Modal visible={permissionExplainerOpen && !isSuperAdminAttendanceExempt} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Enable Secure Attendance</Text>
@@ -2386,7 +2500,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
         </View>
 
         {/* Past Date Notice for check-in action */}
-        {selectedDate !== toMumbaiDateKey(new Date()) && !isAdminAttendanceManager ? (
+        {selectedDate !== toMumbaiDateKey(new Date()) && !isSuperAdminAttendanceExempt ? (
           <View style={[styles.pastDateNotice, { backgroundColor: colors.warning + "15", borderColor: colors.warning + "44" }]}>
             <Ionicons name="warning-outline" size={18} color={colors.warning} />
             <View style={{ flex: 1, marginLeft: 8 }}>
@@ -2559,7 +2673,9 @@ setOfficeLocationName((current) => current.trim() || result.label);
             </View>
           </View>
           </>
-        ) : (
+        ) : null}
+
+        {!isSuperAdminAttendanceExempt ? (
           <>
         <View style={[styles.banner, { backgroundColor: banner.bg, borderColor: banner.border }]}>
           <Ionicons name={banner.icon as never} size={18} color={banner.text} />
@@ -2814,7 +2930,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
           </Text>
         ) : null}
           </>
-        )}
+        ) : null}
 
         {canReviewSignIns ? (
           <View style={styles.approvalSection}>
@@ -2903,7 +3019,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
           </View>
         ) : null}
 
-        {!isAdminAttendanceManager ? (
+        {!isSuperAdminAttendanceExempt ? (
           <>
         <Text style={[styles.logsTitle, { color: colors.text }]}>{selectedDate === toMumbaiDateKey(new Date()) ? "Today's Log" : "Log for " + formatMumbaiDateKey(selectedDate)}</Text>
         <View style={[styles.logList, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
@@ -2976,6 +3092,51 @@ setOfficeLocationName((current) => current.trim() || result.label);
 }
 
 const styles = StyleSheet.create({
+  recoveryWrap: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  recoveryCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 24,
+    backgroundColor: "#FFFFFF",
+    padding: 24,
+    alignItems: "center",
+    gap: 12,
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 5,
+  },
+  recoveryTitle: {
+    fontFamily: "Inter_800ExtraBold",
+    fontSize: 20,
+    color: "#0F172A",
+    textAlign: "center",
+  },
+  recoveryText: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 14,
+    lineHeight: 20,
+    color: "#475569",
+    textAlign: "center",
+  },
+  recoveryButton: {
+    marginTop: 4,
+    borderRadius: 14,
+    backgroundColor: "#2563EB",
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+  },
+  recoveryButtonText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 14,
+    color: "#FFFFFF",
+  },
   dateNavContainer: {
     flexDirection: "row",
     alignItems: "center",

@@ -163,7 +163,15 @@ test("only the intended app pages exist and removed animations cannot return sil
 
 
 test("employees with the same name remain separate in the attendance roster", async () => {
-  const { dedupeAttendanceRosterMembers } = await import("../lib/attendance-roster");
+  const { dedupeAttendanceRosterMembers, isAttendanceRosterMember, isSystemAdministratorAccount } = await import("../lib/attendance-roster");
   const people = [{ id: "one", name: "Same Name", email: "one@example.test", role: "employee" }, { id: "two", name: "Same Name", email: "two@example.test", role: "employee" }];
   assert.equal(dedupeAttendanceRosterMembers(people).length, 2);
+  const promotedAdmin = { id: "admin_one", name: "Promoted Admin", email: "promoted@example.test", role: "admin" };
+  const promotedManager = { id: "manager_one", name: "Promoted Manager", email: "manager@example.test", role: "manager" };
+  const superAdmin = { id: "dolibarr_1", name: "Workspace Owner", email: "owner@example.test", role: "admin" };
+  assert.equal(isSystemAdministratorAccount(promotedAdmin), false);
+  assert.equal(isAttendanceRosterMember(promotedAdmin), true);
+  assert.equal(isAttendanceRosterMember(promotedManager), true);
+  assert.equal(isSystemAdministratorAccount(superAdmin), true);
+  assert.equal(isAttendanceRosterMember(superAdmin), false);
 });
