@@ -1,4 +1,4 @@
-import { isConfidentlyOutside } from "@/lib/geofence";
+import { MAX_AUTO_CHECKOUT_ACCURACY_METERS, evaluateAutoCheckoutExit } from "@/lib/geofence";
 import { createHash, randomUUID } from "node:crypto";
 import type { Express } from "express";
 import type { AttendanceRecord } from "@/lib/types";
@@ -50,12 +50,22 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             reject("Identity verification is required for attendance."); return;
           }
           const accuracy = payload.locationAccuracyMeters;
-          if (!Number.isFinite(accuracy) || accuracy <= 0 || accuracy > deps.MAX_LOCATION_ACCURACY_METERS) {
+          const maxAccuracyMeters = automatic ? MAX_AUTO_CHECKOUT_ACCURACY_METERS : deps.MAX_LOCATION_ACCURACY_METERS;
+          if (!Number.isFinite(accuracy) || accuracy <= 0 || accuracy > maxAccuracyMeters) {
             reject("Location accuracy is weak. Enable precise location, move near open sky and retry."); return;
           }
-          const minimumSampleCount = automatic ? 1 : deps.MIN_LOCATION_SAMPLE_COUNT;
+          const minimumSampleCount = automatic ? 2 : deps.MIN_LOCATION_SAMPLE_COUNT;
           if (!Number.isInteger(payload.locationSampleCount) || payload.locationSampleCount < minimumSampleCount) {
             reject("Stable GPS verification failed. Wait for lock and retry."); return;
+          }
+          if (automatic) {
+            const sampleWindowMs = Number(payload.locationSampleWindowMs ?? 0);
+            if (
+              !Number.isFinite(sampleWindowMs) ||
+              (payload.locationSampleCount < 3 && sampleWindowMs < 15_000)
+            ) {
+              reject("Automatic checkout needs a confirmed geofence exit window."); return;
+            }
           }
           const capturedAt = deps.parseIsoDate(payload.capturedAtClient);
           if (!capturedAt || !deps.isFreshDate(capturedAt, deps.MAX_EVIDENCE_AGE_MS)) {
@@ -76,8 +86,11 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             active.deviceId !== payload.deviceId;
           if (automatic) {
             const activeZone = zones.find((item: any) => item.id === active.geofenceId);
+            const exitDecision = activeZone
+              ? evaluateAutoCheckoutExit(activeZone, payload.latitude, payload.longitude, accuracy)
+              : null;
             if (!req.auth?.deviceId || active.deviceId !== req.auth.deviceId || payload.activeAttendanceId !== active.id ||
-                !activeZone || !isConfidentlyOutside(activeZone, payload.latitude, payload.longitude, accuracy)) {
+                !activeZone || !exitDecision?.outside) {
               reject("Automatic checkout requires a verified exit from the active check-in office."); return;
             }
           }

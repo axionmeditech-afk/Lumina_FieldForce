@@ -87,7 +87,7 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
     const activeAttendanceId = records.at(-1)!.id;
     assert.equal(await post("checkout", { actionSource: "geofence_exit", activeAttendanceId, biometricVerified: false }), 400, "inside office must not auto-checkout");
     assert.equal(await post("checkout", { actionSource: "geofence_exit", activeAttendanceId: "old-session", biometricVerified: false, latitude: office.latitude + .01 }), 400);
-    assert.equal(await post("checkout", { actionSource: "geofence_exit", activeAttendanceId, biometricVerified: false, latitude: office.latitude + .01 }), 201);
+    assert.equal(await post("checkout", { actionSource: "geofence_exit", activeAttendanceId, biometricVerified: false, latitude: office.latitude + .01, locationSampleWindowMs: 30000 }), 201);
     const parallel = await Promise.all([post("checkin"), post("checkin")]);
     assert.deepEqual(parallel.sort(), [201, 409]);
     assert.equal(await post("checkout"), 201);

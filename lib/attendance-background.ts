@@ -5,15 +5,39 @@ import Constants from "expo-constants";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
 import { getApiToken, getCurrentUser, getOrCreateDeviceId, setCheckedIn, addAttendance } from "./storage";
-import { attendanceCheckOut, getAttendanceStatus, getUserGeofences } from "./attendance-api";
+import {
+  attendanceCheckOut,
+  enqueueAttendanceAction,
+  getAttendanceStatus,
+  getUserGeofences,
+  removeQueuedAttendanceAction,
+} from "./attendance-api";
 import { getVerifiedLocationEvidence } from "./location-service";
-import { getEffectiveGeofenceRadiusMeters, isConfidentlyOutside } from "./geofence";
-import type { AttendanceRecord, Geofence } from "./types";
+import { evaluateAutoCheckoutExit, getEffectiveGeofenceRadiusMeters } from "./geofence";
+import type { AttendanceCheckPayload, AttendanceRecord, Geofence } from "./types";
 
 const GEOFENCE_TASK = "BACKGROUND_ATTENDANCE_GEOFENCE_TASK";
 const LOCATION_WATCHDOG_TASK = "BACKGROUND_ATTENDANCE_LOCATION_WATCHDOG_TASK";
 const KEY = "@attendance_background_session_v2";
-type Session = { active: AttendanceRecord; zone: Geofence; pendingExit?: boolean; pendingExitAt?: string };
+const AUTO_CHECKOUT_GRACE_MS = 30_000;
+const AUTO_CHECKOUT_MIN_SAMPLES = 2;
+const AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS = 2 * 60_000;
+
+type ExitSample = {
+  latitude: number;
+  longitude: number;
+  accuracyMeters: number;
+  timestamp: number;
+  distanceMeters: number;
+};
+
+type Session = {
+  active: AttendanceRecord;
+  zone: Geofence;
+  pendingExit?: boolean;
+  pendingExitAt?: string;
+  exitSamples?: ExitSample[];
+};
 let running: Promise<void> | null = null;
 
 async function available() {
@@ -159,66 +183,130 @@ export async function getAttendanceGeofenceRuntimeStatus(): Promise<{
   };
 }
 
-function getBestOutsideFix(zone: Geofence, locations: LocationObject[]): LocationObject | null {
-  const outside = locations
-    .filter((location) =>
-      isConfidentlyOutside(
-        zone,
-        location.coords.latitude,
-        location.coords.longitude,
-        location.coords.accuracy ?? Number.POSITIVE_INFINITY
-      )
-    )
-    .sort((a, b) => (a.coords.accuracy ?? Number.POSITIVE_INFINITY) - (b.coords.accuracy ?? Number.POSITIVE_INFINITY));
-  return outside[0] ?? null;
+function toExitSample(zone: Geofence, location: LocationObject): ExitSample | null {
+  if (location.mocked || Boolean((location.coords as { mocked?: boolean }).mocked)) return null;
+  const decision = evaluateAutoCheckoutExit(
+    zone,
+    location.coords.latitude,
+    location.coords.longitude,
+    location.coords.accuracy ?? null
+  );
+  if (!decision.outside || !decision.accuracyMeters) return null;
+  return {
+    latitude: location.coords.latitude,
+    longitude: location.coords.longitude,
+    accuracyMeters: decision.accuracyMeters,
+    timestamp: location.timestamp,
+    distanceMeters: decision.distanceMeters,
+  };
 }
 
-function getSampleWindowMs(locations: LocationObject[]): number {
-  if (locations.length < 2) return 0;
-  const timestamps = locations.map((location) => location.timestamp).sort((a, b) => a - b);
+function getSampleWindowMs(samples: ExitSample[]): number {
+  if (samples.length < 2) return 0;
+  const timestamps = samples.map((sample) => sample.timestamp).sort((a, b) => a - b);
   return Math.max(0, timestamps[timestamps.length - 1] - timestamps[0]);
 }
 
-async function markPendingExit() {
+function mergeOutsideSamples(session: Session, locations: LocationObject[] = []): Session {
+  const now = Date.now();
+  const existing = (session.exitSamples ?? []).filter(
+    (sample) => now - sample.timestamp <= AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS
+  );
+  const byKey = new Map<string, ExitSample>();
+  for (const sample of existing) {
+    byKey.set(`${sample.timestamp}:${sample.latitude.toFixed(6)}:${sample.longitude.toFixed(6)}`, sample);
+  }
+  for (const location of locations) {
+    if (now - location.timestamp > AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS) continue;
+    const sample = toExitSample(session.zone, location);
+    if (!sample) continue;
+    byKey.set(`${sample.timestamp}:${sample.latitude.toFixed(6)}:${sample.longitude.toFixed(6)}`, sample);
+  }
+  const exitSamples = Array.from(byKey.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-6);
+  const pendingExitAt =
+    session.pendingExitAt ||
+    (exitSamples[0] ? new Date(exitSamples[0].timestamp).toISOString() : new Date().toISOString());
+  return { ...session, pendingExit: true, pendingExitAt, exitSamples };
+}
+
+function isExitReady(session: Session): boolean {
+  const samples = session.exitSamples ?? [];
+  if (samples.length < AUTO_CHECKOUT_MIN_SAMPLES) return false;
+  const firstAt = session.pendingExitAt ? Date.parse(session.pendingExitAt) : samples[0]?.timestamp ?? Date.now();
+  const elapsedMs = Date.now() - firstAt;
+  return elapsedMs >= AUTO_CHECKOUT_GRACE_MS || samples.length >= 3;
+}
+
+function getBestExitSample(session: Session): ExitSample | null {
+  return [...(session.exitSamples ?? [])].sort((a, b) => {
+    if (a.accuracyMeters !== b.accuracyMeters) return a.accuracyMeters - b.accuracyMeters;
+    return b.timestamp - a.timestamp;
+  })[0] ?? null;
+}
+
+async function saveSession(session: Session) {
+  await AsyncStorage.setItem(KEY, JSON.stringify(session));
+}
+
+async function markPendingExit(locations?: LocationObject[]) {
   const session = await readSession();
   if (!session) return;
-  await AsyncStorage.setItem(KEY, JSON.stringify({ ...session, pendingExit: true, pendingExitAt: new Date().toISOString() }));
+  await saveSession(mergeOutsideSamples(session, locations));
+}
+
+async function clearPendingExit() {
+  const session = await readSession();
+  if (!session) return;
+  await saveSession({ ...session, pendingExit: false, pendingExitAt: undefined, exitSamples: [] });
 }
 
 async function verifyExit(locations?: LocationObject[]) {
-  const session = await readSession();
+  let session = await readSession();
   if (!session) return;
   if (!session.pendingExit) return;
+  if (locations?.length) {
+    session = mergeOutsideSamples(session, locations);
+    await saveSession(session);
+  }
   const [user, token, deviceId] = await Promise.all([getCurrentUser(), getApiToken(), getOrCreateDeviceId()]);
   if (!token || !user || user.id !== session.active.userId || deviceId !== session.active.deviceId) return;
-  const freshLocations = (locations ?? []).filter((location) => Date.now() - location.timestamp <= 2 * 60_000);
-  let fix = getBestOutsideFix(session.zone, freshLocations);
-  let sampleCount = Math.max(1, freshLocations.length);
-  let sampleWindowMs = getSampleWindowMs(freshLocations);
 
-  if (!fix) {
+  if (!isExitReady(session)) {
     const evidence = await getVerifiedLocationEvidence({
-      minAccuracyMeters: 100,
+      minAccuracyMeters: 180,
       requiredStableSamples: 1,
-      maxAttempts: 3,
-      maxDriftMeters: 80,
-      timeoutMs: 12_000,
-    });
-    fix = evidence.location;
-    sampleCount = Math.max(1, evidence.sampleCount);
-    sampleWindowMs = evidence.sampleWindowMs;
+      maxAttempts: 2,
+      maxDriftMeters: 120,
+      sampleWaitMs: 2500,
+      timeoutMs: 7000,
+    }).catch(() => null);
+    if (evidence?.location) {
+      session = mergeOutsideSamples(session, [evidence.location]);
+      await saveSession(session);
+    }
+    if (!isExitReady(session)) return;
   }
 
-  if (!isConfidentlyOutside(session.zone, fix.coords.latitude, fix.coords.longitude, fix.coords.accuracy ?? Number.POSITIVE_INFINITY)) return;
-  const record = await attendanceCheckOut({
-    requestId: `exit_${session.active.id}`, actionSource: "geofence_exit", activeAttendanceId: session.active.id,
+  const sample = getBestExitSample(session);
+  if (!sample) return;
+  const requestId = `auto_exit_${session.active.id}`;
+  const sampleCount = Math.max(AUTO_CHECKOUT_MIN_SAMPLES, session.exitSamples?.length ?? 0);
+  const sampleWindowMs = Math.max(getSampleWindowMs(session.exitSamples ?? []), AUTO_CHECKOUT_GRACE_MS);
+  const payload: AttendanceCheckPayload = {
+    requestId, actionSource: "geofence_exit" as const, activeAttendanceId: session.active.id,
     userId: user.id, userName: user.name, deviceId, photoType: "checkout",
-    latitude: fix.coords.latitude, longitude: fix.coords.longitude, locationAccuracyMeters: fix.coords.accuracy,
-    capturedAtClient: new Date(fix.timestamp).toISOString(), locationSampleCount: sampleCount,
+    latitude: sample.latitude, longitude: sample.longitude, locationAccuracyMeters: sample.accuracyMeters,
+    capturedAtClient: new Date(sample.timestamp).toISOString(), locationSampleCount: sampleCount,
     locationSampleWindowMs: sampleWindowMs, mockLocationDetected: false,
     biometricRequired: false, biometricVerified: false, isInsideGeofence: false,
-    notes: "Automatic checkout: verified office exit in background",
-  });
+    geofenceDistanceMeters: sample.distanceMeters,
+    notes: `Automatic checkout: verified office exit in background | samples:${sampleCount} | window:${Math.round(sampleWindowMs / 1000)}s | distance:${Math.round(sample.distanceMeters)}m`,
+  };
+  await enqueueAttendanceAction("checkout", payload);
+  const record = await attendanceCheckOut(payload);
+  await removeQueuedAttendanceAction("checkout", requestId);
   await addAttendance(record);
   await setCheckedIn(false);
   await stopAttendanceGeofence();
@@ -233,11 +321,22 @@ export async function retryPendingAttendanceExit(locations?: LocationObject[]) {
 async function handleLocationWatchdog(locations: LocationObject[]) {
   const session = await readSession();
   if (!session || locations.length === 0) return;
-  if (!getBestOutsideFix(session.zone, locations)) {
-    if (session.pendingExit) await retryPendingAttendanceExit(locations);
+  const hasOutside = locations.some((location) => toExitSample(session.zone, location));
+  const hasInside = locations.some((location) => {
+    const decision = evaluateAutoCheckoutExit(
+      session.zone,
+      location.coords.latitude,
+      location.coords.longitude,
+      location.coords.accuracy ?? null
+    );
+    return decision.usable && !decision.outside && decision.distanceMeters <= decision.effectiveRadiusMeters;
+  });
+  if (hasInside && !hasOutside) {
+    if (session.pendingExit) await clearPendingExit();
     return;
   }
-  await markPendingExit();
+  if (!hasOutside) return;
+  await markPendingExit(locations);
   await retryPendingAttendanceExit(locations);
 }
 
@@ -247,10 +346,11 @@ try {
     const event = data as { eventType: Location.GeofencingEventType; region: Location.LocationRegion };
     const session = await readSession();
     if (!session || !event.region.identifier?.startsWith(`${session.active.id}:`)) return;
-    // A later entry does not erase a pending exit: verification decides using fresh GPS.
     if (event.eventType === Location.GeofencingEventType.Exit) {
       await markPendingExit();
       await retryPendingAttendanceExit();
+    } else if (event.eventType === Location.GeofencingEventType.Enter) {
+      await clearPendingExit();
     }
   });
   TaskManager.defineTask(LOCATION_WATCHDOG_TASK, async ({ data, error }) => {

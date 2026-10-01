@@ -2,6 +2,7 @@ import type { Geofence, GeofenceEvaluation } from "@/lib/types";
 
 const EARTH_RADIUS_METERS = 6371000;
 export const MAX_ATTENDANCE_ACCURACY_METERS = 120;
+export const MAX_AUTO_CHECKOUT_ACCURACY_METERS = 300;
 export const GEOFENCE_EXIT_MARGIN_METERS = 30;
 export const MIN_GEOFENCE_CAPTURE_RADIUS_METERS = 500;
 
@@ -179,4 +180,78 @@ export function isConfidentlyOutside(zone: Geofence, latitude: number, longitude
   return validCoordinates(latitude, longitude) && Number.isFinite(accuracy) && accuracy > 0 && accuracy <= MAX_ATTENDANCE_ACCURACY_METERS &&
     haversineDistanceMeters(latitude, longitude, zone.latitude, zone.longitude) - accuracy >
     getEffectiveGeofenceRadiusMeters(zone) + GEOFENCE_EXIT_MARGIN_METERS;
+}
+
+export type AutoCheckoutExitDecision = {
+  usable: boolean;
+  outside: boolean;
+  distanceMeters: number;
+  effectiveRadiusMeters: number;
+  accuracyMeters: number | null;
+  bufferMeters: number;
+  reason:
+    | "outside_confirmed"
+    | "inside_or_boundary"
+    | "invalid_location"
+    | "accuracy_missing"
+    | "accuracy_too_weak";
+};
+
+export function getAutoCheckoutBufferMeters(accuracyMeters: number | null | undefined): number | null {
+  const accuracy = normalizeAccuracy(accuracyMeters ?? undefined);
+  if (accuracy === null) return null;
+  if (accuracy > MAX_AUTO_CHECKOUT_ACCURACY_METERS) return null;
+  if (accuracy <= 10) return 50;
+  if (accuracy <= MAX_ATTENDANCE_ACCURACY_METERS) return 100;
+  return 150;
+}
+
+export function evaluateAutoCheckoutExit(
+  zone: Geofence,
+  latitude: number,
+  longitude: number,
+  accuracyMeters?: number | null
+): AutoCheckoutExitDecision {
+  const effectiveRadiusMeters = getEffectiveGeofenceRadiusMeters(zone);
+  const accuracy = normalizeAccuracy(accuracyMeters ?? undefined);
+  const invalid = !validCoordinates(latitude, longitude) || !validCoordinates(zone.latitude, zone.longitude);
+  if (invalid) {
+    return {
+      usable: false,
+      outside: false,
+      distanceMeters: Number.POSITIVE_INFINITY,
+      effectiveRadiusMeters,
+      accuracyMeters: accuracy,
+      bufferMeters: 0,
+      reason: "invalid_location",
+    };
+  }
+
+  const distanceMeters = haversineDistanceMeters(latitude, longitude, zone.latitude, zone.longitude);
+  const bufferMeters = getAutoCheckoutBufferMeters(accuracy);
+  if (accuracy === null || bufferMeters === null) {
+    return {
+      usable: false,
+      outside: false,
+      distanceMeters,
+      effectiveRadiusMeters,
+      accuracyMeters: accuracy,
+      bufferMeters: 0,
+      reason: accuracy === null ? "accuracy_missing" : "accuracy_too_weak",
+    };
+  }
+
+  const outside =
+    distanceMeters > effectiveRadiusMeters + bufferMeters &&
+    distanceMeters - accuracy > effectiveRadiusMeters + GEOFENCE_EXIT_MARGIN_METERS;
+
+  return {
+    usable: true,
+    outside,
+    distanceMeters,
+    effectiveRadiusMeters,
+    accuracyMeters: accuracy,
+    bufferMeters,
+    reason: outside ? "outside_confirmed" : "inside_or_boundary",
+  };
 }

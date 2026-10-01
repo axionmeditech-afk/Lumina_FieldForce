@@ -15,7 +15,7 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { GeofenceMap, type GeofenceMapPoint } from "@/components/GeofenceMap";
-import { evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
+import { evaluateAutoCheckoutExit, evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
 import {
   addAttendance,
   addAttendanceAnomaly,
@@ -32,8 +32,8 @@ import {
   upsertGeofence,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import type { AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
-import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
+import type { AttendanceCheckPayload, AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
+import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, removeQueuedAttendanceAction, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
 import {
   ensureLocationServicesEnabled,
   getCurrentPositionWithTimeout,
@@ -61,6 +61,9 @@ const MIN_STABLE_LOCATION_SAMPLES = 2;
 const STRICT_LOCATION_CACHE_MS = 45 * 1000;
 const STRICT_LOCATION_WARMUP_MIN_INTERVAL_MS = 20 * 1000;
 const STABLE_LOCATION_MAX_DRIFT_METERS = 90;
+const AUTO_CHECKOUT_GRACE_MS = 30 * 1000;
+const AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS = 2 * 60 * 1000;
+const AUTO_CHECKOUT_MIN_SAMPLES = 2;
 const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
 const OFFICE_LOCATION_SEARCH_LIMIT = 15;
 const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
@@ -126,6 +129,14 @@ type MonthlyAttendanceSummary = {
     absentDays: number;
     workMinutes: number;
   }[];
+};
+
+type AutoCheckoutClientSample = {
+  latitude: number;
+  longitude: number;
+  accuracyMeters: number;
+  timestamp: number;
+  distanceMeters: number;
 };
 
 function getBannerConfig(
@@ -225,6 +236,31 @@ function isWithinZoneShift(zone: Geofence | null): boolean {
     return nowMins >= startMins && nowMins <= endMins;
   }
   return nowMins >= startMins || nowMins <= endMins;
+}
+
+function getAutoCheckoutSampleWindowMs(samples: AutoCheckoutClientSample[]): number {
+  if (samples.length < 2) return 0;
+  const timestamps = samples.map((sample) => sample.timestamp).sort((a, b) => a - b);
+  return Math.max(0, timestamps[timestamps.length - 1] - timestamps[0]);
+}
+
+function getLatestAutoCheckoutSample(samples: AutoCheckoutClientSample[]): AutoCheckoutClientSample | null {
+  return [...samples].sort((a, b) => b.timestamp - a.timestamp)[0] ?? null;
+}
+
+function appendAutoCheckoutSample(
+  current: AutoCheckoutClientSample[],
+  sample: AutoCheckoutClientSample
+): AutoCheckoutClientSample[] {
+  const now = Date.now();
+  const byKey = new Map<string, AutoCheckoutClientSample>();
+  for (const item of current) {
+    if (now - item.timestamp <= AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS) {
+      byKey.set(`${item.timestamp}:${item.latitude.toFixed(6)}:${item.longitude.toFixed(6)}`, item);
+    }
+  }
+  byKey.set(`${sample.timestamp}:${sample.latitude.toFixed(6)}:${sample.longitude.toFixed(6)}`, sample);
+  return Array.from(byKey.values()).sort((a, b) => a.timestamp - b.timestamp).slice(-6);
 }
 
 function isFiniteCoordinate(latitude: unknown, longitude: unknown): boolean {
@@ -887,8 +923,12 @@ function AttendanceScreenContent() {
   const [gpsLoading, setGpsLoading] = useState(true);
   const [gpsEvidence, setGpsEvidence] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
-  const consecutiveOutsideRef = useRef(0);
   const attendanceSubmissionInProgressRef = useRef<"checkin" | "checkout" | null>(null);
+  const activeAttendanceRef = useRef<AttendanceRecord | null>(null);
+  const autoCheckoutSamplesRef = useRef<AutoCheckoutClientSample[]>([]);
+  const autoCheckoutFirstOutsideAtRef = useRef<number | null>(null);
+  const autoCheckoutInFlightRef = useRef(false);
+  const [autoCheckoutStatus, setAutoCheckoutStatus] = useState<string | null>(null);
   const [approvalActionId, setApprovalActionId] = useState<string | null>(null);
   const [permissionLoading, setPermissionLoading] = useState(false);
   const [permissionExplainerOpen, setPermissionExplainerOpen] = useState(true);
@@ -997,6 +1037,12 @@ function AttendanceScreenContent() {
       setRecords(status.records);
       if (status.active) await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkin`);
       else await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkout`);
+      activeAttendanceRef.current = status.active;
+      if (!status.active) {
+        autoCheckoutSamplesRef.current = [];
+        autoCheckoutFirstOutsideAtRef.current = null;
+        setAutoCheckoutStatus(null);
+      }
       setCheckedInState(Boolean(status.active));
       await setCheckedIn(Boolean(status.active));
       if (isAdminAttendanceManager || canReviewSignIns) {
@@ -1149,6 +1195,155 @@ function AttendanceScreenContent() {
     };
   }, []);
 
+  const clearForegroundAutoCheckout = useCallback((message: string | null = null) => {
+    autoCheckoutSamplesRef.current = [];
+    autoCheckoutFirstOutsideAtRef.current = null;
+    setAutoCheckoutStatus(message);
+  }, []);
+
+  const submitAutoCheckout = useCallback(
+    async (active: AttendanceRecord, zone: Geofence, samples: AutoCheckoutClientSample[]) => {
+      if (!activeUserId || autoCheckoutInFlightRef.current) return;
+      const latestSample = getLatestAutoCheckoutSample(samples);
+      if (!latestSample) return;
+      autoCheckoutInFlightRef.current = true;
+      setAutoCheckoutStatus("Outside office confirmed. Auto-checkout is syncing...");
+      const requestId = `auto_exit_${active.id}`;
+      try {
+        const security = await getClientSecurityStatus(false);
+        const sampleWindowMs = Math.max(getAutoCheckoutSampleWindowMs(samples), AUTO_CHECKOUT_GRACE_MS);
+        const payload: AttendanceCheckPayload = {
+          requestId,
+          actionSource: "geofence_exit",
+          activeAttendanceId: active.id,
+          userId: activeUserId,
+          userName: activeUserName,
+          latitude: latestSample.latitude,
+          longitude: latestSample.longitude,
+          geofenceId: zone.id,
+          geofenceName: zone.name,
+          photoBase64: null,
+          photoMimeType: null,
+          photoType: "checkout",
+          deviceId: security.deviceId,
+          isInsideGeofence: false,
+          notes: `Automatic checkout: verified office exit in foreground | samples:${samples.length} | window:${Math.round(sampleWindowMs / 1000)}s | distance:${Math.round(latestSample.distanceMeters)}m`,
+          mockLocationDetected: security.mockLocationSuspected,
+          locationAccuracyMeters: latestSample.accuracyMeters,
+          capturedAtClient: new Date(latestSample.timestamp).toISOString(),
+          photoCapturedAt: null,
+          geofenceDistanceMeters: latestSample.distanceMeters,
+          faceDetected: false,
+          faceCount: null,
+          faceDetector: null,
+          locationSampleCount: Math.max(AUTO_CHECKOUT_MIN_SAMPLES, samples.length),
+          locationSampleWindowMs: sampleWindowMs,
+          biometricRequired: false,
+          biometricVerified: false,
+          biometricType: null,
+          biometricFailureReason: null,
+        };
+        await enqueueAttendanceAction("checkout", payload);
+        const record = await attendanceCheckOut(payload);
+        await removeQueuedAttendanceAction("checkout", requestId);
+        await addAttendance(record);
+        await setCheckedIn(false);
+        activeAttendanceRef.current = null;
+        setCheckedInState(false);
+        clearForegroundAutoCheckout("Auto-checkout completed after leaving office geofence.");
+        await stopAttendanceGeofence().catch(console.warn);
+        void loadBaseData();
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      } catch (error) {
+        setAutoCheckoutStatus(
+          error instanceof Error
+            ? `Auto-checkout queued. Will retry when connection/session is ready. ${error.message}`
+            : "Auto-checkout queued. Will retry when connection is ready."
+        );
+        void flushAttendanceQueue().then(loadBaseData).catch(() => undefined);
+      } finally {
+        autoCheckoutInFlightRef.current = false;
+      }
+    },
+    [activeUserId, activeUserName, clearForegroundAutoCheckout, loadBaseData]
+  );
+
+  const processForegroundAutoCheckout = useCallback(
+    async (location: LocationObject, nextEvaluation: GeofenceEvaluation) => {
+      if (!checkedInState || !user?.id || isSuperAdminAttendanceExempt) {
+        clearForegroundAutoCheckout(null);
+        return;
+      }
+      const active = activeAttendanceRef.current;
+      if (!active?.id) {
+        setAutoCheckoutStatus("Auto-checkout is waiting for the latest check-in session.");
+        return;
+      }
+      const zone =
+        geofences.find((item) => item.id === active.geofenceId) ||
+        nextEvaluation.activeZone ||
+        geofences[0] ||
+        null;
+      if (!zone) {
+        setAutoCheckoutStatus("Auto-checkout needs an assigned office geofence.");
+        return;
+      }
+      if (isMockLocation(location)) {
+        setAutoCheckoutStatus("Auto-checkout paused because mock location is detected.");
+        return;
+      }
+      const decision = evaluateAutoCheckoutExit(
+        zone,
+        location.coords.latitude,
+        location.coords.longitude,
+        location.coords.accuracy ?? null
+      );
+      if (!decision.usable) {
+        setAutoCheckoutStatus(
+          decision.reason === "accuracy_too_weak"
+            ? "Auto-checkout is waiting for better GPS accuracy."
+            : "Auto-checkout is waiting for a fresh GPS fix."
+        );
+        return;
+      }
+      if (!decision.outside) {
+        clearForegroundAutoCheckout("Auto-checkout armed while you are checked in.");
+        return;
+      }
+
+      const sample: AutoCheckoutClientSample = {
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        accuracyMeters: decision.accuracyMeters ?? location.coords.accuracy ?? 0,
+        timestamp: location.timestamp,
+        distanceMeters: decision.distanceMeters,
+      };
+      const nextSamples = appendAutoCheckoutSample(autoCheckoutSamplesRef.current, sample);
+      autoCheckoutSamplesRef.current = nextSamples;
+      if (!autoCheckoutFirstOutsideAtRef.current) {
+        autoCheckoutFirstOutsideAtRef.current = Date.now();
+      }
+      const elapsedMs = Date.now() - autoCheckoutFirstOutsideAtRef.current;
+      const ready =
+        nextSamples.length >= AUTO_CHECKOUT_MIN_SAMPLES &&
+        (elapsedMs >= AUTO_CHECKOUT_GRACE_MS || nextSamples.length >= 3);
+      const remainingSeconds = Math.max(0, Math.ceil((AUTO_CHECKOUT_GRACE_MS - elapsedMs) / 1000));
+      setAutoCheckoutStatus(
+        ready
+          ? "Outside office confirmed. Auto-checkout is starting..."
+          : `Outside office detected. Confirming for ${remainingSeconds}s (${nextSamples.length}/${AUTO_CHECKOUT_MIN_SAMPLES} GPS samples).`
+      );
+      if (ready) await submitAutoCheckout(active, zone, nextSamples);
+    },
+    [
+      checkedInState,
+      clearForegroundAutoCheckout,
+      geofences,
+      isSuperAdminAttendanceExempt,
+      submitAutoCheckout,
+      user?.id,
+    ]
+  );
 
   const handleLocationUpdate = useCallback(
     async (location: LocationObject) => {
@@ -1166,6 +1361,7 @@ function AttendanceScreenContent() {
       setEvaluation(nextEvaluation);
       setGpsLoading(false);
       setLocationReady(true);
+      await processForegroundAutoCheckout(effectiveLocation, nextEvaluation);
 
       const shouldPrompt =
         isConfirmedInsideZone(nextEvaluation) &&
@@ -1195,6 +1391,7 @@ function AttendanceScreenContent() {
       isOfficeGeofenceAttendance,
       isSalespersonFieldCheckIn,
       isSuperAdminAttendanceExempt,
+      processForegroundAutoCheckout,
       rememberLatestLocation,
       user?.id,
     ]
@@ -1365,6 +1562,27 @@ function AttendanceScreenContent() {
     });
     return () => { clearInterval(timer); subscription.remove(); };
   }, [isFocused, isSuperAdminAttendanceExempt, permissionExplainerOpen, refreshLocation, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id || !isFocused || !appActive) return;
+    let cancelled = false;
+    const flushQueuedAttendance = async () => {
+      try {
+        await flushAttendanceQueue();
+        if (!cancelled) await loadBaseData();
+      } catch {
+        // Queue is best-effort; failed items stay stored for the next retry.
+      }
+    };
+    void flushQueuedAttendance();
+    const timer = setInterval(() => {
+      void flushQueuedAttendance();
+    }, 45_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [appActive, isFocused, loadBaseData, user?.id]);
 
   const requestPermissions = useCallback(async () => {
     setPermissionLoading(true);
@@ -1923,8 +2141,13 @@ setOfficeLocationName((current) => current.trim() || result.label);
         await addAttendance(approvalAwareRecord);
         await setCheckedIn(type === "checkin");
         setCheckedInState(type === "checkin");
-        if (type === "checkout") await stopAttendanceGeofence().catch(console.warn);
-        else {
+        if (type === "checkout") {
+          activeAttendanceRef.current = null;
+          clearForegroundAutoCheckout(null);
+          await stopAttendanceGeofence().catch(console.warn);
+        } else {
+          activeAttendanceRef.current = record;
+          clearForegroundAutoCheckout("Auto-checkout armed while you are checked in.");
           const enabled = await startAttendanceGeofence(record, geofences, true).catch(() => false);
           if (!enabled) {
             Alert.alert(
@@ -1958,6 +2181,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
       getFastAttendanceEvidence,
       isSalespersonFieldCheckIn,
       isSuperAdminAttendanceExempt,
+      clearForegroundAutoCheckout,
       loadBaseData,
       openAppSettings,
       refreshLocation,
@@ -2702,6 +2926,12 @@ setOfficeLocationName((current) => current.trim() || result.label);
         {gpsEvidence ? (
           <Text style={[styles.gpsEvidenceText, { color: colors.textSecondary }]}>{gpsEvidence}</Text>
         ) : null}
+        {checkedInState && autoCheckoutStatus ? (
+          <View style={[styles.autoCheckoutStatus, { borderColor: colors.borderLight, backgroundColor: colors.surfaceSecondary }]}>
+            <Ionicons name="navigate-circle-outline" size={16} color={colors.primary} />
+            <Text style={[styles.autoCheckoutStatusText, { color: colors.textSecondary }]}>{autoCheckoutStatus}</Text>
+          </View>
+        ) : null}
         {geofenceLoadError ? (
           <Pressable
             onPress={() => void loadGeofenceAssignments()}
@@ -3396,6 +3626,23 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: -6,
     marginBottom: 10,
+  },
+  autoCheckoutStatus: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: -4,
+    marginBottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  autoCheckoutStatusText: {
+    flex: 1,
+    fontFamily: "Inter_500Medium",
+    fontSize: 11.5,
+    lineHeight: 16,
   },
   geofenceErrorRow: {
     minHeight: 44,

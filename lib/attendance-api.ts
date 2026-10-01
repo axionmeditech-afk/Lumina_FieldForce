@@ -18,6 +18,7 @@ const RELEASE_FALLBACK_API_BASE = "https://api.axionmeditech.com/api";
 interface QueueItem {
   type: "checkin" | "checkout";
   payload: AttendanceCheckPayload;
+  queuedAt?: string;
 }
 
 export interface DolibarrUser {
@@ -775,6 +776,36 @@ export async function attendanceCheckIn(payload: AttendanceCheckPayload): Promis
 }
 export async function attendanceCheckOut(payload: AttendanceCheckPayload): Promise<AttendanceRecord> {
   return submitAttendanceAction("checkout", payload);
+}
+
+export async function enqueueAttendanceAction(
+  type: "checkin" | "checkout",
+  payload: AttendanceCheckPayload
+): Promise<void> {
+  const requestId = payload.requestId || Crypto.randomUUID();
+  const queue = await getAttendanceQueue<QueueItem & { _retries?: number }>();
+  const nextPayload = { ...payload, requestId };
+  const withoutDuplicate = queue.filter(
+    (entry) => !(entry.type === type && entry.payload.requestId === requestId)
+  );
+  withoutDuplicate.push({
+    type,
+    payload: nextPayload,
+    queuedAt: new Date().toISOString(),
+    _retries: 0,
+  });
+  await setAttendanceQueue(withoutDuplicate.slice(-50));
+}
+
+export async function removeQueuedAttendanceAction(
+  type: "checkin" | "checkout",
+  requestId: string
+): Promise<void> {
+  const queue = await getAttendanceQueue<QueueItem & { _retries?: number }>();
+  const next = queue.filter(
+    (entry) => !(entry.type === type && entry.payload.requestId === requestId)
+  );
+  if (next.length !== queue.length) await setAttendanceQueue(next);
 }
 
 export async function getCompanyAttendanceToday(companyId?: string, date?: string): Promise<AttendanceRecord[]> {
