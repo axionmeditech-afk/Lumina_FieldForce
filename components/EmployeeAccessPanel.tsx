@@ -541,7 +541,7 @@ export function EmployeeAccessPanel() {
         <View style={styles.headerCopy}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Current Employees</Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-            Remove app access for employees who should no longer use attendance.
+            Update role, workspace access, device reset, and employee removal.
           </Text>
         </View>
         <Text style={[styles.countBadge, { color: colors.primary, backgroundColor: `${colors.primary}12` }]}>
@@ -610,7 +610,7 @@ export function EmployeeAccessPanel() {
               })}
             </View>
 
-            <Text style={[styles.groupLabel, { color: colors.textSecondary }]}>Company access</Text>
+            <Text style={[styles.groupLabel, { color: colors.textSecondary }]}>Workspace & office access</Text>
             <View style={styles.chipRow}>
               {companies.map((item) => {
                 const active = selectedCompanies.includes(item.id);
@@ -633,6 +633,9 @@ export function EmployeeAccessPanel() {
                 );
               })}
             </View>
+            <Text style={[styles.helperText, { color: colors.textSecondary }]}>
+              Saving access also syncs this employee with the selected workspace office geofences.
+            </Text>
 
             <View style={styles.actionRow}>
               <Pressable
@@ -703,7 +706,7 @@ export function EmployeeAccessPanel() {
         <View style={styles.headerCopy}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Office Geofence Assignments</Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-            Assign employees to the saved office GPS zones.
+            Manual view for office GPS zones. Normal workspace access saves auto-sync these assignments.
           </Text>
         </View>
         <Text style={[styles.countBadge, { color: colors.primary, backgroundColor: `${colors.primary}12` }]}>
@@ -773,7 +776,7 @@ export function EmployeeAccessPanel() {
             </View>
             {!eligibleEmployees.length ? (
               <Text style={[styles.warningText, { color: colors.warning }]}>
-                No employee has access to this workspace yet. Give company access first, then assign this office geofence.
+                No employee has access to this workspace yet. Give workspace access above and save once.
               </Text>
             ) : null}
           </View>
@@ -894,6 +897,12 @@ const styles = StyleSheet.create({
   chipText: {
     fontFamily: "Inter_600SemiBold",
     fontSize: 12,
+  },
+  helperText: {
+    marginTop: -3,
+    fontFamily: "Inter_400Regular",
+    fontSize: 12,
+    lineHeight: 17,
   },
   actionRow: {
     flexDirection: "row",

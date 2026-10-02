@@ -146,6 +146,8 @@ export interface Geofence {
   id: string;
   companyId?: string;
   name: string;
+  locationLabel?: string | null;
+  locationAddress?: string | null;
   radiusMeters: number;
   latitude: number;
   longitude: number;

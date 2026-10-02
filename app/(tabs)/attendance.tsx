@@ -144,6 +144,24 @@ type AutoCheckoutClientSample = {
   distanceMeters: number;
 };
 
+function isRecordForCompany(record: AttendanceRecord | null | undefined, companyId: string): boolean {
+  if (!record || !companyId) return true;
+  return !record.companyId || record.companyId === companyId;
+}
+
+function selectCurrentWorkspaceGeofences(zones: Geofence[], companyId: string): Geofence[] {
+  const activeZones = zones.filter((zone) => zone.isActive !== false);
+  if (!companyId) return activeZones;
+  const expectedOfficeId = `office_${companyId}`;
+  return activeZones
+    .filter((zone) => zone.companyId === companyId || zone.id === expectedOfficeId)
+    .sort((a, b) => {
+      if (a.id === expectedOfficeId && b.id !== expectedOfficeId) return -1;
+      if (b.id === expectedOfficeId && a.id !== expectedOfficeId) return 1;
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
+}
+
 function getBannerConfig(
   type: BannerType,
   colors: ReturnType<typeof useAppTheme>["colors"],
@@ -1038,18 +1056,22 @@ function AttendanceScreenContent() {
           : Promise.resolve([] as Employee[]),
       ]);
       if (requestId !== loadBaseDataRequestRef.current) return;
+      const scopedRecords = activeCompanyId
+        ? status.records.filter((record) => isRecordForCompany(record, activeCompanyId))
+        : status.records;
+      const scopedActive = isRecordForCompany(status.active, activeCompanyId) ? status.active : null;
       rosterCacheRef.current = { key: rosterKey, at: cache?.key === rosterKey && cache.employees === employees ? cache.at : Date.now(), employees };
-      setRecords(status.records);
-      if (status.active) await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkin`);
+      setRecords(scopedRecords);
+      if (scopedActive) await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkin`);
       else await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkout`);
-      activeAttendanceRef.current = status.active;
-      if (!status.active) {
+      activeAttendanceRef.current = scopedActive;
+      if (!scopedActive) {
         autoCheckoutSamplesRef.current = [];
         autoCheckoutFirstOutsideAtRef.current = null;
         setAutoCheckoutStatus(null);
       }
-      setCheckedInState(Boolean(status.active));
-      await setCheckedIn(Boolean(status.active));
+      setCheckedInState(Boolean(scopedActive));
+      await setCheckedIn(Boolean(scopedActive));
       if (isAdminAttendanceManager || canReviewSignIns) {
         setAdminAttendanceStatuses(buildAdminAttendanceStatuses(companyAttendance, employees, activeUserId, selectedDate));
       }
@@ -1129,29 +1151,42 @@ function AttendanceScreenContent() {
     if (!activeUserId) return;
     setGeofencesLoaded(false);
     setGeofenceLoadError(null);
+    setGeofences([]);
+    setEvaluation((current) => ({
+      ...current,
+      inside: false,
+      insideConfirmed: false,
+      activeZone: null,
+      signalWeak: true,
+      warning: "Loading current workspace office geofence",
+    }));
     try {
       const cached = await getGeofencesForUser(activeUserId);
+      const cachedForWorkspace = selectCurrentWorkspaceGeofences(cached, activeCompanyId);
       try {
         const zones = await getUserGeofences(activeUserId);
         for (const zone of zones) await upsertGeofence(zone);
-        setGeofences(zones);
+        const zonesForWorkspace = selectCurrentWorkspaceGeofences(zones, activeCompanyId);
+        setGeofences(zonesForWorkspace);
 
-        if (zones.length === 0 && cached.length === 0) {
+        if (zonesForWorkspace.length === 0 && cachedForWorkspace.length === 0) {
           setGeofenceLoadError(
-            "No office location is configured for any company attached to this account."
+            activeCompanyName
+              ? `Office location for ${activeCompanyName} is not configured or not assigned to this employee yet.`
+              : "Office location is not configured or not assigned to this employee yet."
           );
         }
         return;
       } catch (error) {
         setGeofenceLoadError(
-          cached.length > 0
+          cachedForWorkspace.length > 0
             ? "Using saved office location because the latest assignment could not be loaded."
             : error instanceof Error
               ? error.message
               : "Office assignment could not be loaded."
         );
       }
-      setGeofences(cached);
+      setGeofences(cachedForWorkspace);
 
     } catch (error) {
       setGeofences([]);
@@ -1161,7 +1196,7 @@ function AttendanceScreenContent() {
     } finally {
       setGeofencesLoaded(true);
     }
-  }, [activeUserId]);
+  }, [activeCompanyId, activeCompanyName, activeUserId]);
 
   const loadOfficeZone = useCallback(async () => {
     if (!activeCompanyId) return;

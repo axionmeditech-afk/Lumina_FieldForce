@@ -5,6 +5,7 @@ import type { AttendanceRecord } from "@/lib/types";
 import { withAttendanceLock } from "../services/attendance-lock";
 
 export type AttendanceActionRouteDeps = Record<string, any>;
+const AUTO_CHECKOUT_MAX_EVIDENCE_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function registerAttendanceActionRoutes(app: Express, deps: AttendanceActionRouteDeps) {
   for (const type of ["checkin", "checkout"] as const) {
@@ -68,13 +69,47 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             }
           }
           const capturedAt = deps.parseIsoDate(payload.capturedAtClient);
-          if (!capturedAt || !deps.isFreshDate(capturedAt, deps.MAX_EVIDENCE_AGE_MS)) {
+          const evidenceMaxAgeMs = automatic ? AUTO_CHECKOUT_MAX_EVIDENCE_AGE_MS : deps.MAX_EVIDENCE_AGE_MS;
+          if (!capturedAt || !deps.isFreshDate(capturedAt, evidenceMaxAgeMs)) {
             reject("Stale attendance evidence. Please get a fresh GPS fix and retry."); return;
           }
           if (payload.mockLocationDetected) { reject("Mock location detected. Disable fake GPS and retry."); return; }
-          const active = database
+          let active = database
             ? await deps.findActiveAttendanceInMySql(payload.userId)
             : await deps.storage.findActiveAttendance(payload.userId);
+          if (
+            type === "checkin" &&
+            active?.companyId &&
+            companyId &&
+            active.companyId !== companyId
+          ) {
+            const staleCheckoutId = deps.randomUUID ? deps.randomUUID() : randomUUID();
+            const staleCheckout: AttendanceRecord = {
+              id: staleCheckoutId,
+              userId: payload.userId,
+              userName: payload.userName,
+              companyId: active.companyId,
+              type: "checkout",
+              timestamp: new Date().toISOString(),
+              timestampServer: new Date().toISOString(),
+              location: { lat: payload.latitude, lng: payload.longitude },
+              geofenceId: active.geofenceId ?? null,
+              geofenceName: active.geofenceName ?? null,
+              deviceId: payload.deviceId,
+              isInsideGeofence: false,
+              notes: `System checkout: workspace changed from ${active.companyId} to ${companyId}; closing stale open session before new check-in.`,
+              source: "manual",
+              approvalStatus: "approved",
+            };
+            if (database) await deps.insertAttendanceInMySql(staleCheckout);
+            else await deps.storage.createAttendance(staleCheckout);
+            try { deps.broadcastAttendanceUpdate(staleCheckout); } catch { /* already committed */ }
+            void Promise.resolve().then(async () => {
+              const config = await deps.resolveDolibarrConfigForUser(staleCheckout.userId);
+              await deps.syncAttendanceWithDolibarr(staleCheckout, config);
+            }).catch(error => console.error("Attendance integration failed after stale checkout save", error));
+            active = null;
+          }
           if (type === "checkin" && active) {
             res.status(409).json({ message: "User already checked in", active }); return;
           }
@@ -101,6 +136,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           }
           // Keep the real server time for overnight shifts; never backdate a checkout.
           const now = new Date().toISOString();
+          const eventTimestamp = automatic && capturedAt ? capturedAt.toISOString() : now;
           const notes = manualCheckoutFromDifferentDevice
             ? [
                 payload.notes,
@@ -110,7 +146,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           const record: AttendanceRecord = {
             id: recordId, userId: payload.userId, userName: payload.userName,
             companyId: (type === "checkout" ? active.companyId : zone.activeZone?.companyId) || companyId || undefined,
-            type, timestamp: now, timestampServer: now,
+            type, timestamp: eventTimestamp, timestampServer: now,
             location: { lat: payload.latitude, lng: payload.longitude },
             geofenceId: zone.activeZone?.id || null, geofenceName: zone.activeZone?.name || null,
             deviceId: payload.deviceId, isInsideGeofence: zone.insideConfirmed,

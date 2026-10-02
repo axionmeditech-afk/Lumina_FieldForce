@@ -34,7 +34,19 @@ export function registerAttendanceRoutes(app: Express, deps: AttendanceRouteDeps
       const [records, active] = deps.isMySqlStateEnabled()
         ? await Promise.all([deps.listAttendanceForUserDateFromMySql(userId, date), deps.findActiveAttendanceInMySql(userId)])
         : await Promise.all([deps.storage.getAttendanceHistory(userId).then(rows => rows.filter(row => toMumbaiDateKey(row.timestamp) === date)), deps.storage.findActiveAttendance(userId)]);
-      res.set("Cache-Control", "no-store").json({ records, active });
+      const requestUser = deps.getRequestUser(req);
+      const activeCompanyId =
+        (await deps.resolveRequestCompanyId(req)) ||
+        requestUser?.companyId ||
+        null;
+      const scopedRecords = activeCompanyId
+        ? records.filter((record) => !record.companyId || record.companyId === activeCompanyId)
+        : records;
+      const scopedActive =
+        active && activeCompanyId && active.companyId && active.companyId !== activeCompanyId
+          ? null
+          : active;
+      res.set("Cache-Control", "no-store").json({ records: scopedRecords, active: scopedActive });
     } catch { res.status(503).json({ message: "Unable to refresh attendance. Please retry." }); }
   });
 

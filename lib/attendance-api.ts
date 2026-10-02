@@ -883,6 +883,7 @@ export async function searchMapplsTextSearch(
 }
 
 const MAX_QUEUE_RETRIES = 5;
+const MAX_AUTO_CHECKOUT_QUEUE_AGE_MS = 30 * 60 * 60 * 1000;
 
 export async function flushAttendanceQueue(): Promise<void> {
   const settings = await getSettings();
@@ -897,8 +898,16 @@ export async function flushAttendanceQueue(): Promise<void> {
   for (let index = 0; index < queue.length; index += 1) {
     const entry = queue[index];
     const retries = entry._retries ?? 0;
-    // Drop items that have exceeded max retries
-    if (retries >= MAX_QUEUE_RETRIES) {
+    const automatic = entry.type === "checkout" && entry.payload.actionSource === "geofence_exit";
+    const queuedAtMs = Date.parse(entry.queuedAt || "");
+    const tooOld =
+      automatic &&
+      Number.isFinite(queuedAtMs) &&
+      Date.now() - queuedAtMs > MAX_AUTO_CHECKOUT_QUEUE_AGE_MS;
+    // Manual items are short-lived to prevent accidental stale submissions. Automatic
+    // geofence checkout is bounded by age instead, because it may need to sync when
+    // the employee opens the app later after poor network/background restrictions.
+    if ((!automatic && retries >= MAX_QUEUE_RETRIES) || tooOld) {
       console.warn(`Dropping queued ${entry.type} after ${retries} failed attempts`, entry.payload.requestId);
       continue;
     }

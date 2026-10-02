@@ -94,6 +94,11 @@ function getTodayCompanyRecords(records: AttendanceRecord[], companyId?: string 
   });
 }
 
+function isRecordForCompany(record: AttendanceRecord | null | undefined, companyId?: string | null): boolean {
+  if (!record || !companyId) return true;
+  return !record.companyId || record.companyId === companyId;
+}
+
 function formatRecordTitle(record: AttendanceRecord, ownUserId?: string): string {
   const actor = record.userId === ownUserId ? "You" : record.userName || "Employee";
   return `${actor} ${record.type === "checkin" ? "checked in" : "checked out"}`;
@@ -128,11 +133,16 @@ export default function Dashboard() {
     try {
       const cachedRecords = await getAttendance();
       setSnapshot((current) => {
-        if (current && current.records.length >= cachedRecords.length) return current;
+        const ownRecords = cachedRecords
+          .filter((record) => record.userId === user.id)
+          .filter((record) => isRecordForCompany(record, activeCompanyId));
+        const cachedActive = getActiveAttendanceForUser(cachedRecords, user.id);
         hasSnapshotRef.current = true;
         return {
-          records: cachedRecords.filter((record) => record.userId === user.id),
-          active: getActiveAttendanceForUser(cachedRecords, user.id),
+          records: ownRecords,
+          active: isRecordForCompany(cachedActive, activeCompanyId)
+            ? cachedActive
+            : null,
           companyRecords: isSupervisor ? getTodayCompanyRecords(cachedRecords, activeCompanyId) : [],
           syncedAt: current?.syncedAt || "Cached",
         };
@@ -153,9 +163,13 @@ export default function Dashboard() {
         getAttendanceStatus(),
         isSupervisor ? getCompanyAttendanceToday(activeCompanyId) : Promise.resolve([]),
       ]);
+      const scopedRecords = activeCompanyId
+        ? status.records.filter((record) => isRecordForCompany(record, activeCompanyId))
+        : status.records;
+      const scopedActive = isRecordForCompany(status.active, activeCompanyId) ? status.active : null;
       const nextSnapshot = {
-        records: status.records,
-        active: status.active,
+        records: scopedRecords,
+        active: scopedActive,
         companyRecords,
         syncedAt: formatMumbaiTime(new Date(), { includeZoneLabel: true }),
       };

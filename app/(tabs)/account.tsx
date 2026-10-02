@@ -37,6 +37,22 @@ function getGreeting(): string {
   return "Good evening";
 }
 
+function selectActiveWorkspaceGeofences<T extends { id: string; companyId?: string; isActive?: boolean }>(
+  zones: T[],
+  companyId?: string | null,
+): T[] {
+  const active = zones.filter((zone) => zone.isActive !== false);
+  if (!companyId) return active;
+  const officeId = `office_${companyId}`;
+  return active
+    .filter((zone) => zone.companyId === companyId || zone.id === officeId)
+    .sort((a, b) => {
+      if (a.id === officeId && b.id !== officeId) return -1;
+      if (b.id === officeId && a.id !== officeId) return 1;
+      return 0;
+    });
+}
+
 type AutoCheckoutSetupState = "checking" | "idle" | "enabled" | "needs_permission" | "needs_checkin" | "unavailable";
 
 export default function Account() {
@@ -143,7 +159,10 @@ export default function Account() {
         Alert.alert("Check in first", "Background geofencing is enabled only for an active attendance session.");
         return;
       }
-      const geofences = await getUserGeofences(active.userId);
+      const geofences = selectActiveWorkspaceGeofences(
+        await getUserGeofences(active.userId),
+        active.companyId || company?.id || user?.companyId,
+      );
       if (!geofences.length) {
         setAutoCheckoutState("idle");
         setAutoCheckoutHint("Office geofence missing. Ask admin to save your office location first.");

@@ -1052,6 +1052,8 @@ async function ensureGeofenceTable(): Promise<void> {
       \`id\` VARCHAR(64) NOT NULL,
       \`company_id\` VARCHAR(64) NULL,
       \`name\` VARCHAR(191) NOT NULL,
+      \`location_label\` VARCHAR(191) NULL,
+      \`location_address\` TEXT NULL,
       \`latitude\` DECIMAL(10,7) NOT NULL,
       \`longitude\` DECIMAL(10,7) NOT NULL,
       \`radius_meters\` INT NOT NULL,
@@ -1066,6 +1068,11 @@ async function ensureGeofenceTable(): Promise<void> {
       KEY \`idx_lff_geofences_company\` (\`company_id\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  await conn.execute(`
+    ALTER TABLE \`lff_geofences\`
+      ADD COLUMN IF NOT EXISTS \`location_label\` VARCHAR(191) NULL AFTER \`name\`,
+      ADD COLUMN IF NOT EXISTS \`location_address\` TEXT NULL AFTER \`location_label\`
+  `).catch(() => undefined);
   geofenceTableEnsured = true;
 }
 
@@ -1075,6 +1082,8 @@ function mapGeofenceRow(row: any): Geofence {
     id: String(row.id),
     companyId: row.company_id ? String(row.company_id) : undefined,
     name: String(row.name || "Unnamed Zone"),
+    locationLabel: row.location_label ? String(row.location_label) : null,
+    locationAddress: row.location_address ? String(row.location_address) : null,
     radiusMeters: Math.max(500, Number(row.radius_meters || 500)),
     latitude: Number(row.latitude),
     longitude: Number(row.longitude),
@@ -1191,12 +1200,14 @@ async function upsertGeofenceInMySql(zone: Geofence): Promise<void> {
   const now = new Date().toISOString();
   await conn.execute(
     `INSERT INTO lff_geofences (
-      id, company_id, name, latitude, longitude, radius_meters, assigned_employee_ids_json,
+      id, company_id, name, location_label, location_address, latitude, longitude, radius_meters, assigned_employee_ids_json,
       is_active, allow_override, working_hours_start, working_hours_end, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       company_id = VALUES(company_id),
       name = VALUES(name),
+      location_label = VALUES(location_label),
+      location_address = VALUES(location_address),
       latitude = VALUES(latitude),
       longitude = VALUES(longitude),
       radius_meters = VALUES(radius_meters),
@@ -1210,6 +1221,8 @@ async function upsertGeofenceInMySql(zone: Geofence): Promise<void> {
       zone.id,
       zone.companyId ?? null,
       zone.name,
+      zone.locationLabel ?? null,
+      zone.locationAddress ?? null,
       zone.latitude,
       zone.longitude,
       Math.max(500, Math.round(zone.radiusMeters || 500)),
@@ -2999,6 +3012,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerAuthRoutes(app, {
     requireAuth,
     requireRoles,
+    getMySqlPool,
     normalizeEmail,
     normalizeRole,
     normalizeCompanyName,

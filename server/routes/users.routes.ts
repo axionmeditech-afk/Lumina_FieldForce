@@ -26,6 +26,102 @@ const {
     isDolibarrSuperuserReviewer,
     forceDolibarrAdminPrivilegesForUserIdentity,
   } = deps;
+  const parseAssignedEmployeeIds = (value: unknown): string[] => {
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value) : value;
+      if (!Array.isArray(parsed)) return [];
+      return Array.from(new Set(parsed.map((item) => normalizeWhitespace(String(item || ""))).filter(Boolean)));
+    } catch {
+      return [];
+    }
+  };
+
+  const syncWorkspaceGeofenceAccess = async (
+    conn: any,
+    employeeIdentityIds: string[],
+    nextCompanyIds: string[],
+  ): Promise<number> => {
+    const identityIds = Array.from(new Set(employeeIdentityIds.map((item) => normalizeWhitespace(item)).filter(Boolean)));
+    const companyIds = new Set(nextCompanyIds.map((item) => normalizeWhitespace(item)).filter(Boolean));
+    if (!identityIds.length) return 0;
+    const primaryId = identityIds[0];
+    const companyPlaceholders = companyIds.size ? Array.from(companyIds).map(() => "?").join(", ") : "''";
+    const containsClauses = identityIds.map(() => "JSON_CONTAINS(assigned_employee_ids_json, JSON_QUOTE(?))").join(" OR ");
+    const [rows] = await conn.query(
+      `SELECT id, company_id, assigned_employee_ids_json
+       FROM lff_geofences
+       WHERE company_id IN (${companyPlaceholders})${containsClauses ? ` OR ${containsClauses}` : ""}`,
+      [...Array.from(companyIds), ...identityIds],
+    ).catch(() => [[] as any[]]);
+    let updated = 0;
+    for (const row of rows || []) {
+      const zoneId = normalizeWhitespace(String(row.id || ""));
+      if (!zoneId) continue;
+      const zoneCompanyId = normalizeWhitespace(String(row.company_id || ""));
+      const current = parseAssignedEmployeeIds(row.assigned_employee_ids_json);
+      const shouldAssign = Boolean(zoneCompanyId && companyIds.has(zoneCompanyId));
+      const withoutAliases = current.filter((id) => !identityIds.includes(normalizeWhitespace(id)));
+      const next = shouldAssign ? Array.from(new Set([...withoutAliases, primaryId])) : withoutAliases;
+      if (next.length === current.length && next.every((id, index) => id === current[index])) continue;
+      await conn.execute(
+        `UPDATE lff_geofences SET assigned_employee_ids_json = ?, updated_at = NOW() WHERE id = ?`,
+        [JSON.stringify(next), zoneId],
+      );
+      updated += 1;
+    }
+    return updated;
+  };
+
+  const closeOpenAttendanceOutsideWorkspaceAccess = async (
+    conn: any,
+    userIdentityIds: string[],
+    nextCompanyIds: string[],
+    reviewerName: string,
+  ): Promise<void> => {
+    const identityIds = Array.from(new Set(userIdentityIds.map((item) => normalizeWhitespace(item || "")).filter(Boolean)));
+    const allowedCompanyIds = new Set(nextCompanyIds.map((item) => normalizeWhitespace(item)).filter(Boolean));
+    if (!identityIds.length || !allowedCompanyIds.size) return;
+    const placeholders = identityIds.map(() => "?").join(", ");
+    const [rows] = await conn.query(
+      `SELECT a.*
+       FROM lff_attendance a
+       WHERE a.user_id IN (${placeholders})
+         AND a.type = 'checkin'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM lff_attendance later
+           WHERE later.user_id = a.user_id
+             AND later.type = 'checkout'
+             AND later.timestamp >= a.timestamp
+         )
+       ORDER BY a.timestamp DESC
+       LIMIT 1`,
+      identityIds,
+    ).catch(() => [[] as any[]]);
+    const active = rows?.[0];
+    const activeCompanyId = normalizeWhitespace(String(active?.company_id || ""));
+    const activeUserId = normalizeWhitespace(String(active?.user_id || identityIds[0]));
+    if (!active || !activeCompanyId || allowedCompanyIds.has(activeCompanyId)) return;
+    await conn.execute(
+      `INSERT INTO lff_attendance (
+        id, user_id, user_name, company_id, type, timestamp, timestamp_server,
+        lat, lng, geofence_id, geofence_name, device_id, is_inside_geofence,
+        source, notes, approval_status
+      ) VALUES (?, ?, ?, ?, 'checkout', NOW(), NOW(), ?, ?, ?, ?, ?, 0, 'manual', ?, 'approved')`,
+      [
+        randomUUID(),
+        activeUserId,
+        normalizeWhitespace(String(active.user_name || "")) || activeUserId,
+        activeCompanyId,
+        active.lat ?? null,
+        active.lng ?? null,
+        active.geofence_id ?? null,
+        active.geofence_name ?? null,
+        active.device_id ?? null,
+        `System checkout because workspace access changed by ${reviewerName}. Previous workspace ${activeCompanyId} is no longer assigned.`,
+      ],
+    ).catch(() => undefined);
+  };
 app.get("/api/users", requireAuth, async (req, res) => {
     try {
       const conn = await getMySqlPool();
@@ -734,8 +830,24 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
         ]
       ).catch(() => undefined);
 
+      const geofenceIdentityIds = Array.from(new Set([
+        resolvedUserId,
+        resolvedUserId ? `dolibarr_${resolvedUserId}` : "",
+        resolvedEmail,
+        resolvedLogin,
+        targetId,
+      ].map((item) => normalizeWhitespace(String(item || ""))).filter(Boolean)));
+      await syncWorkspaceGeofenceAccess(conn, geofenceIdentityIds, nextCompanyIds).catch((error: unknown) => {
+        console.warn("Workspace geofence sync failed", error);
+      });
+      await closeOpenAttendanceOutsideWorkspaceAccess(
+        conn,
+        geofenceIdentityIds,
+        nextCompanyIds,
+        normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin"),
+      );
+
       if (resolvedEmail) removeAuthUserByEmail(resolvedEmail);
-      if (resolvedUserId) await deactivateAuthSession(resolvedUserId).catch(() => undefined);
       if (isAdminRole) {
         await forceDolibarrAdminPrivilegesForUserIdentity({
           id: resolvedUserId,

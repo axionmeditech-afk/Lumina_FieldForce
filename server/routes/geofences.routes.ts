@@ -86,6 +86,8 @@ export function registerGeofenceRoutes(app: Express, deps: GeofenceRouteDeps) {
         const now = new Date().toISOString();
         const zone: Geofence = {
           ...current, id, companyId, name: patch.name ?? current?.name ?? "",
+          locationLabel: patch.locationLabel === undefined ? current?.locationLabel ?? null : patch.locationLabel ?? null,
+          locationAddress: patch.locationAddress === undefined ? current?.locationAddress ?? null : patch.locationAddress ?? null,
           latitude: patch.latitude ?? current?.latitude ?? NaN,
           longitude: patch.longitude ?? current?.longitude ?? NaN,
           radiusMeters: patch.radiusMeters ?? current?.radiusMeters ?? 500,
@@ -97,6 +99,8 @@ export function registerGeofenceRoutes(app: Express, deps: GeofenceRouteDeps) {
         };
         const validTime = (time: unknown) => time == null || (typeof time === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(time));
         if (typeof zone.name !== "string" || !zone.name.trim() || zone.name.length > 191 ||
+            (zone.locationLabel != null && (typeof zone.locationLabel !== "string" || zone.locationLabel.length > 191)) ||
+            (zone.locationAddress != null && typeof zone.locationAddress !== "string") ||
             !validCoordinates(zone.latitude, zone.longitude) || !Number.isFinite(zone.radiusMeters) || zone.radiusMeters < 500 || zone.radiusMeters > 10000 ||
             !Array.isArray(zone.assignedEmployeeIds) || !zone.assignedEmployeeIds.every(id => typeof id === "string") ||
             typeof zone.isActive !== "boolean" || !validTime(zone.workingHoursStart) || !validTime(zone.workingHoursEnd)) {

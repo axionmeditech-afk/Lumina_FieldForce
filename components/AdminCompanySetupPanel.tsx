@@ -268,13 +268,21 @@ export function AdminCompanySetupPanel({ onSaved }: AdminCompanySetupPanelProps 
         null;
       if (officeZone && isValidCoordinate(officeZone.latitude, officeZone.longitude)) {
         setEditingGeofence(officeZone);
-        const label = officeZone.name || company.attendanceZoneLabel || `${company.name} Main Office`;
-        setOfficeName(label);
-        setQuery(label);
+        const officeLabel = officeZone.name || company.attendanceZoneLabel || `${company.name} Main Office`;
+        const locationLabel =
+          officeZone.locationLabel?.trim() ||
+          officeZone.locationAddress?.trim() ||
+          company.headquarters?.trim() ||
+          `${officeZone.latitude.toFixed(6)}, ${officeZone.longitude.toFixed(6)}`;
+        const locationAddress =
+          officeZone.locationAddress?.trim() ||
+          `${officeZone.latitude.toFixed(6)}, ${officeZone.longitude.toFixed(6)} / ${Math.round(officeZone.radiusMeters || OFFICE_RADIUS_METERS)}m`;
+        setOfficeName(officeLabel);
+        setQuery(locationLabel);
         setSelectedLocation({
           id: `saved_${officeZone.id}`,
-          label,
-          address: `${officeZone.latitude.toFixed(6)}, ${officeZone.longitude.toFixed(6)} / ${Math.round(officeZone.radiusMeters || OFFICE_RADIUS_METERS)}m`,
+          label: locationLabel,
+          address: locationAddress,
           latitude: officeZone.latitude,
           longitude: officeZone.longitude,
         });
@@ -306,6 +314,8 @@ export function AdminCompanySetupPanel({ onSaved }: AdminCompanySetupPanelProps 
         id: editingGeofence?.id || `office_${company.id}`,
         companyId: company.id,
         name: cleanOfficeName,
+        locationLabel: selectedLocation.label,
+        locationAddress: selectedLocation.address,
         radiusMeters: editingGeofence?.radiusMeters || OFFICE_RADIUS_METERS,
         latitude: selectedLocation.latitude,
         longitude: selectedLocation.longitude,

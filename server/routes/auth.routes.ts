@@ -11,6 +11,7 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
   const {
     requireAuth,
     requireRoles,
+    getMySqlPool,
     normalizeEmail,
     normalizeRole,
     normalizeCompanyName,
@@ -65,6 +66,49 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     getAuthUserByIdentifier,
     randomUUID,
   } = deps;
+  const parseAssignedEmployeeIds = (value: unknown): string[] => {
+    try {
+      const parsed = typeof value === "string" ? JSON.parse(value) : value;
+      if (!Array.isArray(parsed)) return [];
+      return Array.from(new Set(parsed.map((item) => normalizeWhitespace(String(item || ""))).filter(Boolean)));
+    } catch {
+      return [];
+    }
+  };
+
+  const syncWorkspaceGeofenceAccess = async (
+    employeeIdentityIds: string[],
+    nextCompanyIds: string[],
+  ): Promise<void> => {
+    if (!isMySqlStateEnabled() || typeof getMySqlPool !== "function") return;
+    const identityIds = Array.from(new Set(employeeIdentityIds.map((item) => normalizeWhitespace(item)).filter(Boolean)));
+    const companyIds = new Set(nextCompanyIds.map((item) => normalizeWhitespace(item)).filter(Boolean));
+    if (!identityIds.length || !companyIds.size) return;
+    const primaryId = identityIds[0];
+    const companyPlaceholders = Array.from(companyIds).map(() => "?").join(", ");
+    const containsClauses = identityIds.map(() => "JSON_CONTAINS(assigned_employee_ids_json, JSON_QUOTE(?))").join(" OR ");
+    const conn = await getMySqlPool();
+    const [rows] = await conn.query(
+      `SELECT id, company_id, assigned_employee_ids_json
+       FROM lff_geofences
+       WHERE company_id IN (${companyPlaceholders})${containsClauses ? ` OR ${containsClauses}` : ""}`,
+      [...Array.from(companyIds), ...identityIds],
+    ).catch(() => [[] as any[]]);
+    for (const row of rows || []) {
+      const zoneId = normalizeWhitespace(String(row.id || ""));
+      if (!zoneId) continue;
+      const zoneCompanyId = normalizeWhitespace(String(row.company_id || ""));
+      const current = parseAssignedEmployeeIds(row.assigned_employee_ids_json);
+      const shouldAssign = Boolean(zoneCompanyId && companyIds.has(zoneCompanyId));
+      const withoutAliases = current.filter((id) => !identityIds.includes(normalizeWhitespace(id)));
+      const next = shouldAssign ? Array.from(new Set([...withoutAliases, primaryId])) : withoutAliases;
+      if (next.length === current.length && next.every((id, index) => id === current[index])) continue;
+      await conn.execute(
+        `UPDATE lff_geofences SET assigned_employee_ids_json = ?, updated_at = NOW() WHERE id = ?`,
+        [JSON.stringify(next), zoneId],
+      );
+    }
+  };
 
   app.post("/api/auth/register", async (req, res) => {
     const {
@@ -636,6 +680,19 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
           await forceDolibarrAdminPrivilegesForUserIdentity(reviewedUser);
         }
         await insertAccessRequestInMySql(reviewedRequest);
+        if (action === "approved" && reviewedUser) {
+          await syncWorkspaceGeofenceAccess(
+            [
+              reviewedUser.id,
+              reviewedUser.id ? `dolibarr_${reviewedUser.id}` : "",
+              reviewedUser.email,
+              (reviewedUser as AppUser & { login?: string }).login || normalizeLoginKey(normalizedEmail.split("@")[0] || normalizedEmail),
+            ],
+            assignedCompanyIds,
+          ).catch((error: unknown) => {
+            console.warn("Workspace geofence sync after approval failed", error);
+          });
+        }
       } catch (error) {
         console.error("Failed to persist reviewed access request in MySQL", error);
         res.status(500).json({
