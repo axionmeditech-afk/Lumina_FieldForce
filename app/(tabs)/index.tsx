@@ -17,7 +17,7 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
-import { getAttendanceStatus, getCompanyAttendanceToday } from "@/lib/attendance-api";
+import { getAttendanceStatus, getCompanyAttendanceToday, getCompanyProfilesRemote } from "@/lib/attendance-api";
 import { isSystemAdministratorAccount } from "@/lib/attendance-roster";
 import { formatMumbaiDateKey, formatMumbaiTime, toMumbaiDateKey } from "@/lib/ist-time";
 import { getAttendance } from "@/lib/storage";
@@ -73,8 +73,29 @@ function formatRole(role?: string | null): string {
 function getLatestByUser(records: AttendanceRecord[]): Map<string, AttendanceRecord> {
   const latest = new Map<string, AttendanceRecord>();
   const sorted = [...records].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  for (const record of sorted) latest.set(record.userId, record);
+  for (const record of sorted) {
+    const workspaceKey = (record.companyId || "workspace_default").trim() || "workspace_default";
+    latest.set(`${workspaceKey}:${record.userId}`, record);
+  }
   return latest;
+}
+
+function normalizeWorkspaceIds(values: (string | null | undefined)[]): string[] {
+  return Array.from(new Set(values.map((value) => (value || "").trim()).filter(Boolean)));
+}
+
+async function resolveDashboardWorkspaceIds(
+  user: { role?: string | null; companyId?: string | null; companyIds?: string[] } | null,
+  activeCompanyId: string,
+): Promise<string[]> {
+  const assignedIds = normalizeWorkspaceIds([
+    ...(Array.isArray(user?.companyIds) ? user.companyIds : []),
+    user?.companyId,
+    activeCompanyId,
+  ]);
+  if (user?.role !== "admin") return assignedIds;
+  const companies = await getCompanyProfilesRemote().catch(() => []);
+  return normalizeWorkspaceIds([...assignedIds, ...companies.map((company) => company.id)]);
 }
 
 function getActiveAttendanceForUser(records: AttendanceRecord[], userId?: string): AttendanceRecord | null {
@@ -143,7 +164,9 @@ export default function Dashboard() {
           active: isRecordForCompany(cachedActive, activeCompanyId)
             ? cachedActive
             : null,
-          companyRecords: isSupervisor ? getTodayCompanyRecords(cachedRecords, activeCompanyId) : [],
+          companyRecords: isSupervisor
+            ? getTodayCompanyRecords(cachedRecords, user.role === "admin" ? undefined : activeCompanyId)
+            : [],
           syncedAt: current?.syncedAt || "Cached",
         };
       });
@@ -159,9 +182,14 @@ export default function Dashboard() {
     lastRefreshAtRef.current = Date.now();
     setBusy(force || !hasSnapshotRef.current);
     try {
+      const workspaceIds = isSupervisor
+        ? await resolveDashboardWorkspaceIds(user, activeCompanyId)
+        : [];
       const [status, companyRecords] = await Promise.all([
         getAttendanceStatus(),
-        isSupervisor ? getCompanyAttendanceToday(activeCompanyId) : Promise.resolve([]),
+        isSupervisor
+          ? Promise.all(workspaceIds.map((workspaceId) => getCompanyAttendanceToday(workspaceId))).then((groups) => groups.flat())
+          : Promise.resolve([]),
       ]);
       const scopedRecords = activeCompanyId
         ? status.records.filter((record) => isRecordForCompany(record, activeCompanyId))
