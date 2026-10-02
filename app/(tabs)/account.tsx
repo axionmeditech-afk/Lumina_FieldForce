@@ -46,6 +46,7 @@ export default function Account() {
   const [autoCheckoutBusy, setAutoCheckoutBusy] = useState(false);
   const [autoCheckoutState, setAutoCheckoutState] = useState<AutoCheckoutSetupState>("checking");
   const [autoCheckoutHint, setAutoCheckoutHint] = useState("Checking background setup...");
+  const [accessPanelVersion, setAccessPanelVersion] = useState(0);
   const [signingOut, setSigningOut] = useState(false);
   const isAdmin = user?.role === "admin";
   const userName = user?.name?.trim() || "Lumina User";
@@ -380,8 +381,8 @@ export default function Account() {
 
         {isAdmin ? (
           <>
-            <AdminCompanySetupPanel />
-            <EmployeeAccessPanel />
+            <AdminCompanySetupPanel onSaved={() => setAccessPanelVersion((current) => current + 1)} />
+            <EmployeeAccessPanel key={accessPanelVersion} />
           </>
         ) : null}
 

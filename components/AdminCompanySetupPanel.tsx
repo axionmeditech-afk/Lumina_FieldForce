@@ -15,9 +15,11 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import {
   createCompanyProfileRemote,
   createGeofence,
+  getCompanyGeofences,
   getCompanyProfilesRemote,
   searchMapplsAutosuggest,
   searchMapplsTextSearch,
+  updateCompanyProfileRemote,
   updateGeofence,
 } from "@/lib/attendance-api";
 import { ensureLocationServicesEnabled, requestLocationPermissionBundle } from "@/lib/location-service";
@@ -33,6 +35,10 @@ type OfficeLocation = {
   address: string | null;
   latitude: number;
   longitude: number;
+};
+
+type AdminCompanySetupPanelProps = {
+  onSaved?: () => void;
 };
 
 function isValidCoordinate(latitude: unknown, longitude: unknown): boolean {
@@ -58,10 +64,12 @@ function mergeLocations(current: OfficeLocation[], next: OfficeLocation[]): Offi
   return Array.from(byKey.values()).slice(0, SEARCH_LIMIT);
 }
 
-export function AdminCompanySetupPanel() {
+export function AdminCompanySetupPanel({ onSaved }: AdminCompanySetupPanelProps = {}) {
   const { user, refreshSession } = useAuth();
   const { colors } = useAppTheme();
   const [companies, setCompanies] = useState<CompanyProfile[]>([]);
+  const [editingCompanyId, setEditingCompanyId] = useState<string | null>(null);
+  const [editingGeofence, setEditingGeofence] = useState<Geofence | null>(null);
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
   const [headquarters, setHeadquarters] = useState("");
@@ -74,6 +82,7 @@ export function AdminCompanySetupPanel() {
   const [locating, setLocating] = useState(false);
   const [saving, setSaving] = useState(false);
   const isAdmin = user?.role === "admin";
+  const isEditing = Boolean(editingCompanyId);
 
   const loadCompanies = useCallback(async () => {
     if (!isAdmin) return;
@@ -98,6 +107,18 @@ export function AdminCompanySetupPanel() {
     () => Boolean(name.trim() && selectedLocation && !saving),
     [name, saving, selectedLocation],
   );
+
+  const resetForm = useCallback(() => {
+    setEditingCompanyId(null);
+    setEditingGeofence(null);
+    setName("");
+    setBranch("");
+    setHeadquarters("");
+    setOfficeName("");
+    setQuery("");
+    setResults([]);
+    setSelectedLocation(null);
+  }, []);
 
   const selectLocation = useCallback((location: OfficeLocation) => {
     setSelectedLocation(location);
@@ -228,63 +249,108 @@ export function AdminCompanySetupPanel() {
     }
   }, [name, officeName, selectLocation]);
 
+  const editCompany = useCallback(async (company: CompanyProfile) => {
+    setEditingCompanyId(company.id);
+    setEditingGeofence(null);
+    setName(company.name || "");
+    setBranch(company.primaryBranch || "");
+    setHeadquarters(company.headquarters || "");
+    setOfficeName(company.attendanceZoneLabel || `${company.name} Main Office`);
+    setQuery(company.attendanceZoneLabel || company.name || "");
+    setResults([]);
+    setSelectedLocation(null);
+    try {
+      const zones = await getCompanyGeofences(company.id).catch(() => [] as Geofence[]);
+      const officeZone =
+        zones.find((zone) => zone.id === `office_${company.id}`) ||
+        zones.find((zone) => zone.isActive !== false) ||
+        zones[0] ||
+        null;
+      if (officeZone && isValidCoordinate(officeZone.latitude, officeZone.longitude)) {
+        setEditingGeofence(officeZone);
+        const label = officeZone.name || company.attendanceZoneLabel || `${company.name} Main Office`;
+        setOfficeName(label);
+        setQuery(label);
+        setSelectedLocation({
+          id: `saved_${officeZone.id}`,
+          label,
+          address: `${officeZone.latitude.toFixed(6)}, ${officeZone.longitude.toFixed(6)} / ${Math.round(officeZone.radiusMeters || OFFICE_RADIUS_METERS)}m`,
+          latitude: officeZone.latitude,
+          longitude: officeZone.longitude,
+        });
+      }
+    } catch (error) {
+      Alert.alert("Workspace edit", error instanceof Error ? error.message : "Unable to load saved office geofence.");
+    }
+  }, []);
+
   const saveCompany = useCallback(async () => {
     if (!canSave || !selectedLocation || !user) return;
     const cleanName = name.trim();
     const cleanOfficeName = officeName.trim() || selectedLocation.label || `${cleanName} Main Office`;
     setSaving(true);
     try {
-      const company = await createCompanyProfileRemote({
+      const companyPayload = {
         name: cleanName,
         legalName: cleanName,
         industry: "Field Operations",
         headquarters: headquarters.trim() || "India",
         primaryBranch: branch.trim() || "Main Branch",
         attendanceZoneLabel: cleanOfficeName,
-      });
+      };
+      const company = editingCompanyId
+        ? await updateCompanyProfileRemote(editingCompanyId, companyPayload)
+        : await createCompanyProfileRemote(companyPayload);
       const now = new Date().toISOString();
       const geofence: Geofence = {
-        id: `office_${company.id}`,
+        id: editingGeofence?.id || `office_${company.id}`,
         companyId: company.id,
         name: cleanOfficeName,
-        radiusMeters: OFFICE_RADIUS_METERS,
+        radiusMeters: editingGeofence?.radiusMeters || OFFICE_RADIUS_METERS,
         latitude: selectedLocation.latitude,
         longitude: selectedLocation.longitude,
-        assignedEmployeeIds: [],
+        assignedEmployeeIds: editingGeofence?.assignedEmployeeIds || [],
         isActive: true,
-        allowOverride: false,
-        workingHoursStart: null,
-        workingHoursEnd: null,
-        createdAt: now,
+        allowOverride: editingGeofence?.allowOverride || false,
+        workingHoursStart: editingGeofence?.workingHoursStart || null,
+        workingHoursEnd: editingGeofence?.workingHoursEnd || null,
+        createdAt: editingGeofence?.createdAt || now,
         updatedAt: now,
       };
-      try {
-        await createGeofence(geofence);
-      } catch {
-        await updateGeofence(geofence.id, geofence);
+      if (editingGeofence?.id) {
+        await updateGeofence(editingGeofence.id, geofence);
+      } else {
+        try {
+          await createGeofence(geofence);
+        } catch {
+          await updateGeofence(geofence.id, geofence);
+        }
       }
-      setName("");
-      setBranch("");
-      setHeadquarters("");
-      setOfficeName("");
-      setQuery("");
-      setResults([]);
-      setSelectedLocation(null);
+      resetForm();
       await Promise.all([loadCompanies(), refreshSession()]);
-      Alert.alert("Company ready", `${company.name} was created with a ${OFFICE_RADIUS_METERS}m office geofence.`);
+      onSaved?.();
+      Alert.alert(
+        isEditing ? "Workspace updated" : "Company ready",
+        `${company.name} ${isEditing ? "was updated" : "was created"} with a ${Math.round(geofence.radiusMeters)}m office geofence.`,
+      );
     } catch (error) {
-      Alert.alert("Create failed", error instanceof Error ? error.message : "Unable to create company and office geofence.");
+      Alert.alert(isEditing ? "Update failed" : "Create failed", error instanceof Error ? error.message : "Unable to save company and office geofence.");
     } finally {
       setSaving(false);
     }
   }, [
     branch,
     canSave,
+    editingCompanyId,
+    editingGeofence,
     headquarters,
+    isEditing,
     loadCompanies,
     name,
+    onSaved,
     officeName,
     refreshSession,
+    resetForm,
     selectedLocation,
     user,
   ]);
@@ -300,10 +366,24 @@ export function AdminCompanySetupPanel() {
         <View style={styles.headerCopy}>
           <Text style={[styles.title, { color: colors.text }]}>Company & Office Geofence</Text>
           <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-            Create a workspace and lock attendance to its office location.
+            Create or edit a workspace and lock attendance to its office location.
           </Text>
         </View>
       </View>
+
+      {isEditing ? (
+        <View style={[styles.editNotice, { borderColor: `${colors.primary}44`, backgroundColor: `${colors.primary}10` }]}>
+          <View style={styles.editNoticeCopy}>
+            <Text style={[styles.editNoticeTitle, { color: colors.text }]}>Editing workspace</Text>
+            <Text style={[styles.companyMeta, { color: colors.textSecondary }]} numberOfLines={1}>
+              Changes update the workspace and its office geofence.
+            </Text>
+          </View>
+          <Pressable onPress={resetForm}>
+            <Text style={[styles.linkText, { color: colors.primary }]}>Cancel</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       <View style={styles.formGrid}>
         <TextInput
@@ -417,7 +497,9 @@ export function AdminCompanySetupPanel() {
           { backgroundColor: colors.primary, opacity: !canSave ? 0.45 : pressed ? 0.82 : 1 },
         ]}
       >
-        <Text style={styles.primaryButtonText}>{saving ? "Creating..." : "Create company with office geofence"}</Text>
+        <Text style={styles.primaryButtonText}>
+          {saving ? (isEditing ? "Saving..." : "Creating...") : isEditing ? "Save workspace changes" : "Create company with office geofence"}
+        </Text>
       </Pressable>
 
       <View style={styles.companyListHeader}>
@@ -428,12 +510,26 @@ export function AdminCompanySetupPanel() {
       </View>
       {companies.map((company) => (
         <View key={company.id} style={[styles.companyRow, { borderColor: colors.borderLight }]}>
-          <View>
+          <View style={styles.companyCopy}>
             <Text style={[styles.companyName, { color: colors.text }]}>{company.name}</Text>
             <Text style={[styles.companyMeta, { color: colors.textSecondary }]}>
               {company.primaryBranch || "Main Branch"} - {company.attendanceZoneLabel || "Office geofence not named"}
             </Text>
           </View>
+          <Pressable
+            onPress={() => void editCompany(company)}
+            style={({ pressed }) => [
+              styles.editButton,
+              {
+                borderColor: editingCompanyId === company.id ? colors.primary : colors.border,
+                backgroundColor: editingCompanyId === company.id ? `${colors.primary}12` : colors.surface,
+                opacity: pressed ? 0.75 : 1,
+              },
+            ]}
+          >
+            <Ionicons name="create-outline" size={15} color={colors.primary} />
+            <Text style={[styles.editButtonText, { color: colors.primary }]}>Edit</Text>
+          </Pressable>
         </View>
       ))}
     </View>
@@ -463,6 +559,22 @@ const styles = StyleSheet.create({
   headerCopy: {
     flex: 1,
     gap: 3,
+  },
+  editNotice: {
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  editNoticeCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  editNoticeTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 13.5,
   },
   title: {
     fontFamily: "Inter_700Bold",
@@ -582,6 +694,12 @@ const styles = StyleSheet.create({
   companyRow: {
     borderTopWidth: 1,
     paddingTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  companyCopy: {
+    flex: 1,
   },
   companyName: {
     fontFamily: "Inter_700Bold",
@@ -590,6 +708,19 @@ const styles = StyleSheet.create({
   companyMeta: {
     marginTop: 2,
     fontFamily: "Inter_400Regular",
+    fontSize: 12,
+  },
+  editButton: {
+    minHeight: 34,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  editButtonText: {
+    fontFamily: "Inter_700Bold",
     fontSize: 12,
   },
 });

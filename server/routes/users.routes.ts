@@ -33,13 +33,18 @@ app.get("/api/users", requireAuth, async (req, res) => {
       const requestedCompanyId = normalizeWhitespace(
         typeof req.query.companyId === "string" ? req.query.companyId : ""
       );
+      const wantsAllCompanies =
+        req.query.allCompanies === "1" ||
+        req.query.allCompanies === "true";
       const allowedCompanyIds = new Set(
         normalizeCompanyIds(requestUser?.companyIds || (requestUser?.companyId ? [requestUser.companyId] : []))
       );
+      const canListAllCompanies = wantsAllCompanies && requestUser?.role === "admin";
       const canUseRequestedCompany =
         requestedCompanyId &&
         (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
       const companyId =
+        canListAllCompanies ? "" :
         (canUseRequestedCompany ? requestedCompanyId : "") ||
         (await resolveRequestCompanyId(req)) ||
         requestUser?.companyId ||
@@ -154,7 +159,7 @@ app.get("/api/users", requireAuth, async (req, res) => {
         const employeeCategory =
           finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
 
-        const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
+        const targetCompanyIds = companyId ? [companyId] : [assignedCompanyIds[0]];
         for (const assignedCompanyId of targetCompanyIds) {
           const company = companyById.get(assignedCompanyId);
           const id = row.id || `access_${request.id}`;

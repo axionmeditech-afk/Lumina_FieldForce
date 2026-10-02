@@ -922,9 +922,10 @@ export async function flushAttendanceQueue(): Promise<void> {
 
 
 // --- Users ---
-export async function getUsersRemote(options?: { companyId?: string | null }): Promise<DolibarrUser[]> {
+export async function getUsersRemote(options?: { companyId?: string | null; allCompanies?: boolean }): Promise<DolibarrUser[]> {
   const params = new URLSearchParams();
   if (options?.companyId) params.set("companyId", options.companyId);
+  if (options?.allCompanies) params.set("allCompanies", "1");
   const query = params.toString();
   const data = await fetchJson<{ items?: DolibarrUser[] }>(`/users${query ? `?${query}` : ""}`, { method: "GET" });
   return Array.isArray(data.items) ? data.items : [];

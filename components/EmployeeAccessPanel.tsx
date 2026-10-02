@@ -57,10 +57,10 @@ function getEmployeeCompanyIds(employee: DolibarrUser, fallbackCompanyId?: strin
   const ids = [
     ...(Array.isArray(employee.assignedCompanyIds) ? employee.assignedCompanyIds : []),
     employee.companyId,
-    fallbackCompanyId,
   ]
     .map((item) => String(item || "").trim())
     .filter(Boolean);
+  if (!ids.length && fallbackCompanyId) ids.push(String(fallbackCompanyId).trim());
   return Array.from(new Set(ids));
 }
 
@@ -93,12 +93,29 @@ export function EmployeeAccessPanel() {
     setBusy(true);
     setError("");
     try {
-      const [pending, companyList, employeeList, geofenceList] = await Promise.all([
+      const [pending, companyList, employeeList] = await Promise.all([
         getAdminAccessRequests("pending"),
         getCompanyProfilesRemote().catch(() => [] as CompanyProfile[]),
-        getUsersRemote({ companyId: activeCompanyId || undefined }).catch(() => [] as DolibarrUser[]),
-        getCompanyGeofences(activeCompanyId || undefined).catch(() => [] as Geofence[]),
+        getUsersRemote({ allCompanies: true }).catch(() => [] as DolibarrUser[]),
       ]);
+      const geofenceCompanyIds = Array.from(
+        new Set(
+          [
+            activeCompanyId,
+            ...companyList.map((item) => item.id),
+          ]
+            .map((item) => String(item || "").trim())
+            .filter(Boolean),
+        ),
+      );
+      const geofenceGroups = await Promise.all(
+        geofenceCompanyIds.map((companyId) => getCompanyGeofences(companyId).catch(() => [] as Geofence[])),
+      );
+      const geofenceList = Array.from(
+        new Map(
+          geofenceGroups.flat().map((zone) => [zone.id, zone] as const),
+        ).values(),
+      );
       setRequests(pending);
       setCompanies(companyList);
       setEmployees(employeeList);
@@ -152,7 +169,7 @@ export function EmployeeAccessPanel() {
         for (const employee of employeeList) {
           const employeeKey = getEmployeeId(employee) || getEmployeeEmail(employee);
           if (!employeeKey) continue;
-          if (!next[employeeKey]?.length) next[employeeKey] = getEmployeeCompanyIds(employee, activeCompanyId);
+          next[employeeKey] = getEmployeeCompanyIds(employee, activeCompanyId);
         }
         for (const employeeKey of Object.keys(next)) {
           if (!employeeList.some((employee) => (getEmployeeId(employee) || getEmployeeEmail(employee)) === employeeKey)) {
@@ -704,13 +721,14 @@ export function EmployeeAccessPanel() {
       {geofences.map((zone) => {
         const assigned = zone.assignedEmployeeIds || [];
         const isSaving = savingGeofenceId === zone.id;
+        const zoneCompany = zone.companyId ? companyById.get(zone.companyId) : null;
         return (
           <View key={zone.id} style={[styles.requestCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
             <View style={styles.requestTopRow}>
               <View style={styles.requestCopy}>
                 <Text style={[styles.requestName, { color: colors.text }]}>{zone.name}</Text>
                 <Text style={[styles.requestMeta, { color: colors.textSecondary }]}>
-                  Radius {Math.round(zone.radiusMeters)}m - {assigned.length} assigned
+                  {zoneCompany?.name || zone.companyId || "Workspace"} - Radius {Math.round(zone.radiusMeters)}m - {assigned.length} assigned
                 </Text>
                 {!assigned.length ? (
                   <Text style={[styles.warningText, { color: colors.warning }]}>
