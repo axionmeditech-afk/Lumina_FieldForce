@@ -84,7 +84,7 @@ export function registerAttendanceRoutes(app: Express, deps: AttendanceRouteDeps
       );
       const canUseRequestedCompany =
         requestedCompanyId &&
-        allowedCompanyIds.has(requestedCompanyId);
+        (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
       if (requestedCompanyId && !canUseRequestedCompany) { res.status(403).json({ message: "Company access denied" }); return; }
       const companyId =
         (canUseRequestedCompany ? requestedCompanyId : "") ||

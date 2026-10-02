@@ -32,8 +32,8 @@ import {
   upsertGeofence,
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
-import type { AttendanceCheckPayload, AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
-import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, removeQueuedAttendanceAction, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
+import type { AppUser, AttendanceCheckPayload, AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
+import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, getCompanyProfilesRemote, removeQueuedAttendanceAction, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
 import {
   ensureLocationServicesEnabled,
   getCurrentPositionWithTimeout,
@@ -160,6 +160,36 @@ function selectCurrentWorkspaceGeofences(zones: Geofence[], companyId: string): 
       if (b.id === expectedOfficeId && a.id !== expectedOfficeId) return 1;
       return b.updatedAt.localeCompare(a.updatedAt);
     });
+}
+
+function normalizeWorkspaceIds(values: (string | null | undefined)[]): string[] {
+  return Array.from(new Set(values.map((value) => (value || "").trim()).filter(Boolean)));
+}
+
+async function resolveAttendanceWorkspaceIds(
+  user: AppUser | null,
+  activeCompanyId: string,
+  includeAllWorkspaces: boolean,
+): Promise<string[]> {
+  const profileIds = normalizeWorkspaceIds([
+    ...(Array.isArray(user?.companyIds) ? user?.companyIds || [] : []),
+    user?.companyId,
+  ]);
+  const assignedIds = profileIds.length ? profileIds : normalizeWorkspaceIds([activeCompanyId]);
+  if (includeAllWorkspaces && user?.role === "admin") {
+    // Admins are the workspace owners for Secure Attendance. The companies
+    // endpoint is authenticated and returns the complete workspace catalogue
+    // for admins; include it so a newly created workspace appears immediately
+    // without forcing the admin to re-login or manually assign themselves.
+    const companies = await getCompanyProfilesRemote();
+    return normalizeWorkspaceIds([
+      ...assignedIds,
+      ...companies.map((company) => company.id),
+    ]);
+  }
+  return includeAllWorkspaces
+    ? assignedIds
+    : normalizeWorkspaceIds([activeCompanyId, user?.companyId]);
 }
 
 function getBannerConfig(
@@ -612,25 +642,36 @@ function mergeAttendanceRoster(primary: Employee[], extra: Employee[]): Employee
   return dedupeAttendanceRosterMembers([...primary, ...extra]);
 }
 
-async function loadAttendanceRoster(fallbackCompany?: { id?: string; name?: string }): Promise<Employee[]> {
-  const [employees, users] = await Promise.all([
-    getEmployees().catch(() => [] as Employee[]),
-    getUsersRemote({ companyId: fallbackCompany?.id }).catch(() => [] as DolibarrUser[]),
-  ]);
+async function loadAttendanceRoster(fallbackCompany?: {
+  id?: string;
+  name?: string;
+  allCompanies?: boolean;
+  companyIds?: string[];
+}): Promise<Employee[]> {
+  // Keep a transport failure distinguishable from a valid empty roster. The
+  // caller can then retain the last confirmed admin view instead of replacing
+  // it with a misleading empty state during a short network outage.
+  const users = await getUsersRemote(
+    fallbackCompany?.allCompanies
+      ? { allCompanies: true }
+      : { companyId: fallbackCompany?.id },
+  );
+  const allowedCompanyIds = new Set((fallbackCompany?.companyIds || []).map((id) => id.trim()).filter(Boolean));
   const userEmployees = users
     .map((entry) => mapAttendanceUserToEmployee(entry, fallbackCompany))
-    .filter((entry): entry is Employee => Boolean(entry));
-  if (userEmployees.length > 0) {
-    // The backend list is the authoritative set of users currently assigned to
-    // this company. Do not let stale cached employees inflate the denominator.
+    .filter((entry): entry is Employee => Boolean(entry))
+    .filter((entry) => !allowedCompanyIds.size || allowedCompanyIds.has((entry.companyId || "").trim()));
+  if (userEmployees.length > 0 || fallbackCompany?.allCompanies || fallbackCompany?.id) {
+    // Authoritative roster: only users approved through this app's registration
+    // flow should appear in Secure Attendance. Do not fall back to legacy cached
+    // employees, because those can include demo/dummy Dolibarr records.
     return dedupeAttendanceRosterMembers(userEmployees);
   }
 
-  const companyId = (fallbackCompany?.id || "").trim();
-  const scopedFallback = companyId
-    ? employees.filter((employee) => (employee.companyId || "").trim() === companyId)
-    : employees;
-  return dedupeAttendanceRosterMembers(scopedFallback);
+  const employees = await getEmployees().catch(() => [] as Employee[]);
+  return dedupeAttendanceRosterMembers(
+    employees.filter((employee) => !allowedCompanyIds.size || allowedCompanyIds.has((employee.companyId || "").trim())),
+  );
 }
 
 function buildAdminAttendanceStatuses(
@@ -651,11 +692,10 @@ function buildAdminAttendanceStatuses(
 
   for (const employee of employees) {
     if (!isAttendanceRosterMember(employee)) continue;
-    const employeeRole = employee.role;
     if (!employee.companyId || employee.companyId === "workspace_default") continue;
     const nameKey = normalizeAttendanceIdentity(employee.name);
-    const roleKey = normalizeAttendanceIdentity(employeeRole);
-    const groupKey = `id:${employee.id.replace(/^dolibarr_/, "")}`;
+    const companyKey = (employee.companyId || "workspace_default").trim() || "workspace_default";
+    const groupKey = `company:${companyKey}:id:${employee.id.replace(/^dolibarr_/, "")}`;
     const existing = employeeGroups.get(groupKey);
     if (existing) {
       existing.ids.add(employee.id);
@@ -683,6 +723,7 @@ function buildAdminAttendanceStatuses(
       .filter(
         (entry) =>
           toMumbaiDateKey(entry.timestamp) === today &&
+          isRecordForCompany(entry, employee.companyId || "") &&
           Array.from(ids).some(id => id.replace(/^dolibarr_/, "") === entry.userId.replace(/^dolibarr_/, ""))
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -1042,17 +1083,27 @@ function AttendanceScreenContent() {
     loadInFlightRef.current = true;
     const requestId = ++loadBaseDataRequestRef.current;
     const companyId = activeCompanyId || undefined;
-    const rosterKey = `${activeUserId}:${companyId || ""}`;
     try {
+      const includeAllWorkspaces = isAdminAttendanceManager || canReviewSignIns;
+      const workspaceIds = await resolveAttendanceWorkspaceIds(user, activeCompanyId, includeAllWorkspaces);
+      const attendanceCompanyIds = includeAllWorkspaces ? workspaceIds : normalizeWorkspaceIds([companyId]);
+      const rosterKey = `${activeUserId}:${includeAllWorkspaces ? attendanceCompanyIds.join("|") : companyId || ""}`;
       const cache = rosterCacheRef.current;
       const ROSTER_CACHE_TTL_MS = 120_000; // 2 minutes (was 5 min)
       const [status, companyAttendance, employees] = await Promise.all([
         getAttendanceStatus(selectedDate),
-        isAdminAttendanceManager || canReviewSignIns ? getCompanyAttendanceToday(companyId, selectedDate) : Promise.resolve([]),
+        includeAllWorkspaces
+          ? Promise.all(attendanceCompanyIds.map((id) => getCompanyAttendanceToday(id, selectedDate))).then((groups) => groups.flat())
+          : Promise.resolve([]),
         isAdminAttendanceManager || canReviewSignIns
           ? cache?.key === rosterKey && Date.now() - cache.at < ROSTER_CACHE_TTL_MS
             ? Promise.resolve(cache.employees)
-            : loadAttendanceRoster({ id: companyId, name: activeCompanyName })
+            : loadAttendanceRoster({
+                id: companyId,
+                name: activeCompanyName,
+                allCompanies: includeAllWorkspaces,
+                companyIds: attendanceCompanyIds,
+              })
           : Promise.resolve([] as Employee[]),
       ]);
       if (requestId !== loadBaseDataRequestRef.current) return;
@@ -1086,7 +1137,7 @@ function AttendanceScreenContent() {
         queuedLoadTimer.current = setTimeout(() => { void latestLoadRef.current?.(); }, 500);
       }
     }
-  }, [activeCompanyId, activeCompanyName, activeUserId, selectedDate, isAdminAttendanceManager, canReviewSignIns, isFocused, appActive]);
+  }, [activeCompanyId, activeCompanyName, activeUserId, selectedDate, isAdminAttendanceManager, canReviewSignIns, isFocused, appActive, user]);
 
   useEffect(() => {
     latestLoadRef.current = loadBaseData;
@@ -1122,9 +1173,16 @@ function AttendanceScreenContent() {
       setMonthlySummaryLoading(true);
       try {
         const companyId = activeCompanyId || undefined;
+        const workspaceIds = await resolveAttendanceWorkspaceIds(user, activeCompanyId, true);
+        const attendanceCompanyIds = workspaceIds.length ? workspaceIds : normalizeWorkspaceIds([companyId]);
         const [employees, recordsByDay] = await Promise.all([
-          loadAttendanceRoster({ id: companyId, name: activeCompanyName }),
-          getCompanyAttendanceMonth(companyId, monthKey),
+          loadAttendanceRoster({
+            id: companyId,
+            name: activeCompanyName,
+            allCompanies: true,
+            companyIds: attendanceCompanyIds,
+          }),
+          Promise.all(attendanceCompanyIds.map((id) => getCompanyAttendanceMonth(id, monthKey))).then((groups) => groups.flat()),
         ]);
         setMonthlySummary(buildMonthlyAttendanceSummary(monthKey, recordsByDay, employees));
       } catch (error) {
@@ -1136,7 +1194,7 @@ function AttendanceScreenContent() {
         setMonthlySummaryLoading(false);
       }
     },
-    [activeCompanyId, activeCompanyName, datePickerMonthKey, isAdminAttendanceManager]
+    [activeCompanyId, activeCompanyName, datePickerMonthKey, isAdminAttendanceManager, user]
   );
 
   useEffect(() => {
@@ -2413,14 +2471,8 @@ setOfficeLocationName((current) => current.trim() || result.label);
       const timer = setTimeout(() => {
       setCollapsedAttendanceCompanyIds((current) => {
         const next = new Set(current);
-        // Ensure active company is open (not collapsed)
+        // Keep every workspace visible by default; only preserve explicit user collapses.
         next.delete(company.id);
-        // Collapse other groups by default
-        for (const g of adminAttendanceGroups) {
-          if (g.id !== company.id) {
-            next.add(g.id);
-          }
-        }
         return next;
       });
       }, 0);

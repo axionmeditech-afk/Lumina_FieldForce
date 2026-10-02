@@ -255,7 +255,7 @@ app.get("/api/users", requireAuth, async (req, res) => {
         const employeeCategory =
           finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
 
-        const targetCompanyIds = companyId ? [companyId] : [assignedCompanyIds[0]];
+        const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
         for (const assignedCompanyId of targetCompanyIds) {
           const company = companyById.get(assignedCompanyId);
           const id = row.id || `access_${request.id}`;
