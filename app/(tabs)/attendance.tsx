@@ -1098,7 +1098,9 @@ function AttendanceScreenContent() {
       const ROSTER_CACHE_TTL_MS = 120_000; // 2 minutes (was 5 min)
       const [status, companyAttendance, employees] = await Promise.all([
         getAttendanceStatus(selectedDate),
-        includeAllWorkspaces
+        isAdminAttendanceManager
+          ? getCompanyAttendanceToday(undefined, selectedDate, true)
+          : includeAllWorkspaces
           ? Promise.all(attendanceCompanyIds.map((id) => getCompanyAttendanceToday(id, selectedDate))).then((groups) => groups.flat())
           : Promise.resolve([]),
         isAdminAttendanceManager || canReviewSignIns
@@ -1188,7 +1190,7 @@ function AttendanceScreenContent() {
             allCompanies: true,
             companyIds: attendanceCompanyIds,
           }),
-          Promise.all(attendanceCompanyIds.map((id) => getCompanyAttendanceMonth(id, monthKey))).then((groups) => groups.flat()),
+          getCompanyAttendanceMonth(undefined, monthKey, true),
         ]);
         setMonthlySummary(buildMonthlyAttendanceSummary(monthKey, recordsByDay, employees));
       } catch (error) {

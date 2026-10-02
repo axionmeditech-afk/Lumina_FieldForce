@@ -77,6 +77,9 @@ export function registerAttendanceRoutes(app: Express, deps: AttendanceRouteDeps
       const requestedCompanyId = deps.normalizeWhitespace(
         typeof req.query.company_id === "string" ? req.query.company_id : "",
       );
+      const wantsAllCompanies =
+        req.query.allCompanies === "1" || req.query.allCompanies === "true";
+      const canListAllCompanies = wantsAllCompanies && req.auth?.role === "admin";
       const allowedCompanyIds = new Set(
         deps.normalizeCompanyIds(
           requestUser?.companyIds || (requestUser?.companyId ? [requestUser.companyId] : []),
@@ -87,10 +90,12 @@ export function registerAttendanceRoutes(app: Express, deps: AttendanceRouteDeps
         (requestUser?.role === "admin" || allowedCompanyIds.has(requestedCompanyId));
       if (requestedCompanyId && !canUseRequestedCompany) { res.status(403).json({ message: "Company access denied" }); return; }
       const companyId =
-        (canUseRequestedCompany ? requestedCompanyId : "") ||
-        (await deps.resolveRequestCompanyId(req)) ||
-        requestUser?.companyId ||
-        deps.defaultCompanyId;
+        canListAllCompanies
+          ? ""
+          : (canUseRequestedCompany ? requestedCompanyId : "") ||
+            (await deps.resolveRequestCompanyId(req)) ||
+            requestUser?.companyId ||
+            deps.defaultCompanyId;
 
       const requestedDate = deps.normalizeWhitespace(
         typeof req.query.date === "string" ? req.query.date : "",

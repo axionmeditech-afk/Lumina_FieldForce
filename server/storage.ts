@@ -140,7 +140,7 @@ class MemStorage implements IStorage {
 
   async getCompanyAttendanceForDate(companyId: string, date: string): Promise<AttendanceRecord[]> {
     return Array.from(this.attendance.values())
-      .filter((record) => record.companyId === companyId && isMumbaiDateKey(record.timestamp, date))
+      .filter((record) => (!companyId || record.companyId === companyId) && isMumbaiDateKey(record.timestamp, date))
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
 

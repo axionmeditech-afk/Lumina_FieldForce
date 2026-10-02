@@ -17,7 +17,7 @@ import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
-import { getAttendanceStatus, getCompanyAttendanceToday, getCompanyProfilesRemote } from "@/lib/attendance-api";
+import { getAttendanceStatus, getCompanyAttendanceToday, getCompanyProfilesRemote, getUsersRemote, type DolibarrUser } from "@/lib/attendance-api";
 import { isSystemAdministratorAccount } from "@/lib/attendance-roster";
 import { formatMumbaiDateKey, formatMumbaiTime, toMumbaiDateKey } from "@/lib/ist-time";
 import { getAttendance } from "@/lib/storage";
@@ -115,6 +115,32 @@ function getTodayCompanyRecords(records: AttendanceRecord[], companyId?: string 
   });
 }
 
+function normalizeUserIdentity(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getApprovedRosterKeys(users: DolibarrUser[]): Set<string> {
+  const keys = new Set<string>();
+  for (const user of users) {
+    for (const value of [user.id, user.rowid, user.user_id, user.email, user.login]) {
+      const normalized = normalizeUserIdentity(value);
+      if (!normalized) continue;
+      keys.add(normalized);
+      keys.add(normalized.replace(/^dolibarr_/, ""));
+      keys.add(`dolibarr_${normalized.replace(/^dolibarr_/, "")}`);
+    }
+  }
+  return keys;
+}
+
+function filterToApprovedRoster(records: AttendanceRecord[], users: DolibarrUser[]): AttendanceRecord[] {
+  const approvedKeys = getApprovedRosterKeys(users);
+  return records.filter((record) => {
+    const userId = normalizeUserIdentity(record.userId);
+    return Boolean(userId && approvedKeys.has(userId));
+  });
+}
+
 function isRecordForCompany(record: AttendanceRecord | null | undefined, companyId?: string | null): boolean {
   if (!record || !companyId) return true;
   return !record.companyId || record.companyId === companyId;
@@ -182,14 +208,19 @@ export default function Dashboard() {
     lastRefreshAtRef.current = Date.now();
     setBusy(force || !hasSnapshotRef.current);
     try {
-      const workspaceIds = isSupervisor
+      const workspaceIds = isSupervisor && user.role !== "admin"
         ? await resolveDashboardWorkspaceIds(user, activeCompanyId)
         : [];
-      const [status, companyRecords] = await Promise.all([
+      const [status, companyRecords, roster] = await Promise.all([
         getAttendanceStatus(),
         isSupervisor
-          ? Promise.all(workspaceIds.map((workspaceId) => getCompanyAttendanceToday(workspaceId))).then((groups) => groups.flat())
+          ? user.role === "admin"
+            ? getCompanyAttendanceToday(undefined, undefined, true)
+            : Promise.all(workspaceIds.map((workspaceId) => getCompanyAttendanceToday(workspaceId))).then((groups) => groups.flat())
           : Promise.resolve([]),
+        isSupervisor
+          ? getUsersRemote(user.role === "admin" ? { allCompanies: true } : { companyId: activeCompanyId })
+          : Promise.resolve([] as DolibarrUser[]),
       ]);
       const scopedRecords = activeCompanyId
         ? status.records.filter((record) => isRecordForCompany(record, activeCompanyId))
@@ -198,7 +229,7 @@ export default function Dashboard() {
       const nextSnapshot = {
         records: scopedRecords,
         active: scopedActive,
-        companyRecords,
+        companyRecords: isSupervisor ? filterToApprovedRoster(companyRecords, roster) : companyRecords,
         syncedAt: formatMumbaiTime(new Date(), { includeZoneLabel: true }),
       };
       hasSnapshotRef.current = true;

@@ -808,10 +808,15 @@ export async function removeQueuedAttendanceAction(
   if (next.length !== queue.length) await setAttendanceQueue(next);
 }
 
-export async function getCompanyAttendanceToday(companyId?: string, date?: string): Promise<AttendanceRecord[]> {
+export async function getCompanyAttendanceToday(
+  companyId?: string,
+  date?: string,
+  allCompanies = false,
+): Promise<AttendanceRecord[]> {
   const params: string[] = [];
   if (companyId) params.push(`company_id=${encodeURIComponent(companyId)}`);
   if (date) params.push(`date=${encodeURIComponent(date)}`);
+  if (allCompanies) params.push("allCompanies=1");
   const query = params.length > 0 ? `?${params.join("&")}` : "";
   return fetchJsonWithTimeout<AttendanceRecord[]>(`/attendance/company/today${query}`, { method: "GET", skipGlobalLoading: true }, 70000);
 }
@@ -998,6 +1003,6 @@ export async function getAttendanceStatus(date?: string): Promise<{ records: Att
   return fetchJsonWithTimeout(`/attendance/status${date ? `?date=${encodeURIComponent(date)}` : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
 }
 
-export async function getCompanyAttendanceMonth(companyId: string | undefined, month: string): Promise<AttendanceRecord[]> {
-  return fetchJsonWithTimeout(`/attendance/company/today?month=${encodeURIComponent(month)}${companyId ? `&company_id=${encodeURIComponent(companyId)}` : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
+export async function getCompanyAttendanceMonth(companyId: string | undefined, month: string, allCompanies = false): Promise<AttendanceRecord[]> {
+  return fetchJsonWithTimeout(`/attendance/company/today?month=${encodeURIComponent(month)}${companyId ? `&company_id=${encodeURIComponent(companyId)}` : ""}${allCompanies ? "&allCompanies=1" : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
 }

@@ -191,8 +191,26 @@ app.get("/api/users", requireAuth, async (req, res) => {
             statut,
             NULL as employee_category
            FROM \`nmy5_user\`
-           WHERE statut = 1`
+          WHERE statut = 1`
         );
+      }
+      let appUserRows: any[] = [];
+      let appUsersTableAvailable = false;
+      try {
+        [appUserRows] = await conn.query(
+          `SELECT id, email, role, approval_status
+           FROM lff_users
+           WHERE approval_status = 'approved'`
+        );
+        appUsersTableAvailable = true;
+      } catch {
+        // Older installations may not have lff_users yet. In that case the
+        // approved access-request filter below remains the compatibility path.
+      }
+      const appUserByEmail = new Map<string, any>();
+      for (const appUser of appUserRows || []) {
+        const emailKey = normalizeEmail(String(appUser.email || ""));
+        if (emailKey) appUserByEmail.set(emailKey, appUser);
       }
       const approvedRequests = await listAccessRequestsFromMySql("approved");
       const requestByEmail = new Map<string, AccessRequestRecord>();
@@ -212,6 +230,8 @@ app.get("/api/users", requireAuth, async (req, res) => {
       for (const row of userRows || []) {
         const email = normalizeEmail(String(row.email || ""));
         const loginKey = normalizeLoginKey(String(row.login || ""));
+        const appUser = email ? appUserByEmail.get(email) || null : null;
+        if (appUsersTableAvailable && !appUser) continue;
 
         // Find matching access request to get company assignments
         const request = (email && requestByEmail.get(email)) || (loginKey && requestByLogin.get(loginKey)) || null;
@@ -231,14 +251,18 @@ app.get("/api/users", requireAuth, async (req, res) => {
           "Employee";
         if (isLegacyDemoProfileName(displayName)) continue;
 
-        // Dolibarr's admin flag is authoritative. Employee profile metadata must
-        // never downgrade an administrator into the attendance roster.
-        let role: string = Number(row.admin || 0) === 1 ? "admin" : "employee";
-        if (role !== "admin" && row.employee_category === "on_field") {
+        // The approved app user is authoritative for role and identity. Keep
+        // Dolibarr flags as the compatibility fallback for older installations.
+        let role: string = appUser?.role
+          ? normalizeRole(String(appUser.role))
+          : Number(row.admin || 0) === 1
+            ? "admin"
+            : "employee";
+        if (!appUser && role !== "admin" && row.employee_category === "on_field") {
           role = "salesperson";
-        } else if (role !== "admin" && row.employee_category === "fixed_location") {
+        } else if (!appUser && role !== "admin" && row.employee_category === "fixed_location") {
           role = "employee";
-        } else if (role !== "admin") {
+        } else if (!appUser && role !== "admin") {
           // Fallback: decide from job title or the approved access request.
           let mappedRole: string | null = null;
           if (!mappedRole && row.job) {
@@ -258,12 +282,12 @@ app.get("/api/users", requireAuth, async (req, res) => {
         const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
         for (const assignedCompanyId of targetCompanyIds) {
           const company = companyById.get(assignedCompanyId);
-          const id = row.id || `access_${request.id}`;
+          const id = appUser?.id || row.id || `access_${request.id}`;
           const key = `${assignedCompanyId}:${email || String(id) || displayName.toLowerCase()}`;
           mappedByScope.set(key, {
             id: String(id),
             rowid: row.id ? String(row.id) : undefined,
-            user_id: row.id ? String(row.id) : undefined,
+            user_id: String(id),
             login: normalizeWhitespace(String(row.login || email.split("@")[0] || "")),
             firstname: firstName || displayName.split(" ")[0] || "",
             lastname: lastName || displayName.split(" ").slice(1).join(" ") || "",
