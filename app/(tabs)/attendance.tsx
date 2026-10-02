@@ -657,8 +657,14 @@ async function loadAttendanceRoster(fallbackCompany?: {
       : { companyId: fallbackCompany?.id },
   );
   const allowedCompanyIds = new Set((fallbackCompany?.companyIds || []).map((id) => id.trim()).filter(Boolean));
+  // In all-workspace mode each API row already carries its authoritative
+  // companyId. Do not pass the active workspace as a fallback, otherwise the
+  // mapper would discard every employee assigned to another workspace.
+  const mappingFallback = fallbackCompany?.allCompanies
+    ? { name: fallbackCompany.name }
+    : fallbackCompany;
   const userEmployees = users
-    .map((entry) => mapAttendanceUserToEmployee(entry, fallbackCompany))
+    .map((entry) => mapAttendanceUserToEmployee(entry, mappingFallback))
     .filter((entry): entry is Employee => Boolean(entry))
     .filter((entry) => !allowedCompanyIds.size || allowedCompanyIds.has((entry.companyId || "").trim()));
   if (userEmployees.length > 0 || fallbackCompany?.allCompanies || fallbackCompany?.id) {
