@@ -722,6 +722,12 @@ export function EmployeeAccessPanel() {
         const assigned = zone.assignedEmployeeIds || [];
         const isSaving = savingGeofenceId === zone.id;
         const zoneCompany = zone.companyId ? companyById.get(zone.companyId) : null;
+        const eligibleEmployees = managedEmployees.filter((employee) => {
+          const employeeId = getEmployeeId(employee);
+          if (employeeId && assigned.includes(employeeId)) return true;
+          const employeeCompanyIds = getEmployeeCompanyIds(employee, null);
+          return !zone.companyId || employeeCompanyIds.includes(zone.companyId);
+        });
         return (
           <View key={zone.id} style={[styles.requestCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
             <View style={styles.requestTopRow}>
@@ -740,7 +746,7 @@ export function EmployeeAccessPanel() {
             </View>
 
             <View style={styles.chipRow}>
-              {managedEmployees.map((employee) => {
+              {eligibleEmployees.map((employee) => {
                 const employeeId = getEmployeeId(employee);
                 if (!employeeId) return null;
                 const active = assigned.includes(employeeId);
@@ -765,6 +771,11 @@ export function EmployeeAccessPanel() {
                 );
               })}
             </View>
+            {!eligibleEmployees.length ? (
+              <Text style={[styles.warningText, { color: colors.warning }]}>
+                No employee has access to this workspace yet. Give company access first, then assign this office geofence.
+              </Text>
+            ) : null}
           </View>
         );
       })}

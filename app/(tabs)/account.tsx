@@ -100,7 +100,7 @@ export default function Account() {
   const openPermissionSettings = useCallback(() => {
     Alert.alert(
       "Enable background access",
-      "In App Info, set Location to “Allow all the time”. For better reliability, also set Battery usage to Unrestricted if your phone shows that option.",
+      "In App Info, set Location to \"Allow all the time\". For better reliability, also set Battery usage to Unrestricted if your phone shows that option.",
       [
         { text: "Cancel", style: "cancel" },
         { text: "Open Settings", onPress: () => void Linking.openSettings() },
@@ -131,7 +131,7 @@ export default function Account() {
       const permission = await requestLocationPermissionBundle();
       if (!permission.foreground || !permission.background) {
         setAutoCheckoutState("needs_permission");
-        setAutoCheckoutHint("Background location is off. Enable “Allow all the time” in app settings.");
+        setAutoCheckoutHint("Background location is off. Enable \"Allow all the time\" in app settings.");
         openPermissionSettings();
         return;
       }
