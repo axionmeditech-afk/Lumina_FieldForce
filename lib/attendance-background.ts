@@ -12,6 +12,7 @@ import {
   getUserGeofences,
   removeQueuedAttendanceAction,
 } from "./attendance-api";
+import { notifyAutoCheckoutPending, notifyAutoCheckoutSynced } from "./attendance-notifications";
 import { getVerifiedLocationEvidence } from "./location-service";
 import { evaluateAutoCheckoutExit, getEffectiveGeofenceRadiusMeters } from "./geofence";
 import type { AttendanceCheckPayload, AttendanceRecord, Geofence } from "./types";
@@ -305,11 +306,20 @@ async function verifyExit(locations?: LocationObject[]) {
     notes: `Automatic checkout: verified office exit in background | samples:${sampleCount} | window:${Math.round(sampleWindowMs / 1000)}s | distance:${Math.round(sample.distanceMeters)}m`,
   };
   await enqueueAttendanceAction("checkout", payload);
-  const record = await attendanceCheckOut(payload);
-  await removeQueuedAttendanceAction("checkout", requestId);
-  await addAttendance(record);
-  await setCheckedIn(false);
-  await stopAttendanceGeofence();
+  try {
+    const record = await attendanceCheckOut(payload);
+    await removeQueuedAttendanceAction("checkout", requestId);
+    await addAttendance(record);
+    await setCheckedIn(false);
+    await notifyAutoCheckoutSynced({ detectedAt: payload.capturedAtClient }).catch(() => undefined);
+    await stopAttendanceGeofence();
+  } catch (error) {
+    await notifyAutoCheckoutPending({
+      detectedAt: payload.capturedAtClient || new Date(sample.timestamp).toISOString(),
+      distanceMeters: sample.distanceMeters,
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function retryPendingAttendanceExit(locations?: LocationObject[]) {

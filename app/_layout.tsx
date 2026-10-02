@@ -1,5 +1,7 @@
 import { AppState } from "react-native";
 import { reconcileAttendanceGeofence } from "@/lib/attendance-background";
+import { flushAttendanceQueue } from "@/lib/attendance-api";
+import { ensureAttendanceNotificationChannel } from "@/lib/attendance-notifications";
 import React, { useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
@@ -22,12 +24,16 @@ function AppShell() {
   const userId = user?.id || "";
   useEffect(() => {
     if (!userId) return;
-    const reconcile = () => { void reconcileAttendanceGeofence().catch(console.warn); };
+    const reconcile = () => {
+      void flushAttendanceQueue().catch(console.warn);
+      void reconcileAttendanceGeofence().catch(console.warn);
+    };
     reconcile();
     const sub = AppState.addEventListener("change", state => { if (state === "active") reconcile(); });
     return () => sub.remove();
   }, [userId]);
   const { colors, isDark } = useAppTheme();
+  useEffect(() => { void ensureAttendanceNotificationChannel().catch(console.warn); }, []);
   useEffect(() => { void retireLegacyLocationTracking().catch(console.warn); }, []);
   return <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
     <StatusBar style={isDark ? "light" : "dark"} />

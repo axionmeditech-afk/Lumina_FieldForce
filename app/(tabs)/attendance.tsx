@@ -44,6 +44,11 @@ import {
   requestLocationPermissionBundle,
 } from "@/lib/location-service";
 import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
+import {
+  ensureAttendanceNotificationPermission,
+  notifyAutoCheckoutPending,
+  notifyAutoCheckoutSynced,
+} from "@/lib/attendance-notifications";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
 import { startAttendanceGeofence, stopAttendanceGeofence, retryPendingAttendanceExit } from "@/lib/attendance-background";
 import { getClientSecurityStatus } from "@/lib/security-client";
@@ -1248,6 +1253,7 @@ function AttendanceScreenContent() {
         await removeQueuedAttendanceAction("checkout", requestId);
         await addAttendance(record);
         await setCheckedIn(false);
+        await notifyAutoCheckoutSynced({ detectedAt: payload.capturedAtClient }).catch(() => undefined);
         activeAttendanceRef.current = null;
         setCheckedInState(false);
         clearForegroundAutoCheckout("Auto-checkout completed after leaving office geofence.");
@@ -1255,6 +1261,11 @@ function AttendanceScreenContent() {
         void loadBaseData();
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } catch (error) {
+        const latestSample = getLatestAutoCheckoutSample(samples);
+        await notifyAutoCheckoutPending({
+          detectedAt: latestSample ? new Date(latestSample.timestamp).toISOString() : new Date().toISOString(),
+          distanceMeters: latestSample?.distanceMeters ?? null,
+        }).catch(() => undefined);
         setAutoCheckoutStatus(
           error instanceof Error
             ? `Auto-checkout queued. Will retry when connection/session is ready. ${error.message}`
@@ -2148,6 +2159,7 @@ setOfficeLocationName((current) => current.trim() || result.label);
         } else {
           activeAttendanceRef.current = record;
           clearForegroundAutoCheckout("Auto-checkout armed while you are checked in.");
+          await ensureAttendanceNotificationPermission(true).catch(() => false);
           const enabled = await startAttendanceGeofence(record, geofences, true).catch(() => false);
           if (!enabled) {
             Alert.alert(
