@@ -83,8 +83,7 @@
           "locationAlwaysAndWhenInUsePermission": "Allow background location to automatically check out when you leave your office during an active attendance session."
         }
       ],
-      "expo-notifications",
-      "expo-sqlite"
+      "expo-notifications"
     ],
     "experiments": {
       "typedRoutes": true,
