@@ -65,28 +65,36 @@ workflows:
         script: |
           set -e
           IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
+          echo "Uploading $IPA_PATH using Fastlane to completely bypass altool..."
           
-          echo "Attempting upload with app-store-connect CLI and Explicit Apple ID..."
-          if app-store-connect publish --path "$IPA_PATH" --apple-id "6761368486"; then
-            echo "Successfully uploaded using app-store-connect CLI!"
-            exit 0
-          fi
+          mkdir -p fastlane
+          cat <<'EOF' > fastlane/Fastfile
+          default_platform(:ios)
+          platform :ios do
+            lane :deploy do
+              # Safely handle the private key content (replace literal \n if present)
+              raw_key = ENV["APP_STORE_CONNECT_PRIVATE_KEY"]
+              fixed_key = raw_key.include?('\n') ? raw_key.gsub('\n', "\n") : raw_key
+              
+              app_store_connect_api_key(
+                key_id: ENV["APP_STORE_CONNECT_KEY_IDENTIFIER"],
+                issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+                key_content: fixed_key,
+                in_house: false
+              )
+              
+              upload_to_testflight(
+                ipa: ENV["IPA_PATH"],
+                app_identifier: "com.luminafieldforce",
+                apple_id: "6761368486",
+                skip_waiting_for_build_processing: true
+              )
+            end
+          end
+          EOF
           
-          echo "app-store-connect CLI failed. Falling back to explicit xcrun altool..."
-          mkdir -p ~/.appstoreconnect/private_keys
-          
-          # Extremely robust way to format the private key to valid PEM format
-          KEY_BODY=$(echo "$APP_STORE_CONNECT_PRIVATE_KEY" | sed -e 's/-----BEGIN PRIVATE KEY-----//g' -e 's/-----END PRIVATE KEY-----//g' -e 's/\\n//g' | tr -d ' \n\r')
-          FORMATTED_BODY=$(echo "$KEY_BODY" | fold -w 64)
-          
-          P8_PATH=~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
-          echo "-----BEGIN PRIVATE KEY-----" > "$P8_PATH"
-          echo "$FORMATTED_BODY" >> "$P8_PATH"
-          echo "-----END PRIVATE KEY-----" >> "$P8_PATH"
-          chmod 600 "$P8_PATH"
-          
-          echo "Uploading $IPA_PATH using Explicit Apple ID 6761368486..."
-          xcrun altool --upload-app -f "$IPA_PATH" -t ios --apiKey "$APP_STORE_CONNECT_KEY_IDENTIFIER" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" --app-apple-id "6761368486"
+          export IPA_PATH="$IPA_PATH"
+          fastlane ios deploy
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
