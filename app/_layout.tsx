@@ -1,5 +1,5 @@
 import { AppState } from "react-native";
-import { reconcileAttendanceGeofence } from "@/lib/attendance-background";
+import { reconcileAttendanceGeofence, retryPendingAttendanceExit } from "@/lib/attendance-background";
 import { flushAttendanceQueue } from "@/lib/attendance-api";
 import { ensureAttendanceNotificationChannel } from "@/lib/attendance-notifications";
 import React, { useEffect, useState } from "react";
@@ -24,13 +24,20 @@ function AppShell() {
   const userId = user?.id || "";
   useEffect(() => {
     if (!userId) return;
-    const reconcile = () => {
-      void flushAttendanceQueue().catch(console.warn);
-      void reconcileAttendanceGeofence().catch(console.warn);
+    let running = false;
+    const reconcile = (refreshSession = true) => {
+      if (running || AppState.currentState !== "active") return;
+      running = true;
+      void (async () => {
+        await flushAttendanceQueue();
+        if (refreshSession) await reconcileAttendanceGeofence();
+        else await retryPendingAttendanceExit();
+      })().catch(console.warn).finally(() => { running = false; });
     };
     reconcile();
     const sub = AppState.addEventListener("change", state => { if (state === "active") reconcile(); });
-    return () => sub.remove();
+    const timer = setInterval(() => reconcile(false), 30_000);
+    return () => { sub.remove(); clearInterval(timer); };
   }, [userId]);
   const { colors, isDark } = useAppTheme();
   useEffect(() => { void ensureAttendanceNotificationChannel().catch(console.warn); }, []);

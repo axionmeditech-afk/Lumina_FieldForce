@@ -195,17 +195,15 @@ app.get("/api/users", requireAuth, async (req, res) => {
         );
       }
       let appUserRows: any[] = [];
-      let appUsersTableAvailable = false;
       try {
         [appUserRows] = await conn.query(
           `SELECT id, email, role, approval_status
            FROM lff_users
            WHERE approval_status = 'approved'`
         );
-        appUsersTableAvailable = true;
       } catch {
-        // Older installations may not have lff_users yet. In that case the
-        // approved access-request filter below remains the compatibility path.
+        // Older installations may not have lff_users yet. Approved access
+        // requests below remain the compatibility path.
       }
       const appUserByEmail = new Map<string, any>();
       for (const appUser of appUserRows || []) {
@@ -227,78 +225,83 @@ app.get("/api/users", requireAuth, async (req, res) => {
       }
 
       const mappedByScope = new Map<string, Record<string, unknown>>();
-      for (const row of userRows || []) {
-        const email = normalizeEmail(String(row.email || ""));
-        const loginKey = normalizeLoginKey(String(row.login || ""));
-        const appUser = email ? appUserByEmail.get(email) || null : null;
-        if (appUsersTableAvailable && !appUser) continue;
-
-        // Find matching access request to get company assignments
-        const request = (email && requestByEmail.get(email)) || (loginKey && requestByLogin.get(loginKey)) || null;
-        if (!request) continue;
-
+      const mappedAccessRequestIds = new Set<string>();
+      const addRosterEntry = (
+        request: AccessRequestRecord,
+        options?: {
+          appUser?: any;
+          dolibarrUser?: any;
+          assignedCompanyId?: string;
+          firstName?: string;
+          lastName?: string;
+          displayName?: string;
+          login?: string;
+          phone?: string;
+          statut?: unknown;
+        },
+      ) => {
         const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
-        if (!assignedCompanyIds.length) continue;
-        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
+        if (!assignedCompanyIds.length) return;
+        if (companyId && !assignedCompanyIds.includes(companyId)) return;
 
-        const firstName = normalizeWhitespace(String(row.firstname || ""));
-        const lastName = normalizeWhitespace(String(row.lastname || ""));
+        const requestEmail = normalizeEmail(request.email || "");
+        const appUser = options?.appUser || (requestEmail ? appUserByEmail.get(requestEmail) || null : null);
+        const dolibarrUser = options?.dolibarrUser || null;
+        const firstName = normalizeWhitespace(options?.firstName || String(dolibarrUser?.firstname || ""));
+        const lastName = normalizeWhitespace(options?.lastName || String(dolibarrUser?.lastname || ""));
+        const login =
+          normalizeWhitespace(options?.login || String(dolibarrUser?.login || requestEmail.split("@")[0] || ""));
         const displayName =
-          normalizeWhitespace(request.name) ||
+          normalizeWhitespace(options?.displayName || request.name) ||
           normalizeWhitespace(`${firstName} ${lastName}`) ||
-          normalizeWhitespace(String(row.login || "")) ||
-          email ||
+          login ||
+          requestEmail ||
           "Employee";
-        if (isLegacyDemoProfileName(displayName)) continue;
+        if (isLegacyDemoProfileName(displayName)) return;
 
-        // The approved app user is authoritative for role and identity. Keep
-        // Dolibarr flags as the compatibility fallback for older installations.
         let role: string = appUser?.role
           ? normalizeRole(String(appUser.role))
-          : Number(row.admin || 0) === 1
+          : Number(dolibarrUser?.admin || 0) === 1
             ? "admin"
-            : "employee";
-        if (!appUser && role !== "admin" && row.employee_category === "on_field") {
+            : "";
+        if (!role && dolibarrUser?.employee_category === "on_field") {
           role = "salesperson";
-        } else if (!appUser && role !== "admin" && row.employee_category === "fixed_location") {
+        } else if (!role && dolibarrUser?.employee_category === "fixed_location") {
           role = "employee";
-        } else if (!appUser && role !== "admin") {
-          // Fallback: decide from job title or the approved access request.
-          let mappedRole: string | null = null;
-          if (!mappedRole && row.job) {
-            const jobStr = String(row.job).toLowerCase();
-            if (jobStr.includes("on field") || jobStr.includes("sales")) {
-              mappedRole = "salesperson";
-            } else if (jobStr.includes("fixed") || jobStr.includes("office") || jobStr.includes("support") || jobStr.includes("hr")) {
-              mappedRole = "employee";
-            }
+        } else if (!role && dolibarrUser?.job) {
+          const jobStr = String(dolibarrUser.job).toLowerCase();
+          if (jobStr.includes("on field") || jobStr.includes("sales")) {
+            role = "salesperson";
+          } else if (jobStr.includes("fixed") || jobStr.includes("office") || jobStr.includes("support") || jobStr.includes("hr")) {
+            role = "employee";
           }
-          role = mappedRole || request.approvedRole || request.requestedRole || "salesperson";
         }
-        const finalRole = normalizeRole(role);
+        const finalRole = normalizeRole(role || request.approvedRole || request.requestedRole || "employee");
         const employeeCategory =
           finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
-
+        const rowid = normalizeWhitespace(String(dolibarrUser?.rowid || dolibarrUser?.id || ""));
+        const id = normalizeWhitespace(String(appUser?.id || rowid || `access_${request.id}`));
+        const phone = normalizeWhitespace(options?.phone || String(dolibarrUser?.user_mobile || dolibarrUser?.office_phone || ""));
+        const statut = options?.statut ?? dolibarrUser?.statut ?? 1;
         const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
         for (const assignedCompanyId of targetCompanyIds) {
           const company = companyById.get(assignedCompanyId);
-          const id = appUser?.id || row.id || `access_${request.id}`;
-          const key = `${assignedCompanyId}:${email || String(id) || displayName.toLowerCase()}`;
+          const key = `${assignedCompanyId}:${requestEmail || String(id) || displayName.toLowerCase()}`;
           mappedByScope.set(key, {
             id: String(id),
-            rowid: row.id ? String(row.id) : undefined,
+            rowid: rowid || undefined,
             user_id: String(id),
-            login: normalizeWhitespace(String(row.login || email.split("@")[0] || "")),
+            login,
             firstname: firstName || displayName.split(" ")[0] || "",
             lastname: lastName || displayName.split(" ").slice(1).join(" ") || "",
             name: displayName,
-            email,
-            phone: normalizeWhitespace(String(row.user_mobile || row.office_phone || "")),
+            email: requestEmail,
+            phone,
             town: "",
             address: "",
             zip: "",
-            statut: row.statut ?? 1,
-            status: row.statut ?? 1,
+            statut,
+            status: statut,
             companyId: assignedCompanyId,
             companyName:
               company?.name ||
@@ -306,12 +309,12 @@ app.get("/api/users", requireAuth, async (req, res) => {
               request.requestedCompanyName ||
               assignedCompanyId,
             assignedCompanyIds,
-            admin: Number(row.admin || 0),
-            employee: Number(row.employee || 0),
+            admin: finalRole === "admin" ? 1 : Number(dolibarrUser?.admin || 0),
+            employee: finalRole === "admin" ? 0 : 1,
             employeeCategory,
             employee_category: employeeCategory,
             role: finalRole,
-            department: normalizeDepartmentForRole(finalRole, request.requestedDepartment || row.job),
+            department: normalizeDepartmentForRole(finalRole, request.requestedDepartment || dolibarrUser?.job),
             branch:
               normalizeWhitespace(request.requestedBranch || "") ||
               company?.primaryBranch ||
@@ -323,11 +326,47 @@ app.get("/api/users", requireAuth, async (req, res) => {
             stockistName: request.assignedStockistName || undefined,
           });
         }
+        mappedAccessRequestIds.add(String(request.id));
+      };
+
+      for (const row of userRows || []) {
+        const email = normalizeEmail(String(row.email || ""));
+        const loginKey = normalizeLoginKey(String(row.login || ""));
+        const appUser = email ? appUserByEmail.get(email) || null : null;
+
+        // Find matching access request to get company assignments
+        const request = (email && requestByEmail.get(email)) || (loginKey && requestByLogin.get(loginKey)) || null;
+        if (!request) continue;
+
+        const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
+        if (!assignedCompanyIds.length) continue;
+        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
+
+        addRosterEntry(request, {
+          appUser,
+          dolibarrUser: row,
+          firstName: normalizeWhitespace(String(row.firstname || "")),
+          lastName: normalizeWhitespace(String(row.lastname || "")),
+          login: normalizeWhitespace(String(row.login || "")),
+          phone: normalizeWhitespace(String(row.user_mobile || row.office_phone || "")),
+          statut: row.statut ?? 1,
+        });
+      }
+
+      for (const request of approvedRequests) {
+        if (mappedAccessRequestIds.has(String(request.id))) continue;
+        const assignedCompanyIds = normalizeCompanyIds(request.assignedCompanyIds);
+        if (!assignedCompanyIds.length) continue;
+        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
+        addRosterEntry(request);
       }
 
       res.json({ items: Array.from(mappedByScope.values()) });
-    } catch (e) {
-      res.json({ items: [] });
+    } catch (error) {
+      console.error("Failed to list app users", error);
+      res.status(500).json({
+        message: error instanceof Error ? error.message : "Unable to load employees.",
+      });
     }
   });
 

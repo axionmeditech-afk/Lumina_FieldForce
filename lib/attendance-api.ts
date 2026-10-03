@@ -9,7 +9,11 @@ import {
   getSettings,
   setApiToken,
   setAttendanceQueue,
+  getCurrentUser,
+  addAttendance,
+  setCheckedIn,
 } from "@/lib/storage";
+import { notifyAutoCheckoutSynced } from "./attendance-notifications";
 import { beginGlobalLoading } from "@/lib/global-loading";
 
 const FALLBACK_API_BASE = "http://localhost:5000/api";
@@ -20,6 +24,17 @@ interface QueueItem {
   payload: AttendanceCheckPayload;
   queuedAt?: string;
 }
+
+let queueMutation: Promise<unknown> = Promise.resolve();
+function updateQueue(update: (items: QueueItem[]) => QueueItem[]): Promise<void> {
+  const operation = queueMutation.then(async () => {
+    const current = await getAttendanceQueue<QueueItem>();
+    await setAttendanceQueue(update(current));
+  });
+  queueMutation = operation.catch(() => undefined);
+  return operation;
+}
+let queueFlush: Promise<void> | null = null;
 
 export interface DolibarrUser {
   id?: number | string;
@@ -762,7 +777,7 @@ async function submitAttendanceAction(type: "checkin" | "checkout", payload: Att
     const record = await fetchJsonWithTimeout<AttendanceRecord>(`/attendance/${type}`, {
       method: "POST", skipGlobalLoading: automatic,
       body: JSON.stringify({ ...payload, requestId }),
-    }, 70000);
+    }, automatic ? 15000 : 70000);
     if (!automatic) await AsyncStorage.removeItem(key);
     return record;
   } catch (error) {
@@ -781,31 +796,27 @@ export async function attendanceCheckOut(payload: AttendanceCheckPayload): Promi
 export async function enqueueAttendanceAction(
   type: "checkin" | "checkout",
   payload: AttendanceCheckPayload
-): Promise<void> {
+): Promise<AttendanceCheckPayload> {
   const requestId = payload.requestId || Crypto.randomUUID();
-  const queue = await getAttendanceQueue<QueueItem & { _retries?: number }>();
-  const nextPayload = { ...payload, requestId };
-  const withoutDuplicate = queue.filter(
-    (entry) => !(entry.type === type && entry.payload.requestId === requestId)
-  );
-  withoutDuplicate.push({
-    type,
-    payload: nextPayload,
-    queuedAt: new Date().toISOString(),
-    _retries: 0,
+  let storedPayload = { ...payload, requestId };
+  await updateQueue(queue => {
+    const existing = queue.find(entry => entry.type === type && entry.payload.requestId === requestId);
+    if (existing && payload.actionSource === "geofence_exit") {
+      storedPayload = { ...existing.payload, requestId };
+      return queue;
+    }
+    return [...queue.filter(entry => !(entry.type === type && entry.payload.requestId === requestId)), {
+      type, payload: storedPayload, queuedAt: new Date().toISOString(),
+    }];
   });
-  await setAttendanceQueue(withoutDuplicate.slice(-50));
+  return storedPayload;
 }
 
 export async function removeQueuedAttendanceAction(
   type: "checkin" | "checkout",
   requestId: string
 ): Promise<void> {
-  const queue = await getAttendanceQueue<QueueItem & { _retries?: number }>();
-  const next = queue.filter(
-    (entry) => !(entry.type === type && entry.payload.requestId === requestId)
-  );
-  if (next.length !== queue.length) await setAttendanceQueue(next);
+  await updateQueue(queue => queue.filter(entry => !(entry.type === type && entry.payload.requestId === requestId)));
 }
 
 export async function getCompanyAttendanceToday(
@@ -891,19 +902,29 @@ const MAX_QUEUE_RETRIES = 5;
 const MAX_AUTO_CHECKOUT_QUEUE_AGE_MS = 30 * 60 * 60 * 1000;
 
 export async function flushAttendanceQueue(): Promise<void> {
+  if (queueFlush) return queueFlush;
+  queueFlush = flushAttendanceQueueOnce().finally(() => { queueFlush = null; });
+  return queueFlush;
+}
+
+async function flushAttendanceQueueOnce(): Promise<void> {
   const settings = await getSettings();
-  if (settings.offlineMode === "true" || settings.autoSync === "false") {
+  if (settings.offlineMode === "true") {
     return;
   }
 
+  await queueMutation;
+  const currentUser = await getCurrentUser();
+  if (!currentUser || !await getApiToken()) return;
   const queue = await getAttendanceQueue<QueueItem & { _retries?: number }>();
   if (!queue.length) return;
 
-  const remaining: (QueueItem & { _retries?: number })[] = [];
   for (let index = 0; index < queue.length; index += 1) {
     const entry = queue[index];
+    if (entry.payload.userId !== currentUser.id) continue;
     const retries = entry._retries ?? 0;
     const automatic = entry.type === "checkout" && entry.payload.actionSource === "geofence_exit";
+    if (!automatic && settings.autoSync === "false") continue;
     const queuedAtMs = Date.parse(entry.queuedAt || "");
     const tooOld =
       automatic &&
@@ -913,25 +934,27 @@ export async function flushAttendanceQueue(): Promise<void> {
     // geofence checkout is bounded by age instead, because it may need to sync when
     // the employee opens the app later after poor network/background restrictions.
     if ((!automatic && retries >= MAX_QUEUE_RETRIES) || tooOld) {
-      console.warn(`Dropping queued ${entry.type} after ${retries} failed attempts`, entry.payload.requestId);
+      if (!automatic && entry.payload.requestId) await removeQueuedAttendanceAction(entry.type, entry.payload.requestId);
+      // Keep expired automatic evidence for recovery/review instead of discarding it.
       continue;
     }
     try {
       if (entry.type === "checkin") {
         await attendanceCheckIn(entry.payload);
       } else {
-        await attendanceCheckOut(entry.payload);
+        const record = await attendanceCheckOut(entry.payload);
+        await addAttendance(record);
+        if ((await getCurrentUser())?.id === entry.payload.userId) await setCheckedIn(false);
+        if (automatic) await notifyAutoCheckoutSynced({ detectedAt: entry.payload.capturedAtClient }).catch(console.warn);
       }
+      if (entry.payload.requestId) await removeQueuedAttendanceAction(entry.type, entry.payload.requestId);
     } catch (error) {
-      remaining.push({ ...entry, _retries: retries + 1 });
-      if (isApiAuthRequiredError(error)) {
-        // Auth required — preserve remaining items as-is (no retry increment)
-        remaining.push(...queue.slice(index + 1));
-        break;
-      }
+      await updateQueue(items => items.map(item => item.type === entry.type && item.payload.requestId === entry.payload.requestId
+        ? { ...item, _retries: retries + 1 } : item));
+      console.warn("Attendance sync pending", error instanceof Error ? error.message : error);
+      break;
     }
   }
-  await setAttendanceQueue(remaining);
 }
 
 

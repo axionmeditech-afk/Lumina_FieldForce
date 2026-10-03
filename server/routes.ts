@@ -3105,6 +3105,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   registerAttendanceActionRoutes(app, {
+    getGeofenceById,
     withAttendanceLock, getAttendanceByIdFromMySql, getRequestUser, normalizeCompanyIds, prepareAttendance: ensureAttendanceTable,
     requireAuth,
     parseCheckPayload,

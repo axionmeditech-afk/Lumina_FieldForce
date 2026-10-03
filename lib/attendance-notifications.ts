@@ -83,12 +83,13 @@ export async function notifyAutoCheckoutPending(options: {
   await notifications.scheduleNotificationAsync({
     content: {
       title: "Checkout detected outside office",
-      body: `You left the office at ${timeLabel}${distanceLabel}. Open Lumina once to sync checkout.`,
+      body: `Office exit confirmed at ${timeLabel}${distanceLabel}. Checkout is saved on this phone and syncing automatically.`,
       sound: "default",
       priority: notifications.AndroidNotificationPriority.HIGH,
       data: { screen: "attendance", kind: "auto_checkout_pending", detectedAt: options.detectedAt },
     },
-    trigger: null,
+    identifier: "attendance_auto_checkout",
+    trigger: Platform.OS === "android" ? { channelId: ATTENDANCE_CHANNEL_ID } : null,
   });
 }
 
@@ -112,6 +113,7 @@ export async function notifyAutoCheckoutSynced(options: {
       priority: notifications.AndroidNotificationPriority.DEFAULT,
       data: { screen: "attendance", kind: "auto_checkout_synced" },
     },
-    trigger: null,
+    identifier: "attendance_auto_checkout",
+    trigger: Platform.OS === "android" ? { channelId: ATTENDANCE_CHANNEL_ID } : null,
   });
 }

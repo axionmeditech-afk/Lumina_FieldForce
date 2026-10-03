@@ -50,7 +50,7 @@ import {
   notifyAutoCheckoutSynced,
 } from "@/lib/attendance-notifications";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
-import { startAttendanceGeofence, stopAttendanceGeofence, retryPendingAttendanceExit } from "@/lib/attendance-background";
+import { startAttendanceGeofence, stopAttendanceGeofence } from "@/lib/attendance-background";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 import {
@@ -1317,7 +1317,7 @@ function AttendanceScreenContent() {
       const requestId = `auto_exit_${active.id}`;
       try {
         const security = await getClientSecurityStatus(false);
-        const sampleWindowMs = Math.max(getAutoCheckoutSampleWindowMs(samples), AUTO_CHECKOUT_GRACE_MS);
+        const sampleWindowMs = getAutoCheckoutSampleWindowMs(samples);
         const payload: AttendanceCheckPayload = {
           requestId,
           actionSource: "geofence_exit",
@@ -1349,12 +1349,13 @@ function AttendanceScreenContent() {
           biometricType: null,
           biometricFailureReason: null,
         };
-        await enqueueAttendanceAction("checkout", payload);
-        const record = await attendanceCheckOut(payload);
-        await removeQueuedAttendanceAction("checkout", requestId);
+        const queuedPayload = await enqueueAttendanceAction("checkout", payload);
+        void notifyAutoCheckoutPending({ detectedAt: queuedPayload.capturedAtClient!, distanceMeters: queuedPayload.geofenceDistanceMeters }).catch(console.warn);
+        const record = await attendanceCheckOut(queuedPayload);
         await addAttendance(record);
         await setCheckedIn(false);
-        await notifyAutoCheckoutSynced({ detectedAt: payload.capturedAtClient }).catch(() => undefined);
+        await removeQueuedAttendanceAction("checkout", requestId);
+        await notifyAutoCheckoutSynced({ detectedAt: queuedPayload.capturedAtClient }).catch(() => undefined);
         activeAttendanceRef.current = null;
         setCheckedInState(false);
         clearForegroundAutoCheckout("Auto-checkout completed after leaving office geofence.");
@@ -1362,11 +1363,6 @@ function AttendanceScreenContent() {
         void loadBaseData();
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } catch (error) {
-        const latestSample = getLatestAutoCheckoutSample(samples);
-        await notifyAutoCheckoutPending({
-          detectedAt: latestSample ? new Date(latestSample.timestamp).toISOString() : new Date().toISOString(),
-          distanceMeters: latestSample?.distanceMeters ?? null,
-        }).catch(() => undefined);
         setAutoCheckoutStatus(
           error instanceof Error
             ? `Auto-checkout queued. Will retry when connection/session is ready. ${error.message}`
@@ -1381,7 +1377,7 @@ function AttendanceScreenContent() {
   );
 
   const processForegroundAutoCheckout = useCallback(
-    async (location: LocationObject, nextEvaluation: GeofenceEvaluation) => {
+    async (location: LocationObject) => {
       if (!checkedInState || !user?.id || isSuperAdminAttendanceExempt) {
         clearForegroundAutoCheckout(null);
         return;
@@ -1391,11 +1387,7 @@ function AttendanceScreenContent() {
         setAutoCheckoutStatus("Auto-checkout is waiting for the latest check-in session.");
         return;
       }
-      const zone =
-        geofences.find((item) => item.id === active.geofenceId) ||
-        nextEvaluation.activeZone ||
-        geofences[0] ||
-        null;
+      const zone = geofences.find((item) => item.id === active.geofenceId) || null;
       if (!zone) {
         setAutoCheckoutStatus("Auto-checkout needs an assigned office geofence.");
         return;
@@ -1438,7 +1430,7 @@ function AttendanceScreenContent() {
       const elapsedMs = Date.now() - autoCheckoutFirstOutsideAtRef.current;
       const ready =
         nextSamples.length >= AUTO_CHECKOUT_MIN_SAMPLES &&
-        (elapsedMs >= AUTO_CHECKOUT_GRACE_MS || nextSamples.length >= 3);
+        (getAutoCheckoutSampleWindowMs(nextSamples) >= AUTO_CHECKOUT_GRACE_MS || nextSamples.length >= 3);
       const remainingSeconds = Math.max(0, Math.ceil((AUTO_CHECKOUT_GRACE_MS - elapsedMs) / 1000));
       setAutoCheckoutStatus(
         ready
@@ -1473,7 +1465,7 @@ function AttendanceScreenContent() {
       setEvaluation(nextEvaluation);
       setGpsLoading(false);
       setLocationReady(true);
-      await processForegroundAutoCheckout(effectiveLocation, nextEvaluation);
+      await processForegroundAutoCheckout(effectiveLocation);
 
       const shouldPrompt =
         isConfirmedInsideZone(nextEvaluation) &&

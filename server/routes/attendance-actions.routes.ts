@@ -120,13 +120,17 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             Boolean(active?.deviceId) &&
             active.deviceId !== payload.deviceId;
           if (automatic) {
-            const activeZone = zones.find((item: any) => item.id === active.geofenceId);
+            const activeZone = zones.find((item: any) => item.id === active.geofenceId) ||
+              (active.geofenceId && deps.getGeofenceById ? await deps.getGeofenceById(active.geofenceId) : null);
             const exitDecision = activeZone
               ? evaluateAutoCheckoutExit(activeZone, payload.latitude, payload.longitude, accuracy)
               : null;
             if (!req.auth?.deviceId || active.deviceId !== req.auth.deviceId || payload.activeAttendanceId !== active.id ||
-                !activeZone || !exitDecision?.outside) {
+                !activeZone || (active.companyId && activeZone.companyId !== active.companyId) || !exitDecision?.outside) {
               reject("Automatic checkout requires a verified exit from the active check-in office."); return;
+            }
+            if (capturedAt.getTime() < Date.parse(active.timestamp)) {
+              reject("Checkout evidence predates the active check-in."); return;
             }
           }
           if (type === "checkin" && !zone.insideConfirmed) {
@@ -148,7 +152,8 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             companyId: (type === "checkout" ? active.companyId : zone.activeZone?.companyId) || companyId || undefined,
             type, timestamp: eventTimestamp, timestampServer: now,
             location: { lat: payload.latitude, lng: payload.longitude },
-            geofenceId: zone.activeZone?.id || null, geofenceName: zone.activeZone?.name || null,
+            geofenceId: type === "checkout" ? active.geofenceId : zone.activeZone?.id || null,
+            geofenceName: type === "checkout" ? active.geofenceName : zone.activeZone?.name || null,
             deviceId: payload.deviceId, isInsideGeofence: zone.insideConfirmed,
             notes, source: "mobile", approvalStatus: "approved",
           };
