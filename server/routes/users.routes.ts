@@ -269,9 +269,13 @@ app.get("/api/users", requireAuth, async (req, res) => {
 
         let role: string = appUser?.role
           ? normalizeRole(String(appUser.role))
-          : Number(dolibarrUser?.admin || 0) === 1
-            ? "admin"
-            : "";
+          : request.approvedRole
+            ? normalizeRole(String(request.approvedRole))
+            : request.requestedRole
+              ? normalizeRole(String(request.requestedRole))
+              : Number(dolibarrUser?.admin || 0) === 1
+                ? "admin"
+                : "";
         if (!role && dolibarrUser?.employee_category === "on_field") {
           role = "salesperson";
         } else if (!role && dolibarrUser?.employee_category === "fixed_location") {
@@ -284,7 +288,7 @@ app.get("/api/users", requireAuth, async (req, res) => {
             role = "employee";
           }
         }
-        const finalRole = normalizeRole(role || request.approvedRole || request.requestedRole || "employee");
+        const finalRole = normalizeRole(role || "employee");
         const employeeCategory =
           finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
         const rowid = normalizeWhitespace(String(dolibarrUser?.rowid || dolibarrUser?.id || ""));
@@ -317,7 +321,7 @@ app.get("/api/users", requireAuth, async (req, res) => {
               request.requestedCompanyName ||
               assignedCompanyId,
             assignedCompanyIds,
-            admin: finalRole === "admin" ? 1 : Number(dolibarrUser?.admin || 0),
+            admin: finalRole === "admin" ? 1 : 0,
             employee: finalRole === "admin" ? 0 : 1,
             employeeCategory,
             employee_category: employeeCategory,
