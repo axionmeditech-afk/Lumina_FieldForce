@@ -41,6 +41,7 @@
         "ACCESS_BACKGROUND_LOCATION",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
+        "WAKE_LOCK",
         "POST_NOTIFICATIONS"
       ],
       "adaptiveIcon": {
@@ -63,6 +64,7 @@
     },
     "plugins": [
       "expo-router",
+      "react-native-maps",
       "expo-font",
       "expo-web-browser",
       [
@@ -81,7 +83,8 @@
           "locationAlwaysAndWhenInUsePermission": "Allow background location to automatically check out when you leave your office during an active attendance session."
         }
       ],
-      "expo-notifications"
+      "expo-notifications",
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true,
