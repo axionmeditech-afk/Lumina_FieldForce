@@ -68,24 +68,19 @@ workflows:
           echo "Uploading $IPA_PATH using Fastlane to completely bypass altool..."
           
           mkdir -p fastlane
+          # Save the key to a file exactly as provided by Codemagic
+          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > fastlane/AuthKey.p8
+          # If it has literal \n (escaped), replace them with actual newlines safely
+          perl -pi -e 's/\\n/\n/g' fastlane/AuthKey.p8
+          
           cat <<'EOF' > fastlane/Fastfile
           default_platform(:ios)
           platform :ios do
             lane :deploy do
-              # Safely handle the private key content by forcibly reconstructing the PEM format
-              # This fixes the 'invalid curve name (OpenSSL::PKey::PKeyError)' error
-              raw_key = ENV["APP_STORE_CONNECT_PRIVATE_KEY"] || ""
-              key_body = raw_key.gsub(/-----BEGIN PRIVATE KEY-----/, "")
-                                .gsub(/-----END PRIVATE KEY-----/, "")
-                                .gsub(/\s+/, "")
-                                .gsub(/\\n/, "")
-              folded_body = key_body.scan(/.{1,64}/).join("\n")
-              fixed_key = "-----BEGIN PRIVATE KEY-----\n#{folded_body}\n-----END PRIVATE KEY-----"
-              
               app_store_connect_api_key(
                 key_id: ENV["APP_STORE_CONNECT_KEY_IDENTIFIER"],
                 issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
-                key_content: fixed_key,
+                key_filepath: "fastlane/AuthKey.p8",
                 in_house: false
               )
               
