@@ -64,11 +64,21 @@ workflows:
       - name: Publish to App Store Connect manually
         script: |
           set -e
-          echo "Setting up App Store Connect API Key..."
-          mkdir -p ~/.appstoreconnect/private_keys
-          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
-          
           IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
+          
+          echo "Attempting upload with app-store-connect CLI and Explicit Apple ID..."
+          if app-store-connect publish --path "$IPA_PATH" --apple-id "6761368486"; then
+            echo "Successfully uploaded using app-store-connect CLI!"
+            exit 0
+          fi
+          
+          echo "app-store-connect CLI failed. Falling back to explicit xcrun altool..."
+          mkdir -p ~/.appstoreconnect/private_keys
+          
+          # Safely write the private key handling both literal \n and real newlines
+          printf "%b\n" "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
+          
           echo "Uploading $IPA_PATH using Explicit Apple ID 6761368486..."
           xcrun altool --upload-app -f "$IPA_PATH" -t ios --apiKey "$APP_STORE_CONNECT_KEY_IDENTIFIER" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" --app-apple-id "6761368486"
     artifacts:
