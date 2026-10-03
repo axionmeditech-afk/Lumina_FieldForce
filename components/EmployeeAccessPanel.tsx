@@ -312,11 +312,12 @@ export function EmployeeAccessPanel() {
     const employeeKey = id || email;
     const role = selectedRoleByEmployee[employeeKey] || getEmployeeRole(employee);
     const companyIds = selectedCompanyIdsByEmployee[employeeKey] || [];
+    const validCompanyIds = Array.from(new Set(companyIds.filter((companyId) => companyById.has(companyId))));
     if (!employeeKey) {
       Alert.alert("Cannot update", "This employee record is missing both id and email.");
       return;
     }
-    if (!companyIds.length) {
+    if (!validCompanyIds.length) {
       Alert.alert("Company required", "Select at least one company before saving access.");
       return;
     }
@@ -329,7 +330,7 @@ export function EmployeeAccessPanel() {
           login: employee.login ? String(employee.login) : null,
           name,
           role,
-          companyIds,
+          companyIds: validCompanyIds,
         });
         await Promise.all([load(), refreshSession()]);
       } catch (event) {

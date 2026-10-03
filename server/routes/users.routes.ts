@@ -762,13 +762,21 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
 
     try {
       const selectedCompaniesById = await getCompanyProfilesByIds(nextCompanyIds);
+      const validCompanyIds = nextCompanyIds.filter((companyId: string) => selectedCompaniesById.has(companyId));
       const missingCompanyIds = nextCompanyIds.filter((companyId: string) => !selectedCompaniesById.has(companyId));
-      if (missingCompanyIds.length > 0) {
+      if (validCompanyIds.length === 0) {
         res.status(400).json({ message: "One or more selected companies are invalid." });
         return;
       }
+      if (missingCompanyIds.length > 0) {
+        console.warn("Ignoring stale company ids during access update", {
+          targetId,
+          targetEmail,
+          missingCompanyIds,
+        });
+      }
 
-      const primaryCompany = selectedCompaniesById.get(nextCompanyIds[0]);
+      const primaryCompany = selectedCompaniesById.get(validCompanyIds[0]);
       if (!primaryCompany) {
         res.status(400).json({ message: "Primary company is invalid." });
         return;
@@ -866,7 +874,7 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
            WHERE LOWER(TRIM(email)) = ?`,
           [
             nextRole,
-            JSON.stringify(nextCompanyIds),
+            JSON.stringify(validCompanyIds),
             normalizeWhitespace(requestUser?.id || req.auth?.sub || "admin"),
             normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin"),
             resolvedEmail,
@@ -874,7 +882,7 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
         ).catch(() => undefined);
       }
 
-      const companyIdsJson = JSON.stringify(nextCompanyIds);
+      const companyIdsJson = JSON.stringify(validCompanyIds);
       const department = normalizeDepartmentForRole(nextRole, String(dolibarrUser?.job || ""));
       const updateValues = [
         nextRole,
@@ -912,13 +920,13 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
         resolvedLogin,
         targetId,
       ].map((item) => normalizeWhitespace(String(item || ""))).filter(Boolean)));
-      await syncWorkspaceGeofenceAccess(conn, geofenceIdentityIds, nextCompanyIds).catch((error: unknown) => {
+      await syncWorkspaceGeofenceAccess(conn, geofenceIdentityIds, validCompanyIds).catch((error: unknown) => {
         console.warn("Workspace geofence sync failed", error);
       });
       await closeOpenAttendanceOutsideWorkspaceAccess(
         conn,
         geofenceIdentityIds,
-        nextCompanyIds,
+        validCompanyIds,
         normalizeWhitespace(requestUser?.name || req.auth?.email || "Admin"),
       );
 
@@ -932,7 +940,7 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
           role: "admin",
           companyId: primaryCompany.id,
           companyName: primaryCompany.name,
-          companyIds: nextCompanyIds,
+          companyIds: validCompanyIds,
           department,
           branch: primaryCompany.primaryBranch || requestUser?.branch || "Main Branch",
           phone: "",
@@ -949,7 +957,7 @@ app.patch("/api/users/:id/access", requireAuth, requireRoles("admin"), async (re
           role: nextRole,
           companyId: primaryCompany.id,
           companyName: primaryCompany.name,
-          companyIds: nextCompanyIds,
+          companyIds: validCompanyIds,
         },
       });
     } catch (error) {
