@@ -2,7 +2,7 @@ import * as Crypto from "expo-crypto";
 import { isUsableLocationSample } from "@/lib/location-evidence";
 import { useIsFocused } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, Modal, ActivityIndicator, AppState, Alert, Linking, TextInput } from "react-native";
+import { View, Text, StyleSheet, ScrollView, Pressable, Modal, ActivityIndicator, AppState, Alert, Linking } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import * as Haptics from "expo-haptics";
@@ -14,7 +14,6 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAppTheme } from "@/contexts/ThemeContext";
 import { AppCanvas } from "@/components/AppCanvas";
 import { DrawerToggleButton } from "@/components/DrawerToggleButton";
-import { GeofenceMap, type GeofenceMapPoint } from "@/components/GeofenceMap";
 import { evaluateAutoCheckoutExit, evaluateGeofenceStatus, formatDistance } from "@/lib/geofence";
 import {
   addAttendance,
@@ -33,7 +32,7 @@ import {
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import type { AppUser, AttendanceCheckPayload, AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
-import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, createGeofence as createGeofenceRemote, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, getCompanyProfilesRemote, removeQueuedAttendanceAction, searchMapplsAutosuggest, searchMapplsTextSearch, updateGeofence as updateGeofenceRemote, type DolibarrUser } from "@/lib/attendance-api";
+import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, getCompanyProfilesRemote, removeQueuedAttendanceAction, type DolibarrUser } from "@/lib/attendance-api";
 import {
   ensureLocationServicesEnabled,
   getCurrentPositionWithTimeout,
@@ -70,9 +69,6 @@ const AUTO_CHECKOUT_GRACE_MS = 30 * 1000;
 const AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS = 2 * 60 * 1000;
 const AUTO_CHECKOUT_MIN_SAMPLES = 2;
 const OFFICE_ATTENDANCE_RADIUS_METERS = 500;
-const OFFICE_LOCATION_SEARCH_LIMIT = 15;
-const OFFICE_LOCATION_SEARCH_MIN_CHARS = 2;
-const OFFICE_LOCATION_SEARCH_DEBOUNCE_MS = 400;
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
@@ -83,14 +79,6 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
 const ADMIN_ATTENDANCE_REFRESH_MS = Math.max(30000, readPositiveIntegerEnv("EXPO_PUBLIC_ATTENDANCE_REFRESH_MS", 30000));
 
 type BannerType = "inside" | "outside" | "weak" | "boundary" | "loading";
-
-type OfficeLocationSearchResult = {
-  id: string;
-  label: string;
-  address: string | null;
-  latitude: number;
-  longitude: number;
-};
 
 type AdminAttendanceStatus = {
   id: string;
@@ -314,36 +302,6 @@ function appendAutoCheckoutSample(
   }
   byKey.set(`${sample.timestamp}:${sample.latitude.toFixed(6)}:${sample.longitude.toFixed(6)}`, sample);
   return Array.from(byKey.values()).sort((a, b) => a.timestamp - b.timestamp).slice(-6);
-}
-
-function isFiniteCoordinate(latitude: unknown, longitude: unknown): boolean {
-  return (
-    typeof latitude === "number" &&
-    Number.isFinite(latitude) &&
-    Math.abs(latitude) <= 90 &&
-    typeof longitude === "number" &&
-    Number.isFinite(longitude) &&
-    Math.abs(longitude) <= 180
-  );
-}
-
-function makeOfficeLocationId(prefix: string, index: number): string {
-  return `${prefix}_${Date.now()}_${index}`;
-}
-
-function getOfficeLocationResultKey(result: OfficeLocationSearchResult): string {
-  return `${result.latitude.toFixed(5)},${result.longitude.toFixed(5)}|${result.label.trim().toLowerCase()}`;
-}
-
-function mergeOfficeLocationResults(
-  current: OfficeLocationSearchResult[],
-  next: OfficeLocationSearchResult[]
-): OfficeLocationSearchResult[] {
-  const byKey = new Map<string, OfficeLocationSearchResult>();
-  for (const result of [...current, ...next]) {
-    byKey.set(getOfficeLocationResultKey(result), result);
-  }
-  return Array.from(byKey.values()).slice(0, OFFICE_LOCATION_SEARCH_LIMIT);
 }
 
 function makeLocalAttendanceRecord(
@@ -1005,14 +963,6 @@ function AttendanceScreenContent() {
   const [autoPromptVisible, setAutoPromptVisible] = useState(false);
   const [locationReady, setLocationReady] = useState(false);
   const [officeZone, setOfficeZone] = useState<Geofence | null>(null);
-  const [officeLocationName, setOfficeLocationName] = useState("");
-  const [officeSearchQuery, setOfficeSearchQuery] = useState("");
-  const [officeSearchResults, setOfficeSearchResults] = useState<OfficeLocationSearchResult[]>([]);
-  const [officeSearchBusy, setOfficeSearchBusy] = useState(false);
-  const [officeLocationDraft, setOfficeLocationDraft] = useState<OfficeLocationSearchResult | null>(null);
-  const [adminCurrentLocation, setAdminCurrentLocation] = useState<OfficeLocationSearchResult | null>(null);
-  const [adminCurrentLocationBusy, setAdminCurrentLocationBusy] = useState(false);
-  const [officeSaving, setOfficeSaving] = useState(false);
   const prevInsideRef = useRef(false);
   const latestEvidenceRef = useRef<{
     sampleCount: number;
@@ -1024,7 +974,6 @@ function AttendanceScreenContent() {
   const [lastStoredLocationLabel, setLastStoredLocationLabel] = useState<string | null>(null);
   const strictWarmupInFlightRef = useRef(false);
   const lastStrictWarmupAtRef = useRef(0);
-  const officeSearchRequestIdRef = useRef(0);
   const loadBaseDataRequestRef = useRef(0);
   const loadInFlightRef = useRef(false);
   const reloadPendingRef = useRef(false);
@@ -1273,16 +1222,6 @@ function AttendanceScreenContent() {
       zones.find((zone) => zone.companyId === activeCompanyId && zone.name === `${activeCompanyName} Main Office`) ||
       null;
     setOfficeZone(currentOfficeZone);
-    if (currentOfficeZone) {
-      setOfficeLocationName(currentOfficeZone.name);
-      setOfficeLocationDraft({
-        id: currentOfficeZone.id,
-        label: currentOfficeZone.name,
-        address: null,
-        latitude: currentOfficeZone.latitude,
-        longitude: currentOfficeZone.longitude,
-      });
-    }
   }, [activeCompanyId, activeCompanyName]);
 
   useEffect(() => {
@@ -1771,305 +1710,6 @@ function AttendanceScreenContent() {
     return refreshLocation(true);
   }, [refreshLocation]);
 
-  const searchOfficeLocations = useCallback(async (
-    queryInput?: string,
-    options?: { showAlerts?: boolean; allowDeviceGeocode?: boolean }
-  ) => {
-    const query = (queryInput ?? officeSearchQuery).trim();
-    const showAlerts = options?.showAlerts ?? false;
-    const allowDeviceGeocode = options?.allowDeviceGeocode ?? showAlerts;
-    const requestId = officeSearchRequestIdRef.current + 1;
-    officeSearchRequestIdRef.current = requestId;
-
-    if (query.length < OFFICE_LOCATION_SEARCH_MIN_CHARS) {
-      setOfficeSearchResults([]);
-      if (showAlerts) {
-        Alert.alert("Search Required", "Enter at least 2 characters of the office name, area, landmark, or address.");
-      }
-      return;
-    }
-
-    setOfficeSearchBusy(true);
-    try {
-      let results: OfficeLocationSearchResult[] = [];
-      let mapplsFailureMessage = "";
-
-      try {
-        const autosuggest = await searchMapplsAutosuggest(query, {
-          region: "ind",
-          limit: OFFICE_LOCATION_SEARCH_LIMIT,
-        });
-        const autosuggestResults = (autosuggest.suggestions || [])
-          .map((suggestion, index): OfficeLocationSearchResult | null => {
-            const latitude = suggestion.latitude;
-            const longitude = suggestion.longitude;
-            if (!isFiniteCoordinate(latitude, longitude)) return null;
-            return {
-              id: suggestion.id || makeOfficeLocationId("office_mappls", index),
-              label: suggestion.label,
-              address: suggestion.address,
-              latitude: latitude as number,
-              longitude: longitude as number,
-            };
-          })
-          .filter((item): item is OfficeLocationSearchResult => Boolean(item));
-        results = mergeOfficeLocationResults(results, autosuggestResults);
-
-        const textSearch = await searchMapplsTextSearch(query, {
-          region: "ind",
-          limit: OFFICE_LOCATION_SEARCH_LIMIT,
-        });
-        const textSearchResults = (textSearch.suggestions || [])
-          .map((suggestion, index): OfficeLocationSearchResult | null => {
-            const latitude = suggestion.latitude;
-            const longitude = suggestion.longitude;
-            if (!isFiniteCoordinate(latitude, longitude)) return null;
-            return {
-              id: suggestion.id || makeOfficeLocationId("office_mappls_text", index),
-              label: suggestion.label,
-              address: suggestion.address,
-              latitude: latitude as number,
-              longitude: longitude as number,
-            };
-          })
-          .filter((item): item is OfficeLocationSearchResult => Boolean(item));
-        results = mergeOfficeLocationResults(results, textSearchResults);
-
-        if (!results.length && textSearch.error) {
-          mapplsFailureMessage = textSearch.error;
-        } else if (!results.length && autosuggest.error) {
-          mapplsFailureMessage = autosuggest.error;
-        }
-      } catch (error) {
-        mapplsFailureMessage =
-          error instanceof Error ? error.message : "Mappls place search is unavailable right now.";
-      }
-
-      try {
-        if (query.length >= 4 && results.length < OFFICE_LOCATION_SEARCH_LIMIT) {
-          const params = new URLSearchParams({
-            q: query,
-            format: "jsonv2",
-            addressdetails: "1",
-            limit: String(Math.max(OFFICE_LOCATION_SEARCH_LIMIT, 10)),
-            countrycodes: "in",
-          });
-          const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              "Accept-Language": "en-IN,en",
-              "User-Agent": "LuminaFieldForce/1.0 (office-geofence)",
-            },
-          });
-          if (response.ok) {
-            const payload = (await response.json()) as {
-              lat?: string;
-              lon?: string;
-              name?: string;
-              display_name?: string;
-            }[];
-            if (Array.isArray(payload)) {
-              const osmResults = payload
-                .map((item, index): OfficeLocationSearchResult | null => {
-                  const latitude = Number.parseFloat(item.lat || "");
-                  const longitude = Number.parseFloat(item.lon || "");
-                  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-                  const displayName = (item.display_name || "").trim();
-                  return {
-                    id: makeOfficeLocationId("office_osm", index),
-                    label: (item.name || "").trim() || displayName.split(",")[0]?.trim() || query,
-                    address: displayName || null,
-                    latitude,
-                    longitude,
-                  };
-                })
-                .filter((item): item is OfficeLocationSearchResult => Boolean(item));
-              results = mergeOfficeLocationResults(results, osmResults);
-            }
-          }
-        }
-      } catch {
-        // fallback below
-      }
-
-      if (!results.length && allowDeviceGeocode) {
-        const geocoded = await ExpoLocation.geocodeAsync(query);
-        const deviceResults = geocoded
-          .slice(0, OFFICE_LOCATION_SEARCH_LIMIT)
-          .map((entry, index): OfficeLocationSearchResult => ({
-            id: makeOfficeLocationId("office_geo", index),
-            label: query,
-            address: null,
-            latitude: entry.latitude,
-            longitude: entry.longitude,
-          }));
-        results = mergeOfficeLocationResults(results, deviceResults);
-      }
-
-      if (officeSearchRequestIdRef.current !== requestId) return;
-      setOfficeSearchResults(results);
-      if (!results.length && showAlerts) {
-        const suffix = mapplsFailureMessage ? `\n\nMappls: ${mapplsFailureMessage}` : "";
-        Alert.alert("No Results", `No matching office locations found. Try a more specific address.${suffix}`);
-      }
-    } catch (error) {
-      if (showAlerts) {
-        Alert.alert(
-          "Search Failed",
-          error instanceof Error ? error.message : "Unable to search office location right now."
-        );
-      }
-    } finally {
-      if (officeSearchRequestIdRef.current === requestId) {
-        setOfficeSearchBusy(false);
-      }
-    }
-  }, [officeSearchQuery]);
-
-  useEffect(() => {
-    if (!isAdminAttendanceManager) return;
-    const query = officeSearchQuery.trim();
-    if (query.length < OFFICE_LOCATION_SEARCH_MIN_CHARS) {
-      officeSearchRequestIdRef.current += 1;
-      const timer = setTimeout(() => {
-        setOfficeSearchResults([]);
-        setOfficeSearchBusy(false);
-      }, 0);
-      return () => clearTimeout(timer);
-    }
-
-    const timer = setTimeout(() => {
-      void searchOfficeLocations(query, { showAlerts: false, allowDeviceGeocode: false });
-    }, OFFICE_LOCATION_SEARCH_DEBOUNCE_MS);
-
-    return () => clearTimeout(timer);
-  }, [isAdminAttendanceManager, officeSearchQuery, searchOfficeLocations]);
-
-  const captureAdminCurrentLocation = useCallback(async () => {
-    if (!isAdminAttendanceManager) return;
-    setAdminCurrentLocationBusy(true);
-    try {
-      const permission = await requestLocationPermissionBundle();
-      if (!permission.foreground) {
-        if (!permission.foregroundCanAskAgain) {
-          showPermissionBlockedAlert();
-        } else {
-          Alert.alert("Location Required", "Allow location permission to show your current position on the map.");
-        }
-        return;
-      }
-
-      const gpsEnabled = await ensureLocationServicesEnabled();
-      if (!gpsEnabled) {
-        Alert.alert("Turn On GPS", "Please enable device location services and try again.");
-        return;
-      }
-
-      const { location: position } = await getVerifiedLocationEvidence({ minAccuracyMeters: 50, requiredStableSamples: 2, maxAttempts: 6 });
-      const accuracy =
-        typeof position.coords.accuracy === "number" && Number.isFinite(position.coords.accuracy)
-          ? Math.round(position.coords.accuracy)
-          : null;
-      const currentLocation: OfficeLocationSearchResult = {
-        id: "admin_current_location",
-        label: "Current Location",
-        address: accuracy === null ? null : `GPS accuracy +/-${accuracy}m`,
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-      };
-      const currentLocationDraft: OfficeLocationSearchResult = {
-        ...currentLocation,
-        id: "admin_current_location_draft",
-        label: officeLocationName.trim() || `${activeCompanyName || "Company"} Main Office`,
-      };
-      setAdminCurrentLocation(currentLocation);
-      setOfficeLocationDraft(currentLocationDraft);
-    } catch (error) {
-      Alert.alert(
-        "Current Location Failed",
-        error instanceof Error ? error.message : "Unable to fetch current location."
-      );
-    } finally {
-      setAdminCurrentLocationBusy(false);
-    }
-  }, [activeCompanyName, isAdminAttendanceManager, officeLocationName, showPermissionBlockedAlert]);
-
-  const saveOfficeLocation = useCallback(async (selectedLocation: OfficeLocationSearchResult) => {
-    if (!user?.id || !company?.id || !isAdminAttendanceManager) return;
-    setOfficeSaving(true);
-    try {
-      const employees = await getEmployees();
-      const assignedEmployeeIds = employees
-        .filter((employee) => employee.role === "employee")
-        .map((employee) => employee.id);
-      const now = new Date().toISOString();
-      const officeName = officeLocationName.trim() || selectedLocation.label || `${company.name || "Company"} Main Office`;
-      const nextOfficeZone: Geofence = {
-        id: officeZone?.id || `office_${company.id}`,
-        companyId: company.id,
-        name: officeName,
-        radiusMeters: OFFICE_ATTENDANCE_RADIUS_METERS,
-        latitude: selectedLocation.latitude,
-        longitude: selectedLocation.longitude,
-        assignedEmployeeIds,
-        isActive: true,
-        allowOverride: false,
-        workingHoursStart: officeZone?.workingHoursStart ?? null,
-        workingHoursEnd: officeZone?.workingHoursEnd ?? null,
-        createdAt: officeZone?.createdAt || now,
-        updatedAt: now,
-      };
-
-      try {
-        if (officeZone?.id) {
-          await updateGeofenceRemote(nextOfficeZone.id, nextOfficeZone);
-        } else {
-          await createGeofenceRemote(nextOfficeZone);
-        }
-      } catch (error) { throw error; }
-      await upsertGeofence(nextOfficeZone);
-      await loadGeofenceAssignments();
-      await updateCompany({
-        attendanceZoneLabel: nextOfficeZone.name,
-        primaryBranch: company.primaryBranch || "Main Branch",
-      });
-      setOfficeZone(nextOfficeZone);
-      setOfficeLocationName(officeName);
-      setOfficeSearchResults([]);
-      setOfficeLocationDraft({
-        ...selectedLocation,
-        label: officeName,
-      });
-      Alert.alert(
-        "Office Location Saved",
-        `Employee check-in is now enabled within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of ${nextOfficeZone.name}.`
-      );
-    } catch (error) {
-      Alert.alert(
-        "Office Location Failed",
-        error instanceof Error ? error.message : "Unable to save office location."
-      );
-    } finally {
-      setOfficeSaving(false);
-    }
-  }, [
-    company,
-    isAdminAttendanceManager,
-    loadGeofenceAssignments,
-    officeLocationName,
-    officeZone,
-    updateCompany,
-    user?.id,
-  ]);
-
-  const selectOfficeLocationDraft = useCallback((result: OfficeLocationSearchResult) => {
-    setOfficeLocationDraft(result);
-    setOfficeSearchQuery(result.label);
-setOfficeLocationName((current) => current.trim() || result.label);
-    setOfficeSearchResults([]);
-  }, []);
-
   const lastSubmitRequestIdRef = useRef<string | null>(null);
   const submitAttendance = useCallback(
     async (type: "checkin" | "checkout", options?: { isAuto?: boolean, silent?: boolean }) => {
@@ -2480,39 +2120,6 @@ setOfficeLocationName((current) => current.trim() || result.label);
     }
     return undefined;
   }, [company?.id, adminAttendanceGroups]);
-  const officeMapPlannedStops = useMemo<GeofenceMapPoint[]>(() => {
-    const stops: GeofenceMapPoint[] = [];
-    if (officeLocationDraft) {
-      const officeMarkerName = officeLocationName.trim() || officeLocationDraft.label;
-      stops.push({
-        id: "attendance_office_location",
-        label: officeMarkerName,
-        latitude: officeLocationDraft.latitude,
-        longitude: officeLocationDraft.longitude,
-        summary: `Office geofence radius: ${OFFICE_ATTENDANCE_RADIUS_METERS}m`,
-        detail: officeLocationDraft.address || `${officeLocationDraft.latitude.toFixed(5)}, ${officeLocationDraft.longitude.toFixed(5)}`,
-      });
-    }
-    const currentMatchesOffice = Boolean(
-      officeLocationDraft &&
-      adminCurrentLocation &&
-      Math.abs(officeLocationDraft.latitude - adminCurrentLocation.latitude) <= 0.000001 &&
-      Math.abs(officeLocationDraft.longitude - adminCurrentLocation.longitude) <= 0.000001
-    );
-    if (adminCurrentLocation && !currentMatchesOffice) {
-      stops.push({
-        id: "attendance_current_location",
-        label: "Current Location",
-        latitude: adminCurrentLocation.latitude,
-        longitude: adminCurrentLocation.longitude,
-        summary: "Your device GPS position",
-        detail: adminCurrentLocation.address || `${adminCurrentLocation.latitude.toFixed(5)}, ${adminCurrentLocation.longitude.toFixed(5)}`,
-      });
-    }
-    return stops;
-  }, [adminCurrentLocation, officeLocationDraft, officeLocationName]);
-  const officeLocationToSave = officeLocationDraft ?? adminCurrentLocation;
-
   return (
     <AppCanvas>
       <Modal
@@ -3056,155 +2663,69 @@ setOfficeLocationName((current) => current.trim() || result.label);
           </View>
         </View>
 
-        {showAttendanceOfficeAdminPanel ? (
+        {isOfficeGeofenceAttendance && (officeZone || showAttendanceOfficeAdminPanel) ? (
           <View style={[styles.officePanel, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <View style={styles.officePanelHeader}>
+              <View style={[styles.officePanelIcon, { backgroundColor: colors.surfaceSecondary }]}>
+                <Ionicons name="business-outline" size={19} color={colors.textSecondary} />
+              </View>
               <View style={{ flex: 1 }}>
-                <Text style={[styles.officePanelTitle, { color: colors.text }]}>Employee Office Geofence</Text>
-                <Text style={[styles.officePanelMeta, { color: colors.textSecondary }]}>
-                  {officeZone
-                    ? `${officeZone.name} - ${officeZone.latitude.toFixed(5)}, ${officeZone.longitude.toFixed(5)} - ${officeZone.radiusMeters}m`
-                    : "Search and save the company office location"}
+                <Text style={[styles.officePanelEyebrow, { color: colors.textTertiary }]}>Assigned workplace</Text>
+                <Text style={[styles.officePanelTitle, { color: colors.text }]}>
+                  {officeZone?.name || activeCompanyName || "Office geofence"}
                 </Text>
               </View>
-              <Ionicons name="business-outline" size={22} color={colors.primary} />
-            </View>
-            <View style={[styles.officeNameInputWrap, { borderColor: colors.border, backgroundColor: colors.surfaceSecondary }]}>
-              <Ionicons name="business-outline" size={18} color={colors.textTertiary} />
-              <TextInput
-                style={[styles.officeNameInput, { color: colors.text }]}
-                placeholder="Office display name"
-                placeholderTextColor={colors.textTertiary}
-                value={officeLocationName}
-                onChangeText={setOfficeLocationName}
-                autoCorrect={false}
-              />
-            </View>
-            <View style={styles.officeSearchRow}>
-              <View style={[styles.officeSearchInputWrap, { borderColor: colors.border, backgroundColor: colors.surfaceSecondary }]}>
-                <Ionicons name="search-outline" size={18} color={colors.textTertiary} />
-                <TextInput
-                  style={[styles.officeSearchInput, { color: colors.text }]}
-                  placeholder="Search office, area, landmark..."
-                  placeholderTextColor={colors.textTertiary}
-                  value={officeSearchQuery}
-                  onChangeText={setOfficeSearchQuery}
-                  returnKeyType="search"
-                  autoCorrect={false}
-                  onSubmitEditing={() =>
-                    void searchOfficeLocations(officeSearchQuery, {
-                      showAlerts: true,
-                      allowDeviceGeocode: true,
-                    })
-                  }
-                />
-              </View>
-              <Pressable
+              <View
                 style={[
-                  styles.officeSearchButton,
-                  { backgroundColor: colors.primary, opacity: officeSearchBusy ? 0.72 : 1 },
+                  styles.officeStatusPill,
+                  {
+                    backgroundColor: officeZone ? "rgba(16,185,129,0.10)" : "rgba(245,158,11,0.12)",
+                    borderColor: officeZone ? "rgba(16,185,129,0.26)" : "rgba(245,158,11,0.28)",
+                  },
                 ]}
-                onPress={() =>
-                  void searchOfficeLocations(officeSearchQuery, {
-                    showAlerts: true,
-                    allowDeviceGeocode: true,
-                  })
-                }
-                disabled={officeSearchBusy}
               >
-                {officeSearchBusy ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <Ionicons name="search-outline" size={18} color="#fff" />
-                )}
-              </Pressable>
-            </View>
-            {officeSearchResults.length ? (
-              <View style={[styles.officeResults, { borderColor: colors.borderLight }]}>
-                {officeSearchResults.map((result, index) => (
-                  <Pressable
-                    key={`office_result_${result.id}_${result.latitude.toFixed(6)}_${result.longitude.toFixed(6)}_${index}`}
-                    style={[
-                      styles.officeResultRow,
-                      index < officeSearchResults.length - 1 && { borderBottomColor: colors.borderLight, borderBottomWidth: 1 },
-                    ]}
-                    onPress={() => selectOfficeLocationDraft(result)}
-                    disabled={officeSaving}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.officeResultTitle, { color: colors.text }]}>{result.label}</Text>
-                      <Text style={[styles.officeResultMeta, { color: colors.textSecondary }]} numberOfLines={2}>
-                        {result.address || `${result.latitude.toFixed(5)}, ${result.longitude.toFixed(5)}`}
-                      </Text>
-                    </View>
-                    <Ionicons name="map-outline" size={20} color={colors.primary} />
-                  </Pressable>
-                ))}
+                <Text style={[styles.officeStatusText, { color: officeZone ? colors.success : colors.warning }]}>
+                  {officeZone ? "Configured" : "Missing"}
+                </Text>
               </View>
-            ) : null}
-            <View style={[styles.officeMapWrap, { borderColor: colors.borderLight, backgroundColor: colors.surfaceSecondary }]}>
-              {officeMapPlannedStops.length ? (
-                <GeofenceMap
-                  points={officeMapPlannedStops}
-                  colors={colors}
-                  height={220}
-                />
-              ) : (
-                <View style={styles.officeMapFallback}>
-                  <Ionicons name="map-outline" size={28} color={colors.primary} />
-                  <Text style={[styles.officeMapFallbackTitle, { color: colors.text }]}>
-                    Select office location
-                  </Text>
-                  <Text style={[styles.officeMapFallbackText, { color: colors.textSecondary }]}>
-                    Search a place or tap Current Location to preview it on the office map.
+            </View>
+
+            <Text style={[styles.officePanelMeta, { color: colors.textSecondary }]}>
+              {officeZone
+                ? "This geofence is used for secure check-in, checkout validation, and auto-checkout monitoring."
+                : "Set this workspace office GPS from Account & Access before employees use attendance."}
+            </Text>
+
+            <View style={[styles.officeSummaryBox, { backgroundColor: colors.surfaceSecondary, borderColor: colors.borderLight }]}>
+              <View style={styles.officeSummaryRow}>
+                <View style={styles.officeSummaryItem}>
+                  <Text style={[styles.officeSummaryLabel, { color: colors.textTertiary }]}>Location</Text>
+                  <Text style={[styles.officeSummaryValue, { color: colors.text }]} numberOfLines={1}>
+                    {officeZone ? `${officeZone.latitude.toFixed(5)}, ${officeZone.longitude.toFixed(5)}` : "Not configured"}
                   </Text>
                 </View>
-              )}
-            </View>
-            <View style={styles.officeActionRow}>
-              <Pressable
-                style={[
-                  styles.officeSecondaryButton,
-                  {
-                    borderColor: colors.border,
-                    backgroundColor: colors.backgroundElevated,
-                    opacity: adminCurrentLocationBusy ? 0.72 : 1,
-                  },
-                ]}
-                onPress={captureAdminCurrentLocation}
-                disabled={adminCurrentLocationBusy}
-              >
-                {adminCurrentLocationBusy ? (
-                  <ActivityIndicator size="small" color={colors.primary} />
-                ) : (
-                  <>
-                    <Ionicons name="locate-outline" size={18} color={colors.primary} />
-                    <Text style={[styles.officeSecondaryButtonText, { color: colors.primary }]}>Current Location</Text>
-                  </>
-                )}
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.officeSetButton,
-                  {
-                    backgroundColor: colors.primary,
-                    opacity: !officeLocationToSave || officeSaving ? 0.72 : 1,
-                  },
-                ]}
-                onPress={() => {
-                  if (officeLocationToSave) void saveOfficeLocation(officeLocationToSave);
-                }}
-                disabled={!officeLocationToSave || officeSaving}
-              >
-                {officeSaving ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <>
-                    <Ionicons name="checkmark-outline" size={18} color="#fff" />
-                    <Text style={styles.officeSetButtonText}>Set This Location</Text>
-                  </>
-                )}
-              </Pressable>
+                <View style={[styles.officeSummaryDivider, { backgroundColor: colors.borderLight }]} />
+                <View style={styles.officeSummaryItem}>
+                  <Text style={[styles.officeSummaryLabel, { color: colors.textTertiary }]}>Radius</Text>
+                  <Text style={[styles.officeSummaryValue, { color: colors.text }]}>
+                    {officeZone ? `${officeZone.radiusMeters}m` : "—"}
+                  </Text>
+                </View>
+              </View>
+              <View style={[styles.officeSummaryLine, { backgroundColor: colors.borderLight }]} />
+              <View style={styles.officeSummaryRow}>
+                <View style={styles.officeSummaryItem}>
+                  <Text style={[styles.officeSummaryLabel, { color: colors.textTertiary }]}>Workspace</Text>
+                  <Text style={[styles.officeSummaryValue, { color: colors.text }]} numberOfLines={1}>
+                    {activeCompanyName || company?.name || "Current workspace"}
+                  </Text>
+                </View>
+                <View style={[styles.officeSummaryDivider, { backgroundColor: colors.borderLight }]} />
+                <View style={styles.officeSummaryItem}>
+                  <Text style={[styles.officeSummaryLabel, { color: colors.textTertiary }]}>Mode</Text>
+                  <Text style={[styles.officeSummaryValue, { color: colors.text }]}>Attendance</Text>
+                </View>
+              </View>
             </View>
           </View>
         ) : null}
@@ -3919,162 +3440,82 @@ const styles = StyleSheet.create({
   },
   officePanel: {
     borderWidth: 1,
-    borderRadius: 14,
-    padding: 12,
+    borderRadius: 18,
+    padding: 14,
     gap: 12,
     marginBottom: 14,
   },
   officePanelHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    gap: 11,
+  },
+  officePanelIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  officePanelEyebrow: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: 0.7,
+    marginBottom: 2,
   },
   officePanelTitle: {
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 14,
+    fontFamily: "Inter_700Bold",
+    fontSize: 16,
   },
   officePanelMeta: {
     fontFamily: "Inter_400Regular",
-    fontSize: 11.5,
-    marginTop: 3,
+    fontSize: 12.5,
+    lineHeight: 18,
   },
-  officeNameInputWrap: {
-    minHeight: 44,
-    borderRadius: 12,
+  officeStatusPill: {
     borderWidth: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 12,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
   },
-  officeNameInput: {
-    flex: 1,
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 13,
-    paddingVertical: 0,
+  officeStatusText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 10.5,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
-  officeSearchRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  officeSearchInputWrap: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 12,
+  officeSummaryBox: {
     borderWidth: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 12,
+    borderRadius: 16,
+    padding: 12,
+    gap: 10,
   },
-  officeSearchInput: {
-    flex: 1,
-    fontFamily: "Inter_400Regular",
-    fontSize: 13,
-    paddingVertical: 0,
-  },
-  officeSearchButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  officeResults: {
-    borderTopWidth: 1,
-  },
-  officeResultRow: {
-    minHeight: 58,
+  officeSummaryRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    paddingVertical: 10,
   },
-  officeResultTitle: {
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 13,
-  },
-  officeResultMeta: {
-    fontFamily: "Inter_400Regular",
-    fontSize: 11.5,
-    marginTop: 2,
-    lineHeight: 16,
-  },
-  officeMapWrap: {
-    height: 220,
-    borderRadius: 14,
-    borderWidth: 1,
-    overflow: "hidden",
-  },
-  officeMap: {
+  officeSummaryItem: {
     flex: 1,
+    gap: 4,
   },
-  officeMapFallback: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingHorizontal: 18,
-  },
-  officeMapFallbackTitle: {
+  officeSummaryLabel: {
     fontFamily: "Inter_700Bold",
-    fontSize: 14,
-    textAlign: "center",
+    fontSize: 10,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
   },
-  officeMapFallbackText: {
-    fontFamily: "Inter_400Regular",
-    fontSize: 12,
-    lineHeight: 17,
-    textAlign: "center",
-  },
-  officeActionRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
-  officeSecondaryButton: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 12,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 7,
-    paddingHorizontal: 10,
-  },
-  officeSecondaryButtonText: {
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 12,
-  },
-  officeSetButton: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 7,
-    paddingHorizontal: 10,
-  },
-  officeSetButtonText: {
-    color: "#fff",
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 12,
-  },
-  officeButton: {
-    minHeight: 42,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 8,
-    paddingHorizontal: 12,
-  },
-  officeButtonText: {
-    color: "#fff",
+  officeSummaryValue: {
     fontFamily: "Inter_600SemiBold",
     fontSize: 13,
+  },
+  officeSummaryDivider: {
+    width: 1,
+    alignSelf: "stretch",
+  },
+  officeSummaryLine: {
+    height: 1,
   },
   actionButton: {
     borderRadius: 18,
