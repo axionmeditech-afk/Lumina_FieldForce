@@ -3,17 +3,23 @@ workflows:
     name: Lumina FieldForce iOS IPA
     max_build_duration: 120
     instance_type: mac_mini_m2
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
     integrations:
       app_store_connect: Lumina_fieldforce
     environment:
       groups:
         - API KEYS
       ios_signing:
-        distribution_type: app_store # Change to ad_hoc if you want a directly installable device build.
+        distribution_type: app_store
         bundle_identifier: com.luminafieldforce
       vars:
         BUNDLE_ID: "com.luminafieldforce"
-        APP_STORE_APP_ID: "6761368486"
+        IOS_BUILD_NUMBER_BASE: "16"
       node: 22.14.0
       xcode: latest
       cocoapods: default
@@ -23,6 +29,13 @@ workflows:
         - $HOME/Library/Caches/CocoaPods
         - $CM_BUILD_DIR/node_modules
     scripts:
+      - name: Guard release branch
+        script: |
+          set -eu
+          if [ "${CM_BRANCH:-}" != "main" ]; then
+            echo "Refusing TestFlight release from branch '${CM_BRANCH:-unknown}'. Build the attendance/geofencing main branch only."
+            exit 1
+          fi
       - name: Install JavaScript dependencies
         script: |
           npm ci
@@ -33,13 +46,27 @@ workflows:
         script: |
           cd ios
           pod install --repo-update
+      - name: Set unique iOS build number
+        script: |
+          set -euo pipefail
+
+          case "${PROJECT_BUILD_NUMBER:-}" in
+            ''|*[!0-9]*) echo "PROJECT_BUILD_NUMBER is missing or invalid"; exit 1 ;;
+          esac
+          case "${IOS_BUILD_NUMBER_BASE:-}" in
+            ''|*[!0-9]*) echo "IOS_BUILD_NUMBER_BASE is missing or invalid"; exit 1 ;;
+          esac
+
+          NEXT_BUILD_NUMBER=$((IOS_BUILD_NUMBER_BASE + PROJECT_BUILD_NUMBER))
+          echo "Setting iOS build number to $NEXT_BUILD_NUMBER"
+          cd "$CM_BUILD_DIR/ios"
+          agvtool new-version -all "$NEXT_BUILD_NUMBER"
       - name: Build signed IPA
         script: |
           set -euo pipefail
 
           IOS_WORKSPACE="$(find "$CM_BUILD_DIR/ios" -maxdepth 1 -name "*.xcworkspace" -print -quit)"
           IOS_PROJECT="$(find "$CM_BUILD_DIR/ios" -maxdepth 1 -name "*.xcodeproj" -print -quit)"
-          APP_SCHEME="$(basename "$IOS_PROJECT" .xcodeproj)"
           if [ -z "$IOS_WORKSPACE" ]; then
             echo "No Xcode workspace found under ios/"
             exit 1
@@ -49,55 +76,20 @@ workflows:
             exit 1
           fi
 
-          IOS_SCHEME="$APP_SCHEME"
-
+          IOS_SCHEME="$(basename "$IOS_PROJECT" .xcodeproj)"
           echo "Using workspace: $IOS_WORKSPACE"
           echo "Using project: $IOS_PROJECT"
-          echo "Preferred app scheme: $APP_SCHEME"
           echo "Using scheme: $IOS_SCHEME"
 
           xcode-project use-profiles --project "$IOS_PROJECT"
-
           xcode-project build-ipa \
             --workspace "$IOS_WORKSPACE" \
             --scheme "$IOS_SCHEME"
-      - name: Publish to App Store Connect manually
-        script: |
-          set -e
-          IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
-          echo "Uploading $IPA_PATH using Fastlane to completely bypass altool..."
-          
-          mkdir -p fastlane
-          # Save the key to a file exactly as provided by Codemagic
-          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > fastlane/AuthKey.p8
-          # If it has literal \n (escaped), replace them with actual newlines safely
-          perl -pi -e 's/\\n/\n/g' fastlane/AuthKey.p8
-          
-          cat <<'EOF' > fastlane/Fastfile
-          default_platform(:ios)
-          platform :ios do
-            lane :deploy do
-              app_store_connect_api_key(
-                key_id: ENV["APP_STORE_CONNECT_KEY_IDENTIFIER"],
-                issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
-                key_filepath: "fastlane/AuthKey.p8",
-                in_house: false
-              )
-              
-              upload_to_testflight(
-                ipa: ENV["IPA_PATH"],
-                app_identifier: "com.luminafieldforce",
-                apple_id: "6761368486",
-                skip_waiting_for_build_processing: true
-              )
-            end
-          end
-          EOF
-          
-          export IPA_PATH="$IPA_PATH"
-          fastlane ios deploy
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        auth: integration
