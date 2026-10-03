@@ -75,9 +75,15 @@ workflows:
           echo "app-store-connect CLI failed. Falling back to explicit xcrun altool..."
           mkdir -p ~/.appstoreconnect/private_keys
           
-          # Safely write the private key handling both literal \n and real newlines
-          printf "%b\n" "$APP_STORE_CONNECT_PRIVATE_KEY" > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
-          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
+          # Extremely robust way to format the private key to valid PEM format
+          KEY_BODY=$(echo "$APP_STORE_CONNECT_PRIVATE_KEY" | sed -e 's/-----BEGIN PRIVATE KEY-----//g' -e 's/-----END PRIVATE KEY-----//g' -e 's/\\n//g' | tr -d ' \n\r')
+          FORMATTED_BODY=$(echo "$KEY_BODY" | fold -w 64)
+          
+          P8_PATH=~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8
+          echo "-----BEGIN PRIVATE KEY-----" > "$P8_PATH"
+          echo "$FORMATTED_BODY" >> "$P8_PATH"
+          echo "-----END PRIVATE KEY-----" >> "$P8_PATH"
+          chmod 600 "$P8_PATH"
           
           echo "Uploading $IPA_PATH using Explicit Apple ID 6761368486..."
           xcrun altool --upload-app -f "$IPA_PATH" -t ios --apiKey "$APP_STORE_CONNECT_KEY_IDENTIFIER" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" --app-apple-id "6761368486"
