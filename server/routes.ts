@@ -75,6 +75,12 @@ const LEGACY_COMPANY_DATA_REHOME_TARGET_ID = (
   "cmp_lumina_meditech_7f3e019e"
 ).trim();
 const LEGACY_DEMO_PROFILE_NAMES = new Set([
+  "iamdummy",
+  "i am dummy",
+  "dummy",
+  "dummy user",
+  "test",
+  "test user",
   "priya",
   "priya sharma",
   "rohit",
@@ -690,7 +696,19 @@ function normalizeWhitespace(value: string): string {
 }
 
 function isLegacyDemoProfileName(value: string | null | undefined): boolean {
-  return LEGACY_DEMO_PROFILE_NAMES.has(normalizeWhitespace(value || "").toLowerCase());
+  const normalized = normalizeWhitespace(value || "").toLowerCase();
+  if (!normalized) return false;
+  if (LEGACY_DEMO_PROFILE_NAMES.has(normalized)) return true;
+  return /(^|[^a-z0-9])(dummy|testuser|demo)([^a-z0-9]|$)/i.test(normalized);
+}
+
+function isLegacyDemoIdentity(value: string | null | undefined): boolean {
+  const normalized = normalizeWhitespace(value || "").toLowerCase();
+  if (!normalized) return false;
+  if (isLegacyDemoProfileName(normalized)) return true;
+  if (normalized.endsWith("@trackforce.ai")) return true;
+  const localPart = normalized.includes("@") ? normalized.split("@")[0] : normalized;
+  return isLegacyDemoProfileName(localPart);
 }
 
 function normalizeEmailKey(value: string | null | undefined): string {
@@ -3163,6 +3181,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     normalizeEmail,
     normalizeLoginKey,
     isLegacyDemoProfileName,
+    isLegacyDemoIdentity,
     normalizeRole,
     isSalesRole,
     normalizeDepartmentForRole,

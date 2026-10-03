@@ -15,6 +15,7 @@ const {
     normalizeEmail,
     normalizeLoginKey,
     isLegacyDemoProfileName,
+    isLegacyDemoIdentity,
     normalizeRole,
     isSalesRole,
     normalizeDepartmentForRole,
@@ -257,7 +258,14 @@ app.get("/api/users", requireAuth, async (req, res) => {
           login ||
           requestEmail ||
           "Employee";
-        if (isLegacyDemoProfileName(displayName)) return;
+        if (
+          isLegacyDemoProfileName(displayName) ||
+          isLegacyDemoIdentity(requestEmail) ||
+          isLegacyDemoIdentity(login) ||
+          isLegacyDemoIdentity(String(dolibarrUser?.login || ""))
+        ) {
+          return;
+        }
 
         let role: string = appUser?.role
           ? normalizeRole(String(appUser.role))
