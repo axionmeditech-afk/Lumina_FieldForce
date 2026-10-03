@@ -13,6 +13,7 @@ workflows:
         bundle_identifier: com.luminafieldforce
       vars:
         BUNDLE_ID: "com.luminafieldforce"
+        APP_STORE_APP_ID: "6761368486"
       node: 22.14.0
       xcode: latest
       cocoapods: default
