@@ -53,6 +53,10 @@ function getEmployeeRole(employee: DolibarrUser): UserRole {
   return employee.admin === true || employee.admin === 1 || employee.admin === "1" ? "admin" : "employee";
 }
 
+function isAdminLikeEmployee(employee: DolibarrUser): boolean {
+  return getEmployeeRole(employee) === "admin" || employee.admin === true || employee.admin === 1 || employee.admin === "1";
+}
+
 function getEmployeeCompanyIds(employee: DolibarrUser, fallbackCompanyId?: string | null): string[] {
   const ids = [
     ...(Array.isArray(employee.assignedCompanyIds) ? employee.assignedCompanyIds : []),
@@ -563,7 +567,7 @@ export function EmployeeAccessPanel() {
         const deleteKey = id || email;
         const role = selectedRoleByEmployee[deleteKey] || getEmployeeRole(employee);
         const selectedCompanies = selectedCompanyIdsByEmployee[deleteKey] || [];
-        const canDelete = getEmployeeRole(employee) !== "admin";
+        const isProtectedDelete = isAdminLikeEmployee(employee);
         const isDeleting = deletingId === deleteKey;
         const isResetting = resettingId === deleteKey;
         const isSavingAccess = savingAccessId === deleteKey;
@@ -674,27 +678,31 @@ export function EmployeeAccessPanel() {
                   {isResetting ? "Resetting" : "Reset Session"}
                 </Text>
               </Pressable>
-              {canDelete ? (
-                <Pressable
-                  disabled={Boolean(deletingId)}
-                  onPress={() => confirmDeleteEmployee(employee)}
-                  style={({ pressed }) => [
-                    styles.deleteButton,
-                    {
-                      borderColor: `${colors.danger}44`,
-                      backgroundColor: `${colors.danger}10`,
-                      opacity: deletingId || pressed ? 0.72 : 1,
-                    },
-                  ]}
-                >
-                  {isDeleting ? (
-                    <ActivityIndicator color={colors.danger} size="small" />
-                  ) : (
-                    <Ionicons name="trash-outline" size={17} color={colors.danger} />
-                  )}
-                  <Text style={[styles.deleteText, { color: colors.danger }]}>Delete</Text>
-                </Pressable>
-              ) : null}
+              <Pressable
+                disabled={Boolean(deletingId) || isProtectedDelete}
+                onPress={() => confirmDeleteEmployee(employee)}
+                style={({ pressed }) => [
+                  styles.deleteButton,
+                  {
+                    borderColor: isProtectedDelete ? colors.border : `${colors.danger}44`,
+                    backgroundColor: isProtectedDelete ? colors.backgroundElevated : `${colors.danger}10`,
+                    opacity: deletingId || pressed || isProtectedDelete ? 0.72 : 1,
+                  },
+                ]}
+              >
+                {isDeleting ? (
+                  <ActivityIndicator color={colors.danger} size="small" />
+                ) : (
+                  <Ionicons
+                    name={isProtectedDelete ? "lock-closed-outline" : "trash-outline"}
+                    size={17}
+                    color={isProtectedDelete ? colors.textTertiary : colors.danger}
+                  />
+                )}
+                <Text style={[styles.deleteText, { color: isProtectedDelete ? colors.textTertiary : colors.danger }]}>
+                  {isProtectedDelete ? "Protected" : "Delete"}
+                </Text>
+              </Pressable>
             </View>
           </View>
         );
