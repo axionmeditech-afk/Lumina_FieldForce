@@ -24,7 +24,6 @@ import { isSalesRole } from "@/lib/role-access";
 import type { UserRole } from "@/lib/types";
 
 const SIGNUP_ROLES: { label: string; value: UserRole }[] = [
-  { label: "Admin", value: "admin" },
   { label: "Employee", value: "employee" },
   { label: "Manager", value: "manager" },
   { label: "HR", value: "hr" },

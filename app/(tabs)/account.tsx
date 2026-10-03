@@ -327,8 +327,9 @@ export default function Account() {
           </View>
         </LinearGradient>
 
-        <View
-          style={[
+        {!isAdmin && (
+          <View
+            style={[
             styles.card,
             {
               borderColor: colors.border,
@@ -397,6 +398,7 @@ export default function Account() {
             </Text>
           </Pressable>
         </View>
+        )}
 
         {isAdmin ? (
           <>

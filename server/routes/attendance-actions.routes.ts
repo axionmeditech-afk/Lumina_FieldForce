@@ -162,6 +162,30 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           else await deps.storage.createAttendance(record);
           res.status(201).json(record);
           try { deps.broadcastAttendanceUpdate(record); } catch { /* already committed */ }
+          if (automatic && deps.insertNotificationInMySql) {
+            const activeZone = zones.find((item: any) => item.id === active?.geofenceId) ||
+              (active?.geofenceId && deps.getGeofenceById ? await deps.getGeofenceById(active.geofenceId) : null);
+            const exitDecision = activeZone
+              ? evaluateAutoCheckoutExit(activeZone, payload.latitude, payload.longitude, accuracy)
+              : null;
+            if (exitDecision && exitDecision.outside) {
+              const distance = Math.round(exitDecision.distance);
+              const notifId = deps.randomUUID ? deps.randomUUID() : randomUUID();
+              await deps.insertNotificationInMySql({
+                id: notifId,
+                companyId: active?.companyId || companyId || undefined,
+                title: "Auto-Checkout Alert",
+                body: `${record.userName} was auto-checked out, detected ${distance}m away from the office.`,
+                kind: "alert",
+                audience: "admin",
+                createdById: record.userId,
+                createdByName: record.userName,
+                createdAt: now,
+                readByIds: [],
+                audienceUserIds: []
+              }).catch((e: any) => console.error("Failed to insert auto-checkout notif", e));
+            }
+          }
           void Promise.resolve().then(async () => {
             const config = await deps.resolveDolibarrConfigForUser(record.userId);
             await deps.syncAttendanceWithDolibarr(record, config);
