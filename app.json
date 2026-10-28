@@ -3,7 +3,6 @@
     "name": "Lumina FieldForce",
     "slug": "lumina-fieldforce",
     "owner": "appallakarthik",
-    "entryPoint": "./node_modules/expo-router/entry",
     "version": "1.0.0",
     "updates": {
       "enabled": false,
@@ -14,12 +13,6 @@
     "icon": "./assets/images/logo.png",
     "scheme": "luminafieldforce",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/images/logo.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0F172A"
-    },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.luminafieldforce",
@@ -67,6 +60,14 @@
       "react-native-maps",
       "expo-font",
       "expo-web-browser",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/logo.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#0F172A"
+        }
+      ],
       [
         "expo-local-authentication",
         {

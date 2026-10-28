@@ -1,4 +1,3 @@
-const appJson = require("./app.json");
 const fs = require("fs");
 const path = require("path");
 
@@ -21,8 +20,11 @@ function readDotenvValue(name) {
   return "";
 }
 
-module.exports = () => {
-  const expoConfig = appJson.expo || {};
+module.exports = ({ config }) => {
+  // Expo supplies the resolved static app.json configuration here. Returning
+  // that config directly keeps app.json as the single source of truth while
+  // allowing environment-specific native map keys to be injected at build time.
+  const expoConfig = config || {};
   const androidConfig = expoConfig.android || {};
   const iosConfig = expoConfig.ios || {};
   const googleMapsApiKey =
@@ -40,38 +42,35 @@ module.exports = () => {
     "";
 
   return {
-    ...appJson,
-    expo: {
-      ...expoConfig,
-      android: {
-        ...androidConfig,
-        ...(googleMapsApiKey
-          ? {
-              config: {
-                ...(androidConfig.config || {}),
-                googleMaps: {
-                  apiKey: googleMapsApiKey,
-                },
+    ...expoConfig,
+    android: {
+      ...androidConfig,
+      ...(googleMapsApiKey
+        ? {
+            config: {
+              ...(androidConfig.config || {}),
+              googleMaps: {
+                apiKey: googleMapsApiKey,
               },
-            }
-          : {}),
-      },
-      ios: {
-        ...iosConfig,
-        ...(googleMapsIosApiKey
-          ? {
-              config: {
-                ...(iosConfig.config || {}),
-                googleMapsApiKey: googleMapsIosApiKey,
-              },
-            }
-          : {}),
-      },
-      extra: {
-        ...(expoConfig.extra || {}),
-        googleMapsConfigured: Boolean(googleMapsApiKey),
-        googleMapsIosConfigured: Boolean(googleMapsIosApiKey),
-      },
+            },
+          }
+        : {}),
+    },
+    ios: {
+      ...iosConfig,
+      ...(googleMapsIosApiKey
+        ? {
+            config: {
+              ...(iosConfig.config || {}),
+              googleMapsApiKey: googleMapsIosApiKey,
+            },
+          }
+        : {}),
+    },
+    extra: {
+      ...(expoConfig.extra || {}),
+      googleMapsConfigured: Boolean(googleMapsApiKey),
+      googleMapsIosConfigured: Boolean(googleMapsIosApiKey),
     },
   };
 };

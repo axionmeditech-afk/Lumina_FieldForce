@@ -99,7 +99,7 @@ function CustomDrawerContent(
   const { user, company, logout } = useAuth();
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
-  const scrollRef = useRef<ScrollView | null>(null);
+  const scrollRef = useRef<React.ComponentRef<typeof DrawerContentScrollView> | null>(null);
   const signingOutRef = useRef(false);
   const activeRouteKey = props.state.routes[props.state.index]?.key;
   const previousRouteKey = useRef(activeRouteKey);
@@ -322,6 +322,20 @@ export default function AttendanceLayout() {
               size={size}
               name="location-outline"
               focusedName="location"
+            />
+          ),
+        }}
+      />
+      <Drawer.Screen
+        name="field-tracking"
+        options={{
+          title: "Live Tracking",
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon
+              focused={focused}
+              size={size}
+              name="navigate-outline"
+              focusedName="navigate"
             />
           ),
         }}

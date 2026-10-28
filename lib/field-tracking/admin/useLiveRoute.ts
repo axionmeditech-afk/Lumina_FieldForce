@@ -57,12 +57,15 @@ export function useLiveRoute() {
       // The backend returns an array of rows under `employees`.
       // Let's map it to LiveEmployee structure.
       const rawEmployees: any[] = body.employees || [];
-      const incomingEmployees: LiveEmployee[] = rawEmployees.map(row => ({
+      const incomingEmployees: LiveEmployee[] = rawEmployees.map(row => {
+        const name = String(row.employee_name || row.employee_id || 'Employee');
+        const words = name.trim().split(/\s+/).filter(Boolean);
+        return ({
         employeeId: row.employee_id,
         sessionId: row.session_id,
-        name: `Employee ${row.employee_id.slice(-4)}`, // Fallback, maybe backend should return name
-        initials: row.employee_id.slice(0, 2).toUpperCase(),
-        roleLabel: 'Field Worker',
+        name,
+        initials: (words.length > 1 ? `${words[0]![0]}${words.at(-1)![0]}` : name.slice(0, 2)).toUpperCase(),
+        roleLabel: 'Field employee',
         sequence: row.sequence_no,
         latitude: Number(row.latitude),
         longitude: Number(row.longitude),
@@ -74,7 +77,8 @@ export function useLiveRoute() {
         status: 'live',
         sessionStatus: 'active',
         offRoute: false
-      }));
+        });
+      });
 
       if (!incomingEmployees.length) {
         employeeRef.current = null;

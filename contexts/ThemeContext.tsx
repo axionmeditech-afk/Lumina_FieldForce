@@ -20,7 +20,7 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-function resolveMode(_mode: ThemeMode, _systemTheme: ColorSchemeName): "light" | "dark" {
+function resolveMode(_mode: ThemeMode, _systemTheme: ColorSchemeName | null): "light" | "dark" {
   if (_mode === "system") {
     return _systemTheme === "dark" ? "dark" : "light";
   }

@@ -80,6 +80,7 @@ test("background exit submits while stationary and survives offline restart with
       ensureAttendanceNotificationPermission: async () => true,
       notifyAutoCheckoutPending: async () => { pendingNotifications++; }, notifyAutoCheckoutSynced: async () => {},
     },
+    "./field-tracking/attendance-lifecycle": { stopFieldTrackingForCheckOut: async () => {} },
     "./location-service": { getVerifiedLocationEvidence: async () => null },
   });
   assert.equal(await runtime.startAttendanceGeofence(active, [zone], true), true);
@@ -132,6 +133,7 @@ test("queue retry keeps concurrent new events, uses one flush and updates local 
     "expo-crypto": { randomUUID }, "expo-constants": {},
     "@/lib/global-loading": { beginGlobalLoading: () => () => {} },
     "./attendance-notifications": { notifyAutoCheckoutSynced: async () => { notifications++; } },
+    "./field-tracking/attendance-lifecycle": { stopFieldTrackingForCheckOut: async () => {} },
     "@/lib/storage": {
       getSettings: async () => ({ autoSync: "false" }), getApiToken: async () => "token",
       getCurrentUser: async () => ({ id: "employee" }), getAttendanceQueue: async () => structuredClone(queue),
@@ -314,10 +316,10 @@ test("GPS evidence and client/server geofencing agree at uncertain boundaries", 
 });
 
 
-test("only the intended app pages exist and removed animations cannot return silently", async () => {
+test("only supported app pages exist and removed animations cannot return silently", async () => {
   const { readdir, readFile } = await import("node:fs/promises");
   const routes = (await readdir("app/(tabs)")).sort();
-  assert.deepEqual(routes, ["_layout.tsx", "account.tsx", "attendance.tsx", "index.tsx"]);
+  assert.deepEqual(routes, ["_layout.tsx", "account.tsx", "attendance.tsx", "field-tracking.tsx", "index.tsx"]);
   const pkg = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(pkg.dependencies.lenis, undefined);
   for (const file of ["app/(tabs)/index.tsx", "app/(tabs)/_layout.tsx", "app/login.tsx", "components/StartScreen.tsx"]) {

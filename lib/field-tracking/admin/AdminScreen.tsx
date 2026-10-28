@@ -1,5 +1,5 @@
-import React from 'react';
-import { StyleSheet, Text, View, Pressable, ActivityIndicator } from 'react-native';
+import React, { useState } from 'react';
+import { StyleSheet, Text, View, Pressable, ActivityIndicator, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RouteMap } from '../components/RouteMap';
 import { StatusDot } from '../components/Primitives';
@@ -8,7 +8,15 @@ import { useLiveRoute } from './useLiveRoute';
 
 export function AdminScreen() {
   const { employee, employees, points, connectionState, error, serverHealth, refresh, selectEmployee } = useLiveRoute();
+  const [selectingEmployee, setSelectingEmployee] = useState(true);
   const live = connectionState === 'live';
+
+  if (selectingEmployee) {
+    return <EmployeePicker employees={employees} connectionState={connectionState} error={error} onRefresh={refresh} onSelect={(employeeId) => {
+      selectEmployee(employeeId);
+      setSelectingEmployee(false);
+    }} />;
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -32,6 +40,9 @@ export function AdminScreen() {
               <Text style={styles.mapPillTitle}>{employee?.name ?? 'Operations map'}</Text>
               <Text style={styles.mapPillSubtitle}>Live field tracking</Text>
             </View>
+            <Pressable onPress={() => setSelectingEmployee(true)} style={styles.changeButton}>
+              <Text style={styles.changeButtonText}>Change</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -88,6 +99,56 @@ export function AdminScreen() {
   );
 }
 
+function EmployeePicker({
+  employees,
+  connectionState,
+  error,
+  onRefresh,
+  onSelect,
+}: {
+  employees: any[];
+  connectionState: string;
+  error: string | null;
+  onRefresh: () => void;
+  onSelect: (employeeId: string) => void;
+}) {
+  const loading = connectionState === 'connecting' || connectionState === 'recovering';
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <View style={styles.pickerScreen}>
+        <View style={styles.pickerHeader}>
+          <View style={styles.pickerIcon}><Text style={styles.pickerIconText}>⌖</Text></View>
+          <Text style={styles.pickerTitle}>Choose live employee</Text>
+          <Text style={styles.pickerSubtitle}>Select whose current route you want to view.</Text>
+        </View>
+        <View style={styles.pickerStatusRow}>
+          <StatusDot tone={connectionState === 'live' ? 'live' : connectionState === 'offline' ? 'danger' : 'warning'} />
+          <Text style={styles.pickerStatusText}>{connectionState === 'live' ? `${employees.length} employee${employees.length === 1 ? '' : 's'} sharing location` : connectionState}</Text>
+          <Pressable onPress={onRefresh} style={styles.pickerRefresh}><Text style={styles.pickerRefreshText}>Refresh</Text></Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.pickerList} showsVerticalScrollIndicator={false}>
+          {loading && !employees.length ? <ActivityIndicator color="#1769D2" style={styles.loader} /> : null}
+          {employees.map((item) => (
+            <EmployeeRosterCard
+              key={`${item.employeeId}:${item.sessionId}`}
+              employee={item}
+              selected={false}
+              onPress={() => onSelect(item.employeeId)}
+            />
+          ))}
+          {!loading && !employees.length ? (
+            <View style={styles.rosterEmpty}>
+              <Text style={styles.rosterEmptyTitle}>No active tracking yet</Text>
+              <Text style={styles.rosterEmptyBody}>An employee appears here after check-in and the first GPS location sync.</Text>
+            </View>
+          ) : null}
+          {error ? <Text style={styles.noteText}>Connection note · {error}</Text> : null}
+        </ScrollView>
+      </View>
+    </SafeAreaView>
+  );
+}
+
 function EmployeeRosterCard({ employee, selected, onPress }: { employee: any; selected: boolean; onPress: () => void }) {
   const speed = employee.speed == null || employee.speed < 0 ? '—' : `${Math.round(employee.speed * 3.6)} km/h`;
   const accuracy = employee.accuracy == null ? 'GPS —' : `GPS ±${Math.round(employee.accuracy)} m`;
@@ -121,6 +182,8 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#E9EEF5' },
   topBar: { position: 'absolute', top: 12, left: 14, right: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   mapPill: { flex: 1, minHeight: 58, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.97)', borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 10, elevation: 5 },
+  changeButton: { minHeight: 32, borderRadius: 12, paddingHorizontal: 10, justifyContent: 'center', backgroundColor: '#EAF1FF' },
+  changeButtonText: { color: '#1769D2', fontSize: 11, fontWeight: '800' },
   brandDot: { width: 13, height: 13, borderRadius: 7, backgroundColor: '#4285F4' },
   mapPillTitle: { color: '#111827', fontSize: 15, fontWeight: '900' },
   mapPillSubtitle: { color: '#64748B', fontSize: 11, marginTop: 2 },
@@ -156,5 +219,17 @@ const styles = StyleSheet.create({
   healthValueReady: { color: '#16794D' },
   healthValueWarning: { color: '#9A6200' },
   healthValueDanger: { color: '#B42318' },
-  noteText: { color: '#64748B', fontSize: 11, lineHeight: 17, marginHorizontal: 16 }
+  noteText: { color: '#64748B', fontSize: 11, lineHeight: 17, marginHorizontal: 16 },
+  pickerScreen: { flex: 1, backgroundColor: '#F5F8FC', paddingHorizontal: 18 },
+  pickerHeader: { paddingTop: 28, paddingBottom: 20 },
+  pickerIcon: { width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1769D2', marginBottom: 14 },
+  pickerIconText: { color: '#FFFFFF', fontSize: 23, fontWeight: '900' },
+  pickerTitle: { color: '#10233F', fontSize: 24, fontWeight: '900' },
+  pickerSubtitle: { color: '#64748B', fontSize: 13, lineHeight: 19, marginTop: 6 },
+  pickerStatusRow: { minHeight: 46, borderRadius: 14, borderWidth: 1, borderColor: '#DCE3EC', backgroundColor: '#FFFFFF', paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  pickerStatusText: { flex: 1, color: '#475569', fontSize: 11, fontWeight: '700' },
+  pickerRefresh: { minHeight: 30, justifyContent: 'center', paddingHorizontal: 9 },
+  pickerRefreshText: { color: '#1769D2', fontSize: 11, fontWeight: '800' },
+  pickerList: { paddingTop: 14, paddingBottom: 32, gap: 8 },
+  loader: { marginTop: 32 }
 });

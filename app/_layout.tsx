@@ -1,7 +1,8 @@
 import { AppState } from "react-native";
 import { reconcileAttendanceGeofence, retryPendingAttendanceExit } from "@/lib/attendance-background";
-import { flushAttendanceQueue } from "@/lib/attendance-api";
+import { flushAttendanceQueue, getAttendanceStatus } from "@/lib/attendance-api";
 import { ensureAttendanceNotificationChannel } from "@/lib/attendance-notifications";
+import { restoreFieldTrackingForActiveAttendance } from "@/lib/field-tracking/attendance-lifecycle";
 import React, { useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
@@ -13,6 +14,7 @@ import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ThemeProvider, useAppTheme } from "@/contexts/ThemeContext";
 import { retireLegacyLocationTracking } from "@/lib/retire-legacy-tracking";
+import "@/lib/field-tracking/background-task";
 import { useFonts } from "expo-font";
 import { Inter_400Regular } from "@expo-google-fonts/inter/400Regular";
 import { Inter_500Medium } from "@expo-google-fonts/inter/500Medium";
@@ -30,15 +32,18 @@ function AppShell() {
       running = true;
       void (async () => {
         await flushAttendanceQueue();
-        if (refreshSession) await reconcileAttendanceGeofence();
-        else await retryPendingAttendanceExit();
+        if (refreshSession) {
+          await reconcileAttendanceGeofence();
+          const { active } = await getAttendanceStatus();
+          await restoreFieldTrackingForActiveAttendance(user, active);
+        } else await retryPendingAttendanceExit();
       })().catch(console.warn).finally(() => { running = false; });
     };
     reconcile();
     const sub = AppState.addEventListener("change", state => { if (state === "active") reconcile(); });
     const timer = setInterval(() => reconcile(false), 30_000);
     return () => { sub.remove(); clearInterval(timer); };
-  }, [userId]);
+  }, [user, userId]);
   const { colors, isDark } = useAppTheme();
   useEffect(() => { void ensureAttendanceNotificationChannel().catch(console.warn); }, []);
   useEffect(() => { void retireLegacyLocationTracking().catch(console.warn); }, []);

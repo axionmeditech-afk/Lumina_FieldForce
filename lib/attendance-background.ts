@@ -24,6 +24,7 @@ const AUTO_CHECKOUT_GRACE_MS = 30_000;
 const AUTO_CHECKOUT_MIN_SAMPLES = 2;
 const AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS = 2 * 60_000;
 const WATCHDOG_VERSION = 2;
+const FIELD_TRACKING_SUSPENDED_KEY = "@attendance_background_watchdog_suspended_for_field_tracking";
 
 type ExitSample = {
   latitude: number;
@@ -143,6 +144,29 @@ async function startAttendanceLocationWatchdog(): Promise<void> {
       notificationColor: "#2563EB",
       killServiceOnDestroy: false,
     },
+  });
+}
+
+// The field-route task owns the GPS stream during an active shift. Keep the
+// attendance geofence, but stop the duplicate watchdog to conserve battery.
+export async function suspendAttendanceWatchdogForFieldTracking(): Promise<void> {
+  await serializeTask(async () => {
+    await AsyncStorage.setItem(FIELD_TRACKING_SUSPENDED_KEY, "1");
+    if (!await available()) return;
+    if (await Location.hasStartedLocationUpdatesAsync(LOCATION_WATCHDOG_TASK).catch(() => false)) {
+      await Location.stopLocationUpdatesAsync(LOCATION_WATCHDOG_TASK).catch(() => undefined);
+    }
+  });
+}
+
+export async function resumeAttendanceWatchdogAfterFieldTracking(): Promise<void> {
+  await serializeTask(async () => {
+    await AsyncStorage.removeItem(FIELD_TRACKING_SUSPENDED_KEY);
+    const session = await readSession();
+    if (!session || !await available()) return;
+    if (!await Location.hasStartedLocationUpdatesAsync(LOCATION_WATCHDOG_TASK).catch(() => false)) {
+      await startAttendanceLocationWatchdog();
+    }
   });
 }
 
@@ -345,6 +369,9 @@ async function verifyExit(locations?: LocationObject[]) {
   await removeQueuedAttendanceAction("checkout", requestId);
   await notifyAutoCheckoutSynced({ detectedAt: payload.capturedAtClient }).catch(() => undefined);
   await stopAttendanceGeofenceInternal();
+  await import("./field-tracking/attendance-lifecycle")
+    .then(({ stopFieldTrackingForCheckOut }) => stopFieldTrackingForCheckOut(session.active.userId))
+    .catch((error) => console.warn("Unable to stop field tracking after auto-checkout", error));
 }
 
 export async function retryPendingAttendanceExit(locations?: LocationObject[]) {
@@ -378,6 +405,11 @@ async function handleLocationWatchdog(locations: LocationObject[]) {
   await verifyExit();
 }
 
+/** Feed attendance exit detection from the field tracker's single GPS task. */
+export async function processAttendanceLocationBatch(locations: LocationObject[]): Promise<void> {
+  await serializeTask(() => handleLocationWatchdog(locations));
+}
+
 try {
   TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => serializeTask(async () => {
     if (error || !data) return;
@@ -409,6 +441,7 @@ export async function reconcileAttendanceGeofence() {
   await retryPendingAttendanceExit();
   const { active } = await getAttendanceStatus();
   if (!active) { await stopAttendanceGeofence(); return; }
+  if (await AsyncStorage.getItem(FIELD_TRACKING_SUSPENDED_KEY) === "1") return;
   await startAttendanceGeofence(active, await getUserGeofences(active.userId));
   await retryPendingAttendanceExit();
 }

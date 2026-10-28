@@ -11,7 +11,10 @@ let notificationsModule: NotificationsModule | null | undefined;
 let handlerConfigured = false;
 
 function isExpoGo(): boolean {
-  return Constants.appOwnership === "expo" || Constants.executionEnvironment === "storeClient";
+  // appOwnership is deprecated and can be null in newer Expo Go clients.
+  // expoGoConfig is present only when the app is running inside Expo Go; a
+  // development build still loads the native notifications module normally.
+  return Constants.appOwnership === "expo" || Constants.expoGoConfig != null;
 }
 
 async function getNotificationsModule(): Promise<NotificationsModule | null> {

@@ -284,13 +284,20 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
     const pool = await deps.getMySqlPool();
     const [rows] = await pool.execute<any[]>(
-      `SELECT s.id AS session_id, s.employee_id, p.latitude, p.longitude, p.accuracy,
+      `SELECT s.id AS session_id, s.employee_id,
+              COALESCE(a.user_name, s.employee_id) AS employee_name,
+              p.latitude, p.longitude, p.accuracy,
               p.speed, p.heading, p.captured_at, p.sequence_no
        FROM lff_tracking_sessions s
        JOIN lff_tracking_points p ON p.point_id=(
          SELECT p2.point_id FROM lff_tracking_points p2
          WHERE p2.session_id=s.id AND (p2.route_eligible=1 OR p2.rejection_reason='stationary_noise')
          ORDER BY p2.sequence_no DESC LIMIT 1
+       )
+       LEFT JOIN lff_attendance a ON a.id=(
+         SELECT a2.id FROM lff_attendance a2
+         WHERE a2.user_id=s.employee_id AND a2.type='checkin' AND a2.timestamp<=s.started_at
+         ORDER BY a2.timestamp DESC LIMIT 1
        )
        WHERE s.company_id=? AND s.status='active'
        ORDER BY p.captured_at DESC LIMIT 500`,

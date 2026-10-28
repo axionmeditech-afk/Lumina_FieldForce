@@ -945,6 +945,9 @@ async function flushAttendanceQueueOnce(): Promise<void> {
         const record = await attendanceCheckOut(entry.payload);
         await addAttendance(record);
         if ((await getCurrentUser())?.id === entry.payload.userId) await setCheckedIn(false);
+        await import("./field-tracking/attendance-lifecycle")
+          .then(({ stopFieldTrackingForCheckOut }) => stopFieldTrackingForCheckOut(entry.payload.userId))
+          .catch((error) => console.warn("Unable to stop field tracking after queued checkout", error));
         if (automatic) await notifyAutoCheckoutSynced({ detectedAt: entry.payload.capturedAtClient }).catch(console.warn);
       }
       if (entry.payload.requestId) await removeQueuedAttendanceAction(entry.type, entry.payload.requestId);

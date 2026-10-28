@@ -50,6 +50,7 @@ import {
 } from "@/lib/attendance-notifications";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
 import { startAttendanceGeofence, stopAttendanceGeofence } from "@/lib/attendance-background";
+import { startFieldTrackingForCheckIn, stopFieldTrackingForCheckOut } from "@/lib/field-tracking/attendance-lifecycle";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 import {
@@ -1299,6 +1300,9 @@ function AttendanceScreenContent() {
         setCheckedInState(false);
         clearForegroundAutoCheckout("Auto-checkout completed after leaving office geofence.");
         await stopAttendanceGeofence().catch(console.warn);
+        await stopFieldTrackingForCheckOut(active.userId).catch((error) =>
+          console.warn("Unable to stop field tracking after foreground auto-checkout", error),
+        );
         void loadBaseData();
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } catch (error) {
@@ -1889,6 +1893,9 @@ function AttendanceScreenContent() {
           activeAttendanceRef.current = null;
           clearForegroundAutoCheckout(null);
           await stopAttendanceGeofence().catch(console.warn);
+          await stopFieldTrackingForCheckOut(user.id).catch((error) =>
+            console.warn("Unable to stop field tracking after checkout", error),
+          );
         } else {
           activeAttendanceRef.current = record;
           clearForegroundAutoCheckout("Auto-checkout armed while you are checked in.");
@@ -1899,6 +1906,17 @@ function AttendanceScreenContent() {
               "Check-in saved",
               "Auto-checkout needs Always/Background location permission. Enable it from Account or Android App Settings so the app can check out while locked."
             );
+          }
+          try {
+            await startFieldTrackingForCheckIn(user, record);
+          } catch (error) {
+            console.warn("Check-in saved but field tracking did not start", error);
+            if (!options?.silent) {
+              Alert.alert(
+                "Check-in saved",
+                "Live tracking could not start. Allow Precise and Background location, then reopen the app."
+              );
+            }
           }
         }
         void loadBaseData();

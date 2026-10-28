@@ -169,7 +169,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
               ? evaluateAutoCheckoutExit(activeZone, payload.latitude, payload.longitude, accuracy)
               : null;
             if (exitDecision && exitDecision.outside) {
-              const distance = Math.round(exitDecision.distance);
+              const distance = Math.round(exitDecision.distanceMeters);
               const notifId = deps.randomUUID ? deps.randomUUID() : randomUUID();
               await deps.insertNotificationInMySql({
                 id: notifId,

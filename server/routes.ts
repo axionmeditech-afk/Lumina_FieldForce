@@ -37,6 +37,7 @@ import { registerAuthRoutes } from "@/server/routes/auth.routes";
 import { registerStateRoutes } from "@/server/routes/state.routes";
 import { registerAttendanceActionRoutes } from "@/server/routes/attendance-actions.routes";
 import { registerGeofenceRoutes } from "@/server/routes/geofences.routes";
+import { registerFieldTrackingRoutes } from "@/server/routes/field-tracking.routes";
 
 
 type AdminWsClientMeta = {
@@ -3120,6 +3121,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     parseOptionalInteger,
     searchMapplsPlaces,
     reverseGeocodeMapplsCoordinates,
+  });
+
+  registerFieldTrackingRoutes(app, {
+    requireAuth,
+    getMySqlPool,
+    isMySqlStateEnabled,
+    resolveRequestCompanyId,
+    getRequestUser,
   });
 
   registerAttendanceActionRoutes(app, {

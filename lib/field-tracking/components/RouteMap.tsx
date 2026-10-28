@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ForwardRefExoticComponent, type RefAttributes } from 'react';
 import { Linking, StyleSheet, Text, View } from 'react-native';
-import WebView from 'react-native-webview';
+import WebView, { type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import type { Coordinate, HaltRecord, RoutePoint } from '../types';
 import { fieldTrackingConfig as appConfig } from '../config';
 import { haversineMetres } from '../geo';
@@ -20,6 +20,14 @@ type MapPayload = {
   navigationActive: boolean;
   heading: number | null;
 };
+
+type WebViewHandle = { postMessage: (message: string) => void };
+
+// react-native-webview exposes a function-component declaration while its
+// runtime supports refs. This keeps SDK 58's stricter JSX typing at the edge.
+const CompatibleWebView = WebView as unknown as ForwardRefExoticComponent<
+  WebViewProps & RefAttributes<WebViewHandle>
+>;
 
 export function RouteMap({
   points,
@@ -52,7 +60,7 @@ export function RouteMap({
   previewRoute?: boolean;
   heading?: number | null;
 }) {
-  const webRef = useRef<WebView>(null);
+  const webRef = useRef<WebViewHandle>(null);
   const [rendererStatus, setRendererStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const eligible = useMemo(() => points.filter((point) => point.routeEligible), [points]);
   const trusted = useMemo(
@@ -108,7 +116,7 @@ export function RouteMap({
 
   return (
     <View style={styles.frame}>
-      <WebView
+      <CompatibleWebView
         ref={webRef}
         originWhitelist={['*']}
         source={{ html }}
@@ -122,7 +130,7 @@ export function RouteMap({
         mixedContentMode="never"
         onError={() => setRendererStatus('error')}
         onLoadEnd={() => webRef.current?.postMessage(JSON.stringify({ type: 'map_state', payload }))}
-        onMessage={(event) => {
+        onMessage={(event: WebViewMessageEvent) => {
           if (event.nativeEvent.data === 'map_ready') setRendererStatus('ready');
           if (event.nativeEvent.data === 'map_error') setRendererStatus('error');
         }}
