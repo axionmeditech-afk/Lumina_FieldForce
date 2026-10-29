@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useNavigation } from 'expo-router';
+import { Redirect, useNavigation } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/contexts/AuthContext';
 import { RouteMap } from '@/lib/field-tracking/components/RouteMap';
@@ -402,11 +402,12 @@ const styles = StyleSheet.create({
 
 export default function FieldTrackingScreen() {
   const { user } = useAuth();
+  const navigation = useNavigation();
   const isSupervisor = user?.role === 'admin' || user?.role === 'manager' || user?.role === 'hr';
   
   if (isSupervisor) {
-    return <AdminScreen />;
+    return <AdminScreen onOpenMenu={() => (navigation as any).openDrawer?.()} />;
   }
-  return <EmployeeTrackingScreen />;
+  return <Redirect href="/(tabs)/attendance" />;
 }
 

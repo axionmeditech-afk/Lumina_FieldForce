@@ -140,7 +140,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.status(400).json({ message: 'Invalid location batch.', issues: parsed.error.issues });
       return;
     }
-    const companyId = resolveAuthorizedCompanyId(req, parsed.data.companyId, deps);
+    const companyId = await resolveAuthorizedCompanyId(req, parsed.data.companyId, deps);
     const employeeId = req.auth?.sub || '';
     if (!companyId || !employeeId) {
       res.status(403).json({ message: 'Workspace access is required for field tracking.' });
@@ -276,7 +276,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
     const requestedCompanyId = String(req.query.companyId || '').trim();
     const companyId = requestedCompanyId
-      ? resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
+      ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
       : await deps.resolveRequestCompanyId(req);
     if (!companyId) {
       res.status(403).json({ message: 'Workspace access is required for live tracking.' });
@@ -316,9 +316,16 @@ function getAuthorizedCompanyIds(req: Request, deps: Deps): Set<string> {
   );
 }
 
-function resolveAuthorizedCompanyId(req: Request, requestedCompanyId: string, deps: Deps): string | null {
+async function resolveAuthorizedCompanyId(req: Request, requestedCompanyId: string, deps: Deps): Promise<string | null> {
   const normalized = requestedCompanyId.trim();
-  return normalized && getAuthorizedCompanyIds(req, deps).has(normalized) ? normalized : null;
+  if (!normalized) return null;
+  if (getAuthorizedCompanyIds(req, deps).has(normalized)) return normalized;
+
+  // Some authenticated Dolibarr users are resolved on demand rather than being
+  // present in the in-memory user cache. Match their server-resolved workspace
+  // before rejecting a legitimate location upload.
+  const resolvedCompanyId = await deps.resolveRequestCompanyId(req);
+  return resolvedCompanyId === normalized ? normalized : null;
 }
 
 async function ensureTables(pool: Pool): Promise<void> {

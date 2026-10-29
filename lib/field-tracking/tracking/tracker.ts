@@ -159,7 +159,11 @@ export async function restoreFieldTracker(employeeId?: string): Promise<void> {
   await setState('tracker_state', 'tracking');
 }
 
-export async function startFieldTracking(employeeId: string, companyId: string): Promise<TrackingSession> {
+export async function startFieldTracking(
+  employeeId: string,
+  companyId: string,
+  initialLocation?: Location.LocationObject,
+): Promise<TrackingSession> {
   if (!companyId.trim()) throw new Error('Select a workspace before starting field tracking.');
   const existing = await getActiveSession();
   if (existing) {
@@ -189,7 +193,9 @@ export async function startFieldTracking(employeeId: string, companyId: string):
   };
   await createSession(session);
   try {
-    await persistFieldLocation(await getInitialFix());
+    // Attendance has already verified a recent, precise fix at check-in. Reuse it so
+    // the live session is committed immediately instead of waiting for a second GPS lock.
+    await persistFieldLocation(initialLocation ?? await getInitialFix());
     if (permissions.backgroundCapable) await startNativeTask();
     else {
       installExpoGoLifecycle();

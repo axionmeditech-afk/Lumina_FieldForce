@@ -249,6 +249,7 @@ export default function AttendanceLayout() {
   const { colors, isDark } = useAppTheme();
   const { width } = useWindowDimensions();
   const isLargeScreen = width >= 1024;
+  const canViewLiveTracking = user?.role === "admin" || user?.role === "manager" || user?.role === "hr";
   const palette = getDrawerPalette(isDark);
   const drawerWidth = useMemo(() => Math.min(DRAWER_WIDTH, Math.max(300, width * 0.86)), [width]);
 
@@ -326,20 +327,22 @@ export default function AttendanceLayout() {
           ),
         }}
       />
-      <Drawer.Screen
-        name="field-tracking"
-        options={{
-          title: "Live Tracking",
-          drawerIcon: ({ focused, size }) => (
-            <DrawerIcon
-              focused={focused}
-              size={size}
-              name="navigate-outline"
-              focusedName="navigate"
-            />
-          ),
-        }}
-      />
+      {canViewLiveTracking ? (
+        <Drawer.Screen
+          name="field-tracking"
+          options={{
+            title: "Live Tracking",
+            drawerIcon: ({ focused, size }) => (
+              <DrawerIcon
+                focused={focused}
+                size={size}
+                name="navigate-outline"
+                focusedName="navigate"
+              />
+            ),
+          }}
+        />
+      ) : null}
       <Drawer.Screen
         name="account"
         options={{

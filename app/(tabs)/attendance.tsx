@@ -1899,25 +1899,30 @@ function AttendanceScreenContent() {
         } else {
           activeAttendanceRef.current = record;
           clearForegroundAutoCheckout("Auto-checkout armed while you are checked in.");
-          await ensureAttendanceNotificationPermission(true).catch(() => false);
-          const enabled = await startAttendanceGeofence(record, geofences, true).catch(() => false);
-          if (!enabled) {
-            Alert.alert(
-              "Check-in saved",
-              "Auto-checkout needs Always/Background location permission. Enable it from Account or Android App Settings so the app can check out while locked."
-            );
-          }
-          try {
-            await startFieldTrackingForCheckIn(user, record);
-          } catch (error) {
-            console.warn("Check-in saved but field tracking did not start", error);
-            if (!options?.silent) {
+          // The attendance record is already confirmed above. Location permission prompts and
+          // the first high-accuracy GPS fix may take up to 30 seconds, so they must never keep
+          // the Check in button in its loading state.
+          void (async () => {
+            try {
+              await startFieldTrackingForCheckIn(user, record, postCaptureLocation);
+            } catch (error) {
+              console.warn("Check-in saved but field tracking did not start", error);
+              if (!options?.silent) {
+                Alert.alert(
+                  "Check-in saved",
+                  "Live tracking could not start. Allow Precise and Background location, then reopen the app."
+                );
+              }
+            }
+            await ensureAttendanceNotificationPermission(true).catch(() => false);
+            const enabled = await startAttendanceGeofence(record, geofences, true).catch(() => false);
+            if (!enabled) {
               Alert.alert(
                 "Check-in saved",
-                "Live tracking could not start. Allow Precise and Background location, then reopen the app."
+                "Auto-checkout needs Always/Background location permission. Enable it from Account or Android App Settings so the app can check out while locked."
               );
             }
-          }
+          })();
         }
         void loadBaseData();
         if (requiresApproval) {

@@ -1,18 +1,19 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, Pressable, ActivityIndicator, ScrollView } from 'react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { RouteMap } from '../components/RouteMap';
 import { StatusDot } from '../components/Primitives';
 import { BottomSheet } from '../components/BottomSheet';
 import { useLiveRoute } from './useLiveRoute';
 
-export function AdminScreen() {
+export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
   const { employee, employees, points, connectionState, error, serverHealth, refresh, selectEmployee } = useLiveRoute();
   const [selectingEmployee, setSelectingEmployee] = useState(true);
   const live = connectionState === 'live';
 
   if (selectingEmployee) {
-    return <EmployeePicker employees={employees} connectionState={connectionState} error={error} onRefresh={refresh} onSelect={(employeeId) => {
+    return <EmployeePicker employees={employees} connectionState={connectionState} error={error} onOpenMenu={onOpenMenu} onRefresh={refresh} onSelect={(employeeId) => {
       selectEmployee(employeeId);
       setSelectingEmployee(false);
     }} />;
@@ -103,12 +104,14 @@ function EmployeePicker({
   employees,
   connectionState,
   error,
+  onOpenMenu,
   onRefresh,
   onSelect,
 }: {
   employees: any[];
   connectionState: string;
   error: string | null;
+  onOpenMenu: () => void;
   onRefresh: () => void;
   onSelect: (employeeId: string) => void;
 }) {
@@ -118,6 +121,14 @@ function EmployeePicker({
       <View style={styles.pickerScreen}>
         <View style={styles.pickerHeader}>
           <View style={styles.pickerIcon}><Text style={styles.pickerIconText}>⌖</Text></View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open navigation menu"
+            onPress={onOpenMenu}
+            style={({ pressed }) => [styles.pickerMenuButton, pressed && styles.pickerMenuButtonPressed]}
+          >
+            <Ionicons name="menu" size={25} color="#152238" />
+          </Pressable>
           <Text style={styles.pickerTitle}>Choose live employee</Text>
           <Text style={styles.pickerSubtitle}>Select whose current route you want to view.</Text>
         </View>
@@ -221,8 +232,10 @@ const styles = StyleSheet.create({
   healthValueDanger: { color: '#B42318' },
   noteText: { color: '#64748B', fontSize: 11, lineHeight: 17, marginHorizontal: 16 },
   pickerScreen: { flex: 1, backgroundColor: '#F5F8FC', paddingHorizontal: 18 },
-  pickerHeader: { paddingTop: 28, paddingBottom: 20 },
-  pickerIcon: { width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1769D2', marginBottom: 14 },
+  pickerHeader: { paddingTop: 88, paddingBottom: 20, position: 'relative' },
+  pickerMenuButton: { position: 'absolute', top: 28, left: 0, width: 46, height: 46, borderRadius: 23, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', elevation: 3 },
+  pickerMenuButtonPressed: { opacity: 0.82 },
+  pickerIcon: { display: 'none' },
   pickerIconText: { color: '#FFFFFF', fontSize: 23, fontWeight: '900' },
   pickerTitle: { color: '#10233F', fontSize: 24, fontWeight: '900' },
   pickerSubtitle: { color: '#64748B', fontSize: 13, lineHeight: 19, marginTop: 6 },
