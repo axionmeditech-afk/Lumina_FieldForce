@@ -56,7 +56,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   throw finalError ?? new Error('Field tracking backend is unavailable.');
 }
 
-export async function getFieldHealth(): Promise<{ apiReachable: boolean; routerReachable: boolean; geocoderReachable: boolean }> {
+export async function getFieldHealth(): Promise<{ apiReachable: boolean; provider?: 'stadia' | 'self-hosted' | 'unconfigured'; routerReachable: boolean; geocoderReachable: boolean }> {
   try {
     return await requestJson('/field-tracking/health', { timeoutMs: 5_000 });
   } catch {
@@ -82,7 +82,7 @@ export function planFieldRoute(origin: Coordinate, destination: PlaceSearchResul
   });
 }
 
-export async function fetchMatchedRoute(sessionId: string): Promise<{ source: 'self-hosted-valhalla' | 'raw'; points: Coordinate[]; lastSequence: number }> {
+export async function fetchMatchedRoute(sessionId: string): Promise<{ source: 'stadia-valhalla' | 'self-hosted-valhalla' | 'raw'; points: Coordinate[]; lastSequence: number }> {
   return requestJson(`/field-tracking/sessions/${encodeURIComponent(sessionId)}/matched-route`, { timeoutMs: 14_000 });
 }
 

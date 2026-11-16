@@ -2,7 +2,15 @@ import type { Express, Request } from 'express';
 import type { Pool } from 'mysql2/promise';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
-import { computeRoute, matchTrace, searchPlaces } from '@/server/services/field-geospatial';
+import {
+  computeRoute,
+  getConfiguredRouteSource,
+  getGeospatialProvider,
+  isGeocoderConfigured,
+  isRouterConfigured,
+  matchTrace,
+  searchPlaces,
+} from '@/server/services/field-geospatial';
 
 type Deps = {
   requireAuth: (req: any, res: any, next: any) => void;
@@ -91,17 +99,22 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
 
   app.get('/api/field-tracking/health', deps.requireAuth, async (_req, res) => {
     if (healthCache && Date.now() - healthCache.checkedAt < 20_000) {
-      res.json({ apiReachable: true, routerReachable: healthCache.routerReachable, geocoderReachable: healthCache.geocoderReachable });
+      res.json({ apiReachable: true, provider: getGeospatialProvider(), routerReachable: healthCache.routerReachable, geocoderReachable: healthCache.geocoderReachable });
       return;
     }
-    const [routerReachable, geocoderReachable] = await Promise.all([
-      probe(process.env.VALHALLA_URL || process.env.ROUTER_BASE_URL || '', '/status'),
-      // Some Nominatim images expose /status inconsistently while their actual
-      // search API is healthy. Probe the same lightweight endpoint the app uses.
-      probe(process.env.NOMINATIM_URL || process.env.GEOCODER_BASE_URL || '', '/search?q=Ahmedabad&format=jsonv2&limit=1'),
-    ]);
+    // Hosted Stadia readiness is configuration-based. The mobile app polls this
+    // endpoint frequently, so health checks must not consume geocoding credits.
+    const hosted = getGeospatialProvider() === 'stadia';
+    const [routerReachable, geocoderReachable] = hosted
+      ? [isRouterConfigured(), isGeocoderConfigured()]
+      : await Promise.all([
+          probe(process.env.VALHALLA_URL || process.env.ROUTER_BASE_URL || '', '/status'),
+          // Some Nominatim images expose /status inconsistently while their actual
+          // search API is healthy. Probe the same lightweight endpoint the app uses.
+          probe(process.env.NOMINATIM_URL || process.env.GEOCODER_BASE_URL || '', '/search?q=Ahmedabad&format=jsonv2&limit=1'),
+        ]);
     healthCache = { checkedAt: Date.now(), routerReachable, geocoderReachable };
-    res.json({ apiReachable: true, routerReachable, geocoderReachable });
+    res.json({ apiReachable: true, provider: getGeospatialProvider(), routerReachable, geocoderReachable });
   });
 
   app.get('/api/field-tracking/places/search', deps.requireAuth, async (req, res) => {
@@ -370,7 +383,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const matched = await matchTrace(points).catch(() => points);
-    res.json({ source: matched === points ? 'raw' : 'self-hosted-valhalla', points: matched, lastSequence });
+    res.json({ source: matched === points ? 'raw' : getConfiguredRouteSource(), points: matched, lastSequence });
   });
 
   app.get('/api/field-tracking/sessions/:sessionId/kpis', deps.requireAuth, requireStore, async (req, res) => {

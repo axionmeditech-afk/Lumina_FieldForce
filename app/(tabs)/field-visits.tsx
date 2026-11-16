@@ -127,7 +127,7 @@ export default function FieldVisitsScreen() {
 
   const assignVisit = async () => {
     if (!selectedEmployeeId || !selectedPlace) {
-      Alert.alert('Choose employee and place', 'Select the field employee and an exact Nominatim place first.');
+      Alert.alert('Choose employee and place', 'Select the field employee and an exact search result first.');
       return;
     }
     setSaving(true);
@@ -187,7 +187,7 @@ export default function FieldVisitsScreen() {
         },
         'auto',
       );
-      if (planned.source !== 'self-hosted-valhalla' || planned.coordinates.length < 2) {
+      if (planned.source === 'unavailable' || planned.coordinates.length < 2) {
         throw new Error('No road route was found for this place.');
       }
       setRoute(planned);
@@ -299,7 +299,7 @@ export default function FieldVisitsScreen() {
       placeId: selectedVisit.placeId, name: selectedVisit.placeName, address: selectedVisit.placeAddress,
       latitude: selectedVisit.latitude, longitude: selectedVisit.longitude, primaryType: null,
     }, 'auto').then((nextRoute) => {
-      if (nextRoute.source === 'self-hosted-valhalla' && nextRoute.coordinates.length >= 2) {
+      if (nextRoute.source !== 'unavailable' && nextRoute.coordinates.length >= 2) {
         setRoute(nextRoute);
         spokenRef.current.clear();
         speak('Route updated.');

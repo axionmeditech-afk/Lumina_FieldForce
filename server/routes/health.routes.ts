@@ -1,4 +1,9 @@
 import type { Express } from "express";
+import {
+  getGeospatialProvider,
+  isGeocoderConfigured,
+  isRouterConfigured,
+} from "@/server/services/field-geospatial";
 
 export type HealthRouteDeps = {
   isMySqlStateEnabled: () => boolean;
@@ -12,6 +17,9 @@ export function registerHealthRoutes(app: Express, deps: HealthRouteDeps) {
       commit: process.env.RENDER_GIT_COMMIT || null,
       ts: new Date().toISOString(),
       mysqlStateEnabled: deps.isMySqlStateEnabled(),
+      geospatialProvider: getGeospatialProvider(),
+      routerConfigured: isRouterConfigured(),
+      geocoderConfigured: isGeocoderConfigured(),
     });
   });
 }

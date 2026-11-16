@@ -47,7 +47,7 @@ export function RouteMap({
 }: {
   points: RoutePoint[];
   matchedRoute?: Coordinate[];
-  matchedRouteSource?: 'self-hosted-valhalla' | 'raw';
+  matchedRouteSource?: 'stadia-valhalla' | 'self-hosted-valhalla' | 'raw';
   waypoints?: Coordinate[];
   follow?: boolean;
   compact?: boolean;
@@ -69,7 +69,7 @@ export function RouteMap({
   );
   const latest = trusted.at(-1);
   const displayTravelRoute = useMemo(
-    () => mergeTravelTrail(compactRawTrace(eligible), matchedRouteSource === 'self-hosted-valhalla' ? matchedRoute : []),
+    () => mergeTravelTrail(compactRawTrace(eligible), matchedRouteSource !== 'raw' ? matchedRoute : []),
     [eligible, matchedRoute, matchedRouteSource]
   );
   const start = useMemo(

@@ -98,8 +98,8 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
             <View style={styles.healthRow}>
               <HealthChip label="API" value={serverHealth.apiReachable ? 'Ready' : 'Offline'} ready={serverHealth.apiReachable} />
               <HealthChip label="Live polling" value={connectionState} ready={connectionState === 'live'} warning={connectionState !== 'offline' && connectionState !== 'live'} />
-              <HealthChip label="Valhalla" value={serverHealth.routerReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.routerReachable} />
-              <HealthChip label="Nominatim" value={serverHealth.geocoderReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.geocoderReachable} />
+              <HealthChip label="Routing API" value={serverHealth.routerReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.routerReachable} />
+              <HealthChip label="Geocoding API" value={serverHealth.geocoderReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.geocoderReachable} />
             </View>
           </SectionCard>
         </BottomSheet>

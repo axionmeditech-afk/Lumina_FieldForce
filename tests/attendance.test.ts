@@ -319,7 +319,7 @@ test("GPS evidence and client/server geofencing agree at uncertain boundaries", 
 test("only supported app pages exist and removed animations cannot return silently", async () => {
   const { readdir, readFile } = await import("node:fs/promises");
   const routes = (await readdir("app/(tabs)")).sort();
-  assert.deepEqual(routes, ["_layout.tsx", "account.tsx", "attendance.tsx", "field-tracking.tsx", "index.tsx"]);
+  assert.deepEqual(routes, ["_layout.tsx", "account.tsx", "attendance.tsx", "field-tracking.tsx", "field-visits.tsx", "index.tsx"]);
   const pkg = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(pkg.dependencies.lenis, undefined);
   for (const file of ["app/(tabs)/index.tsx", "app/(tabs)/_layout.tsx", "app/login.tsx", "components/StartScreen.tsx"]) {

@@ -66,7 +66,7 @@ export type NavigationManeuver = {
 };
 
 export type RoutePlan = {
-  source: 'self-hosted-valhalla' | 'unavailable';
+  source: 'stadia-valhalla' | 'self-hosted-valhalla' | 'unavailable';
   distanceMetres: number | null;
   durationSeconds: number | null;
   coordinates: Coordinate[];

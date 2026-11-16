@@ -43,7 +43,7 @@ function EmployeeTrackingScreen() {
   const [navigationActive, setNavigationActive] = useState(false);
   const [travelMode, setTravelMode] = useState<'auto' | 'pedestrian' | 'bicycle'>('auto');
   const [matchedRoute, setMatchedRoute] = useState<Coordinate[]>([]);
-  const [matchedSource, setMatchedSource] = useState<'self-hosted-valhalla' | 'raw'>('raw');
+  const [matchedSource, setMatchedSource] = useState<'stadia-valhalla' | 'self-hosted-valhalla' | 'raw'>('raw');
   const rerouteSamplesRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
   const arrivalSamplesRef = useRef(0);
@@ -94,7 +94,7 @@ function EmployeeTrackingScreen() {
     setPlanning(true);
     try {
       const planned = await planFieldRoute(currentPosition, place, travelMode);
-      if (planned.source !== 'self-hosted-valhalla' || planned.coordinates.length < 2) {
+      if (planned.source === 'unavailable' || planned.coordinates.length < 2) {
         throw new Error('No route was found inside the installed map region.');
       }
       setDestination(place);
@@ -163,7 +163,7 @@ function EmployeeTrackingScreen() {
     setPlanning(true);
     void planFieldRoute(currentPosition, destination, mode)
       .then((planned) => {
-        if (planned.source === 'self-hosted-valhalla' && planned.coordinates.length >= 2) setRoute(planned);
+        if (planned.source !== 'unavailable' && planned.coordinates.length >= 2) setRoute(planned);
       })
       .catch((error) => Alert.alert('Route unavailable', humanizeError(error)))
       .finally(() => setPlanning(false));

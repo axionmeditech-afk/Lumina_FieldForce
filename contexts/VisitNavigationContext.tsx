@@ -184,7 +184,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     offRouteSamplesRef.current = 0;
     setBusy(true);
     void planFieldRoute(session.position, toPlace(session.visit), 'auto').then((nextRoute) => {
-      if (nextRoute.source === 'self-hosted-valhalla' && nextRoute.coordinates.length >= 2) {
+      if (nextRoute.source !== 'unavailable' && nextRoute.coordinates.length >= 2) {
         setSession((current) => current ? { ...current, route: nextRoute, updatedAt: new Date().toISOString() } : null);
         spokenRef.current.clear();
         speak('Route updated.');
