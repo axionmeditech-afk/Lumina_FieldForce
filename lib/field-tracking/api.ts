@@ -16,10 +16,15 @@ export type FieldVisitAssignment = {
   longitude: number;
   queueOrder: number;
   notes: string;
-  status: 'pending' | 'completed' | 'cancelled';
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
   createdAt: string;
+  startedAt: string | null;
   completedAt: string | null;
+  arrivalLocation: (Coordinate & { accuracy: number | null }) | null;
+  completionLocation: (Coordinate & { accuracy: number | null }) | null;
 };
+
+export type VisitEvidenceLocation = Coordinate & { accuracy?: number | null };
 
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const token = await getApiToken();
@@ -74,11 +79,11 @@ export async function searchFieldPlaces(query: string, bias?: Coordinate): Promi
   return result.places;
 }
 
-export function planFieldRoute(origin: Coordinate, destination: PlaceSearchResult, travelMode: 'auto' | 'pedestrian' | 'bicycle'): Promise<RoutePlan> {
+export function planFieldRoute(origin: Coordinate, destination: PlaceSearchResult, travelMode: 'auto' | 'pedestrian' | 'bicycle', assignmentId?: string): Promise<RoutePlan> {
   return requestJson('/field-tracking/route', {
     method: 'POST',
     timeoutMs: 18_000,
-    body: JSON.stringify({ origin, destination, travelMode }),
+    body: JSON.stringify({ origin, destination, travelMode, assignmentId }),
   });
 }
 
@@ -129,8 +134,16 @@ export function createFieldVisitAssignment(input: {
   });
 }
 
-export function completeFieldVisitAssignment(assignmentId: string): Promise<{ ok: boolean }> {
+export function startFieldVisitAssignment(assignmentId: string, location: VisitEvidenceLocation): Promise<{ assignment: FieldVisitAssignment }> {
+  return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/start`, {
+    method: 'POST',
+    body: JSON.stringify({ location }),
+  });
+}
+
+export function completeFieldVisitAssignment(assignmentId: string, location?: VisitEvidenceLocation): Promise<{ ok: boolean; nextAssignment: FieldVisitAssignment | null }> {
   return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/complete`, {
     method: 'POST',
+    body: JSON.stringify({ location: location || null }),
   });
 }

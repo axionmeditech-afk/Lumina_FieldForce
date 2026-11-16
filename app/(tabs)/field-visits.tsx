@@ -12,22 +12,24 @@ import {
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
-import { useNavigation } from 'expo-router';
+import { router, useNavigation } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/contexts/AuthContext';
 import { useVisitNavigation } from '@/contexts/VisitNavigationContext';
-import { getUsersRemote } from '@/lib/attendance-api';
+import { getAttendanceStatus, getUsersRemote } from '@/lib/attendance-api';
 import {
   completeFieldVisitAssignment,
   createFieldVisitAssignment,
   getFieldVisitAssignments,
   planFieldRoute,
   searchFieldPlaces,
+  startFieldVisitAssignment,
   type FieldVisitAssignment,
 } from '@/lib/field-tracking/api';
 import { RouteMap } from '@/lib/field-tracking/components/RouteMap';
 import { formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
 import type { PlaceSearchResult, RoutePlan } from '@/lib/field-tracking/types';
+import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-navigation-lifecycle';
 
 const EMPTY_ROUTE: RoutePlan = {
   source: 'unavailable', distanceMetres: null, durationSeconds: null, coordinates: [], maneuvers: [],
@@ -56,10 +58,13 @@ export default function FieldVisitsScreen() {
   const [route, setRoute] = useState<RoutePlan>(EMPTY_ROUTE);
   const [routing, setRouting] = useState(false);
   const [currentPosition, setCurrentPosition] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [currentAccuracy, setCurrentAccuracy] = useState<number | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
+  const [checkedIn, setCheckedIn] = useState(false);
   const [navigationActive, setNavigationActive] = useState(false);
   const [arrived, setArrived] = useState(false);
   const [rerouting, setRerouting] = useState(false);
+  const [visitActionBusy, setVisitActionBusy] = useState(false);
   const locationSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
   const offRouteSamplesRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
@@ -73,10 +78,17 @@ export default function FieldVisitsScreen() {
     setSelectedVisit(saved.visit);
     setRoute(saved.route);
     setCurrentPosition(saved.position);
+    setCurrentAccuracy(saved.accuracy);
     setHeading(saved.heading);
     setNavigationActive(saved.status === 'active');
     setArrived(saved.status === 'arrived');
   }, [visitNavigation.session?.updatedAt]);
+
+  useEffect(() => subscribeToVisitNavigationCheckout(() => {
+    setCheckedIn(false);
+    setNavigationActive(false);
+    setArrived(false);
+  }), []);
 
   useEffect(() => {
     if (!visitNavigation.expandNonce || !visitNavigation.session) return;
@@ -91,12 +103,14 @@ export default function FieldVisitsScreen() {
   const reload = useCallback(async (quiet = false) => {
     quiet ? setRefreshing(true) : setLoading(true);
     try {
-      const [nextAssignments, nextEmployees] = await Promise.all([
+      const [nextAssignments, nextEmployees, attendance] = await Promise.all([
         getFieldVisitAssignments(),
         supervisor ? getUsersRemote({ companyId: company?.id }) : Promise.resolve([]),
+        supervisor ? Promise.resolve({ active: null }) : getAttendanceStatus().catch(() => ({ records: [], active: null })),
       ]);
       setAssignments(nextAssignments);
       setEmployees(nextEmployees.filter((item: any) => item.id && !isSupervisor(item.role)));
+      if (!supervisor) setCheckedIn(Boolean(attendance.active));
     } catch (error) {
       if (!quiet) Alert.alert('Visit queue unavailable', humanize(error));
     } finally {
@@ -107,7 +121,7 @@ export default function FieldVisitsScreen() {
 
   useEffect(() => { void reload(); }, [reload]);
 
-  const pending = useMemo(() => assignments.filter((item) => item.status === 'pending'), [assignments]);
+  const pending = useMemo(() => assignments.filter((item) => item.status === 'pending' || item.status === 'in_progress'), [assignments]);
   const employeeById = useMemo(() => new Map(employees.map((item: any) => [String(item.id), item])), [employees]);
 
   const searchPlaces = async () => {
@@ -161,75 +175,111 @@ export default function FieldVisitsScreen() {
   // through attendance, dashboard or the visit queue.
   useEffect(() => () => undefined, []);
 
-  const openRoute = async (visit: FieldVisitAssignment) => {
+  const openVisit = async (visit: FieldVisitAssignment) => {
     stopDirections();
+    await visitNavigation.clear();
     setMapOpen(true);
     setSelectedVisit(visit);
     setRoute(EMPTY_ROUTE);
     setCurrentPosition(null);
+    setCurrentAccuracy(null);
     setHeading(null);
     setArrived(false);
     setRerouting(false);
     offRouteSamplesRef.current = 0;
     spokenRef.current.clear();
-    setRouting(true);
-    try {
-      const permission = await Location.requestForegroundPermissionsAsync();
-      if (permission.status !== 'granted') throw new Error('Allow precise location to calculate the route to this visit.');
-      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      setCurrentPosition({ latitude: location.coords.latitude, longitude: location.coords.longitude });
-      setHeading(Number.isFinite(location.coords.heading) ? location.coords.heading : null);
-      const planned = await planFieldRoute(
-        { latitude: location.coords.latitude, longitude: location.coords.longitude },
-        {
-          placeId: visit.placeId, name: visit.placeName, address: visit.placeAddress,
-          latitude: visit.latitude, longitude: visit.longitude, primaryType: null,
-        },
-        'auto',
-      );
-      if (planned.source === 'unavailable' || planned.coordinates.length < 2) {
-        throw new Error('No road route was found for this place.');
-      }
-      setRoute(planned);
-      await visitNavigation.setPreview({
-        visit,
-        route: planned,
-        position: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-        heading: Number.isFinite(location.coords.heading) ? location.coords.heading : null,
-      });
-    } catch (error) {
-      Alert.alert('Route unavailable', humanize(error));
-    } finally {
-      setRouting(false);
-    }
   };
 
   const startDirections = async () => {
-    if (!selectedVisit || route.coordinates.length < 2) {
-      Alert.alert('Route is still loading', 'Wait for a valid route before starting directions.');
-      return;
-    }
+    if (!selectedVisit || selectedVisit.status !== 'pending') return;
+    setRouting(true);
     try {
-      await visitNavigation.start();
+      const attendance = await getAttendanceStatus();
+      setCheckedIn(Boolean(attendance.active));
+      if (!attendance.active) {
+        Alert.alert('Check-in required', 'Check in before starting directions for this visit.', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Go to attendance', onPress: () => router.push('/(tabs)/attendance') },
+        ]);
+        return;
+      }
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (permission.status !== 'granted') throw new Error('Allow precise location to start directions.');
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      const position = { latitude: location.coords.latitude, longitude: location.coords.longitude };
+      const nextHeading = Number.isFinite(location.coords.heading) ? location.coords.heading : null;
+      const accuracy = Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null;
+      const planned = await planFieldRoute(position, {
+        placeId: selectedVisit.placeId, name: selectedVisit.placeName, address: selectedVisit.placeAddress,
+        latitude: selectedVisit.latitude, longitude: selectedVisit.longitude, primaryType: null,
+      }, 'auto', selectedVisit.assignmentId);
+      if (planned.source === 'unavailable' || planned.coordinates.length < 2) throw new Error('No road route was found for this place.');
+      setCurrentPosition(position);
+      setCurrentAccuracy(accuracy);
+      setHeading(nextHeading);
+      setRoute(planned);
+      await visitNavigation.start({ visit: selectedVisit, route: planned, position, heading: nextHeading, accuracy });
       setArrived(false);
       setNavigationActive(true);
     } catch (error) {
       setNavigationActive(false);
       Alert.alert('Directions unavailable', humanize(error));
+    } finally {
+      setRouting(false);
+    }
+  };
+
+  const startVisit = async (visit: FieldVisitAssignment) => {
+    if (!currentPosition) {
+      Alert.alert('Current location required', 'Wait for a precise GPS fix before starting the visit.');
+      return;
+    }
+    setVisitActionBusy(true);
+    try {
+      const result = await startFieldVisitAssignment(visit.assignmentId, { ...currentPosition, accuracy: currentAccuracy });
+      stopDirections();
+      await visitNavigation.clear();
+      setSelectedVisit(result.assignment);
+      setAssignments((current) => current.map((item) => item.assignmentId === result.assignment.assignmentId ? result.assignment : item));
+      setRoute(EMPTY_ROUTE);
+      setArrived(false);
+      speak('Visit started. Complete it here when your work is finished.');
+    } catch (error) {
+      Alert.alert('Could not start visit', humanize(error));
+    } finally {
+      setVisitActionBusy(false);
     }
   };
 
   const completeVisit = async (visit: FieldVisitAssignment) => {
+    setVisitActionBusy(true);
     try {
-      await completeFieldVisitAssignment(visit.assignmentId);
+      const result = await completeFieldVisitAssignment(
+        visit.assignmentId,
+        currentPosition ? { ...currentPosition, accuracy: currentAccuracy } : undefined,
+      );
       stopDirections();
       await visitNavigation.clear();
       setSelectedVisit(null);
       setMapOpen(false);
       setRoute(EMPTY_ROUTE);
       await reload(true);
+      if (result.nextAssignment) {
+        Alert.alert(
+          'Visit completed',
+          `Next suggested visit: ${result.nextAssignment.placeName}. Directions will start only when you choose them.`,
+          [
+            { text: 'Back to queue', style: 'cancel' },
+            { text: 'View next visit', onPress: () => void openVisit(result.nextAssignment!) },
+          ],
+        );
+      } else {
+        Alert.alert('Visit completed', 'All currently assigned visits are complete.');
+      }
     } catch (error) {
       Alert.alert('Could not complete visit', humanize(error));
+    } finally {
+      setVisitActionBusy(false);
     }
   };
 
@@ -266,10 +316,10 @@ export default function FieldVisitsScreen() {
     if (visitNavigation.session) return;
     if (!navigationActive || !selectedVisit || !currentPosition) return;
     const destinationDistance = haversineMetres(currentPosition, selectedVisit);
-    if (destinationDistance > 50) return;
+    if (destinationDistance > 100) return;
     setArrived(true);
     stopDirections();
-    speak('You have arrived at your destination. Mark the visit complete when finished.');
+    speak(`You have reached ${selectedVisit.placeName}. Start the visit when ready.`);
   }, [currentPosition, navigationActive, selectedVisit, stopDirections, visitNavigation.session]);
 
   useEffect(() => {
@@ -298,7 +348,7 @@ export default function FieldVisitsScreen() {
     void planFieldRoute(currentPosition, {
       placeId: selectedVisit.placeId, name: selectedVisit.placeName, address: selectedVisit.placeAddress,
       latitude: selectedVisit.latitude, longitude: selectedVisit.longitude, primaryType: null,
-    }, 'auto').then((nextRoute) => {
+    }, 'auto', selectedVisit.assignmentId).then((nextRoute) => {
       if (nextRoute.source !== 'unavailable' && nextRoute.coordinates.length >= 2) {
         setRoute(nextRoute);
         spokenRef.current.clear();
@@ -324,18 +374,26 @@ export default function FieldVisitsScreen() {
           <View style={[styles.routeCard, navigationActive && styles.routeCardNavigating]}>
             {routing ? <ActivityIndicator color="#1769D2" style={{ marginTop: 10 }} /> : navigationActive && nextManeuver.maneuver ? (
               <View style={styles.maneuverRow}><View style={styles.turnArrowShell}><Ionicons name={turnIcon(nextManeuver.maneuver.instruction)} size={39} color="#FFFFFF" /></View><View style={styles.maneuverCopy}><Text style={styles.directionInstruction} numberOfLines={2}>{nextManeuver.maneuver.instruction}</Text><Text style={[styles.routeMetric, styles.routeMetricNavigating]}>{formatDistance(nextManeuver.distanceToManeuver)} to next turn · {formatDistance(nextManeuver.remainingDistance)} remaining</Text></View></View>
+            ) : selectedVisit.status === 'in_progress' ? (
+              <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.visitStartedIcon]}><Ionicons name="briefcase" size={23} color="#16835B" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Visit in progress</Text><Text style={styles.previewRouteMeta}>Complete the assigned work, then record the visit completion here.</Text></View></View>
+            ) : arrived ? (
+              <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.arrivedIcon]}><Ionicons name="location" size={24} color="#16835B" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>You have reached {selectedVisit.placeName}</Text><Text style={styles.previewRouteMeta}>Start visit when you are ready to begin the assigned work.</Text></View></View>
             ) : route.distanceMetres != null ? (
               <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Best road route ready</Text><Text style={styles.routeMetric}>{formatDistance(route.distanceMetres)} · {formatDuration(route.durationSeconds || 0)}</Text><Text style={styles.previewRouteMeta}>{previewArrival ? `Arrive by ${formatArrival(previewArrival)}` : 'Arrival time calculating'} · Voice guidance ready</Text></View></View>
-            ) : <Text style={styles.destinationAddress}>Getting your current position and route…</Text>}
+            ) : checkedIn ? (
+              <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Ready for directions</Text><Text style={styles.previewRouteMeta}>The road route will be calculated only after you tap Start directions.</Text></View></View>
+            ) : <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="lock-closed" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Check-in required</Text><Text style={styles.previewRouteMeta}>Complete attendance check-in before starting directions.</Text></View></View>}
           </View>
         </SafeAreaView>
         <SafeAreaView style={styles.mapBottom} edges={['bottom', 'left', 'right']}>
-          {arrived ? <Pressable onPress={() => void completeVisit(selectedVisit)} style={styles.completeButton}>
-            <Ionicons name="checkmark-circle" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>Mark visit complete</Text>
+          {selectedVisit.status === 'in_progress' ? <Pressable onPress={() => void completeVisit(selectedVisit)} disabled={visitActionBusy} style={[styles.completeButton, visitActionBusy && styles.dimmed]}>
+            {visitActionBusy ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="checkmark-circle" size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>Complete visit</Text>
+          </Pressable> : arrived ? <Pressable onPress={() => void startVisit(selectedVisit)} disabled={visitActionBusy} style={[styles.completeButton, visitActionBusy && styles.dimmed]}>
+            {visitActionBusy ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="briefcase" size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>Start visit</Text>
           </Pressable> : navigationActive ? <Pressable onPress={() => stopDirections(true)} style={styles.stopDirectionsButton}>
             <Ionicons name="stop-circle" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>{rerouting ? 'Rerouting…' : 'Stop directions'}</Text>
-          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || route.coordinates.length < 2} style={[styles.directionsButton, (routing || route.coordinates.length < 2) && styles.dimmed]}>
-            <Ionicons name="navigate" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>Start directions</Text>
+          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || !checkedIn} style={[styles.directionsButton, (routing || !checkedIn) && styles.disabledButton]}>
+            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
           </Pressable>
           }
         </SafeAreaView>
@@ -389,15 +447,16 @@ export default function FieldVisitsScreen() {
           </View>
         ) : null}
 
-        <Text style={styles.sectionTitle}>{supervisor ? 'Assigned visits' : `Next stops · ${pending.length}`}</Text>
+        <Text style={styles.sectionTitle}>{supervisor ? 'Assigned visits' : `Active queue · ${pending.length}`}</Text>
         {loading ? <ActivityIndicator color="#1769D2" style={{ marginTop: 30 }} /> : null}
         {!loading && !pending.length ? <View style={styles.empty}><Ionicons name="navigate-outline" size={30} color="#64748B" /><Text style={styles.emptyTitle}>No pending visits</Text><Text style={styles.emptyBody}>{supervisor ? 'Assign the first place above.' : 'Your admin will send places here when they are ready.'}</Text></View> : null}
         {pending.map((visit) => (
-          <Pressable key={visit.assignmentId} onPress={() => supervisor ? undefined : void openRoute(visit)} style={styles.visitCard}>
+          <Pressable key={visit.assignmentId} onPress={() => supervisor ? undefined : void openVisit(visit)} style={[styles.visitCard, visit.status === 'in_progress' && styles.visitCardActive]}>
             <View style={styles.orderBubble}><Text style={styles.orderText}>{visit.queueOrder}</Text></View>
             <View style={{ flex: 1 }}>
               <Text style={styles.visitTitle}>{visit.placeName}</Text>
               <Text style={styles.visitAddress}>{visit.placeAddress}</Text>
+              {visit.status === 'in_progress' ? <Text style={styles.visitInProgress}>Visit in progress</Text> : null}
               {supervisor ? <Text style={styles.visitMeta}>For: {employeeById.get(visit.employeeId)?.name || visit.employeeId}</Text> : null}
               {visit.notes ? <Text style={styles.visitMeta}>Note: {visit.notes}</Text> : null}
             </View>
@@ -503,8 +562,8 @@ const styles = StyleSheet.create({
   searchRow: { flexDirection: 'row', gap: 8 }, input: { flex: 1, minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 13, color: '#111827', backgroundColor: '#FBFCFE', fontSize: 13 }, searchButton: { width: 48, height: 48, borderRadius: 14, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1769D2' },
   placeRow: { flexDirection: 'row', gap: 10, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#E6ECF4' }, placeName: { color: '#152238', fontSize: 13, fontWeight: '800' }, placeAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 2 }, selectedText: { color: '#1769D2', fontSize: 12, fontWeight: '700', marginTop: 12 },
   label: { color: '#475569', fontSize: 11, fontWeight: '800', marginTop: 15, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }, employeeRow: { gap: 8, paddingRight: 8 }, employeeChip: { borderRadius: 16, borderWidth: 1, borderColor: '#D6E0ED', paddingHorizontal: 11, paddingVertical: 9, backgroundColor: '#F7F9FC' }, employeeChipSelected: { backgroundColor: '#1769D2', borderColor: '#1769D2' }, employeeChipText: { color: '#475569', fontSize: 12, fontWeight: '700' }, employeeChipTextSelected: { color: '#FFFFFF' },
-  notesInput: { marginTop: 14, minHeight: 60, paddingTop: 12, textAlignVertical: 'top' }, assignButton: { height: 48, borderRadius: 15, marginTop: 12, backgroundColor: '#1769D2', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }, assignButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' }, dimmed: { opacity: .6 }, note: { color: '#9A6200', fontSize: 11, marginTop: 10 },
+  notesInput: { marginTop: 14, minHeight: 60, paddingTop: 12, textAlignVertical: 'top' }, assignButton: { height: 48, borderRadius: 15, marginTop: 12, backgroundColor: '#1769D2', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }, assignButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' }, dimmed: { opacity: .6 }, disabledButton: { opacity: .72, backgroundColor: '#7B8798' }, note: { color: '#9A6200', fontSize: 11, marginTop: 10 },
   sectionTitle: { color: '#10233F', fontSize: 16, fontWeight: '900', marginBottom: 10 }, empty: { borderWidth: 1, borderStyle: 'dashed', borderColor: '#D6E0ED', borderRadius: 18, alignItems: 'center', padding: 28, backgroundColor: '#FAFBFD' }, emptyTitle: { color: '#334155', fontSize: 14, fontWeight: '800', marginTop: 8 }, emptyBody: { color: '#64748B', fontSize: 12, textAlign: 'center', lineHeight: 18, marginTop: 4 },
-  visitCard: { minHeight: 82, borderRadius: 18, padding: 13, marginBottom: 9, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', flexDirection: 'row', alignItems: 'center', gap: 11 }, orderBubble: { width: 29, height: 29, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, orderText: { color: '#1769D2', fontSize: 12, fontWeight: '900' }, visitTitle: { color: '#152238', fontSize: 13, fontWeight: '900' }, visitAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 3 }, visitMeta: { color: '#475569', fontSize: 10, lineHeight: 15, marginTop: 4 },
-  mapTop: { position: 'absolute', top: 0, left: 0, right: 0, gap: 9, paddingHorizontal: 14, paddingTop: 8 }, destinationHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10 }, destinationCopy: { flex: 1, minHeight: 52, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 14, justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, destinationTitle: { color: '#152238', fontSize: 15, fontWeight: '900' }, destinationAddress: { color: '#64748B', fontSize: 11, marginTop: 3 }, routeCard: { width: '100%', minHeight: 74, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 15, paddingVertical: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, routeCardNavigating: { backgroundColor: '#1769D2', borderColor: '#1769D2', alignItems: 'stretch' }, maneuverRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 13 }, turnArrowShell: { width: 58, height: 58, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.14)' }, maneuverCopy: { flex: 1, minWidth: 0 }, routeMetric: { color: '#0B8C66', fontSize: 13, fontWeight: '900', marginTop: 5 }, routeMetricNavigating: { color: '#DCEBFF' }, directionInstruction: { color: '#FFFFFF', fontSize: 16, lineHeight: 21, fontWeight: '900' }, previewRouteRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 11 }, previewIconShell: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, previewRouteTitle: { color: '#152238', fontSize: 14, fontWeight: '900' }, previewRouteMeta: { color: '#64748B', fontSize: 11, marginTop: 3 }, mapBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 14 }, completeButton: { height: 52, borderRadius: 18, backgroundColor: '#16835B', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, directionsButton: { height: 52, borderRadius: 18, backgroundColor: '#1769D2', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, stopDirectionsButton: { height: 52, borderRadius: 18, backgroundColor: '#BE3F3A', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, completeButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  visitCard: { minHeight: 82, borderRadius: 18, padding: 13, marginBottom: 9, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', flexDirection: 'row', alignItems: 'center', gap: 11 }, visitCardActive: { borderColor: '#73C8A5', backgroundColor: '#F2FCF7' }, orderBubble: { width: 29, height: 29, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, orderText: { color: '#1769D2', fontSize: 12, fontWeight: '900' }, visitTitle: { color: '#152238', fontSize: 13, fontWeight: '900' }, visitAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 3 }, visitMeta: { color: '#475569', fontSize: 10, lineHeight: 15, marginTop: 4 }, visitInProgress: { color: '#16835B', fontSize: 10, fontWeight: '900', marginTop: 5, textTransform: 'uppercase', letterSpacing: .45 },
+  mapTop: { position: 'absolute', top: 0, left: 0, right: 0, gap: 9, paddingHorizontal: 14, paddingTop: 8 }, destinationHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10 }, destinationCopy: { flex: 1, minHeight: 52, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 14, justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, destinationTitle: { color: '#152238', fontSize: 15, fontWeight: '900' }, destinationAddress: { color: '#64748B', fontSize: 11, marginTop: 3 }, routeCard: { width: '100%', minHeight: 74, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 15, paddingVertical: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, routeCardNavigating: { backgroundColor: '#1769D2', borderColor: '#1769D2', alignItems: 'stretch' }, maneuverRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 13 }, turnArrowShell: { width: 58, height: 58, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.14)' }, maneuverCopy: { flex: 1, minWidth: 0 }, routeMetric: { color: '#0B8C66', fontSize: 13, fontWeight: '900', marginTop: 5 }, routeMetricNavigating: { color: '#DCEBFF' }, directionInstruction: { color: '#FFFFFF', fontSize: 16, lineHeight: 21, fontWeight: '900' }, previewRouteRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 11 }, previewIconShell: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, arrivedIcon: { backgroundColor: '#E7F8EF' }, visitStartedIcon: { backgroundColor: '#E7F8EF' }, lockedIcon: { backgroundColor: '#FFF5D9' }, previewRouteTitle: { color: '#152238', fontSize: 14, fontWeight: '900' }, previewRouteMeta: { color: '#64748B', fontSize: 11, marginTop: 3, lineHeight: 16 }, mapBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 14 }, completeButton: { height: 52, borderRadius: 18, backgroundColor: '#16835B', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, directionsButton: { height: 52, borderRadius: 18, backgroundColor: '#1769D2', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, stopDirectionsButton: { height: 52, borderRadius: 18, backgroundColor: '#BE3F3A', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, completeButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
 });

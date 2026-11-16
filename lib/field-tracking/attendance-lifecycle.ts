@@ -2,6 +2,7 @@ import type { AppUser, AttendanceRecord } from "@/lib/types";
 import type * as Location from "expo-location";
 import { restoreFieldTracker, startFieldTracking, stopFieldTracking } from "./tracking/tracker";
 import { getActiveSession } from "./tracking/database";
+import { notifyVisitNavigationCheckout } from "./visit-navigation-lifecycle";
 
 /** Only employee-facing roles publish a live route to supervisors. */
 export function canAutoTrackAttendance(user: Pick<AppUser, "role"> | null | undefined): boolean {
@@ -21,6 +22,7 @@ export async function startFieldTrackingForCheckIn(
 }
 
 export async function stopFieldTrackingForCheckOut(userId: string | null | undefined): Promise<void> {
+  notifyVisitNavigationCheckout();
   if (userId) await stopFieldTracking(userId);
 }
 
@@ -31,6 +33,7 @@ export async function restoreFieldTrackingForActiveAttendance(
 ): Promise<void> {
   if (!user?.id || !canAutoTrackAttendance(user)) return;
   if (active?.userId !== user.id) {
+    notifyVisitNavigationCheckout();
     await stopFieldTracking(user.id);
     return;
   }

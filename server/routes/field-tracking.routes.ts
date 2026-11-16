@@ -2,6 +2,7 @@ import type { Express, Request } from 'express';
 import type { Pool } from 'mysql2/promise';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
+import type { AttendanceRecord } from '@/lib/types';
 import {
   computeRoute,
   getConfiguredRouteSource,
@@ -18,6 +19,7 @@ type Deps = {
   isMySqlStateEnabled: () => boolean;
   resolveRequestCompanyId: (req: Request) => Promise<string | null>;
   getRequestUser: (req: Request) => { companyId?: string | null; companyIds?: string[] | null } | null;
+  findActiveAttendance: (userId: string) => Promise<AttendanceRecord | null>;
 };
 
 const pointSchema = z.object({
@@ -67,6 +69,13 @@ const routeSchema = z.object({
     address: z.string().max(500).optional().default(''),
   }),
   travelMode: z.enum(['auto', 'pedestrian', 'bicycle']).default('auto'),
+  assignmentId: z.string().uuid().optional(),
+});
+
+const visitEvidenceSchema = z.object({
+  location: coordinateSchema.extend({
+    accuracy: z.number().min(0).max(10_000).nullable().optional(),
+  }).nullable().optional(),
 });
 
 const assignmentSchema = z.object({
@@ -135,14 +144,47 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
   });
 
-  app.post('/api/field-tracking/route', deps.requireAuth, async (req, res) => {
+  app.post('/api/field-tracking/route', deps.requireAuth, requireStore, async (req, res) => {
     const parsed = routeSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ message: 'Invalid route request.' });
       return;
     }
     try {
-      const plan = await computeRoute(parsed.data.origin, parsed.data.destination, parsed.data.travelMode);
+      let destination = parsed.data.destination;
+      if (['employee', 'salesperson'].includes(req.auth?.role || '')) {
+        const employeeId = String(req.auth?.sub || '').trim();
+        const active = await requireActiveAttendance(employeeId, res, deps);
+        if (!active) return;
+        if (!parsed.data.assignmentId) {
+          res.status(400).json({ code: 'ASSIGNMENT_REQUIRED', message: 'Choose an assigned visit before starting directions.' });
+          return;
+        }
+        const pool = await deps.getMySqlPool();
+        const [rows] = await pool.execute<any[]>(
+          `SELECT id, company_id, place_id, place_name, place_address, latitude, longitude
+           FROM lff_place_assignments
+           WHERE id=? AND employee_id=? AND status='pending' LIMIT 1`,
+          [parsed.data.assignmentId, employeeId],
+        );
+        const assignment = rows[0];
+        if (!assignment) {
+          res.status(404).json({ code: 'VISIT_NOT_AVAILABLE', message: 'This visit is no longer pending for your account.' });
+          return;
+        }
+        if (active.companyId && String(assignment.company_id) !== active.companyId) {
+          res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'Check in to the visit workspace before starting directions.' });
+          return;
+        }
+        destination = {
+          placeId: String(assignment.place_id),
+          name: String(assignment.place_name),
+          address: String(assignment.place_address || ''),
+          latitude: Number(assignment.latitude),
+          longitude: Number(assignment.longitude),
+        };
+      }
+      const plan = await computeRoute(parsed.data.origin, destination, parsed.data.travelMode);
       if (plan.source === 'unavailable' || plan.coordinates.length < 2) {
         res.status(422).json({ message: 'No route was found inside the installed map region.' });
         return;
@@ -174,10 +216,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const pool = await deps.getMySqlPool();
     const [rows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-              latitude, longitude, queue_order, notes, status, created_at, completed_at
+              latitude, longitude, queue_order, notes, status, created_at, started_at, completed_at,
+              arrival_latitude, arrival_longitude, arrival_accuracy,
+              completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
        WHERE company_id=? ${supervisor ? '' : 'AND employee_id=?'}
-       ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, employee_id, queue_order, created_at DESC`,
+       ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, employee_id, queue_order, created_at DESC`,
       supervisor ? [companyId] : [companyId, employeeId],
     );
     res.json({ assignments: rows.map(mapAssignment) });
@@ -202,7 +246,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const [sequenceRows] = await pool.execute<any[]>(
       `SELECT COALESCE(MAX(queue_order), 0) AS last_order
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status='pending'`,
+       WHERE company_id=? AND employee_id=? AND status IN ('pending','in_progress')`,
       [companyId, parsed.data.employeeId],
     );
     const queueOrder = Number(sequenceRows[0]?.last_order || 0) + 1;
@@ -225,9 +269,90 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         placeName: parsed.data.place.name, placeAddress: parsed.data.place.address,
         latitude: parsed.data.place.latitude, longitude: parsed.data.place.longitude,
         queueOrder, notes: parsed.data.notes || '', status: 'pending',
-        createdAt: new Date().toISOString(), completedAt: null,
+        createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
+        arrivalLocation: null, completionLocation: null,
       },
     });
+  });
+
+  app.post('/api/field-tracking/assignments/:assignmentId/start', deps.requireAuth, requireStore, async (req, res) => {
+    const assignmentId = String(req.params.assignmentId || '').trim();
+    const parsed = visitEvidenceSchema.safeParse(req.body);
+    if (!assignmentId || !parsed.success || !parsed.data.location) {
+      res.status(400).json({ message: 'A visit and current location are required to start the visit.' });
+      return;
+    }
+    const employeeId = String(req.auth?.sub || '').trim();
+    const active = await requireActiveAttendance(employeeId, res, deps);
+    if (!active) return;
+    const pool = await deps.getMySqlPool();
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute<any[]>(
+        `SELECT * FROM lff_place_assignments WHERE id=? AND employee_id=? LIMIT 1 FOR UPDATE`,
+        [assignmentId, employeeId],
+      );
+      const assignment = rows[0];
+      if (!assignment || String(assignment.status) !== 'pending') {
+        await connection.rollback();
+        res.status(404).json({ message: 'This pending visit was not found for your account.' });
+        return;
+      }
+      if (active.companyId && String(assignment.company_id) !== active.companyId) {
+        await connection.rollback();
+        res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'This visit does not belong to your active check-in workspace.' });
+        return;
+      }
+      const [activeVisitRows] = await connection.execute<any[]>(
+        `SELECT id FROM lff_place_assignments
+         WHERE employee_id=? AND status='in_progress' AND id<>? LIMIT 1 FOR UPDATE`,
+        [employeeId, assignmentId],
+      );
+      if (activeVisitRows.length) {
+        await connection.rollback();
+        res.status(409).json({ code: 'VISIT_ALREADY_ACTIVE', message: 'Complete your active visit before starting another one.' });
+        return;
+      }
+      const location = parsed.data.location;
+      const distance = haversineMetres(
+        { latitude: location.latitude, longitude: location.longitude },
+        { latitude: Number(assignment.latitude), longitude: Number(assignment.longitude) },
+      );
+      const arrivalRadius = Math.max(100, Math.min(150, Number(location.accuracy || 0) * 2));
+      if (distance > arrivalRadius) {
+        await connection.rollback();
+        res.status(409).json({
+          code: 'VISIT_LOCATION_REQUIRED',
+          message: `Move within ${Math.round(arrivalRadius)} metres of the assigned place to start this visit.`,
+          distanceMetres: Math.round(distance),
+        });
+        return;
+      }
+      await connection.execute(
+        `UPDATE lff_place_assignments
+         SET status='in_progress', started_at=NOW(3), arrival_latitude=?, arrival_longitude=?,
+             arrival_accuracy=?, updated_at=NOW(3)
+         WHERE id=? AND employee_id=? AND status='pending'`,
+        [location.latitude, location.longitude, location.accuracy ?? null, assignmentId, employeeId],
+      );
+      const [updatedRows] = await connection.execute<any[]>(
+        `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
+                latitude, longitude, queue_order, notes, status, created_at, started_at, completed_at,
+                arrival_latitude, arrival_longitude, arrival_accuracy,
+                completion_latitude, completion_longitude, completion_accuracy
+         FROM lff_place_assignments WHERE id=? LIMIT 1`,
+        [assignmentId],
+      );
+      await connection.commit();
+      res.json({ assignment: mapAssignment(updatedRows[0]) });
+    } catch (error) {
+      await connection.rollback().catch(() => undefined);
+      console.error('[field-tracking] start visit failed', error);
+      res.status(503).json({ message: 'Could not start this visit. Please retry.' });
+    } finally {
+      connection.release();
+    }
   });
 
   app.post('/api/field-tracking/assignments/:assignmentId/complete', deps.requireAuth, requireStore, async (req, res) => {
@@ -236,19 +361,38 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.status(400).json({ message: 'Visit assignment id is required.' });
       return;
     }
-    const employeeId = String(req.auth?.sub || '').trim();
-    const pool = await deps.getMySqlPool();
-    const [result] = await pool.execute<any>(
-      `UPDATE lff_place_assignments
-       SET status='completed', completed_at=NOW(3), updated_at=NOW(3)
-       WHERE id=? AND employee_id=? AND status='pending'`,
-      [assignmentId, employeeId],
-    );
-    if (!result.affectedRows) {
-      res.status(404).json({ message: 'This pending visit was not found for your account.' });
+    const parsed = visitEvidenceSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      res.status(400).json({ message: 'Invalid visit completion location.' });
       return;
     }
-    res.json({ ok: true });
+    const employeeId = String(req.auth?.sub || '').trim();
+    const active = await requireActiveAttendance(employeeId, res, deps);
+    if (!active) return;
+    const pool = await deps.getMySqlPool();
+    const location = parsed.data.location;
+    const [result] = await pool.execute<any>(
+      `UPDATE lff_place_assignments
+       SET status='completed', completed_at=NOW(3), completion_latitude=?, completion_longitude=?,
+           completion_accuracy=?, updated_at=NOW(3)
+       WHERE id=? AND employee_id=? AND status='in_progress'`,
+      [location?.latitude ?? null, location?.longitude ?? null, location?.accuracy ?? null, assignmentId, employeeId],
+    );
+    if (!result.affectedRows) {
+      res.status(404).json({ message: 'Start this visit before marking it complete.' });
+      return;
+    }
+    const [nextRows] = await pool.execute<any[]>(
+      `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
+              latitude, longitude, queue_order, notes, status, created_at, started_at, completed_at,
+              arrival_latitude, arrival_longitude, arrival_accuracy,
+              completion_latitude, completion_longitude, completion_accuracy
+       FROM lff_place_assignments
+       WHERE employee_id=? AND company_id=? AND status='pending'
+       ORDER BY queue_order ASC, created_at ASC LIMIT 1`,
+      [employeeId, active.companyId || await deps.resolveRequestCompanyId(req)],
+    );
+    res.json({ ok: true, nextAssignment: nextRows[0] ? mapAssignment(nextRows[0]) : null });
   });
 
   app.post('/api/field-tracking/locations/batch', deps.requireAuth, requireStore, async (req, res) => {
@@ -382,6 +526,15 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.json({ source: 'raw', points, lastSequence });
       return;
     }
+    // The supervisor dashboard polls this endpoint every few seconds. Returning
+    // the accepted GPS trace keeps live monitoring current without spending a
+    // paid map-matching request on every poll. Explicit matching remains
+    // available for a deliberate audit/export request only.
+    const wantsMatched = req.query.match === '1' || req.query.match === 'true';
+    if (!wantsMatched) {
+      res.json({ source: 'raw', points, lastSequence });
+      return;
+    }
     const matched = await matchTrace(points).catch(() => points);
     res.json({ source: matched === points ? 'raw' : getConfiguredRouteSource(), points: matched, lastSequence });
   });
@@ -420,10 +573,10 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       [session.company_id, session.employee_id],
     );
     const [nextVisitRows] = await pool.execute<any[]>(
-      `SELECT place_name, place_address, latitude, longitude
+      `SELECT place_name, place_address, latitude, longitude, status
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status='pending'
-       ORDER BY queue_order ASC, created_at ASC
+       WHERE company_id=? AND employee_id=? AND status IN ('pending','in_progress')
+       ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END, queue_order ASC, created_at ASC
        LIMIT 1`,
       [session.company_id, session.employee_id],
     );
@@ -480,7 +633,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         name: String(nextVisit.place_name || 'Next visit'),
         address: String(nextVisit.place_address || ''),
         distanceMetres: distanceToNext == null ? null : Math.round(distanceToNext),
-        status: distanceToNext != null && distanceToNext <= arrivalRadius ? 'arrived' : 'en_route',
+        status: String(nextVisit.status) === 'in_progress' || (distanceToNext != null && distanceToNext <= arrivalRadius) ? 'arrived' : 'en_route',
       } : null,
       activity: fieldActivity.events.slice(-8).reverse().map((event) => ({
         id: event.id,
@@ -554,6 +707,19 @@ async function resolveAuthorizedCompanyId(req: Request, requestedCompanyId: stri
   return resolvedCompanyId === normalized ? normalized : null;
 }
 
+async function requireActiveAttendance(employeeId: string, res: any, deps: Deps): Promise<AttendanceRecord | null> {
+  if (!employeeId) {
+    res.status(401).json({ code: 'AUTH_REQUIRED', message: 'Sign in again before starting field work.' });
+    return null;
+  }
+  const active = await deps.findActiveAttendance(employeeId);
+  if (!active) {
+    res.status(403).json({ code: 'CHECK_IN_REQUIRED', message: 'Check in before starting directions or a visit.' });
+    return null;
+  }
+  return active;
+}
+
 async function ensureTables(pool: Pool): Promise<void> {
   if (!tablePromise) {
     tablePromise = (async () => {
@@ -611,21 +777,49 @@ async function ensureTables(pool: Pool): Promise<void> {
           longitude DECIMAL(10,7) NOT NULL,
           queue_order INT UNSIGNED NOT NULL,
           notes VARCHAR(500) NULL,
-          status ENUM('pending','completed','cancelled') NOT NULL DEFAULT 'pending',
+          status ENUM('pending','in_progress','completed','cancelled') NOT NULL DEFAULT 'pending',
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          started_at DATETIME(3) NULL,
           completed_at DATETIME(3) NULL,
+          arrival_latitude DECIMAL(10,7) NULL,
+          arrival_longitude DECIMAL(10,7) NULL,
+          arrival_accuracy DECIMAL(8,2) NULL,
+          completion_latitude DECIMAL(10,7) NULL,
+          completion_longitude DECIMAL(10,7) NULL,
+          completion_accuracy DECIMAL(8,2) NULL,
           PRIMARY KEY (id),
           KEY idx_lff_place_assignments_employee_queue (company_id, employee_id, status, queue_order),
           KEY idx_lff_place_assignments_company_status (company_id, status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       );
+      // Add the visit lifecycle fields to databases created by earlier builds.
+      await pool.execute(
+        `ALTER TABLE lff_place_assignments
+         MODIFY COLUMN status ENUM('pending','in_progress','completed','cancelled') NOT NULL DEFAULT 'pending'`,
+      );
+      await ensureColumn(pool, 'lff_place_assignments', 'started_at', 'DATETIME(3) NULL AFTER updated_at');
+      await ensureColumn(pool, 'lff_place_assignments', 'arrival_latitude', 'DECIMAL(10,7) NULL AFTER completed_at');
+      await ensureColumn(pool, 'lff_place_assignments', 'arrival_longitude', 'DECIMAL(10,7) NULL AFTER arrival_latitude');
+      await ensureColumn(pool, 'lff_place_assignments', 'arrival_accuracy', 'DECIMAL(8,2) NULL AFTER arrival_longitude');
+      await ensureColumn(pool, 'lff_place_assignments', 'completion_latitude', 'DECIMAL(10,7) NULL AFTER arrival_accuracy');
+      await ensureColumn(pool, 'lff_place_assignments', 'completion_longitude', 'DECIMAL(10,7) NULL AFTER completion_latitude');
+      await ensureColumn(pool, 'lff_place_assignments', 'completion_accuracy', 'DECIMAL(8,2) NULL AFTER completion_longitude');
     })().catch((error) => {
       tablePromise = null;
       throw error;
     });
   }
   await tablePromise;
+}
+
+async function ensureColumn(pool: Pool, table: string, column: string, definition: string): Promise<void> {
+  const [rows] = await pool.execute<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1`,
+    [table, column],
+  );
+  if (!rows.length) await pool.execute(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
 }
 
 function mapAssignment(row: Record<string, unknown>) {
@@ -643,7 +837,18 @@ function mapAssignment(row: Record<string, unknown>) {
     notes: String(row.notes || ''),
     status: String(row.status || 'pending'),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
+    startedAt: row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at ? String(row.started_at) : null,
     completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at ? String(row.completed_at) : null,
+    arrivalLocation: row.arrival_latitude == null || row.arrival_longitude == null ? null : {
+      latitude: Number(row.arrival_latitude),
+      longitude: Number(row.arrival_longitude),
+      accuracy: row.arrival_accuracy == null ? null : Number(row.arrival_accuracy),
+    },
+    completionLocation: row.completion_latitude == null || row.completion_longitude == null ? null : {
+      latitude: Number(row.completion_latitude),
+      longitude: Number(row.completion_longitude),
+      accuracy: row.completion_accuracy == null ? null : Number(row.completion_accuracy),
+    },
   };
 }
 

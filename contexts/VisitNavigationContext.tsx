@@ -5,9 +5,11 @@ import * as Speech from 'expo-speech';
 import { router, usePathname } from 'expo-router';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { getAttendanceStatus } from '@/lib/attendance-api';
 import { planFieldRoute, type FieldVisitAssignment } from '@/lib/field-tracking/api';
 import { distanceToRoute, formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
 import type { Coordinate, RoutePlan } from '@/lib/field-tracking/types';
+import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-navigation-lifecycle';
 
 type NavigationStatus = 'preview' | 'active' | 'arrived';
 type StoredSession = {
@@ -15,6 +17,7 @@ type StoredSession = {
   route: RoutePlan;
   position: Coordinate | null;
   heading: number | null;
+  accuracy: number | null;
   status: NavigationStatus;
   updatedAt: string;
 };
@@ -32,7 +35,7 @@ type NavigationContextValue = {
   expandNonce: number;
   screenExpanded: boolean;
   setPreview: (session: Omit<StoredSession, 'status' | 'updatedAt'>) => Promise<void>;
-  start: () => Promise<void>;
+  start: (session?: Omit<StoredSession, 'status' | 'updatedAt'>) => Promise<void>;
   stop: (announce?: boolean) => void;
   clear: () => Promise<void>;
   requestExpand: () => void;
@@ -68,11 +71,17 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     setHydrated(false);
     setScreenExpanded(false);
     if (!storageKey) { setHydrated(true); return; }
-    void AsyncStorage.getItem(storageKey).then((raw) => {
+    void AsyncStorage.getItem(storageKey).then(async (raw) => {
       if (!raw) return;
       try {
         const saved = JSON.parse(raw) as StoredSession;
-        if (saved?.visit?.assignmentId && saved?.route?.coordinates?.length >= 2) setSession(saved);
+        if (!saved?.visit?.assignmentId || saved?.route?.coordinates?.length < 2) return;
+        const attendance = await getAttendanceStatus();
+        if (!attendance.active) {
+          await AsyncStorage.removeItem(storageKey);
+          return;
+        }
+        setSession({ ...saved, accuracy: saved.accuracy ?? null });
       } catch { void AsyncStorage.removeItem(storageKey); }
     }).finally(() => setHydrated(true));
   }, [storageKey, stopWatch]);
@@ -126,19 +135,23 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
         ...current,
         position: { latitude: location.coords.latitude, longitude: location.coords.longitude },
         heading: Number.isFinite(location.coords.heading) ? location.coords.heading : null,
+        accuracy: Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null,
         updatedAt: new Date().toISOString(),
       } : null),
     );
   }, [stopWatch]);
 
-  const start = useCallback(async () => {
-    if (!session || session.route.coordinates.length < 2) throw new Error('Route is still loading.');
+  const start = useCallback(async (next?: Omit<StoredSession, 'status' | 'updatedAt'>) => {
+    const candidate = next || session;
+    if (!candidate || candidate.route.coordinates.length < 2) throw new Error('Route is still loading.');
     setBusy(true);
     try {
+      const attendance = await getAttendanceStatus();
+      if (!attendance.active) throw new Error('Check in before starting directions.');
       await startWatch();
       spokenRef.current.clear();
       offRouteSamplesRef.current = 0;
-      setSession((current) => current ? { ...current, status: 'active', updatedAt: new Date().toISOString() } : null);
+      setSession({ ...candidate, status: 'active', updatedAt: new Date().toISOString() });
       speak('Directions started. Follow the highlighted route.');
     } finally { setBusy(false); }
   }, [session, startWatch]);
@@ -156,18 +169,23 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     if (storageKey) await AsyncStorage.removeItem(storageKey);
   }, [storageKey, stopWatch]);
 
+  useEffect(() => subscribeToVisitNavigationCheckout(() => clear()), [clear]);
+
   useEffect(() => {
     if (session?.status !== 'active') return;
-    void startWatch().catch(() => stop());
+    void getAttendanceStatus().then((attendance) => {
+      if (!attendance.active) return clear();
+      return startWatch();
+    }).catch(() => stop());
     return stopWatch;
-  }, [session?.status, startWatch, stop, stopWatch]);
+  }, [clear, session?.status, startWatch, stop, stopWatch]);
 
   useEffect(() => {
     if (!session || session.status !== 'active' || !session.position || !progress) return;
-    if (haversineMetres(session.position, session.visit) <= 50) {
+    if (haversineMetres(session.position, session.visit) <= 100) {
       stopWatch();
       setSession((current) => current ? { ...current, status: 'arrived', updatedAt: new Date().toISOString() } : null);
-      speak('You have arrived at your destination. Mark the visit complete when finished.');
+      speak(`You have reached ${session.visit.placeName}. Start the visit when ready.`);
       return;
     }
     if (progress.distanceToManeuver <= 180) {
@@ -183,7 +201,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     lastRerouteRef.current = Date.now();
     offRouteSamplesRef.current = 0;
     setBusy(true);
-    void planFieldRoute(session.position, toPlace(session.visit), 'auto').then((nextRoute) => {
+    void planFieldRoute(session.position, toPlace(session.visit), 'auto', session.visit.assignmentId).then((nextRoute) => {
       if (nextRoute.source !== 'unavailable' && nextRoute.coordinates.length >= 2) {
         setSession((current) => current ? { ...current, route: nextRoute, updatedAt: new Date().toISOString() } : null);
         spokenRef.current.clear();

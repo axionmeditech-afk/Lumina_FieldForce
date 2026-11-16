@@ -3320,6 +3320,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     isMySqlStateEnabled,
     resolveRequestCompanyId,
     getRequestUser,
+    findActiveAttendance: findActiveAttendanceInMySql,
   });
 
   registerAttendanceActionRoutes(app, {
