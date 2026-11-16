@@ -8,12 +8,32 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
     firstString,
     isRemoteStateKeyAllowed,
     isMySqlStateEnabled,
-    readRemoteState,
+    readCompanyScopedRemoteState,
     resolveRequestCompanyId,
-    withDefaultCompanyIdForRemoteState,
-    writeRemoteState,
+    writeCompanyScopedRemoteState,
     getRequestUser,
+    normalizeWhitespace,
   } = deps;
+
+  const resolveAuthorizedCompanyScope = async (req: any): Promise<string | null> => {
+    const requestedCompanyId = normalizeWhitespace(firstString(req.query?.companyId));
+    const defaultCompanyId = normalizeWhitespace(await resolveRequestCompanyId(req));
+    const requestUser = getRequestUser(req);
+    const allowedCompanyIds = new Set(
+      [
+        ...(Array.isArray(requestUser?.companyIds) ? requestUser.companyIds : []),
+        requestUser?.companyId,
+        defaultCompanyId,
+      ]
+        .map((companyId) => normalizeWhitespace(companyId || ""))
+        .filter(Boolean),
+    );
+    if (requestedCompanyId) {
+      if (!allowedCompanyIds.has(requestedCompanyId)) return null;
+      return requestedCompanyId;
+    }
+    return defaultCompanyId && allowedCompanyIds.has(defaultCompanyId) ? defaultCompanyId : null;
+  };
 
   app.get("/api/state/:key", requireAuth, async (req, res) => {
     const key = decodeURIComponent(firstString(req.params.key) || "").trim();
@@ -27,8 +47,13 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
     }
 
     try {
+      const companyId = await resolveAuthorizedCompanyScope(req);
+      if (!companyId) {
+        res.status(403).json({ message: "You are not authorized for this company state." });
+        return;
+      }
 
-      const rawValue = await readRemoteState(key);
+      const rawValue = await readCompanyScopedRemoteState(key, companyId);
       if (!rawValue) {
         res.json({
           key,
@@ -91,16 +116,12 @@ export function registerStateRoutes(app: Express, deps: StateRouteDeps) {
     }
 
     try {
-
-      const defaultCompanyId = await resolveRequestCompanyId(req);
-      const scopedValue = withDefaultCompanyIdForRemoteState(
-        key,
-        body.value ?? null,
-        defaultCompanyId
-      );
-      const serialized = JSON.stringify(scopedValue ?? null);
-      await writeRemoteState(key, serialized, getRequestUser(req));
-      // --------------------------------
+      const companyId = await resolveAuthorizedCompanyScope(req);
+      if (!companyId) {
+        res.status(403).json({ message: "You are not authorized for this company state." });
+        return;
+      }
+      await writeCompanyScopedRemoteState(key, companyId, body.value ?? null, getRequestUser(req));
 
       res.json({
         ok: true,

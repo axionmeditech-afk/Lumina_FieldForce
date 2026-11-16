@@ -6,9 +6,11 @@ import { RouteMap } from '../components/RouteMap';
 import { StatusDot } from '../components/Primitives';
 import { BottomSheet } from '../components/BottomSheet';
 import { useLiveRoute } from './useLiveRoute';
+import { formatDistance, formatDuration } from '../geo';
+import type { FieldSessionKpis } from '../types';
 
 export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
-  const { employee, employees, points, connectionState, error, serverHealth, refresh, selectEmployee } = useLiveRoute();
+  const { employee, employees, points, connectionState, error, serverHealth, kpis, kpiState, refresh, selectEmployee } = useLiveRoute();
   const [selectingEmployee, setSelectingEmployee] = useState(true);
   const live = connectionState === 'live';
 
@@ -84,6 +86,14 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
             )}
           </SectionCard>
 
+          <SectionCard title="Field performance KPIs">
+            {kpis ? <FieldPerformanceKpis kpis={kpis} /> : (
+              <LiveKpiPreview employee={employee} loading={kpiState === 'loading'} unavailable={kpiState === 'unavailable'} />
+            )}
+          </SectionCard>
+          
+          {error ? <Text style={styles.noteText}>Connection note · {error}</Text> : null}
+
           <SectionCard title="System health">
             <View style={styles.healthRow}>
               <HealthChip label="API" value={serverHealth.apiReachable ? 'Ready' : 'Offline'} ready={serverHealth.apiReachable} />
@@ -92,8 +102,6 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
               <HealthChip label="Nominatim" value={serverHealth.geocoderReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.geocoderReachable} />
             </View>
           </SectionCard>
-          
-          {error ? <Text style={styles.noteText}>Connection note · {error}</Text> : null}
         </BottomSheet>
       </View>
     </SafeAreaView>
@@ -178,6 +186,98 @@ function EmployeeRosterCard({ employee, selected, onPress }: { employee: any; se
   );
 }
 
+function FieldPerformanceKpis({ kpis }: { kpis: FieldSessionKpis }) {
+  const nextVisit = kpis.nextVisit;
+  const statusTitle = nextVisit
+    ? nextVisit.status === 'arrived' ? `Arrived at ${nextVisit.name}` : `Heading to ${nextVisit.name}`
+    : 'No pending visit assigned';
+  const statusDetail = nextVisit
+    ? `${nextVisit.address || 'Assigned field visit'} · ${nextVisit.distanceMetres == null ? 'distance unavailable' : `${formatDistance(nextVisit.distanceMetres)} away`}`
+    : 'Live GPS, distance and halt metrics remain available for this field shift.';
+  const haltValue = kpis.activeHalt ? `${formatDuration(kpis.haltSeconds)} active` : kpis.haltCount ? formatDuration(kpis.haltSeconds) : 'None';
+
+  return (
+    <>
+      <View style={styles.activityHeader}>
+        <Text style={styles.activityHeaderTitle}>{statusTitle}</Text>
+        <Text style={styles.activityHeaderDetail}>{statusDetail}</Text>
+      </View>
+      <Text style={styles.activityTitle}>Recent field activity</Text>
+      <View style={styles.activityTimeline}>
+        {kpis.activity.length ? kpis.activity.map((activity) => (
+          <ActivityRow key={activity.id} activity={activity} />
+        )) : <Text style={styles.activityEmpty}>Movement history will appear after verified GPS points are received.</Text>}
+      </View>
+      <View style={styles.kpiGrid}>
+        <KpiCard label="Shift time" value={formatDuration(kpis.shiftSeconds)} />
+        <KpiCard label="Moving time" value={formatDuration(kpis.movingSeconds)} />
+        <KpiCard label="Travelled" value={formatDistance(kpis.distanceMetres)} />
+        <KpiCard label="Avg. speed" value={kpis.averageMovingSpeedKmh == null ? '—' : `${Math.round(kpis.averageMovingSpeedKmh)} km/h`} />
+        <KpiCard label="Total halt" value={haltValue} warning={kpis.activeHalt || kpis.haltSeconds >= 30 * 60} />
+        <KpiCard label="Halt count" value={`${kpis.haltCount}`} warning={kpis.activeHalt} />
+        <KpiCard label="Visits" value={`${kpis.visitCompleted}/${kpis.visitTotal} done`} />
+        <KpiCard label="GPS quality" value={kpis.gpsAccuracyMetres == null ? 'Waiting' : `±${Math.round(kpis.gpsAccuracyMetres)} m`} />
+      </View>
+      <Text style={styles.kpiNote}>Last verified GPS: {formatAge(kpis.lastPointAgeSeconds)} · {kpis.acceptedPoints}/{kpis.totalPoints} points accepted.</Text>
+    </>
+  );
+}
+
+function LiveKpiPreview({ employee, loading, unavailable }: { employee: any; loading: boolean; unavailable: boolean }) {
+  const speed = employee?.speed == null || employee.speed < 0 ? '—' : `${Math.round(employee.speed * 3.6)} km/h`;
+  const accuracy = employee?.accuracy == null ? 'Waiting' : `±${Math.round(employee.accuracy)} m`;
+  return (
+    <>
+      <View style={styles.previewSyncRow}>
+        {loading ? <ActivityIndicator color="#1769D2" size="small" /> : null}
+        <Text style={styles.previewSyncText}>{unavailable ? 'Activity details will retry automatically.' : loading ? 'Loading field activity details...' : 'Select an employee to load field activity.'}</Text>
+      </View>
+      <View style={styles.kpiGrid}>
+        <KpiCard label="Live speed" value={speed} />
+        <KpiCard label="GPS quality" value={accuracy} />
+        <KpiCard label="Last GPS" value={employee ? 'Live' : 'Waiting'} />
+        <KpiCard label="Field state" value={employee ? 'Active' : '—'} />
+      </View>
+    </>
+  );
+}
+
+function ActivityRow({ activity }: { activity: FieldSessionKpis['activity'][number] }) {
+  const isHalt = activity.type === 'halt';
+  const durationSeconds = activity.endedAt == null
+    ? Math.max(0, (Date.now() - new Date(activity.startedAt).getTime()) / 1000)
+    : Math.max(0, (new Date(activity.endedAt).getTime() - new Date(activity.startedAt).getTime()) / 1000);
+  return (
+    <View style={styles.activityRow}>
+      <View style={[styles.activityMarker, isHalt ? styles.activityMarkerHalt : styles.activityMarkerMove]} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.activityRowTitle}>{isHalt ? `${activity.active ? 'Current halt' : 'Halt'} · ${formatDuration(durationSeconds)}` : `Moved ${formatDistance(activity.distanceMetres)}`}</Text>
+        <Text style={styles.activityRoute}>{isHalt ? `At ${formatCoordinate(activity.start)}` : `${formatCoordinate(activity.start)} → ${formatCoordinate(activity.end)}`}</Text>
+        <Text style={styles.activityTime}>{formatActivityTime(activity.startedAt)} · {activity.endedAt ? formatActivityTime(activity.endedAt) : 'Now'}</Text>
+      </View>
+    </View>
+  );
+}
+
+function KpiCard({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
+  return <View style={[styles.kpiCard, warning && styles.kpiCardWarning]}><Text style={styles.kpiLabel}>{label}</Text><Text style={[styles.kpiValue, warning && styles.kpiValueWarning]} numberOfLines={1}>{value}</Text></View>;
+}
+
+function formatAge(seconds: number | null): string {
+  if (seconds == null) return 'waiting';
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  return `${Math.floor(seconds / 3600)}h ago`;
+}
+
+function formatCoordinate(point: { latitude: number; longitude: number }): string {
+  return `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)}`;
+}
+
+function formatActivityTime(value: string): string {
+  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 function HealthChip({ label, value, ready = false, warning = false }: { label: string; value: string; ready?: boolean; warning?: boolean }) {
   const tone = ready ? styles.healthChipReady : warning ? styles.healthChipWarning : styles.healthChipDanger;
   const textTone = ready ? styles.healthValueReady : warning ? styles.healthValueWarning : styles.healthValueDanger;
@@ -220,6 +320,28 @@ const styles = StyleSheet.create({
   rosterEmpty: { borderRadius: 14, borderWidth: 1, borderStyle: 'dashed', borderColor: '#DCE3EC', backgroundColor: '#F8FAFD', padding: 14 },
   rosterEmptyTitle: { color: '#111827', fontSize: 12, fontWeight: '800' },
   rosterEmptyBody: { color: '#64748B', fontSize: 10, lineHeight: 15, marginTop: 4 },
+  activityHeader: { borderLeftWidth: 3, borderLeftColor: '#1769D2', paddingLeft: 11, marginBottom: 14 },
+  activityHeaderTitle: { color: '#111827', fontSize: 13, fontWeight: '900' },
+  activityHeaderDetail: { color: '#64748B', fontSize: 10, lineHeight: 15, marginTop: 3 },
+  activityTitle: { color: '#475569', fontSize: 10, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.55, marginBottom: 8 },
+  activityTimeline: { borderRadius: 14, borderWidth: 1, borderColor: '#DCE3EC', backgroundColor: '#F8FAFD', paddingHorizontal: 12, paddingVertical: 4 },
+  activityEmpty: { color: '#64748B', fontSize: 10, lineHeight: 15, paddingVertical: 12 },
+  activityRow: { minHeight: 66, flexDirection: 'row', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#E7ECF3' },
+  activityMarker: { width: 10, height: 10, borderRadius: 5, marginTop: 4 },
+  activityMarkerMove: { backgroundColor: '#1769D2' },
+  activityMarkerHalt: { backgroundColor: '#C47A00' },
+  activityRowTitle: { color: '#111827', fontSize: 11, fontWeight: '900' },
+  activityRoute: { color: '#475569', fontSize: 10, lineHeight: 14, marginTop: 3 },
+  activityTime: { color: '#94A3B8', fontSize: 9, marginTop: 3, fontWeight: '700' },
+  previewSyncRow: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  previewSyncText: { flex: 1, color: '#64748B', fontSize: 10, lineHeight: 15 },
+  kpiGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  kpiCard: { width: '48%', minHeight: 68, borderRadius: 14, backgroundColor: '#F8FAFD', borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 11, paddingVertical: 10, justifyContent: 'center' },
+  kpiCardWarning: { backgroundColor: '#FFF8E8', borderColor: '#F2D79C' },
+  kpiLabel: { color: '#64748B', fontSize: 9, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.55 },
+  kpiValue: { color: '#111827', fontSize: 15, fontWeight: '900', marginTop: 5 },
+  kpiValueWarning: { color: '#9A6200' },
+  kpiNote: { color: '#64748B', fontSize: 10, lineHeight: 15, marginTop: 10 },
   healthRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   healthChip: { minWidth: '29%', flexGrow: 1, minHeight: 52, borderRadius: 13, borderWidth: 1, paddingHorizontal: 10, paddingVertical: 8, justifyContent: 'center' },
   healthChipReady: { backgroundColor: '#ECF9F1', borderColor: '#B9E7CC' },

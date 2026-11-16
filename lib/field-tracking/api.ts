@@ -1,8 +1,25 @@
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 import { getApiToken } from '@/lib/storage';
-import type { Coordinate, PlaceSearchResult, RoutePlan, RoutePoint, TrackingSession } from './types';
+import type { Coordinate, FieldSessionKpis, PlaceSearchResult, RoutePlan, RoutePoint, TrackingSession } from './types';
 
 type RequestOptions = RequestInit & { timeoutMs?: number };
+
+export type FieldVisitAssignment = {
+  assignmentId: string;
+  companyId: string;
+  employeeId: string;
+  assignedBy: string;
+  placeId: string;
+  placeName: string;
+  placeAddress: string;
+  latitude: number;
+  longitude: number;
+  queueOrder: number;
+  notes: string;
+  status: 'pending' | 'completed' | 'cancelled';
+  createdAt: string;
+  completedAt: string | null;
+};
 
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const token = await getApiToken();
@@ -69,6 +86,10 @@ export async function fetchMatchedRoute(sessionId: string): Promise<{ source: 's
   return requestJson(`/field-tracking/sessions/${encodeURIComponent(sessionId)}/matched-route`, { timeoutMs: 14_000 });
 }
 
+export async function fetchFieldSessionKpis(sessionId: string): Promise<FieldSessionKpis> {
+  return requestJson(`/field-tracking/sessions/${encodeURIComponent(sessionId)}/kpis`, { timeoutMs: 10_000 });
+}
+
 export async function uploadFieldPoints(session: TrackingSession, points: RoutePoint[]): Promise<{
   accepted: { pointId: string }[];
   rejected: { pointId?: string; reason?: string }[];
@@ -89,5 +110,27 @@ export function completeFieldSession(sessionId: string, endedAt: string): Promis
   return requestJson(`/field-tracking/sessions/${encodeURIComponent(sessionId)}/complete`, {
     method: 'POST',
     body: JSON.stringify({ endedAt }),
+  });
+}
+
+export async function getFieldVisitAssignments(): Promise<FieldVisitAssignment[]> {
+  const result = await requestJson<{ assignments: FieldVisitAssignment[] }>('/field-tracking/assignments');
+  return result.assignments;
+}
+
+export function createFieldVisitAssignment(input: {
+  employeeId: string;
+  place: PlaceSearchResult;
+  notes?: string;
+}): Promise<{ assignment: FieldVisitAssignment }> {
+  return requestJson('/field-tracking/assignments', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function completeFieldVisitAssignment(assignmentId: string): Promise<{ ok: boolean }> {
+  return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/complete`, {
+    method: 'POST',
   });
 }

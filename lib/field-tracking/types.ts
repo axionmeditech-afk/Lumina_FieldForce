@@ -101,3 +101,39 @@ export type LiveEmployee = {
   offRoute: boolean;
 };
 
+export type FieldSessionKpis = {
+  sessionId: string;
+  employeeId: string;
+  sessionStartedAt: string;
+  shiftSeconds: number;
+  movingSeconds: number;
+  haltSeconds: number;
+  haltCount: number;
+  activeHalt: boolean;
+  distanceMetres: number;
+  averageMovingSpeedKmh: number | null;
+  totalPoints: number;
+  acceptedPoints: number;
+  gpsAccuracyMetres: number | null;
+  lastCapturedAt: string | null;
+  lastPointAgeSeconds: number | null;
+  visitTotal: number;
+  visitCompleted: number;
+  nextVisit: {
+    name: string;
+    address: string;
+    distanceMetres: number | null;
+    status: 'en_route' | 'arrived';
+  } | null;
+  activity: Array<{
+    id: string;
+    type: 'movement' | 'halt';
+    startedAt: string;
+    endedAt: string | null;
+    distanceMetres: number;
+    start: Coordinate;
+    end: Coordinate;
+    active: boolean;
+  }>;
+};
+

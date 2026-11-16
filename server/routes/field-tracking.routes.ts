@@ -1,5 +1,6 @@
 import type { Express, Request } from 'express';
 import type { Pool } from 'mysql2/promise';
+import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { computeRoute, matchTrace, searchPlaces } from '@/server/services/field-geospatial';
 
@@ -60,6 +61,16 @@ const routeSchema = z.object({
   travelMode: z.enum(['auto', 'pedestrian', 'bicycle']).default('auto'),
 });
 
+const assignmentSchema = z.object({
+  employeeId: z.string().trim().min(1).max(64),
+  place: coordinateSchema.extend({
+    placeId: z.string().trim().min(1).max(256),
+    name: z.string().trim().min(1).max(200),
+    address: z.string().trim().max(500).default(''),
+  }),
+  notes: z.string().trim().max(500).optional().default(''),
+});
+
 let tablePromise: Promise<void> | null = null;
 let healthCache: { checkedAt: number; routerReachable: boolean; geocoderReachable: boolean } | null = null;
 
@@ -85,7 +96,9 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
     const [routerReachable, geocoderReachable] = await Promise.all([
       probe(process.env.VALHALLA_URL || process.env.ROUTER_BASE_URL || '', '/status'),
-      probe(process.env.NOMINATIM_URL || process.env.GEOCODER_BASE_URL || '', '/status?format=json'),
+      // Some Nominatim images expose /status inconsistently while their actual
+      // search API is healthy. Probe the same lightweight endpoint the app uses.
+      probe(process.env.NOMINATIM_URL || process.env.GEOCODER_BASE_URL || '', '/search?q=Ahmedabad&format=jsonv2&limit=1'),
     ]);
     healthCache = { checkedAt: Date.now(), routerReachable, geocoderReachable };
     res.json({ apiReachable: true, routerReachable, geocoderReachable });
@@ -132,6 +145,97 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       const message = messageOf(error);
       res.status(/not_configured|unavailable/.test(message) ? 503 : 502).json({ message });
     }
+  });
+
+  // A visit is deliberately stored separately from the live GPS session. This
+  // lets an admin assign work before the employee checks in, and preserves the
+  // visit queue across app restarts and devices.
+  app.get('/api/field-tracking/assignments', deps.requireAuth, requireStore, async (req, res) => {
+    const companyId = await deps.resolveRequestCompanyId(req);
+    const employeeId = String(req.auth?.sub || '').trim();
+    if (!companyId || !employeeId) {
+      res.status(403).json({ message: 'Workspace access is required for visit assignments.' });
+      return;
+    }
+    const supervisor = ['admin', 'hr', 'manager'].includes(req.auth?.role || '');
+    const pool = await deps.getMySqlPool();
+    const [rows] = await pool.execute<any[]>(
+      `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
+              latitude, longitude, queue_order, notes, status, created_at, completed_at
+       FROM lff_place_assignments
+       WHERE company_id=? ${supervisor ? '' : 'AND employee_id=?'}
+       ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, employee_id, queue_order, created_at DESC`,
+      supervisor ? [companyId] : [companyId, employeeId],
+    );
+    res.json({ assignments: rows.map(mapAssignment) });
+  });
+
+  app.post('/api/field-tracking/assignments', deps.requireAuth, requireStore, async (req, res) => {
+    if (!['admin', 'hr', 'manager'].includes(req.auth?.role || '')) {
+      res.status(403).json({ message: 'Supervisor access is required to assign a visit.' });
+      return;
+    }
+    const parsed = assignmentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: 'Invalid visit assignment.', issues: parsed.error.issues });
+      return;
+    }
+    const companyId = await deps.resolveRequestCompanyId(req);
+    if (!companyId) {
+      res.status(403).json({ message: 'Select an authorised workspace first.' });
+      return;
+    }
+    const pool = await deps.getMySqlPool();
+    const [sequenceRows] = await pool.execute<any[]>(
+      `SELECT COALESCE(MAX(queue_order), 0) AS last_order
+       FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND status='pending'`,
+      [companyId, parsed.data.employeeId],
+    );
+    const queueOrder = Number(sequenceRows[0]?.last_order || 0) + 1;
+    const id = randomUUID();
+    await pool.execute(
+      `INSERT INTO lff_place_assignments
+        (id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
+         latitude, longitude, queue_order, notes, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW(3), NOW(3))`,
+      [
+        id, companyId, parsed.data.employeeId, String(req.auth?.sub || ''),
+        parsed.data.place.placeId, parsed.data.place.name, parsed.data.place.address,
+        parsed.data.place.latitude, parsed.data.place.longitude, queueOrder, parsed.data.notes || null,
+      ],
+    );
+    res.status(201).json({
+      assignment: {
+        assignmentId: id, companyId, employeeId: parsed.data.employeeId,
+        assignedBy: String(req.auth?.sub || ''), placeId: parsed.data.place.placeId,
+        placeName: parsed.data.place.name, placeAddress: parsed.data.place.address,
+        latitude: parsed.data.place.latitude, longitude: parsed.data.place.longitude,
+        queueOrder, notes: parsed.data.notes || '', status: 'pending',
+        createdAt: new Date().toISOString(), completedAt: null,
+      },
+    });
+  });
+
+  app.post('/api/field-tracking/assignments/:assignmentId/complete', deps.requireAuth, requireStore, async (req, res) => {
+    const assignmentId = String(req.params.assignmentId || '').trim();
+    if (!assignmentId) {
+      res.status(400).json({ message: 'Visit assignment id is required.' });
+      return;
+    }
+    const employeeId = String(req.auth?.sub || '').trim();
+    const pool = await deps.getMySqlPool();
+    const [result] = await pool.execute<any>(
+      `UPDATE lff_place_assignments
+       SET status='completed', completed_at=NOW(3), updated_at=NOW(3)
+       WHERE id=? AND employee_id=? AND status='pending'`,
+      [assignmentId, employeeId],
+    );
+    if (!result.affectedRows) {
+      res.status(404).json({ message: 'This pending visit was not found for your account.' });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   app.post('/api/field-tracking/locations/batch', deps.requireAuth, requireStore, async (req, res) => {
@@ -269,6 +373,115 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     res.json({ source: matched === points ? 'raw' : 'self-hosted-valhalla', points: matched, lastSequence });
   });
 
+  app.get('/api/field-tracking/sessions/:sessionId/kpis', deps.requireAuth, requireStore, async (req, res) => {
+    const sessionId = String(req.params.sessionId || '');
+    const pool = await deps.getMySqlPool();
+    const [sessions] = await pool.execute<any[]>(
+      `SELECT id, employee_id, company_id, started_at, ended_at, status
+       FROM lff_tracking_sessions WHERE id=? LIMIT 1`,
+      [sessionId],
+    );
+    const session = sessions[0];
+    const ownsSession = String(session?.employee_id || '') === (req.auth?.sub || '');
+    const supervisor = ['admin', 'hr', 'manager'].includes(req.auth?.role || '')
+      && getAuthorizedCompanyIds(req, deps).has(String(session?.company_id || ''));
+    if (!session || (!ownsSession && !supervisor)) {
+      res.status(404).json({ message: 'Tracking session was not found.' });
+      return;
+    }
+
+    const [pointRows] = await pool.execute<any[]>(
+      `SELECT sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible
+       FROM lff_tracking_points
+       WHERE session_id=?
+       ORDER BY sequence_no ASC
+       LIMIT 10000`,
+      [sessionId],
+    );
+    const [visitRows] = await pool.execute<any[]>(
+      `SELECT
+          COUNT(*) AS total_count,
+          SUM(status='completed') AS completed_count
+       FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND status<>'cancelled'`,
+      [session.company_id, session.employee_id],
+    );
+    const [nextVisitRows] = await pool.execute<any[]>(
+      `SELECT place_name, place_address, latitude, longitude
+       FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND status='pending'
+       ORDER BY queue_order ASC, created_at ASC
+       LIMIT 1`,
+      [session.company_id, session.employee_id],
+    );
+
+    const points = pointRows.map((row) => ({
+      latitude: Number(row.latitude),
+      longitude: Number(row.longitude),
+      accuracy: row.accuracy == null ? null : Number(row.accuracy),
+      speed: row.speed == null ? null : Number(row.speed),
+      capturedAt: asDateMillis(row.captured_at),
+      routeEligible: Boolean(row.route_eligible),
+    })).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Number.isFinite(point.capturedAt));
+    const accepted = points.filter((point) => point.routeEligible && (point.accuracy == null || point.accuracy <= 80));
+    const latest = accepted.at(-1) ?? null;
+    const now = Date.now();
+    const shiftStartedAt = asDateMillis(session.started_at);
+    const shiftEndedAt = session.status === 'completed' ? asDateMillis(session.ended_at) : now;
+    const shiftSeconds = Number.isFinite(shiftStartedAt)
+      ? Math.max(0, Math.floor((Math.max(shiftStartedAt, shiftEndedAt) - shiftStartedAt) / 1000))
+      : 0;
+    const distanceMetres = gpsDistanceMetres(accepted);
+    const fieldActivity = deriveFieldActivity(accepted, now);
+    const movingSeconds = Math.max(0, shiftSeconds - Math.min(shiftSeconds, fieldActivity.totalHaltSeconds));
+    const averageMovingSpeedKmh = movingSeconds >= 60 && distanceMetres > 0
+      ? Number(((distanceMetres / movingSeconds) * 3.6).toFixed(1))
+      : null;
+    const nextVisit = nextVisitRows[0];
+    const nextLatitude = Number(nextVisit?.latitude);
+    const nextLongitude = Number(nextVisit?.longitude);
+    const distanceToNext = latest && Number.isFinite(nextLatitude) && Number.isFinite(nextLongitude)
+      ? haversineMetres(latest, { latitude: nextLatitude, longitude: nextLongitude })
+      : null;
+    const arrivalRadius = latest?.accuracy != null ? Math.max(50, Math.min(100, latest.accuracy * 2)) : 75;
+
+    res.json({
+      sessionId,
+      employeeId: String(session.employee_id),
+      sessionStartedAt: asIsoDate(session.started_at),
+      shiftSeconds,
+      movingSeconds,
+      haltSeconds: fieldActivity.totalHaltSeconds,
+      haltCount: fieldActivity.haltCount,
+      activeHalt: fieldActivity.activeHalt,
+      distanceMetres: Math.round(distanceMetres),
+      averageMovingSpeedKmh,
+      totalPoints: points.length,
+      acceptedPoints: accepted.length,
+      gpsAccuracyMetres: latest?.accuracy ?? null,
+      lastCapturedAt: latest ? new Date(latest.capturedAt).toISOString() : null,
+      lastPointAgeSeconds: latest ? Math.max(0, Math.floor((now - latest.capturedAt) / 1000)) : null,
+      visitTotal: Number(visitRows[0]?.total_count || 0),
+      visitCompleted: Number(visitRows[0]?.completed_count || 0),
+      nextVisit: nextVisit ? {
+        name: String(nextVisit.place_name || 'Next visit'),
+        address: String(nextVisit.place_address || ''),
+        distanceMetres: distanceToNext == null ? null : Math.round(distanceToNext),
+        status: distanceToNext != null && distanceToNext <= arrivalRadius ? 'arrived' : 'en_route',
+      } : null,
+      activity: fieldActivity.events.slice(-8).reverse().map((event) => ({
+        id: event.id,
+        type: event.type,
+        startedAt: new Date(event.startedAt).toISOString(),
+        endedAt: event.endedAt == null ? null : new Date(event.endedAt).toISOString(),
+        distanceMetres: Math.round(event.distanceMetres),
+        start: { latitude: event.start.latitude, longitude: event.start.longitude },
+        end: { latitude: event.end.latitude, longitude: event.end.longitude },
+        active: event.active,
+      })),
+    });
+  });
+
   app.get('/api/field-tracking/live', deps.requireAuth, requireStore, async (req, res) => {
     if (!['admin', 'hr', 'manager'].includes(req.auth?.role || '')) {
       res.status(403).json({ message: 'Supervisor access is required.' });
@@ -372,12 +585,53 @@ async function ensureTables(pool: Pool): Promise<void> {
             REFERENCES lff_tracking_sessions(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       );
+      await pool.execute(
+        `CREATE TABLE IF NOT EXISTS lff_place_assignments (
+          id VARCHAR(64) NOT NULL,
+          company_id VARCHAR(64) NOT NULL,
+          employee_id VARCHAR(64) NOT NULL,
+          assigned_by VARCHAR(64) NOT NULL,
+          place_id VARCHAR(256) NOT NULL,
+          place_name VARCHAR(200) NOT NULL,
+          place_address VARCHAR(500) NOT NULL DEFAULT '',
+          latitude DECIMAL(10,7) NOT NULL,
+          longitude DECIMAL(10,7) NOT NULL,
+          queue_order INT UNSIGNED NOT NULL,
+          notes VARCHAR(500) NULL,
+          status ENUM('pending','completed','cancelled') NOT NULL DEFAULT 'pending',
+          created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          completed_at DATETIME(3) NULL,
+          PRIMARY KEY (id),
+          KEY idx_lff_place_assignments_employee_queue (company_id, employee_id, status, queue_order),
+          KEY idx_lff_place_assignments_company_status (company_id, status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      );
     })().catch((error) => {
       tablePromise = null;
       throw error;
     });
   }
   await tablePromise;
+}
+
+function mapAssignment(row: Record<string, unknown>) {
+  return {
+    assignmentId: String(row.id || ''),
+    companyId: String(row.company_id || ''),
+    employeeId: String(row.employee_id || ''),
+    assignedBy: String(row.assigned_by || ''),
+    placeId: String(row.place_id || ''),
+    placeName: String(row.place_name || 'Assigned place'),
+    placeAddress: String(row.place_address || ''),
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    queueOrder: Number(row.queue_order || 0),
+    notes: String(row.notes || ''),
+    status: String(row.status || 'pending'),
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
+    completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at ? String(row.completed_at) : null,
+  };
 }
 
 async function probe(baseValue: string, path: string): Promise<boolean> {
@@ -399,6 +653,146 @@ function toSqlDate(value: string): Date {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime())) throw new Error('invalid_date');
   return parsed;
+}
+
+type KpiPoint = {
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  speed: number | null;
+  capturedAt: number;
+  routeEligible: boolean;
+};
+
+function asDateMillis(value: unknown): number {
+  const parsed = value instanceof Date ? value.getTime() : new Date(String(value || '')).getTime();
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function asIsoDate(value: unknown): string {
+  const milliseconds = asDateMillis(value);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : new Date(0).toISOString();
+}
+
+function haversineMetres(
+  from: { latitude: number; longitude: number },
+  to: { latitude: number; longitude: number },
+): number {
+  const radians = (value: number) => value * Math.PI / 180;
+  const latitudeDelta = radians(to.latitude - from.latitude);
+  const longitudeDelta = radians(to.longitude - from.longitude);
+  const formula = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(radians(from.latitude)) * Math.cos(radians(to.latitude)) * Math.sin(longitudeDelta / 2) ** 2;
+  return 6_371_000 * 2 * Math.asin(Math.min(1, Math.sqrt(formula)));
+}
+
+function gpsDistanceMetres(points: KpiPoint[]): number {
+  return points.reduce((total, point, index) => {
+    if (index === 0) return total;
+    const previous = points[index - 1]!;
+    const elapsedSeconds = (point.capturedAt - previous.capturedAt) / 1000;
+    // A long data gap cannot be represented by a straight line reliably.
+    if (elapsedSeconds <= 0 || elapsedSeconds > 15 * 60) return total;
+    return total + haversineMetres(previous, point);
+  }, 0);
+}
+
+type FieldActivityEvent = {
+  id: string;
+  type: 'movement' | 'halt';
+  startedAt: number;
+  endedAt: number | null;
+  distanceMetres: number;
+  start: KpiPoint;
+  end: KpiPoint;
+  active: boolean;
+};
+
+function deriveFieldActivity(points: KpiPoint[], now: number): {
+  totalHaltSeconds: number;
+  haltCount: number;
+  activeHalt: boolean;
+  events: FieldActivityEvent[];
+} {
+  const minimumHaltSeconds = 3 * 60;
+  const haltRadiusMetres = 45;
+  const haltRanges: Array<{ start: number; end: number; active: boolean; durationSeconds: number }> = [];
+
+  for (let start = 0; start < points.length - 1;) {
+    let end = start;
+    let pathDistance = 0;
+    while (end + 1 < points.length) {
+      const current = points[end]!;
+      const next = points[end + 1]!;
+      const elapsed = (next.capturedAt - current.capturedAt) / 1000;
+      const nextDistanceFromAnchor = haversineMetres(points[start]!, next);
+      if (elapsed <= 0 || elapsed > 15 * 60 || nextDistanceFromAnchor > haltRadiusMetres) break;
+      pathDistance += haversineMetres(current, next);
+      end += 1;
+    }
+
+    const startedAt = points[start]!.capturedAt;
+    const endedAt = points[end]!.capturedAt;
+    const durationSeconds = Math.max(0, (endedAt - startedAt) / 1000);
+    const isLatestCluster = end === points.length - 1 && now - endedAt <= 5 * 60 * 1000;
+    // A small GPS drift inside the halt radius is expected; larger movement is not a halt.
+    if (end > start && durationSeconds >= minimumHaltSeconds && pathDistance <= haltRadiusMetres * 1.5) {
+      haltRanges.push({
+        start,
+        end,
+        active: isLatestCluster,
+        durationSeconds: isLatestCluster ? Math.max(durationSeconds, (now - startedAt) / 1000) : durationSeconds,
+      });
+      start = end + 1;
+    } else {
+      start += 1;
+    }
+  }
+
+  const events: FieldActivityEvent[] = [];
+  const addMovement = (fromIndex: number, toIndex: number) => {
+    if (toIndex <= fromIndex) return;
+    const from = points[fromIndex]!;
+    const to = points[toIndex]!;
+    const distanceMetres = gpsDistanceMetres(points.slice(fromIndex, toIndex + 1));
+    if (distanceMetres < 5) return;
+    events.push({
+      id: `move-${from.capturedAt}-${to.capturedAt}`,
+      type: 'movement',
+      startedAt: from.capturedAt,
+      endedAt: to.capturedAt,
+      distanceMetres,
+      start: from,
+      end: to,
+      active: false,
+    });
+  };
+
+  let cursor = 0;
+  haltRanges.forEach((halt) => {
+    addMovement(cursor, halt.start);
+    const from = points[halt.start]!;
+    const to = points[halt.end]!;
+    events.push({
+      id: `halt-${from.capturedAt}-${to.capturedAt}`,
+      type: 'halt',
+      startedAt: from.capturedAt,
+      endedAt: halt.active ? null : to.capturedAt,
+      distanceMetres: haversineMetres(from, to),
+      start: from,
+      end: to,
+      active: halt.active,
+    });
+    cursor = halt.end;
+  });
+  addMovement(cursor, points.length - 1);
+
+  return {
+    totalHaltSeconds: Math.round(haltRanges.reduce((total, halt) => total + halt.durationSeconds, 0)),
+    haltCount: haltRanges.length,
+    activeHalt: haltRanges.some((halt) => halt.active),
+    events,
+  };
 }
 
 function messageOf(error: unknown): string {

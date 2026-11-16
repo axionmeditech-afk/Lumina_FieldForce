@@ -13,6 +13,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ThemeProvider, useAppTheme } from "@/contexts/ThemeContext";
+import { VisitNavigationMiniCard, VisitNavigationProvider } from "@/contexts/VisitNavigationContext";
 import { retireLegacyLocationTracking } from "@/lib/retire-legacy-tracking";
 import "@/lib/field-tracking/background-task";
 import { useFonts } from "expo-font";
@@ -48,10 +49,13 @@ function AppShell() {
   useEffect(() => { void ensureAttendanceNotificationChannel().catch(console.warn); }, []);
   useEffect(() => { void retireLegacyLocationTracking().catch(console.warn); }, []);
   return <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
-    <StatusBar style={isDark ? "light" : "dark"} />
-    <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="index" /><Stack.Screen name="login" /><Stack.Screen name="(tabs)" />
-    </Stack>
+    <VisitNavigationProvider userId={user?.id || null}>
+      <StatusBar style={isDark ? "light" : "dark"} />
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="index" /><Stack.Screen name="login" /><Stack.Screen name="(tabs)" />
+      </Stack>
+      <VisitNavigationMiniCard />
+    </VisitNavigationProvider>
   </GestureHandlerRootView>;
 }
 export default function RootLayout() {

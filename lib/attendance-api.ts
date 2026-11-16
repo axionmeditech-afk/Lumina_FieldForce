@@ -601,41 +601,6 @@ export async function getAuthenticatedApiUser(
   }
 }
 
-export async function registerApiUser(payload: {
-  name: string;
-  email: string;
-  password: string;
-  companyName: string;
-  role?: "admin" | "hr" | "manager" | "salesperson" | "employee";
-  department?: string;
-  branch?: string;
-  phone?: string;
-  pincode?: string;
-}, options?: AuthRequestOptions): Promise<string | null> {
-  const timeoutMs = Math.max(300, options?.timeoutMs ?? 2200);
-  try {
-    const deviceId = await getOrCreateDeviceId();
-    const result = await fetchJsonWithTimeout<{ token?: string }>(
-      "/auth/register",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          ...payload,
-          deviceId,
-        }),
-      },
-      timeoutMs
-    );
-    if (result.token) {
-      await setApiToken(result.token);
-      return result.token;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export async function logoutApiSession(options?: AuthRequestOptions): Promise<void> {
   const timeoutMs = Math.max(300, options?.timeoutMs ?? 1800);
   try {

@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { createHash } from "crypto";
 import type { AppUser, UserRole } from "@/lib/types";
 
 type AuthUserRecord = any;
@@ -6,6 +7,67 @@ type AccessRequestRecord = any;
 type CompanyProfileSummary = any;
 
 export type AuthRouteDeps = Record<string, any>;
+
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 8;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const MAX_TRACKED_LOGIN_ATTEMPTS = 10_000;
+type LoginAttempt = { windowStartedAt: number; failures: number; lockedUntil: number };
+const loginAttempts = new Map<string, LoginAttempt>();
+
+function passwordPolicyError(value: unknown): string | null {
+  if (typeof value !== "string") return "Password is required.";
+  if (value.length < 12) return "Password must be at least 12 characters.";
+  if (value.length > 256) return "Password is too long.";
+  const characterClasses = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9\s]/].filter((pattern) => pattern.test(value)).length;
+  return characterClasses >= 3
+    ? null
+    : "Password must include at least three of: lowercase, uppercase, number, symbol.";
+}
+
+function loginAttemptKey(req: any, identifier: string): string {
+  // Keep raw identifiers/IP addresses out of memory while limiting both a
+  // targeted account and broad credential-stuffing from one network.
+  const ip = String(req.ip || req.socket?.remoteAddress || "unknown").slice(0, 200);
+  const normalizedIdentifier = identifier.trim().toLowerCase().slice(0, 320);
+  return createHash("sha256").update(`${ip}\u0000${normalizedIdentifier}`).digest("hex");
+}
+
+function activeLoginLock(key: string): number {
+  const attempt = loginAttempts.get(key);
+  if (!attempt) return 0;
+  const now = Date.now();
+  if (attempt.lockedUntil > now) return attempt.lockedUntil - now;
+  if (now - attempt.windowStartedAt > LOGIN_WINDOW_MS) loginAttempts.delete(key);
+  return 0;
+}
+
+function recordFailedLogin(key: string): void {
+  const now = Date.now();
+  if (loginAttempts.size >= MAX_TRACKED_LOGIN_ATTEMPTS && !loginAttempts.has(key)) {
+    for (const [candidateKey, attempt] of loginAttempts) {
+      if (attempt.lockedUntil <= now && now - attempt.windowStartedAt > LOGIN_WINDOW_MS) {
+        loginAttempts.delete(candidateKey);
+      }
+    }
+    // Bound memory under a distributed identifier spray. Oldest entries are
+    // less useful than preserving availability of the auth process.
+    if (loginAttempts.size >= MAX_TRACKED_LOGIN_ATTEMPTS) {
+      const oldest = loginAttempts.keys().next();
+      if (!oldest.done) loginAttempts.delete(oldest.value);
+    }
+  }
+  const current = loginAttempts.get(key);
+  const next = !current || now - current.windowStartedAt > LOGIN_WINDOW_MS
+    ? { windowStartedAt: now, failures: 1, lockedUntil: 0 }
+    : { ...current, failures: current.failures + 1 };
+  if (next.failures >= LOGIN_MAX_FAILURES) next.lockedUntil = now + LOGIN_LOCK_MS;
+  loginAttempts.set(key, next);
+}
+
+function clearFailedLogins(key: string): void {
+  loginAttempts.delete(key);
+}
 
 export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
   const {
@@ -20,6 +82,8 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     hasAnyApprovedAdmin,
     buildUserFromRegistration,
     hashPassword,
+    hashLegacyDolibarrPassword,
+    persistSecurePasswordHash,
     setAuthUserRecord,
     upsertAuthUserInMySql,
     forceDolibarrAdminPrivilegesForUserIdentity,
@@ -110,109 +174,14 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     }
   };
 
-  app.post("/api/auth/register", async (req, res) => {
-    const {
-      name,
-      email,
-      password,
-      companyName,
-      role,
-      department,
-      branch,
-      phone,
-    } = req.body as {
-      name?: string;
-      email?: string;
-      password?: string;
-      companyName?: string;
-      role?: UserRole;
-      department?: string;
-      branch?: string;
-      phone?: string;
-    };
-
-    if (!name || !email || !password || !companyName) {
-      res.status(400).json({ message: "Name, email, password and company name are required" });
-      return;
-    }
-
-    const normalizedEmail = normalizeEmail(email);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      res.status(400).json({ message: "Invalid email format" });
-      return;
-    }
-    if (password.length < 6) {
-      res.status(400).json({ message: "Password must be at least 6 characters" });
-      return;
-    }
-
-    const normalizedRole = normalizeRole(role);
-    const normalizedCompanyName = normalizeCompanyName(companyName);
-    const existingRecord = await checkAuthUserForSignup(normalizedEmail);
-    if (existingRecord && resolveApprovalStatus(existingRecord) === "approved") {
-      res.status(409).json({ message: "User already exists for this email" });
-      return;
-    }
-
-    const adminAlreadyExists = await hasAnyApprovedAdmin();
-    if (normalizedRole === "admin" && adminAlreadyExists) {
-      res.status(403).json({
-        message:
-          "An admin already exists. Ask an existing admin to approve additional admin access.",
-      });
-      return;
-    }
-
-    const user = buildUserFromRegistration({
-      name,
-      email: normalizedEmail,
-      companyName: normalizedCompanyName,
-      role: normalizedRole,
-      department,
-      branch,
-      phone,
+  // Public registration must never mint an approved account.  Keeping this
+  // endpoint explicit (instead of silently redirecting) prevents old clients
+  // from accidentally treating a pending request as an authenticated session.
+  app.post("/api/auth/register", (_req, res) => {
+    res.status(410).json({
+      message: "Direct account registration is disabled. Submit an access request for administrator approval.",
+      code: "direct_registration_disabled",
     });
-    const now = new Date().toISOString();
-    const authRecord: AuthUserRecord = {
-      user,
-      passwordHash: hashPassword(password),
-      createdAt: now,
-      updatedAt: now,
-      approvalStatus: "approved",
-    };
-    setAuthUserRecord(authRecord);
-    try {
-      await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
-      if (user.role === "admin") {
-        await forceDolibarrAdminPrivilegesForUserIdentity(user);
-      }
-    } catch (error) {
-      removeAuthUserByEmail(user.email);
-      console.error("Failed to persist registered user in MySQL", error);
-      res.status(500).json({
-        message:
-          error instanceof Error
-            ? `Failed to save user in database: ${error.message}`
-            : "Failed to save user in database.",
-      });
-      return;
-    }
-
-    const deviceId = resolveDeviceIdFromRequest(req);
-    try {
-      const token = await issueDeviceScopedAuthToken(user, deviceId);
-      res.status(201).json({ token, user });
-    } catch (error) {
-      if (isSingleDeviceSessionLockError(error)) {
-        res.status(409).json({
-          message: SINGLE_DEVICE_SESSION_LOCK_MESSAGE,
-          code: "session_active_on_another_device",
-        });
-        return;
-      }
-      console.error("Failed to issue auth token during registration", error);
-      res.status(500).json({ message: "Unable to create login session right now." });
-    }
   });
 
   app.post("/api/auth/access-request", async (req, res) => {
@@ -246,8 +215,9 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       res.status(400).json({ message: "Invalid email format" });
       return;
     }
-    if (password.length < 6) {
-      res.status(400).json({ message: "Password must be at least 6 characters" });
+    const passwordError = passwordPolicyError(password);
+    if (passwordError) {
+      res.status(400).json({ message: passwordError });
       return;
     }
 
@@ -262,7 +232,26 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       return;
     }
 
-    if (normalizedRole === "admin" && !adminAlreadyExists) {
+    // A first admin is an installation operation, not public signup.  The
+    // secret lives only in the server environment and is intentionally never
+    // accepted in the JSON request body.
+    const bootstrapToken = String(req.header("x-initial-admin-token") || "").trim();
+    const configuredBootstrapToken = String(process.env.INITIAL_ADMIN_SETUP_TOKEN || "").trim();
+    const canBootstrapAdmin =
+      normalizedRole === "admin" &&
+      !adminAlreadyExists &&
+      configuredBootstrapToken.length >= 24 &&
+      bootstrapToken === configuredBootstrapToken;
+
+    if (normalizedRole === "admin" && !adminAlreadyExists && !canBootstrapAdmin) {
+      res.status(403).json({
+        message: "Initial administrator setup requires the server-side bootstrap token.",
+        code: "bootstrap_token_required",
+      });
+      return;
+    }
+
+    if (canBootstrapAdmin) {
       const now = new Date().toISOString();
       const bootstrapAdmin = buildUserFromRegistration({
         name,
@@ -276,12 +265,14 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       const authRecord: AuthUserRecord = {
         user: bootstrapAdmin,
         passwordHash: hashPassword(password),
+        legacyPasswordHash: hashLegacyDolibarrPassword(password),
         createdAt: existingRecord?.createdAt || now,
         updatedAt: now,
         approvalStatus: "approved",
       };
       setAuthUserRecord(authRecord);
       try {
+        await persistSecurePasswordHash(normalizedEmail, authRecord.passwordHash);
         await upsertAuthUserInMySql(authRecord, normalizedCompanyName);
         await forceDolibarrAdminPrivilegesForUserIdentity(bootstrapAdmin);
       } catch (error) {
@@ -356,6 +347,7 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     const pendingAuthRecord: AuthUserRecord = {
       user: pendingUser,
       passwordHash: pendingPasswordHash,
+      legacyPasswordHash: hashLegacyDolibarrPassword(password),
       createdAt: existingRecord?.createdAt || now,
       updatedAt: now,
       approvalStatus: "pending",
@@ -386,6 +378,7 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     };
     accessRequestsById.set(pendingRequest.id, pendingRequest);
     try {
+      await persistSecurePasswordHash(normalizedEmail, pendingPasswordHash);
       await insertAccessRequestInMySql(pendingRequest);
       await upsertAuthUserInMySql(pendingAuthRecord, normalizedCompanyName);
       try {
@@ -756,8 +749,9 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
         res.status(400).json({ message: "Invalid email format." });
         return;
       }
-      if (password.length < 6) {
-        res.status(400).json({ message: "Password must be at least 6 characters." });
+      const passwordError = passwordPolicyError(password);
+      if (passwordError) {
+        res.status(400).json({ message: passwordError });
         return;
       }
 
@@ -793,6 +787,7 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       const authRecord: AuthUserRecord = {
         user: userToPersist,
         passwordHash: hashPassword(password),
+        legacyPasswordHash: hashLegacyDolibarrPassword(password),
         createdAt: now,
         updatedAt: now,
         approvalStatus: "approved",
@@ -800,6 +795,7 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
 
       setAuthUserRecord(authRecord);
       try {
+        await persistSecurePasswordHash(normalizedEmail, authRecord.passwordHash);
         await upsertAuthUserInMySql(authRecord, companyName, {
           systemAdministrator,
         });
@@ -843,16 +839,26 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       res.status(400).json({ message: "Email/username and password are required" });
       return;
     }
+    const attemptKey = loginAttemptKey(req, rawIdentifier);
+    const lockRemainingMs = activeLoginLock(attemptKey);
+    if (lockRemainingMs > 0) {
+      const retryAfterSeconds = Math.ceil(lockRemainingMs / 1000);
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      res.status(429).json({ message: "Too many failed sign-in attempts. Try again later.", retryAfterSeconds });
+      return;
+    }
 
     await initAuthUsersStore();
     const authRecord = getAuthUserByIdentifier(rawIdentifier);
     if (authRecord && matchesStoredPasswordHash(authRecord.passwordHash, password)) {
       const status = resolveApprovalStatus(authRecord);
       if (status === "pending") {
+        clearFailedLogins(attemptKey);
         res.status(403).json({ message: "Your access request is pending admin approval." });
         return;
       }
       if (status === "rejected") {
+        clearFailedLogins(attemptKey);
         res.status(403).json({ message: "Your access request was rejected by admin." });
         return;
       }
@@ -864,10 +870,12 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       }
       if (latestRequest?.passwordHash && matchesStoredPasswordHash(latestRequest.passwordHash, password)) {
         if (latestRequest.status === "pending") {
+          clearFailedLogins(attemptKey);
           res.status(403).json({ message: "Your access request is pending admin approval." });
           return;
         }
         if (latestRequest.status === "rejected") {
+          clearFailedLogins(attemptKey);
           res.status(403).json({ message: "Your access request was rejected by admin." });
           return;
         }
@@ -875,9 +883,11 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     }
     const user = await authenticateCredentials(rawIdentifier, password);
     if (!user) {
+      recordFailedLogin(attemptKey);
       res.status(401).json({ message: "Invalid credentials" });
       return;
     }
+    clearFailedLogins(attemptKey);
 
     const deviceId = resolveDeviceIdFromRequest(req);
     try {
@@ -917,15 +927,25 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       res.status(400).json({ message: "Email/username and password are required" });
       return;
     }
+    const attemptKey = loginAttemptKey(req, rawIdentifier);
+    const lockRemainingMs = activeLoginLock(attemptKey);
+    if (lockRemainingMs > 0) {
+      const retryAfterSeconds = Math.ceil(lockRemainingMs / 1000);
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      res.status(429).json({ message: "Too many failed sign-in attempts. Try again later.", retryAfterSeconds });
+      return;
+    }
     await initAuthUsersStore();
     const authRecord = getAuthUserByIdentifier(rawIdentifier);
     if (authRecord && matchesStoredPasswordHash(authRecord.passwordHash, password)) {
       const status = resolveApprovalStatus(authRecord);
       if (status === "pending") {
+        clearFailedLogins(attemptKey);
         res.status(403).json({ message: "Your access request is pending admin approval." });
         return;
       }
       if (status === "rejected") {
+        clearFailedLogins(attemptKey);
         res.status(403).json({ message: "Your access request was rejected by admin." });
         return;
       }
@@ -937,10 +957,12 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       }
       if (latestRequest?.passwordHash && matchesStoredPasswordHash(latestRequest.passwordHash, password)) {
         if (latestRequest.status === "pending") {
+          clearFailedLogins(attemptKey);
           res.status(403).json({ message: "Your access request is pending admin approval." });
           return;
         }
         if (latestRequest.status === "rejected") {
+          clearFailedLogins(attemptKey);
           res.status(403).json({ message: "Your access request was rejected by admin." });
           return;
         }
@@ -948,9 +970,11 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
     }
     const user = await authenticateCredentials(rawIdentifier, password);
     if (!user) {
+      recordFailedLogin(attemptKey);
       res.status(401).json({ message: "Invalid credentials" });
       return;
     }
+    clearFailedLogins(attemptKey);
     const deviceId = resolveDeviceIdFromRequest(req);
     try {
       if (replaceSession === true) {

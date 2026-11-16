@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { LiveConnectionState, LiveEmployee, RoutePoint } from '../types';
+import type { FieldSessionKpis, LiveConnectionState, LiveEmployee, RoutePoint } from '../types';
 import { getFieldHealth } from '../api';
 import { getApiToken } from '@/lib/storage';
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
@@ -10,6 +10,21 @@ function mergePoints(current: RoutePoint[], incoming: RoutePoint[]): RoutePoint[
   return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence).slice(-5000);
 }
 
+async function fetchKpisFast(baseUrl: string, token: string, sessionId: string): Promise<FieldSessionKpis> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3_500);
+  try {
+    const response = await fetch(`${baseUrl}/field-tracking/sessions/${encodeURIComponent(sessionId)}/kpis`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`kpis_${response.status}`);
+    return await response.json() as FieldSessionKpis;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function useLiveRoute() {
   const [employee, setEmployee] = useState<LiveEmployee | null>(null);
   const [employees, setEmployees] = useState<LiveEmployee[]>([]);
@@ -17,6 +32,8 @@ export function useLiveRoute() {
   const [connectionState, setConnectionState] = useState<LiveConnectionState>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [serverHealth, setServerHealth] = useState({ apiReachable: false, routerReachable: false, geocoderReachable: false });
+  const [kpis, setKpis] = useState<FieldSessionKpis | null>(null);
+  const [kpiState, setKpiState] = useState<'idle' | 'loading' | 'ready' | 'unavailable'>('idle');
   const mountedRef = useRef(true);
   
   const employeeRef = useRef<LiveEmployee | null>(null);
@@ -90,6 +107,8 @@ export function useLiveRoute() {
           setEmployee(null);
           setEmployees([]);
           setPoints([]);
+          setKpis(null);
+          setKpiState('idle');
           setConnectionState('waiting');
           setError(null);
         }
@@ -109,6 +128,23 @@ export function useLiveRoute() {
       const sessionChanged = employeeRef.current?.sessionId !== selected.sessionId;
       employeeRef.current = selected;
       if (mountedRef.current) setEmployee(selected);
+      if (sessionChanged && mountedRef.current) {
+        setKpis(null);
+        setKpiState('loading');
+      }
+
+      // Start KPI delivery immediately. Route matching can call Valhalla and must
+      // never delay the dashboard's basic live details.
+      void fetchKpisFast(bases[0]!, token, selected.sessionId)
+        .then((nextKpis) => {
+          if (mountedRef.current && employeeRef.current?.sessionId === selected.sessionId) {
+            setKpis(nextKpis);
+            setKpiState('ready');
+          }
+        })
+        .catch(() => {
+          if (mountedRef.current && employeeRef.current?.sessionId === selected.sessionId) setKpiState('unavailable');
+        });
 
       // Fetch route points for selected employee
       const routeResponse = await fetch(`${bases[0]}/field-tracking/sessions/${encodeURIComponent(selected.sessionId)}/matched-route`, {
@@ -169,11 +205,13 @@ export function useLiveRoute() {
     applyPoints([], true);
     if (mountedRef.current) {
       setEmployee(selected);
+      setKpis(null);
+      setKpiState('loading');
       setConnectionState('recovering');
     }
     void refresh();
   }, [applyPoints, refresh]);
 
   const latest = [...points].reverse().find((point) => point.routeEligible || point.rejectionReason === 'stationary_noise') ?? null;
-  return { employee, employees, points, latest, connectionState, error, serverHealth, refresh, selectEmployee };
+  return { employee, employees, points, latest, connectionState, error, serverHealth, kpis, kpiState, refresh, selectEmployee };
 }

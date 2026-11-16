@@ -129,8 +129,8 @@ async function startNativeTask(): Promise<void> {
     pausesUpdatesAutomatically: false,
     showsBackgroundLocationIndicator: true,
     foregroundService: {
-      notificationTitle: 'Field tracking is active',
-      notificationBody: 'Your work route is being recorded securely.',
+      notificationTitle: 'Attendance auto-checkout active',
+      notificationBody: 'Lumina is watching your office boundary during this active check-in.',
       notificationColor: '#1769D2',
       killServiceOnDestroy: false,
     },

@@ -2,7 +2,7 @@ import { attendanceConnection, withAttendanceLock } from "./services/attendance-
 import express, { type Express, type Request, type Response } from "express";
 import type { Pool, PoolConnection } from "mysql2/promise";
 import { createServer, type Server } from "node:http";
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import type { AppNotification, AppUser, AttendanceCheckPayload, AttendanceRecord, CompanyProfile, Geofence, UserAccessRequest, UserRole } from "@/lib/types";
 import {
@@ -330,6 +330,10 @@ function getRequestUser(req: Request): AppUser | null {
 interface AuthUserRecord {
   user: AppUser;
   passwordHash: string;
+  // Dolibarr's legacy user table still uses an MD5-compatible field. It is
+  // never used to authenticate the FieldForce API once a secure credential
+  // has been written to lff_auth_credentials.
+  legacyPasswordHash?: string;
   createdAt: string;
   updatedAt: string;
   approvalStatus?: "pending" | "approved" | "rejected";
@@ -421,7 +425,11 @@ async function upsertAuthUserInMySql(
         ? 0
         : 1;
   const phone = normalizeWhitespace(user.phone || "");
-  const passwordHash = isLikelyMd5(record.passwordHash) ? record.passwordHash.trim().toLowerCase() : "";
+  const passwordHash = isLikelyMd5(record.legacyPasswordHash)
+    ? record.legacyPasswordHash!.trim().toLowerCase()
+    : isLikelyMd5(record.passwordHash)
+      ? record.passwordHash.trim().toLowerCase()
+      : "";
   const approvalStatus = resolveApprovalStatus(record);
   const statutFlag = approvalStatus === "approved" ? 1 : 0;
 
@@ -720,7 +728,28 @@ function normalizeLoginKey(value: string | null | undefined): string {
   return (value || "").trim().toLowerCase();
 }
 
+const SCRYPT_N = 1 << 15;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEY_LENGTH = 64;
+
+/**
+ * Passwords for this API are stored using a versioned, salted scrypt digest.
+ * The format is deliberately self-contained so its work factor can be raised
+ * later without invalidating existing users.
+ */
 function hashPassword(password: string): string {
+  const salt = randomBytes(16);
+  const digest = scryptSync(password, salt, SCRYPT_KEY_LENGTH, {
+    N: SCRYPT_N,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+    maxmem: 64 * 1024 * 1024,
+  });
+  return `scrypt$v=1$${salt.toString("base64url")}$${digest.toString("base64url")}`;
+}
+
+function hashLegacyDolibarrPassword(password: string): string {
   return createHash("md5").update(password).digest("hex");
 }
 
@@ -729,9 +758,109 @@ function hashPasswordLegacy(password: string): string {
 }
 
 function matchesStoredPasswordHash(storedHash: string | null | undefined, password: string): boolean {
-  const normalized = (storedHash || "").trim().toLowerCase();
+  const normalized = (storedHash || "").trim();
   if (!normalized) return false;
-  return normalized === hashPassword(password) || normalized === hashPasswordLegacy(password);
+  if (normalized.startsWith("scrypt$v=1$")) {
+    const parts = normalized.split("$");
+    if (parts.length !== 4) return false;
+    try {
+      const salt = Buffer.from(parts[2]!, "base64url");
+      const expected = Buffer.from(parts[3]!, "base64url");
+      if (salt.length < 16 || salt.length > 64 || expected.length !== SCRYPT_KEY_LENGTH) return false;
+      const actual = scryptSync(password, salt, SCRYPT_KEY_LENGTH, {
+        N: SCRYPT_N,
+        r: SCRYPT_R,
+        p: SCRYPT_P,
+        maxmem: 64 * 1024 * 1024,
+      });
+      return timingSafeEqual(expected, actual);
+    } catch {
+      return false;
+    }
+  }
+  const legacy = normalized.toLowerCase();
+  const expectedMd5 = hashLegacyDolibarrPassword(password);
+  const expectedSha256 = hashPasswordLegacy(password);
+  return safeStringEqual(legacy, expectedMd5) || safeStringEqual(legacy, expectedSha256);
+}
+
+function safeStringEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isSecurePasswordHash(value: string | null | undefined): boolean {
+  return (value || "").trim().startsWith("scrypt$v=1$");
+}
+
+// Dolibarr's legacy user table only supports its historical MD5 format.  Keep
+// the application credential in a separate table so API authentication is
+// never downgraded just to remain compatible with that external table.
+const securePasswordHashesInMemory = new Map<string, string>();
+let secureCredentialsTableReady: Promise<void> | null = null;
+
+async function ensureSecureCredentialsTable(): Promise<void> {
+  if (!isMySqlStateEnabled()) return;
+  if (!secureCredentialsTableReady) {
+    secureCredentialsTableReady = (async () => {
+      const conn = await getMySqlPool();
+      await conn.execute(`
+        CREATE TABLE IF NOT EXISTS lff_auth_credentials (
+          email VARCHAR(191) NOT NULL PRIMARY KEY,
+          password_hash VARCHAR(512) NOT NULL,
+          password_algorithm VARCHAR(32) NOT NULL DEFAULT 'scrypt-v1',
+          upgraded_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+    })().catch((error) => {
+      secureCredentialsTableReady = null;
+      throw error;
+    });
+  }
+  await secureCredentialsTableReady;
+}
+
+async function readSecurePasswordHash(email: string): Promise<string | null> {
+  const normalizedEmail = normalizeEmailKey(email);
+  if (!normalizedEmail) return null;
+  if (isMySqlStateEnabled()) {
+    try {
+      await ensureSecureCredentialsTable();
+      const conn = await getMySqlPool();
+      const [rows] = await conn.execute(
+        "SELECT password_hash FROM lff_auth_credentials WHERE email = ? LIMIT 1",
+        [normalizedEmail],
+      );
+      const value = (rows as any[])?.[0]?.password_hash;
+      return isSecurePasswordHash(value) ? String(value) : null;
+    } catch (error) {
+      console.warn("Secure credential lookup failed; using the in-memory fallback.", error instanceof Error ? error.message : error);
+    }
+  }
+  const fallback = securePasswordHashesInMemory.get(normalizedEmail);
+  return isSecurePasswordHash(fallback) ? fallback ?? null : null;
+}
+
+async function persistSecurePasswordHash(email: string, passwordHash: string): Promise<void> {
+  const normalizedEmail = normalizeEmailKey(email);
+  if (!normalizedEmail || !isSecurePasswordHash(passwordHash)) {
+    throw new Error("Refusing to persist an invalid secure password hash.");
+  }
+  securePasswordHashesInMemory.set(normalizedEmail, passwordHash);
+  if (!isMySqlStateEnabled()) return;
+  await ensureSecureCredentialsTable();
+  const conn = await getMySqlPool();
+  await conn.execute(
+    `INSERT INTO lff_auth_credentials (email, password_hash, password_algorithm, upgraded_at)
+     VALUES (?, ?, 'scrypt-v1', NOW(3))
+     ON DUPLICATE KEY UPDATE
+       password_hash = VALUES(password_hash),
+       password_algorithm = VALUES(password_algorithm),
+       upgraded_at = VALUES(upgraded_at)`,
+    [normalizedEmail, passwordHash],
+  );
 }
 
 function isLikelyMd5(value: string | null | undefined): boolean {
@@ -1749,25 +1878,63 @@ async function readNormalizedState(key: string): Promise<unknown[] | undefined> 
  return undefined;
 }
 
-function withDefaultCompanyIdForRemoteState(
-  key: string,
-  value: unknown,
-  defaultCompanyId: string | null
-): unknown {
-  if (!defaultCompanyId || !COMPANY_SCOPED_REMOTE_STATE_KEYS.has(key) || !Array.isArray(value)) {
-    return value;
-  }
-  let changed = false;
-  const next = value.map((entry) => {
+function companyScopedRemoteStateStorageKey(key: string, companyId: string): string {
+  return `@lff_company_state_v1:${encodeURIComponent(normalizeWhitespace(companyId))}:${key}`;
+}
+
+function companyIdOnRemoteStateEntry(entry: unknown): string {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "";
+  const record = entry as Record<string, unknown>;
+  return normalizeWhitespace(
+    typeof record.companyId === "string"
+      ? record.companyId
+      : typeof record.company_id === "string"
+        ? record.company_id
+        : "",
+  );
+}
+
+function scopeRemoteStateValueToCompany(key: string, value: unknown, companyId: string): unknown {
+  if (!COMPANY_SCOPED_REMOTE_STATE_KEYS.has(key) || !Array.isArray(value)) return value;
+  return value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-    const record = entry as Record<string, unknown>;
-    const currentCompanyId =
-      typeof record.companyId === "string" ? normalizeWhitespace(record.companyId) : "";
-    if (currentCompanyId) return entry;
-    changed = true;
-    return { ...record, companyId: defaultCompanyId };
+    return { ...(entry as Record<string, unknown>), companyId };
   });
-  return changed ? next : value;
+}
+
+async function readCompanyScopedRemoteState(key: string, companyId: string): Promise<string | null> {
+  const normalizedCompanyId = normalizeWhitespace(companyId);
+  if (!COMPANY_SCOPED_REMOTE_STATE_KEYS.has(key) || !normalizedCompanyId) return null;
+
+  const scopedValue = await readRemoteState(companyScopedRemoteStateStorageKey(key, normalizedCompanyId));
+  if (scopedValue !== null) return scopedValue;
+
+  // One-time compatibility read for data written before tenant namespacing.
+  // Legacy values are filtered strictly; untagged records are never exposed.
+  const legacyValue = await readRemoteState(key);
+  if (!legacyValue) return null;
+  const parsed = parseJsonText(legacyValue);
+  if (!Array.isArray(parsed)) return null;
+  const filtered = parsed.filter((entry) => companyIdOnRemoteStateEntry(entry) === normalizedCompanyId);
+  return filtered.length ? JSON.stringify(filtered) : null;
+}
+
+async function writeCompanyScopedRemoteState(
+  key: string,
+  companyId: string,
+  value: unknown,
+  requestUser?: AppUser | null,
+): Promise<void> {
+  const normalizedCompanyId = normalizeWhitespace(companyId);
+  if (!COMPANY_SCOPED_REMOTE_STATE_KEYS.has(key) || !normalizedCompanyId) {
+    throw new Error("A valid company scope is required for remote state.");
+  }
+  const scopedValue = scopeRemoteStateValueToCompany(key, value ?? null, normalizedCompanyId);
+  await writeRemoteState(
+    companyScopedRemoteStateStorageKey(key, normalizedCompanyId),
+    JSON.stringify(scopedValue),
+    requestUser,
+  );
 }
 
 async function writeNormalizedState(key: string, jsonValue: string, requestUser?: AppUser | null): Promise<boolean> {
@@ -2941,8 +3108,30 @@ async function authenticateCredentials(identifier: string, password: string): Pr
   await initAuthUsersStore();
   const record = (await syncAuthUserCacheForEmail(identifier)) || getAuthUserByIdentifier(identifier);
   if (!record) return null;
-  if (!matchesStoredPasswordHash(record.passwordHash, password)) return null;
+  const securePasswordHash = await readSecurePasswordHash(record.user.email);
+  const passwordMatchesSecureHash = securePasswordHash
+    ? matchesStoredPasswordHash(securePasswordHash, password)
+    : false;
+  const passwordMatchesLegacyHash = !securePasswordHash
+    && matchesStoredPasswordHash(record.passwordHash, password);
+  if (!passwordMatchesSecureHash && !passwordMatchesLegacyHash) return null;
   if (resolveApprovalStatus(record) !== "approved") return null;
+  // Upgrade legacy MD5/SHA-256 credentials only after proving the supplied
+  // password is correct. Authentication remains available if the database is
+  // temporarily down because the current process keeps the secure hash too.
+  if (!securePasswordHash && passwordMatchesLegacyHash) {
+    const upgradedHash = hashPassword(password);
+    try {
+      await persistSecurePasswordHash(record.user.email, upgradedHash);
+      record.passwordHash = upgradedHash;
+      record.legacyPasswordHash = record.legacyPasswordHash || "";
+      setAuthUserRecord(record);
+    } catch (error) {
+      // Do not lock a legitimate user out because a migration write has a
+      // transient database failure; the next successful login retries it.
+      console.error("Failed to upgrade a legacy password hash", error);
+    }
+  }
   return {
     ...record.user,
     approvalStatus: "approved",
@@ -3040,6 +3229,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     hasAnyApprovedAdmin,
     buildUserFromRegistration,
     hashPassword,
+    hashLegacyDolibarrPassword,
+    persistSecurePasswordHash,
     setAuthUserRecord,
     upsertAuthUserInMySql,
     forceDolibarrAdminPrivilegesForUserIdentity,
@@ -3092,11 +3283,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     firstString,
     isRemoteStateKeyAllowed,
     isMySqlStateEnabled,
-    readRemoteState,
+    readCompanyScopedRemoteState,
     resolveRequestCompanyId,
-    withDefaultCompanyIdForRemoteState,
-    writeRemoteState,
+    writeCompanyScopedRemoteState,
     getRequestUser,
+    normalizeWhitespace,
   });
 
   registerGeofenceRoutes(app, {

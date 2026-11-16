@@ -344,6 +344,20 @@ export default function AttendanceLayout() {
         />
       ) : null}
       <Drawer.Screen
+        name="field-visits"
+        options={{
+          title: canViewLiveTracking ? "Assign Field Visits" : "My Visit Queue",
+          drawerIcon: ({ focused, size }) => (
+            <DrawerIcon
+              focused={focused}
+              size={size}
+              name="list-outline"
+              focusedName="list"
+            />
+          ),
+        }}
+      />
+      <Drawer.Screen
         name="account"
         options={{
           title: company?.name ? "Account & Access" : "Account",

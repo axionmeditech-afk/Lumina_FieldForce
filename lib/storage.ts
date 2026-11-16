@@ -1490,8 +1490,14 @@ export async function registerUser(input: RegisterUserInput): Promise<RegisterUs
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return { ok: false, message: "Valid email is required" };
   }
-  if (!password || password.length < 6) {
-    return { ok: false, message: "Password must be at least 6 characters" };
+  const passwordClasses = typeof password === "string"
+    ? [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9\s]/].filter((pattern) => pattern.test(password)).length
+    : 0;
+  if (!password || password.length < 12 || passwordClasses < 3) {
+    return {
+      ok: false,
+      message: "Password must be at least 12 characters and include three of: lowercase, uppercase, number, symbol.",
+    };
   }
 
   const rawAuthUsers = await getAuthUsersRaw();

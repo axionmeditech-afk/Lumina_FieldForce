@@ -5,7 +5,6 @@ import Constants from "expo-constants";
 import type { AppUser, CompanyProfile, UserRole } from "@/lib/types";
 import {
   getCurrentUser,
-  authenticateUser,
   logoutUser,
   seedDataIfNeeded,
   registerUser,
@@ -21,7 +20,6 @@ import {
   isApiSessionInvalidError,
   issueApiToken,
   logoutApiSession,
-  registerApiUser,
   submitAccessRequestToBackend,
 } from "@/lib/attendance-api";
 
@@ -55,10 +53,6 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function shouldPrioritizeBackendSession(role?: UserRole | null): boolean {
-  return role === "admin" || role === "hr" || role === "manager";
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null);
   const [company, setCompany] = useState<CompanyProfile | null>(null);
@@ -66,49 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const lastSessionValidationAtRef = useRef(0);
   const isStandaloneRuntime =
     !__DEV__ && Constants.appOwnership !== "expo" && !Constants.expoConfig?.hostUri;
-
-  const hydrateApiSession = useCallback(
-    async (
-      authUser: AppUser,
-      email: string,
-      password: string,
-      allowRegistration: boolean
-    ): Promise<boolean> => {
-      const tokenTimeoutMs = isStandaloneRuntime ? 9000 : 1200;
-      const registerTimeoutMs = isStandaloneRuntime ? 12000 : 1600;
-      try {
-        const normalizedEmail = email.trim().toLowerCase();
-
-        let token = await issueApiToken(normalizedEmail, password, { timeoutMs: tokenTimeoutMs });
-        if (token || !allowRegistration) {
-          return Boolean(token);
-        }
-
-        token = await registerApiUser(
-          {
-            name: authUser.name,
-            email: authUser.email,
-            password,
-            companyName: authUser.companyName,
-            role: authUser.role,
-            department: authUser.department,
-            branch: authUser.branch,
-            phone: authUser.phone,
-            pincode: authUser.pincode,
-          },
-          { timeoutMs: registerTimeoutMs }
-        );
-        if (!token) {
-          token = await issueApiToken(normalizedEmail, password, { timeoutMs: tokenTimeoutMs });
-        }
-        return Boolean(token);
-      } catch {
-        // Keep login/signup fast when backend is slow or unreachable.
-        return false;
-      }
-    },
-    [isStandaloneRuntime]
-  );
+  const backendAuthRequired = Boolean((process.env.EXPO_PUBLIC_API_URL || "").trim());
 
   const clearLocalSession = useCallback(async () => {
     await stopAttendanceGeofence().catch(console.warn);
@@ -120,6 +72,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshSession = useCallback(async () => {
     const activeUser = await getCurrentUser();
     const token = activeUser ? await getApiToken() : null;
+    // In a configured deployment, a locally cached profile is not a session.
+    // This also clears sessions created by older app versions that used the
+    // now-disabled offline/password fallback.
+    if (activeUser && backendAuthRequired && !token) {
+      await clearLocalSession();
+      return;
+    }
     if (activeUser && (isStandaloneRuntime || token)) {
       if (!token) {
         if (isStandaloneRuntime) {
@@ -159,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       setCompany(null);
     }
-  }, [clearLocalSession, isStandaloneRuntime]);
+  }, [backendAuthRequired, clearLocalSession, isStandaloneRuntime]);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -272,33 +231,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    if (isStandaloneRuntime) {
+    if (isStandaloneRuntime || backendAuthRequired) {
       return {
         ok: false,
         message: lastErrorMessage || "Online sign-in is required. Please check backend access and try again.",
       };
-    }
-
-    const u = await authenticateUser(rawIdentifier, password);
-    if (u) {
-      if (isStandaloneRuntime && shouldPrioritizeBackendSession(u.role)) {
-        const hasBackendSession = await hydrateApiSession(u, rawIdentifier, password, true);
-        if (hasBackendSession) {
-          const remoteUser = await getAuthenticatedApiUser({ timeoutMs: remoteUserTimeoutMs });
-          if (remoteUser) {
-            const hydrated = await syncBackendAuthenticatedUser(remoteUser);
-            setUser(hydrated);
-            const activeCompany = await getCurrentCompanyProfile();
-            setCompany(activeCompany);
-            return { ok: true };
-          }
-        }
-      }
-      setUser(u);
-      const activeCompany = await getCurrentCompanyProfile();
-      setCompany(activeCompany);
-      void hydrateApiSession(u, rawIdentifier, password, true);
-      return { ok: true };
     }
     return { ok: false, message: lastErrorMessage };
   };
@@ -310,13 +247,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!result.ok) {
       return { ok: false, message: result.message || "Registration failed" };
     }
-    if (result.user) {
-      setUser(result.user);
-      setCompany(result.company || (await getCurrentCompanyProfile()));
-      void hydrateApiSession(result.user, input.email, input.password, true);
-      return { ok: true, message: result.message, authenticated: true };
-    }
-
     const backendResult = await submitAccessRequestToBackend(
       {
         name: input.name,
@@ -337,6 +267,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return {
         ok: false,
         message: backendResult.message || "Signup request rejected by backend.",
+        authenticated: false,
+      };
+    }
+
+    // A local cache must never be allowed to create an authenticated user. The
+    // backend is authoritative for every signup and approval decision.
+    if (result.user) {
+      await deleteAuthUserByEmail(input.email);
+      return {
+        ok: false,
+        message: "Account setup must be completed by an administrator.",
         authenticated: false,
       };
     }
