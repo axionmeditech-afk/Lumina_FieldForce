@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/contexts/AuthContext';
 import { useVisitNavigation } from '@/contexts/VisitNavigationContext';
 import { getAttendanceStatus, getUsersRemote } from '@/lib/attendance-api';
+import { getCurrentPositionWithTimeout, getLastKnownLocationSafe } from '@/lib/location-service';
 import {
   completeFieldVisitAssignment,
   createFieldVisitAssignment,
@@ -209,7 +210,17 @@ export default function FieldVisitsScreen() {
       }
       const permission = await Location.requestForegroundPermissionsAsync();
       if (permission.status !== 'granted') throw new Error('Allow precise location to start directions.');
-      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      // Expo's unbounded getCurrentPositionAsync can wait indefinitely on
+      // some Android devices. Prefer a live fix, then a recent precise cached
+      // fix, and always return control to the employee within a fixed window.
+      const location = await getCurrentPositionWithTimeout(
+        { accuracy: Location.Accuracy.High, mayShowUserSettingsDialog: true },
+        12_000,
+      ).catch(async () => {
+        const cached = await getLastKnownLocationSafe({ requiredAccuracy: 120, maxAgeMs: 60_000 });
+        if (!cached) throw new Error('GPS fix timed out. Move near an open area and retry.');
+        return cached;
+      });
       const position = { latitude: location.coords.latitude, longitude: location.coords.longitude };
       const nextHeading = Number.isFinite(location.coords.heading) ? location.coords.heading : null;
       const accuracy = Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null;

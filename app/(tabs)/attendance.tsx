@@ -1068,7 +1068,10 @@ function AttendanceScreenContent() {
       const scopedRecords = activeCompanyId
         ? status.records.filter((record) => isRecordForCompany(record, activeCompanyId))
         : status.records;
-      const scopedActive = isRecordForCompany(status.active, activeCompanyId) ? status.active : null;
+      // Always preserve the authenticated user's durable open attendance.
+      // It may belong to the workspace that was selected at check-in time;
+      // hiding it would make checkout impossible after a workspace switch.
+      const scopedActive = status.active;
       rosterCacheRef.current = { key: rosterKey, at: cache?.key === rosterKey && cache.employees === employees ? cache.at : Date.now(), employees };
       setRecords(scopedRecords);
       if (scopedActive) await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkin`);
@@ -1727,24 +1730,10 @@ function AttendanceScreenContent() {
       if (!options?.silent) setActionLoading(true);
       try {
         const isAuto = options?.isAuto === true;
-        if (!isAuto) {
-          // Reconcile the button with the durable server state before asking
-          // for biometric/GPS evidence. This also repairs a stale local
-          // "Checkout" button after another device or auto-checkout ended the
-          // active attendance session.
-          const liveStatus = await getAttendanceStatus();
-          activeAttendanceRef.current = liveStatus.active;
-          const liveCheckedIn = Boolean(liveStatus.active);
-          setCheckedInState(liveCheckedIn);
-          if (type === "checkout" && !liveCheckedIn) {
-            Alert.alert("Already checked out", "Your attendance is already marked OUT on the server.");
-            return;
-          }
-          if (type === "checkin" && liveCheckedIn) {
-            Alert.alert("Already checked in", "Your active check-in has been restored from the server.");
-            return;
-          }
-        }
+        // Do not make a second blocking status call here. The screen already
+        // reconciles on focus and the idempotent mutation is the final source
+        // of truth. The old preflight could add 35 seconds before GPS and make
+        // a healthy checkout look permanently stuck on Render/mobile data.
         const biometricRequired = true;
         let biometricVerified = false;
         let biometricType: string | null = null;

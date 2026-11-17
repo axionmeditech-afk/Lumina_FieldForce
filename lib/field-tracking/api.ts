@@ -2,7 +2,9 @@ import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 import { getApiToken } from '@/lib/storage';
 import type { Coordinate, FieldSessionKpis, PlaceSearchResult, RoutePlan, RoutePoint, TrackingSession } from './types';
 
-type RequestOptions = RequestInit & { timeoutMs?: number };
+type RequestOptions = RequestInit & { timeoutMs?: number; retryAcrossBases?: boolean };
+
+class NonRetryableFieldRequestError extends Error {}
 
 export type FieldVisitAssignment = {
   assignmentId: string;
@@ -31,15 +33,19 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   if (!token) throw new Error('Please sign in again to use field tracking.');
   const bases = await getApiBaseUrlCandidates();
   if (!bases.length) throw new Error('Backend is not configured.');
-  const method = (options.method || 'GET').toUpperCase();
-  const candidates = ['GET', 'HEAD'].includes(method) ? bases : bases.slice(0, 1);
+  const { timeoutMs = 12_000, retryAcrossBases = false, ...requestInit } = options;
+  const method = (requestInit.method || 'GET').toUpperCase();
+  const candidates = ['GET', 'HEAD'].includes(method) || retryAcrossBases ? bases : bases.slice(0, 1);
+  const deadline = Date.now() + timeoutMs;
   let finalError: Error | null = null;
   for (const base of candidates) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 12_000);
+    const timeout = setTimeout(() => controller.abort(), Math.min(20_000, remainingMs));
     try {
       const response = await fetch(`${base}${path}`, {
-        ...options,
+        ...requestInit,
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${token}`,
@@ -48,9 +54,19 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
         signal: controller.signal,
       });
       const body = await response.json().catch(() => null) as { message?: string; error?: string } | null;
-      if (!response.ok) throw new Error(body?.message || body?.error || `Field tracking request failed (${response.status}).`);
+      if (!response.ok) {
+        const message = body?.message || body?.error || `Field tracking request failed (${response.status}).`;
+        // Business/auth failures are deterministic across both services.
+        // Retry only transient gateway/server failures on the secondary host.
+        if (response.status < 500 && response.status !== 408 && response.status !== 429) {
+          throw new NonRetryableFieldRequestError(message);
+        }
+        finalError = new Error(message);
+        continue;
+      }
       return body as T;
     } catch (error) {
+      if (error instanceof NonRetryableFieldRequestError) throw error;
       finalError = error instanceof Error
         ? new Error(error.name === 'AbortError' ? 'Field tracking request timed out.' : error.message)
         : new Error('Field tracking request failed.');
@@ -86,6 +102,7 @@ export function planFieldRoute(origin: Coordinate, destination: PlaceSearchResul
     // exceed the previous 18 second limit. Keep it bounded, but allow enough
     // time for one cold production request to finish.
     timeoutMs: 35_000,
+    retryAcrossBases: true,
     body: JSON.stringify({ origin, destination, travelMode, assignmentId }),
   });
 }

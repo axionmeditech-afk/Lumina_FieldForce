@@ -42,11 +42,13 @@ export function registerAttendanceRoutes(app: Express, deps: AttendanceRouteDeps
       const scopedRecords = activeCompanyId
         ? records.filter((record) => !record.companyId || record.companyId === activeCompanyId)
         : records;
-      const scopedActive =
-        active && activeCompanyId && active.companyId && active.companyId !== activeCompanyId
-          ? null
-          : active;
-      res.set("Cache-Control", "no-store").json({ records: scopedRecords, active: scopedActive });
+      // An employee's open attendance must remain visible even when the app's
+      // currently selected workspace changed after check-in. Hiding it here
+      // produces a split-brain UI (dashboard OUT, attendance Checkout) and
+      // prevents the employee from closing the old session. Company scoping
+      // still applies to the daily timeline; the authenticated user's active
+      // record is safe to return and is required to reconcile attendance.
+      res.set("Cache-Control", "no-store").json({ records: scopedRecords, active });
     } catch { res.status(503).json({ message: "Unable to refresh attendance. Please retry." }); }
   });
 

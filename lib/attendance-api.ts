@@ -1006,11 +1006,34 @@ export async function updateUserAccessRemote(
 }
 
 export async function getAttendanceStatus(date?: string): Promise<{ records: AttendanceRecord[]; active: AttendanceRecord | null }> {
-  const status = await fetchJsonWithTimeout<{ records: AttendanceRecord[]; active: AttendanceRecord | null }>(
+  let status = await fetchJsonWithTimeout<{ records: AttendanceRecord[]; active: AttendanceRecord | null }>(
     `/attendance/status${date ? `?date=${encodeURIComponent(date)}` : ""}`,
     { method: "GET", skipGlobalLoading: true },
     35000,
   );
+  if (!status.active) {
+    // Older deployed servers scoped `active` to the currently selected
+    // workspace. Recover the authenticated user's real open session from the
+    // unscoped history endpoint so a workspace switch can never strand an
+    // employee in an uncloseable check-in. The server-side status route now
+    // returns this directly, but this fallback keeps the APK compatible while
+    // a rolling Render deployment is still replacing instances.
+    const currentUser = await getCurrentUser();
+    if (currentUser?.id) {
+      const history = await fetchJsonWithTimeout<AttendanceRecord[]>(
+        `/attendance/history?user_id=${encodeURIComponent(currentUser.id)}&limit=50`,
+        { method: "GET", skipGlobalLoading: true },
+        12000,
+      ).catch(() => []);
+      const latestCheckIn = history
+        .filter((record) => record.type === "checkin")
+        .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0] ?? null;
+      const hasLaterCheckout = latestCheckIn
+        ? history.some((record) => record.type === "checkout" && Date.parse(record.timestamp) >= Date.parse(latestCheckIn.timestamp))
+        : false;
+      if (latestCheckIn && !hasLaterCheckout) status = { ...status, active: latestCheckIn };
+    }
+  }
   // The backend is the attendance source of truth. Keeping the scoped local
   // flag in sync prevents the attendance, dashboard and visit screens from
   // presenting three different states after a failed or delayed request.
