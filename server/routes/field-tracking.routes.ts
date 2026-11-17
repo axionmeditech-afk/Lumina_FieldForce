@@ -493,6 +493,243 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     res.json({ ok: true });
   });
 
+  app.get('/api/field-tracking/employees', deps.requireAuth, requireStore, async (req, res) => {
+    if (!['admin', 'hr', 'manager'].includes(req.auth?.role || '')) {
+      res.status(403).json({ message: 'Supervisor access is required.' });
+      return;
+    }
+    const requestedCompanyId = String(req.query.companyId || '').trim();
+    const companyId = requestedCompanyId
+      ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
+      : await deps.resolveRequestCompanyId(req);
+    if (!companyId) {
+      res.status(403).json({ message: 'Workspace access is required for field history.' });
+      return;
+    }
+    const pool = await deps.getMySqlPool();
+    const [rows] = await pool.execute<any[]>(
+      `SELECT s.id AS session_id, s.employee_id, s.status AS session_status,
+              COALESCE(a.user_name, s.employee_id) AS employee_name,
+              p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
+              p.battery, p.captured_at, p.sequence_no
+       FROM lff_tracking_sessions s
+       LEFT JOIN lff_tracking_points p ON p.point_id=(
+         SELECT p2.point_id FROM lff_tracking_points p2
+         WHERE p2.session_id=s.id AND (p2.route_eligible=1 OR p2.rejection_reason='stationary_noise')
+         ORDER BY p2.sequence_no DESC LIMIT 1
+       )
+       LEFT JOIN lff_attendance a ON a.id=(
+         SELECT a2.id FROM lff_attendance a2
+         WHERE a2.user_id=s.employee_id AND a2.type='checkin' AND a2.timestamp<=s.started_at
+         ORDER BY a2.timestamp DESC LIMIT 1
+       )
+       WHERE s.company_id=? AND s.id=(
+         SELECT s2.id FROM lff_tracking_sessions s2
+         WHERE s2.company_id=s.company_id AND s2.employee_id=s.employee_id
+         ORDER BY s2.updated_at DESC, s2.started_at DESC LIMIT 1
+       )
+       ORDER BY (s.status='active') DESC, p.captured_at DESC
+       LIMIT 500`,
+      [companyId],
+    );
+    res.json({ employees: rows });
+  });
+
+  app.get('/api/field-tracking/employees/:employeeId/calendar', deps.requireAuth, requireStore, async (req, res) => {
+    if (!['admin', 'hr', 'manager'].includes(req.auth?.role || '')) {
+      res.status(403).json({ message: 'Supervisor access is required.' });
+      return;
+    }
+    const employeeId = String(req.params.employeeId || '').trim();
+    const month = String(req.query.month || '').trim();
+    const offsetMinutes = normalizeTimezoneOffset(req.query.tzOffsetMinutes);
+    let bounds: ReturnType<typeof monthDateBounds>;
+    try {
+      bounds = monthDateBounds(month, offsetMinutes);
+    } catch {
+      res.status(400).json({ message: 'Choose a valid calendar month.' });
+      return;
+    }
+    const requestedCompanyId = String(req.query.companyId || '').trim();
+    const companyId = requestedCompanyId
+      ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
+      : await deps.resolveRequestCompanyId(req);
+    if (!companyId || !employeeId) {
+      res.status(403).json({ message: 'Workspace access is required for field history.' });
+      return;
+    }
+    const pool = await deps.getMySqlPool();
+    const [employeeRows] = await pool.execute<any[]>(
+      `SELECT 1 FROM lff_tracking_sessions WHERE company_id=? AND employee_id=? LIMIT 1`,
+      [companyId, employeeId],
+    );
+    if (!employeeRows.length) {
+      res.status(404).json({ message: 'No field history was found for this employee.' });
+      return;
+    }
+    const [rows] = await pool.execute<any[]>(
+      `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible
+       FROM lff_tracking_points
+       WHERE company_id=? AND employee_id=? AND captured_at>=? AND captured_at<?
+       ORDER BY captured_at ASC, session_id ASC, sequence_no ASC
+       LIMIT 120000`,
+      [companyId, employeeId, bounds.start, bounds.end],
+    );
+    const points = rows.map(mapKpiPoint).filter(isValidKpiPoint);
+    const dates = [...new Set(points.map((point) => localDateKey(point.capturedAt, offsetMinutes)))];
+    const [visitRows] = await pool.execute<any[]>(
+      `SELECT status, started_at, completed_at FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND status<>'cancelled'
+         AND ((started_at>=? AND started_at<?) OR (completed_at>=? AND completed_at<?))`,
+      [companyId, employeeId, bounds.start, bounds.end, bounds.start, bounds.end],
+    );
+    const visitCounts = new Map<string, { total: number; completed: number }>();
+    for (const visit of visitRows) {
+      const startedAt = asDateMillis(visit.started_at);
+      const completedAt = asDateMillis(visit.completed_at);
+      const date = Number.isFinite(startedAt)
+        ? localDateKey(startedAt, offsetMinutes)
+        : Number.isFinite(completedAt) ? localDateKey(completedAt, offsetMinutes) : '';
+      if (!date) continue;
+      const counts = visitCounts.get(date) ?? { total: 0, completed: 0 };
+      counts.total += 1;
+      if (String(visit.status) === 'completed' && Number.isFinite(completedAt)) counts.completed += 1;
+      visitCounts.set(date, counts);
+    }
+    const days = dates.map((date) => {
+      const summary = summarizeTrackingDay(points, date, offsetMinutes);
+      const visits = visitCounts.get(date) ?? { total: 0, completed: 0 };
+      return {
+        date,
+        sessionCount: summary.sessionCount,
+        shiftSeconds: summary.shiftSeconds,
+        movingSeconds: summary.movingSeconds,
+        haltSeconds: summary.haltSeconds,
+        haltCount: summary.haltCount,
+        distanceMetres: summary.distanceMetres,
+        visitTotal: visits.total,
+        visitCompleted: visits.completed,
+        acceptedPoints: summary.acceptedPoints,
+        lastCapturedAt: summary.lastCapturedAt,
+      };
+    }).sort((left, right) => left.date.localeCompare(right.date));
+    res.json({ employeeId, month, timezoneOffsetMinutes: offsetMinutes, days });
+  });
+
+  app.get('/api/field-tracking/employees/:employeeId/daily', deps.requireAuth, requireStore, async (req, res) => {
+    if (!['admin', 'hr', 'manager'].includes(req.auth?.role || '')) {
+      res.status(403).json({ message: 'Supervisor access is required.' });
+      return;
+    }
+    const employeeId = String(req.params.employeeId || '').trim();
+    const date = String(req.query.date || '').trim();
+    const offsetMinutes = normalizeTimezoneOffset(req.query.tzOffsetMinutes);
+    let bounds: ReturnType<typeof localDateBounds>;
+    try {
+      bounds = localDateBounds(date, offsetMinutes);
+    } catch {
+      res.status(400).json({ message: 'Choose a valid tracking date.' });
+      return;
+    }
+    const requestedCompanyId = String(req.query.companyId || '').trim();
+    const companyId = requestedCompanyId
+      ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
+      : await deps.resolveRequestCompanyId(req);
+    if (!companyId || !employeeId) {
+      res.status(403).json({ message: 'Workspace access is required for field history.' });
+      return;
+    }
+    const pool = await deps.getMySqlPool();
+    const [sessionRows] = await pool.execute<any[]>(
+      `SELECT id FROM lff_tracking_sessions WHERE company_id=? AND employee_id=? LIMIT 1`,
+      [companyId, employeeId],
+    );
+    if (!sessionRows.length) {
+      res.status(404).json({ message: 'No field history was found for this employee.' });
+      return;
+    }
+    const [rows] = await pool.execute<any[]>(
+      `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible
+       FROM lff_tracking_points
+       WHERE company_id=? AND employee_id=? AND captured_at>=? AND captured_at<?
+       ORDER BY captured_at ASC, session_id ASC, sequence_no ASC
+       LIMIT 30000`,
+      [companyId, employeeId, bounds.start, bounds.end],
+    );
+    const points = rows.map(mapKpiPoint).filter(isValidKpiPoint);
+    const summary = summarizeTrackingDay(points, date, offsetMinutes);
+    const [visitRows] = await pool.execute<any[]>(
+      `SELECT status, created_at, started_at, completed_at, place_name, place_address, latitude, longitude
+       FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND status<>'cancelled'
+       ORDER BY queue_order ASC, created_at ASC`,
+      [companyId, employeeId],
+    );
+    const today = localDateKey(Date.now(), offsetMinutes);
+    const dayVisits = visitRows.filter((visit) => {
+      const startedAt = asDateMillis(visit.started_at);
+      const completedAt = asDateMillis(visit.completed_at);
+      return (Number.isFinite(startedAt) && localDateKey(startedAt, offsetMinutes) === date)
+        || (Number.isFinite(completedAt) && localDateKey(completedAt, offsetMinutes) === date)
+        || (date === today && ['pending', 'in_progress'].includes(String(visit.status)));
+    });
+    const nextVisit = date === today
+      ? dayVisits.find((visit) => ['pending', 'in_progress'].includes(String(visit.status)))
+      : null;
+    const latest = points.filter((point) => point.routeEligible).at(-1) ?? null;
+    const nextLatitude = Number(nextVisit?.latitude);
+    const nextLongitude = Number(nextVisit?.longitude);
+    const distanceToNext = latest && Number.isFinite(nextLatitude) && Number.isFinite(nextLongitude)
+      ? haversineMetres(latest, { latitude: nextLatitude, longitude: nextLongitude })
+      : null;
+    const routePoints = thinTrackingPoints(points.filter((point) => point.routeEligible && (point.accuracy == null || point.accuracy <= 80)));
+    res.json({
+      date,
+      points: routePoints.map((point) => ({
+        pointId: `${point.sessionId}:${point.sequence}`,
+        sessionId: point.sessionId,
+        sequence: point.sequence,
+        latitude: point.latitude,
+        longitude: point.longitude,
+        accuracy: point.accuracy,
+        speed: point.speed,
+        heading: null,
+        battery: null,
+        mocked: false,
+        capturedAt: new Date(point.capturedAt).toISOString(),
+        syncedAt: null,
+        routeEligible: true,
+        rejectionReason: null,
+      })),
+      kpis: {
+        sessionId: `${employeeId}:${date}`,
+        employeeId,
+        sessionStartedAt: points[0] ? new Date(points[0].capturedAt).toISOString() : bounds.start.toISOString(),
+        shiftSeconds: summary.shiftSeconds,
+        movingSeconds: summary.movingSeconds,
+        haltSeconds: summary.haltSeconds,
+        haltCount: summary.haltCount,
+        activeHalt: summary.activeHalt,
+        distanceMetres: summary.distanceMetres,
+        averageMovingSpeedKmh: summary.averageMovingSpeedKmh,
+        totalPoints: summary.totalPoints,
+        acceptedPoints: summary.acceptedPoints,
+        gpsAccuracyMetres: summary.gpsAccuracyMetres,
+        lastCapturedAt: summary.lastCapturedAt,
+        lastPointAgeSeconds: summary.lastPointAgeSeconds,
+        visitTotal: dayVisits.length,
+        visitCompleted: dayVisits.filter((visit) => String(visit.status) === 'completed').length,
+        nextVisit: nextVisit ? {
+          name: String(nextVisit.place_name || 'Next visit'),
+          address: String(nextVisit.place_address || ''),
+          distanceMetres: distanceToNext == null ? null : Math.round(distanceToNext),
+          status: String(nextVisit.status) === 'in_progress' ? 'arrived' : 'en_route',
+        } : null,
+        activity: mapDailyActivity(summary.activity),
+      },
+    });
+  });
+
   app.get('/api/field-tracking/sessions/:sessionId/matched-route', deps.requireAuth, requireStore, async (req, res) => {
     const sessionId = String(req.params.sessionId || '');
     const pool = await deps.getMySqlPool();
@@ -581,28 +818,18 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       [session.company_id, session.employee_id],
     );
 
-    const points = pointRows.map((row) => ({
-      latitude: Number(row.latitude),
-      longitude: Number(row.longitude),
-      accuracy: row.accuracy == null ? null : Number(row.accuracy),
-      speed: row.speed == null ? null : Number(row.speed),
-      capturedAt: asDateMillis(row.captured_at),
-      routeEligible: Boolean(row.route_eligible),
-    })).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Number.isFinite(point.capturedAt));
+    const allPoints = pointRows.map((row) => mapKpiPoint({ ...row, session_id: sessionId })).filter(isValidKpiPoint);
+    const offsetMinutes = normalizeTimezoneOffset(req.query.tzOffsetMinutes);
+    const requestedDate = String(req.query.date || '').trim();
+    const latestPoint = allPoints.filter((point) => point.routeEligible).at(-1) ?? allPoints.at(-1) ?? null;
+    const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+      ? requestedDate
+      : localDateKey(latestPoint?.capturedAt ?? Date.now(), offsetMinutes);
+    const points = allPoints.filter((point) => localDateKey(point.capturedAt, offsetMinutes) === selectedDate);
     const accepted = points.filter((point) => point.routeEligible && (point.accuracy == null || point.accuracy <= 80));
     const latest = accepted.at(-1) ?? null;
     const now = Date.now();
-    const shiftStartedAt = asDateMillis(session.started_at);
-    const shiftEndedAt = session.status === 'completed' ? asDateMillis(session.ended_at) : now;
-    const shiftSeconds = Number.isFinite(shiftStartedAt)
-      ? Math.max(0, Math.floor((Math.max(shiftStartedAt, shiftEndedAt) - shiftStartedAt) / 1000))
-      : 0;
-    const distanceMetres = gpsDistanceMetres(accepted);
-    const fieldActivity = deriveFieldActivity(accepted, now);
-    const movingSeconds = Math.max(0, shiftSeconds - Math.min(shiftSeconds, fieldActivity.totalHaltSeconds));
-    const averageMovingSpeedKmh = movingSeconds >= 60 && distanceMetres > 0
-      ? Number(((distanceMetres / movingSeconds) * 3.6).toFixed(1))
-      : null;
+    const daySummary = summarizeTrackingDay(points, selectedDate, offsetMinutes, now);
     const nextVisit = nextVisitRows[0];
     const nextLatitude = Number(nextVisit?.latitude);
     const nextLongitude = Number(nextVisit?.longitude);
@@ -614,19 +841,19 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     res.json({
       sessionId,
       employeeId: String(session.employee_id),
-      sessionStartedAt: asIsoDate(session.started_at),
-      shiftSeconds,
-      movingSeconds,
-      haltSeconds: fieldActivity.totalHaltSeconds,
-      haltCount: fieldActivity.haltCount,
-      activeHalt: fieldActivity.activeHalt,
-      distanceMetres: Math.round(distanceMetres),
-      averageMovingSpeedKmh,
-      totalPoints: points.length,
-      acceptedPoints: accepted.length,
-      gpsAccuracyMetres: latest?.accuracy ?? null,
-      lastCapturedAt: latest ? new Date(latest.capturedAt).toISOString() : null,
-      lastPointAgeSeconds: latest ? Math.max(0, Math.floor((now - latest.capturedAt) / 1000)) : null,
+      sessionStartedAt: points[0] ? new Date(points[0].capturedAt).toISOString() : asIsoDate(session.started_at),
+      shiftSeconds: daySummary.shiftSeconds,
+      movingSeconds: daySummary.movingSeconds,
+      haltSeconds: daySummary.haltSeconds,
+      haltCount: daySummary.haltCount,
+      activeHalt: daySummary.activeHalt,
+      distanceMetres: daySummary.distanceMetres,
+      averageMovingSpeedKmh: daySummary.averageMovingSpeedKmh,
+      totalPoints: daySummary.totalPoints,
+      acceptedPoints: daySummary.acceptedPoints,
+      gpsAccuracyMetres: daySummary.gpsAccuracyMetres,
+      lastCapturedAt: daySummary.lastCapturedAt,
+      lastPointAgeSeconds: daySummary.lastPointAgeSeconds,
       visitTotal: Number(visitRows[0]?.total_count || 0),
       visitCompleted: Number(visitRows[0]?.completed_count || 0),
       nextVisit: nextVisit ? {
@@ -635,16 +862,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         distanceMetres: distanceToNext == null ? null : Math.round(distanceToNext),
         status: String(nextVisit.status) === 'in_progress' || (distanceToNext != null && distanceToNext <= arrivalRadius) ? 'arrived' : 'en_route',
       } : null,
-      activity: fieldActivity.events.slice(-8).reverse().map((event) => ({
-        id: event.id,
-        type: event.type,
-        startedAt: new Date(event.startedAt).toISOString(),
-        endedAt: event.endedAt == null ? null : new Date(event.endedAt).toISOString(),
-        distanceMetres: Math.round(event.distanceMetres),
-        start: { latitude: event.start.latitude, longitude: event.start.longitude },
-        end: { latitude: event.end.latitude, longitude: event.end.longitude },
-        active: event.active,
-      })),
+      activity: mapDailyActivity(daySummary.activity).slice(0, 8),
     });
   });
 
@@ -874,6 +1092,8 @@ function toSqlDate(value: string): Date {
 }
 
 type KpiPoint = {
+  sessionId: string;
+  sequence: number;
   latitude: number;
   longitude: number;
   accuracy: number | null;
@@ -881,6 +1101,131 @@ type KpiPoint = {
   capturedAt: number;
   routeEligible: boolean;
 };
+
+type DailyTrackingSummary = {
+  date: string;
+  sessionCount: number;
+  shiftSeconds: number;
+  movingSeconds: number;
+  haltSeconds: number;
+  haltCount: number;
+  activeHalt: boolean;
+  distanceMetres: number;
+  averageMovingSpeedKmh: number | null;
+  totalPoints: number;
+  acceptedPoints: number;
+  gpsAccuracyMetres: number | null;
+  lastCapturedAt: string | null;
+  lastPointAgeSeconds: number | null;
+  activity: FieldActivityEvent[];
+};
+
+function normalizeTimezoneOffset(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(-720, Math.min(840, Math.round(parsed))) : 330;
+}
+
+function localDateKey(milliseconds: number, offsetMinutes: number): string {
+  return new Date(milliseconds + offsetMinutes * 60_000).toISOString().slice(0, 10);
+}
+
+function localDateBounds(date: string, offsetMinutes: number): { start: Date; end: Date } {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('invalid_tracking_date');
+  const localMidnightUtc = Date.parse(`${date}T00:00:00.000Z`);
+  if (!Number.isFinite(localMidnightUtc)) throw new Error('invalid_tracking_date');
+  const startMs = localMidnightUtc - offsetMinutes * 60_000;
+  return { start: new Date(startMs), end: new Date(startMs + 24 * 60 * 60 * 1000) };
+}
+
+function monthDateBounds(month: string, offsetMinutes: number): { start: Date; end: Date; firstDate: string; nextDate: string } {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('invalid_tracking_month');
+  const [year, monthNumber] = month.split('-').map(Number);
+  if (!year || !monthNumber || monthNumber < 1 || monthNumber > 12) throw new Error('invalid_tracking_month');
+  const firstDate = `${year.toString().padStart(4, '0')}-${monthNumber.toString().padStart(2, '0')}-01`;
+  const nextMonthUtc = Date.UTC(year, monthNumber, 1);
+  const nextDate = new Date(nextMonthUtc).toISOString().slice(0, 10);
+  const start = localDateBounds(firstDate, offsetMinutes).start;
+  const end = localDateBounds(nextDate, offsetMinutes).start;
+  return { start, end, firstDate, nextDate };
+}
+
+export function summarizeTrackingDay(points: KpiPoint[], date: string, offsetMinutes: number, now = Date.now()): DailyTrackingSummary {
+  const dayPoints = points
+    .filter((point) => Number.isFinite(point.capturedAt) && localDateKey(point.capturedAt, offsetMinutes) === date)
+    .sort((left, right) => left.capturedAt - right.capturedAt || left.sequence - right.sequence);
+  const accepted = dayPoints.filter((point) => point.routeEligible && (point.accuracy == null || point.accuracy <= 80));
+  const bySession = new Map<string, KpiPoint[]>();
+  for (const point of accepted) {
+    const list = bySession.get(point.sessionId) ?? [];
+    list.push(point);
+    bySession.set(point.sessionId, list);
+  }
+
+  let shiftSeconds = 0;
+  let haltSeconds = 0;
+  let haltCount = 0;
+  let activeHalt = false;
+  let distanceMetres = 0;
+  const activity: FieldActivityEvent[] = [];
+  const today = localDateKey(now, offsetMinutes);
+  for (const sessionPoints of bySession.values()) {
+    const first = sessionPoints[0];
+    const last = sessionPoints.at(-1);
+    if (!first || !last) continue;
+    const recentlyActive = date === today && now - last.capturedAt >= 0 && now - last.capturedAt <= 5 * 60_000;
+    const effectiveEnd = recentlyActive ? now : last.capturedAt;
+    shiftSeconds += Math.max(0, Math.floor((effectiveEnd - first.capturedAt) / 1000));
+    distanceMetres += gpsDistanceMetres(sessionPoints);
+    const derived = deriveFieldActivity(sessionPoints, recentlyActive ? now : last.capturedAt);
+    haltSeconds += derived.totalHaltSeconds;
+    haltCount += derived.haltCount;
+    activeHalt = activeHalt || derived.activeHalt;
+    activity.push(...derived.events);
+  }
+  const boundedHaltSeconds = Math.min(shiftSeconds, Math.max(0, Math.round(haltSeconds)));
+  const movingSeconds = Math.max(0, shiftSeconds - boundedHaltSeconds);
+  const latest = accepted.at(-1) ?? null;
+  return {
+    date,
+    sessionCount: bySession.size,
+    shiftSeconds,
+    movingSeconds,
+    haltSeconds: boundedHaltSeconds,
+    haltCount,
+    activeHalt,
+    distanceMetres: Math.round(distanceMetres),
+    averageMovingSpeedKmh: movingSeconds >= 60 && distanceMetres > 0
+      ? Number(((distanceMetres / movingSeconds) * 3.6).toFixed(1))
+      : null,
+    totalPoints: dayPoints.length,
+    acceptedPoints: accepted.length,
+    gpsAccuracyMetres: latest?.accuracy ?? null,
+    lastCapturedAt: latest ? new Date(latest.capturedAt).toISOString() : null,
+    lastPointAgeSeconds: latest ? Math.max(0, Math.floor((now - latest.capturedAt) / 1000)) : null,
+    activity: activity.sort((left, right) => left.startedAt - right.startedAt),
+  };
+}
+
+function mapDailyActivity(events: FieldActivityEvent[]) {
+  return events.slice(-12).reverse().map((event) => ({
+    id: event.id,
+    type: event.type,
+    startedAt: new Date(event.startedAt).toISOString(),
+    endedAt: event.endedAt == null ? null : new Date(event.endedAt).toISOString(),
+    distanceMetres: Math.round(event.distanceMetres),
+    start: { latitude: event.start.latitude, longitude: event.start.longitude },
+    end: { latitude: event.end.latitude, longitude: event.end.longitude },
+    active: event.active,
+  }));
+}
+
+function thinTrackingPoints(points: KpiPoint[], maximum = 3000): KpiPoint[] {
+  if (points.length <= maximum) return points;
+  const step = (points.length - 1) / (maximum - 1);
+  const thinned: KpiPoint[] = [];
+  for (let index = 0; index < maximum; index += 1) thinned.push(points[Math.round(index * step)]!);
+  return thinned;
+}
 
 function asDateMillis(value: unknown): number {
   const parsed = value instanceof Date ? value.getTime() : new Date(String(value || '')).getTime();
@@ -890,6 +1235,25 @@ function asDateMillis(value: unknown): number {
 function asIsoDate(value: unknown): string {
   const milliseconds = asDateMillis(value);
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : new Date(0).toISOString();
+}
+
+function mapKpiPoint(row: Record<string, unknown>): KpiPoint {
+  return {
+    sessionId: String(row.session_id || ''),
+    sequence: Number(row.sequence_no || 0),
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    accuracy: row.accuracy == null ? null : Number(row.accuracy),
+    speed: row.speed == null ? null : Number(row.speed),
+    capturedAt: asDateMillis(row.captured_at),
+    routeEligible: Boolean(row.route_eligible),
+  };
+}
+
+function isValidKpiPoint(point: KpiPoint): boolean {
+  return Number.isFinite(point.latitude)
+    && Number.isFinite(point.longitude)
+    && Number.isFinite(point.capturedAt);
 }
 
 function haversineMetres(
@@ -934,7 +1298,7 @@ function deriveFieldActivity(points: KpiPoint[], now: number): {
 } {
   const minimumHaltSeconds = 3 * 60;
   const haltRadiusMetres = 45;
-  const haltRanges: Array<{ start: number; end: number; active: boolean; durationSeconds: number }> = [];
+  const haltRanges: { start: number; end: number; active: boolean; durationSeconds: number }[] = [];
 
   for (let start = 0; start < points.length - 1;) {
     let end = start;

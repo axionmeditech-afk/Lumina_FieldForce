@@ -125,7 +125,7 @@ export type FieldSessionKpis = {
     distanceMetres: number | null;
     status: 'en_route' | 'arrived';
   } | null;
-  activity: Array<{
+  activity: {
     id: string;
     type: 'movement' | 'halt';
     startedAt: string;
@@ -134,6 +134,33 @@ export type FieldSessionKpis = {
     start: Coordinate;
     end: Coordinate;
     active: boolean;
-  }>;
+  }[];
+};
+
+export type FieldTrackingDaySummary = {
+  date: string;
+  sessionCount: number;
+  shiftSeconds: number;
+  movingSeconds: number;
+  haltSeconds: number;
+  haltCount: number;
+  distanceMetres: number;
+  visitTotal: number;
+  visitCompleted: number;
+  acceptedPoints: number;
+  lastCapturedAt: string | null;
+};
+
+export type FieldTrackingCalendar = {
+  employeeId: string;
+  month: string;
+  timezoneOffsetMinutes: number;
+  days: FieldTrackingDaySummary[];
+};
+
+export type FieldTrackingDaily = {
+  date: string;
+  points: RoutePoint[];
+  kpis: FieldSessionKpis;
 };
 

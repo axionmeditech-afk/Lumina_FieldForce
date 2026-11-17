@@ -1,217 +1,262 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { FieldSessionKpis, LiveConnectionState, LiveEmployee, RoutePoint } from '../types';
+import type {
+  FieldTrackingCalendar,
+  FieldTrackingDaily,
+  LiveConnectionState,
+  LiveEmployee,
+  RoutePoint,
+} from '../types';
 import { getFieldHealth } from '../api';
 import { getApiToken } from '@/lib/storage';
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 
-function mergePoints(current: RoutePoint[], incoming: RoutePoint[]): RoutePoint[] {
-  const bySequence = new Map(current.map((point) => [point.sequence, point]));
-  for (const point of incoming) bySequence.set(point.sequence, point);
-  return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence).slice(-5000);
+const timezoneOffsetMinutes = -new Date().getTimezoneOffset();
+
+function localDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
-async function fetchKpisFast(baseUrl: string, token: string, sessionId: string): Promise<FieldSessionKpis> {
+async function fetchJsonFast<T>(url: string, token: string, timeoutMs = 8_000): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3_500);
-  try {
-    const response = await fetch(`${baseUrl}/field-tracking/sessions/${encodeURIComponent(sessionId)}/kpis`, {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const request = (async () => {
+    const response = await fetch(url, {
       headers: { authorization: `Bearer ${token}` },
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`kpis_${response.status}`);
-    return await response.json() as FieldSessionKpis;
+    const body = await response.json().catch(() => null) as T | { message?: string } | null;
+    if (!response.ok) throw new Error((body as { message?: string } | null)?.message || `tracking_${response.status}`);
+    return body as T;
+  })();
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error('Field history request timed out.'));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([request, timeout]);
   } finally {
-    clearTimeout(timeout);
+    if (timer) clearTimeout(timer);
   }
 }
 
+function mapEmployee(row: any): LiveEmployee {
+  const name = String(row.employee_name || row.employee_id || 'Employee');
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const capturedAt = row.captured_at ? new Date(row.captured_at).toISOString() : new Date(0).toISOString();
+  const ageMs = Date.now() - new Date(capturedAt).getTime();
+  const sessionStatus = row.session_status === 'active' ? 'active' : 'completed';
+  const status: LiveEmployee['status'] = sessionStatus !== 'active'
+    ? 'offline'
+    : ageMs <= 2 * 60_000 ? 'live'
+      : ageMs <= 10 * 60_000 ? 'delayed' : 'stale';
+  return {
+    employeeId: String(row.employee_id),
+    sessionId: String(row.session_id),
+    name,
+    initials: (words.length > 1 ? `${words[0]![0]}${words.at(-1)![0]}` : name.slice(0, 2)).toUpperCase(),
+    roleLabel: 'Field employee',
+    sequence: Number(row.sequence_no || 0),
+    latitude: Number(row.latitude || 0),
+    longitude: Number(row.longitude || 0),
+    accuracy: row.accuracy == null ? null : Number(row.accuracy),
+    speed: row.speed == null ? null : Number(row.speed),
+    heading: row.heading == null ? null : Number(row.heading),
+    battery: row.battery == null ? null : Number(row.battery),
+    capturedAt,
+    status,
+    sessionStatus,
+    offRoute: false,
+  };
+}
+
 export function useLiveRoute() {
+  const today = localDateKey();
   const [employee, setEmployee] = useState<LiveEmployee | null>(null);
   const [employees, setEmployees] = useState<LiveEmployee[]>([]);
   const [points, setPoints] = useState<RoutePoint[]>([]);
   const [connectionState, setConnectionState] = useState<LiveConnectionState>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [serverHealth, setServerHealth] = useState({ apiReachable: false, routerReachable: false, geocoderReachable: false });
-  const [kpis, setKpis] = useState<FieldSessionKpis | null>(null);
+  const [kpis, setKpis] = useState<FieldTrackingDaily['kpis'] | null>(null);
   const [kpiState, setKpiState] = useState<'idle' | 'loading' | 'ready' | 'unavailable'>('idle');
+  const [selectedDate, setSelectedDateState] = useState(today);
+  const [calendarMonth, setCalendarMonthState] = useState(today.slice(0, 7));
+  const [calendarDays, setCalendarDays] = useState<FieldTrackingCalendar['days']>([]);
+  const [calendarState, setCalendarState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const mountedRef = useRef(true);
-  
   const employeeRef = useRef<LiveEmployee | null>(null);
   const employeesRef = useRef<LiveEmployee[]>([]);
   const selectedEmployeeIdRef = useRef<string | null>(null);
-  const pointsRef = useRef<RoutePoint[]>([]);
-  const lastSequenceRef = useRef(0);
+  const selectedDateRef = useRef(today);
+  const calendarMonthRef = useRef(today.slice(0, 7));
   const refreshingRef = useRef(false);
-
-  const applyPoints = useCallback((incoming: RoutePoint[], replace = false) => {
-    const next = replace ? [...incoming].sort((a, b) => a.sequence - b.sequence).slice(-5000) : mergePoints(pointsRef.current, incoming);
-    pointsRef.current = next;
-    lastSequenceRef.current = next.at(-1)?.sequence ?? 0;
-    if (mountedRef.current) setPoints(next);
-  }, []);
 
   const refresh = useCallback(async () => {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
-    
     void getFieldHealth().then((nextHealth) => {
       if (mountedRef.current) setServerHealth(nextHealth);
     });
-
     try {
       const token = await getApiToken();
       if (!token) throw new Error('admin_login_failed');
-
       const bases = await getApiBaseUrlCandidates();
       if (!bases.length) throw new Error('Backend is not configured.');
-      
-      const response = await fetch(`${bases[0]}/field-tracking/live`, {
-        headers: { authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error(`live_${response.status}`);
-      const body = await response.json();
-      
-      // The backend returns an array of rows under `employees`.
-      // Let's map it to LiveEmployee structure.
-      const rawEmployees: any[] = body.employees || [];
-      const incomingEmployees: LiveEmployee[] = rawEmployees.map(row => {
-        const name = String(row.employee_name || row.employee_id || 'Employee');
-        const words = name.trim().split(/\s+/).filter(Boolean);
-        return ({
-        employeeId: row.employee_id,
-        sessionId: row.session_id,
-        name,
-        initials: (words.length > 1 ? `${words[0]![0]}${words.at(-1)![0]}` : name.slice(0, 2)).toUpperCase(),
-        roleLabel: 'Field employee',
-        sequence: row.sequence_no,
-        latitude: Number(row.latitude),
-        longitude: Number(row.longitude),
-        accuracy: row.accuracy ? Number(row.accuracy) : null,
-        speed: row.speed ? Number(row.speed) : null,
-        heading: row.heading ? Number(row.heading) : null,
-        battery: row.battery,
-        capturedAt: row.captured_at,
-        status: 'live',
-        sessionStatus: 'active',
-        offRoute: false
-        });
-      });
-
+      const base = bases[0]!;
+      const directory = await fetchJsonFast<{ employees: any[] }>(`${base}/field-tracking/employees`, token);
+      const incomingEmployees = (directory.employees || []).map(mapEmployee);
+      employeesRef.current = incomingEmployees;
+      if (mountedRef.current) setEmployees(incomingEmployees);
       if (!incomingEmployees.length) {
         employeeRef.current = null;
-        employeesRef.current = [];
         selectedEmployeeIdRef.current = null;
-        pointsRef.current = [];
-        lastSequenceRef.current = 0;
         if (mountedRef.current) {
           setEmployee(null);
-          setEmployees([]);
           setPoints([]);
           setKpis(null);
+          setCalendarDays([]);
           setKpiState('idle');
+          setCalendarState('ready');
           setConnectionState('waiting');
           setError(null);
         }
         return;
       }
-
-      employeesRef.current = incomingEmployees;
-      if (mountedRef.current) setEmployees(incomingEmployees);
-      
       const selected = (selectedEmployeeIdRef.current
         ? incomingEmployees.find((item) => item.employeeId === selectedEmployeeIdRef.current)
         : null)
         ?? incomingEmployees.find((item) => item.sessionStatus === 'active')
         ?? incomingEmployees[0]!;
-      
       selectedEmployeeIdRef.current = selected.employeeId;
-      const sessionChanged = employeeRef.current?.sessionId !== selected.sessionId;
+      const employeeChanged = employeeRef.current?.employeeId !== selected.employeeId;
       employeeRef.current = selected;
-      if (mountedRef.current) setEmployee(selected);
-      if (sessionChanged && mountedRef.current) {
-        setKpis(null);
-        setKpiState('loading');
+      if (mountedRef.current) {
+        setEmployee(selected);
+        if (employeeChanged) {
+          setKpis(null);
+          setPoints([]);
+          setKpiState('loading');
+          setCalendarState('loading');
+        }
       }
-
-      // Start KPI delivery immediately. Route matching can call Valhalla and must
-      // never delay the dashboard's basic live details.
-      void fetchKpisFast(bases[0]!, token, selected.sessionId)
-        .then((nextKpis) => {
-          if (mountedRef.current && employeeRef.current?.sessionId === selected.sessionId) {
-            setKpis(nextKpis);
-            setKpiState('ready');
-          }
-        })
-        .catch(() => {
-          if (mountedRef.current && employeeRef.current?.sessionId === selected.sessionId) setKpiState('unavailable');
-        });
-
-      // Fetch route points for selected employee
-      const routeResponse = await fetch(`${bases[0]}/field-tracking/sessions/${encodeURIComponent(selected.sessionId)}/matched-route`, {
-        headers: { authorization: `Bearer ${token}` }
-      });
-      
-      if (routeResponse.ok) {
-        const routeBody = await routeResponse.json();
-        // The API returns points directly. Let's adapt them to RoutePoint shape.
-        const routePoints: RoutePoint[] = (routeBody.points || []).map((p: any, i: number) => ({
-          pointId: `mock-${i}`,
-          sessionId: selected.sessionId,
-          sequence: i,
-          latitude: p.latitude,
-          longitude: p.longitude,
-          accuracy: p.accuracy,
-          speed: null,
-          heading: null,
-          battery: null,
-          mocked: false,
-          capturedAt: new Date().toISOString(),
-          routeEligible: true,
-          rejectionReason: null
-        }));
-        applyPoints(routePoints, sessionChanged);
+      const encodedEmployee = encodeURIComponent(selected.employeeId);
+      const offset = encodeURIComponent(String(timezoneOffsetMinutes));
+      const calendarUrl = `${base}/field-tracking/employees/${encodedEmployee}/calendar?month=${encodeURIComponent(calendarMonthRef.current)}&tzOffsetMinutes=${offset}`;
+      const dailyUrl = `${base}/field-tracking/employees/${encodedEmployee}/daily?date=${encodeURIComponent(selectedDateRef.current)}&tzOffsetMinutes=${offset}`;
+      const [calendar, daily] = await Promise.all([
+        fetchJsonFast<FieldTrackingCalendar>(calendarUrl, token, 10_000),
+        fetchJsonFast<FieldTrackingDaily>(dailyUrl, token, 12_000),
+      ]);
+      if (mountedRef.current && selectedEmployeeIdRef.current === selected.employeeId) {
+        setCalendarDays(calendar.days);
+        setCalendarState('ready');
+        setPoints(daily.points);
+        setKpis(daily.kpis);
+        setKpiState('ready');
+        setConnectionState('live');
+        setError(null);
       }
-
-      setError(null);
-      if (mountedRef.current) setConnectionState('live');
     } catch (failure) {
-      const message = failure instanceof Error ? failure.message : 'live_connection_failed';
+      const message = failure instanceof Error ? failure.message : 'field_history_failed';
       if (mountedRef.current) {
         setConnectionState('offline');
         setError(message);
+        setKpiState((current) => current === 'loading' ? 'unavailable' : current);
+        setCalendarState((current) => current === 'loading' ? 'unavailable' : current);
       }
     } finally {
       refreshingRef.current = false;
     }
-  }, [applyPoints]);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
-    void refresh();
-    const poll = setInterval(() => void refresh(), 10_000);
+    const initialRefresh = setTimeout(() => void refresh(), 0);
+    const poll = setInterval(() => void refresh(), 15_000);
     return () => {
       mountedRef.current = false;
+      clearTimeout(initialRefresh);
       clearInterval(poll);
     };
   }, [refresh]);
 
   const selectEmployee = useCallback((employeeId: string) => {
-    if (selectedEmployeeIdRef.current === employeeId) return;
     const selected = employeesRef.current.find((item) => item.employeeId === employeeId);
     if (!selected) return;
     selectedEmployeeIdRef.current = employeeId;
     employeeRef.current = selected;
-    lastSequenceRef.current = 0;
-    applyPoints([], true);
+    const nextToday = localDateKey();
+    selectedDateRef.current = nextToday;
+    calendarMonthRef.current = nextToday.slice(0, 7);
     if (mountedRef.current) {
       setEmployee(selected);
+      setSelectedDateState(nextToday);
+      setCalendarMonthState(nextToday.slice(0, 7));
+      setPoints([]);
       setKpis(null);
       setKpiState('loading');
+      setCalendarState('loading');
       setConnectionState('recovering');
     }
     void refresh();
-  }, [applyPoints, refresh]);
+  }, [refresh]);
 
+  const selectDate = useCallback((date: string) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date === selectedDateRef.current) return;
+    selectedDateRef.current = date;
+    if (date.slice(0, 7) !== calendarMonthRef.current) {
+      calendarMonthRef.current = date.slice(0, 7);
+      setCalendarMonthState(date.slice(0, 7));
+    }
+    setSelectedDateState(date);
+    setPoints([]);
+    setKpis(null);
+    setKpiState('loading');
+    setConnectionState('recovering');
+    void refresh();
+  }, [refresh]);
+
+  const selectMonth = useCallback((month: string) => {
+    if (!/^\d{4}-\d{2}$/.test(month) || month === calendarMonthRef.current) return;
+    calendarMonthRef.current = month;
+    const nextDate = month === localDateKey().slice(0, 7) ? localDateKey() : `${month}-01`;
+    selectedDateRef.current = nextDate;
+    setCalendarMonthState(month);
+    setSelectedDateState(nextDate);
+    setCalendarDays([]);
+    setPoints([]);
+    setKpis(null);
+    setCalendarState('loading');
+    setKpiState('loading');
+    setConnectionState('recovering');
+    void refresh();
+  }, [refresh]);
+
+  const viewingLive = selectedDate === today && employee?.sessionStatus === 'active' && employee.status === 'live';
   const latest = [...points].reverse().find((point) => point.routeEligible || point.rejectionReason === 'stationary_noise') ?? null;
-  return { employee, employees, points, latest, connectionState, error, serverHealth, kpis, kpiState, refresh, selectEmployee };
+  return {
+    employee,
+    employees,
+    points,
+    latest,
+    connectionState,
+    error,
+    serverHealth,
+    kpis,
+    kpiState,
+    refresh,
+    selectEmployee,
+    selectedDate,
+    selectDate,
+    calendarMonth,
+    selectMonth,
+    calendarDays,
+    calendarState,
+    viewingLive,
+  };
 }
