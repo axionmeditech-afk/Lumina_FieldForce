@@ -12,7 +12,7 @@ import {
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Location from 'expo-location';
 import * as Speech from 'expo-speech';
-import { router, useNavigation } from 'expo-router';
+import { router, useIsFocused, useNavigation } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '@/contexts/AuthContext';
 import { useVisitNavigation } from '@/contexts/VisitNavigationContext';
@@ -40,6 +40,7 @@ const isSupervisor = (role?: string | null) => ['admin', 'hr', 'manager'].includ
 export default function FieldVisitsScreen() {
   const { user, company } = useAuth();
   const navigation = useNavigation();
+  const isFocused = useIsFocused();
   const visitNavigation = useVisitNavigation();
   const supervisor = isSupervisor(user?.role);
   const [assignments, setAssignments] = useState<FieldVisitAssignment[]>([]);
@@ -119,7 +120,10 @@ export default function FieldVisitsScreen() {
     }
   }, [company?.id, supervisor]);
 
-  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    if (!isFocused) return;
+    void reload();
+  }, [isFocused, reload]);
 
   const pending = useMemo(() => assignments.filter((item) => item.status === 'pending' || item.status === 'in_progress'), [assignments]);
   const employeeById = useMemo(() => new Map(employees.map((item: any) => [String(item.id), item])), [employees]);
@@ -392,7 +396,7 @@ export default function FieldVisitsScreen() {
             {visitActionBusy ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="briefcase" size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>Start visit</Text>
           </Pressable> : navigationActive ? <Pressable onPress={() => stopDirections(true)} style={styles.stopDirectionsButton}>
             <Ionicons name="stop-circle" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>{rerouting ? 'Rerouting…' : 'Stop directions'}</Text>
-          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || !checkedIn} style={[styles.directionsButton, (routing || !checkedIn) && styles.disabledButton]}>
+          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing} style={[styles.directionsButton, (routing || !checkedIn) && styles.disabledButton]}>
             {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
           </Pressable>
           }

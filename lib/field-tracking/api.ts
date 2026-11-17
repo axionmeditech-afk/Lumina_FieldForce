@@ -82,7 +82,10 @@ export async function searchFieldPlaces(query: string, bias?: Coordinate): Promi
 export function planFieldRoute(origin: Coordinate, destination: PlaceSearchResult, travelMode: 'auto' | 'pedestrian' | 'bicycle', assignmentId?: string): Promise<RoutePlan> {
   return requestJson('/field-tracking/route', {
     method: 'POST',
-    timeoutMs: 18_000,
+    // Render cold-start plus the upstream route computation can legitimately
+    // exceed the previous 18 second limit. Keep it bounded, but allow enough
+    // time for one cold production request to finish.
+    timeoutMs: 35_000,
     body: JSON.stringify({ origin, destination, travelMode, assignmentId }),
   });
 }

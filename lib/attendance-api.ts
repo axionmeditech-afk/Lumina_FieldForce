@@ -17,7 +17,8 @@ import { notifyAutoCheckoutSynced } from "./attendance-notifications";
 import { beginGlobalLoading } from "@/lib/global-loading";
 
 const FALLBACK_API_BASE = "http://localhost:5000/api";
-const RELEASE_FALLBACK_API_BASE = "https://api.axionmeditech.com/api";
+const RELEASE_FALLBACK_API_BASE = "https://lumina-fieldforce-api.onrender.com/api";
+const RELEASE_SECONDARY_API_BASE = "https://lumina-fieldforce.onrender.com/api";
 
 interface QueueItem {
   type: "checkin" | "checkout";
@@ -279,15 +280,15 @@ export async function getApiBaseUrlCandidates(): Promise<string[]> {
   // If a public HTTPS backend is configured, hard-pin to public API bases even in Expo/dev.
   // This avoids stale LAN/localhost settings hijacking production traffic inside preview builds.
   if (publicHttpsEnvApiBases.length > 0) {
-    return [...new Set([...publicHttpsEnvApiBases, RELEASE_FALLBACK_API_BASE, ...publicHttpsSettingsApiBases])];
+    return [...new Set([...publicHttpsEnvApiBases, RELEASE_FALLBACK_API_BASE, RELEASE_SECONDARY_API_BASE, ...publicHttpsSettingsApiBases])];
   }
 
   // In production, prefer a user-provided public HTTPS API base if available.
   if (!isExpoDevRuntime) {
     if (publicHttpsSettingsApiBases.length > 0) {
-      return [...new Set([RELEASE_FALLBACK_API_BASE, ...publicHttpsSettingsApiBases])];
+      return [...new Set([RELEASE_FALLBACK_API_BASE, RELEASE_SECONDARY_API_BASE, ...publicHttpsSettingsApiBases])];
     }
-    return [RELEASE_FALLBACK_API_BASE];
+    return [RELEASE_FALLBACK_API_BASE, RELEASE_SECONDARY_API_BASE];
   }
 
   // In dev runtime keep env URL first, but still allow LAN/localhost fallback.
@@ -366,10 +367,11 @@ class ApiHttpError extends Error {
 
 type ApiRequestInit = RequestInit & {
   skipGlobalLoading?: boolean;
+  allowMutationFallback?: boolean;
 };
 
 async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
-  const { skipGlobalLoading, ...requestInit } = init;
+  const { skipGlobalLoading, allowMutationFallback, ...requestInit } = init;
   const endGlobalLoading = skipGlobalLoading ? () => {} : beginGlobalLoading();
   try {
   let apiBases = await getApiBaseUrlCandidates();
@@ -385,7 +387,13 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
     throw new ApiAuthRequiredError();
   }
 
-  if (requestInit.method && !["GET", "HEAD"].includes(requestInit.method.toUpperCase())) apiBases = apiBases.slice(0, 1);
+  if (
+    requestInit.method &&
+    !["GET", "HEAD"].includes(requestInit.method.toUpperCase()) &&
+    !allowMutationFallback
+  ) {
+    apiBases = apiBases.slice(0, 1);
+  }
   for (const apiBase of apiBases) {
     if (requestInit.signal?.aborted) {
       throw new Error("Request aborted.");
@@ -517,6 +525,13 @@ async function fetchJsonWithTimeout<T>(
       ...init,
       signal: controller.signal,
     });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(
+        `Backend did not respond within ${Math.ceil(timeoutMs / 1000)} seconds. Check your connection and retry.`
+      );
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -740,9 +755,9 @@ async function submitAttendanceAction(type: "checkin" | "checkout", payload: Att
   if (!automatic) await AsyncStorage.setItem(key, requestId);
   try {
     const record = await fetchJsonWithTimeout<AttendanceRecord>(`/attendance/${type}`, {
-      method: "POST", skipGlobalLoading: automatic,
+      method: "POST", skipGlobalLoading: automatic, allowMutationFallback: true,
       body: JSON.stringify({ ...payload, requestId }),
-    }, automatic ? 15000 : 70000);
+    }, automatic ? 30000 : 45000);
     if (!automatic) await AsyncStorage.removeItem(key);
     return record;
   } catch (error) {
@@ -794,7 +809,7 @@ export async function getCompanyAttendanceToday(
   if (date) params.push(`date=${encodeURIComponent(date)}`);
   if (allCompanies) params.push("allCompanies=1");
   const query = params.length > 0 ? `?${params.join("&")}` : "";
-  return fetchJsonWithTimeout<AttendanceRecord[]>(`/attendance/company/today${query}`, { method: "GET", skipGlobalLoading: true }, 70000);
+  return fetchJsonWithTimeout<AttendanceRecord[]>(`/attendance/company/today${query}`, { method: "GET", skipGlobalLoading: true }, 25000);
 }
 
 export interface MapplsPlaceSuggestion {
@@ -991,9 +1006,18 @@ export async function updateUserAccessRemote(
 }
 
 export async function getAttendanceStatus(date?: string): Promise<{ records: AttendanceRecord[]; active: AttendanceRecord | null }> {
-  return fetchJsonWithTimeout(`/attendance/status${date ? `?date=${encodeURIComponent(date)}` : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
+  const status = await fetchJsonWithTimeout<{ records: AttendanceRecord[]; active: AttendanceRecord | null }>(
+    `/attendance/status${date ? `?date=${encodeURIComponent(date)}` : ""}`,
+    { method: "GET", skipGlobalLoading: true },
+    35000,
+  );
+  // The backend is the attendance source of truth. Keeping the scoped local
+  // flag in sync prevents the attendance, dashboard and visit screens from
+  // presenting three different states after a failed or delayed request.
+  await setCheckedIn(Boolean(status.active));
+  return status;
 }
 
 export async function getCompanyAttendanceMonth(companyId: string | undefined, month: string, allCompanies = false): Promise<AttendanceRecord[]> {
-  return fetchJsonWithTimeout(`/attendance/company/today?month=${encodeURIComponent(month)}${companyId ? `&company_id=${encodeURIComponent(companyId)}` : ""}${allCompanies ? "&allCompanies=1" : ""}`, { method: "GET", skipGlobalLoading: true }, 70000);
+  return fetchJsonWithTimeout(`/attendance/company/today?month=${encodeURIComponent(month)}${companyId ? `&company_id=${encodeURIComponent(companyId)}` : ""}${allCompanies ? "&allCompanies=1" : ""}`, { method: "GET", skipGlobalLoading: true }, 30000);
 }

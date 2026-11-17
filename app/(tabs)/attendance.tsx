@@ -1727,6 +1727,24 @@ function AttendanceScreenContent() {
       if (!options?.silent) setActionLoading(true);
       try {
         const isAuto = options?.isAuto === true;
+        if (!isAuto) {
+          // Reconcile the button with the durable server state before asking
+          // for biometric/GPS evidence. This also repairs a stale local
+          // "Checkout" button after another device or auto-checkout ended the
+          // active attendance session.
+          const liveStatus = await getAttendanceStatus();
+          activeAttendanceRef.current = liveStatus.active;
+          const liveCheckedIn = Boolean(liveStatus.active);
+          setCheckedInState(liveCheckedIn);
+          if (type === "checkout" && !liveCheckedIn) {
+            Alert.alert("Already checked out", "Your attendance is already marked OUT on the server.");
+            return;
+          }
+          if (type === "checkin" && liveCheckedIn) {
+            Alert.alert("Already checked in", "Your active check-in has been restored from the server.");
+            return;
+          }
+        }
         const biometricRequired = true;
         let biometricVerified = false;
         let biometricType: string | null = null;

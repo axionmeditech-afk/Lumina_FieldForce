@@ -99,7 +99,7 @@ const AI_ENV_DEFAULTS = {
   projectId: EXPO_PUBLIC_GROQ_PROJECT_ID,
 };
 
-const RELEASE_BACKEND_FALLBACK_URL = "https://api.axionmeditech.com";
+const RELEASE_BACKEND_FALLBACK_URL = "https://lumina-fieldforce-api.onrender.com";
 
 const BACKEND_ENV_DEFAULTS = {
   apiBaseUrl:
