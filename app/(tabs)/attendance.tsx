@@ -40,6 +40,7 @@ import {
   getVerifiedLocationEvidence,
   getLocationPermissionSnapshot,
   isMockLocation,
+  requestForegroundLocationPermission,
   requestLocationPermissionBundle,
 } from "@/lib/location-service";
 import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
@@ -1670,7 +1671,10 @@ function AttendanceScreenContent() {
   }, [refreshLocation, showPermissionBlockedAlert]);
 
   const ensureAttendanceLocationPreflight = useCallback(async () => {
-    const locationPermission = await requestLocationPermissionBundle();
+    // Background access is requested centrally at app startup. A manual
+    // check-in/out must never open Android's "Allow all the time" settings
+    // screen while its action spinner is running.
+    const locationPermission = await requestForegroundLocationPermission();
     if (!locationPermission.foreground) {
       if (!locationPermission.foregroundCanAskAgain) {
         showPermissionBlockedAlert();

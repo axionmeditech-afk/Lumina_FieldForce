@@ -126,10 +126,15 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
   }, [stopWatch]);
 
   const startWatch = useCallback(async () => {
-    const permission = await Location.requestForegroundPermissionsAsync();
+    let permission = await Location.getForegroundPermissionsAsync();
+    if (permission.status !== 'granted' && permission.canAskAgain) {
+      permission = await Location.requestForegroundPermissionsAsync();
+    }
     if (permission.status !== 'granted') throw new Error('Allow precise location for turn-by-turn directions.');
     stopWatch();
-    watchRef.current = await Location.watchPositionAsync(
+    let timedOut = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const watchPromise = Location.watchPositionAsync(
       { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3_000 },
       (location) => setSession((current) => current ? {
         ...current,
@@ -138,7 +143,21 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
         accuracy: Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null,
         updatedAt: new Date().toISOString(),
       } : null),
-    );
+    ).then((subscription) => {
+      if (timedOut) subscription.remove();
+      return subscription;
+    });
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        reject(new Error('Live location watcher could not start. Turn on Precise Location and retry.'));
+      }, 10_000);
+    });
+    try {
+      watchRef.current = await Promise.race([watchPromise, timeoutPromise]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }, [stopWatch]);
 
   const start = useCallback(async (next?: Omit<StoredSession, 'status' | 'updatedAt'>) => {
@@ -146,8 +165,9 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     if (!candidate || candidate.route.coordinates.length < 2) throw new Error('Route is still loading.');
     setBusy(true);
     try {
-      const attendance = await getAttendanceStatus();
-      if (!attendance.active) throw new Error('Check in before starting directions.');
+      // The visit screen checks server attendance immediately before route
+      // planning. Repeating the same 35-second request here made a successful
+      // route look stuck in standalone builds.
       await startWatch();
       spokenRef.current.clear();
       offRouteSamplesRef.current = 0;

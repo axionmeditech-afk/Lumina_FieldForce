@@ -157,6 +157,19 @@ export async function requestLocationPermissionBundle(): Promise<LocationPermiss
   };
 }
 
+/** Request only the permission needed for a foreground attendance action. */
+export async function requestForegroundLocationPermission(): Promise<LocationPermissionState> {
+  let fg = await Location.getForegroundPermissionsAsync();
+  if (!fg.granted && fg.canAskAgain) fg = await Location.requestForegroundPermissionsAsync();
+  const bg = await Location.getBackgroundPermissionsAsync().catch(() => null);
+  return {
+    foreground: fg.granted,
+    foregroundCanAskAgain: fg.canAskAgain,
+    background: Boolean(bg?.granted),
+    backgroundCanAskAgain: Boolean(bg?.canAskAgain),
+  };
+}
+
 export async function getVerifiedLocationEvidence(
   options?: VerifiedLocationOptions
 ): Promise<VerifiedLocationEvidence> {

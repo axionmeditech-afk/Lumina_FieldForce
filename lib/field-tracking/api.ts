@@ -42,18 +42,33 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Math.min(20_000, remainingMs));
+    const candidateTimeoutMs = Math.min(20_000, remainingMs);
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
-      const response = await fetch(`${base}${path}`, {
-        ...requestInit,
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${token}`,
-          ...(options.headers || {}),
-        },
-        signal: controller.signal,
+      // React Native's fetch implementation does not consistently reject when
+      // AbortController fires (notably after a network hand-off or a sleeping
+      // Render instance). Race the complete fetch + body read against a real
+      // rejection so a directions button can never spin forever.
+      const request = (async () => {
+        const response = await fetch(`${base}${path}`, {
+          ...requestInit,
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${token}`,
+            ...(options.headers || {}),
+          },
+          signal: controller.signal,
+        });
+        const body = await response.json().catch(() => null) as { message?: string; error?: string } | null;
+        return { response, body };
+      })();
+      const hardTimeout = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Field tracking request timed out.'));
+        }, candidateTimeoutMs);
       });
-      const body = await response.json().catch(() => null) as { message?: string; error?: string } | null;
+      const { response, body } = await Promise.race([request, hardTimeout]);
       if (!response.ok) {
         const message = body?.message || body?.error || `Field tracking request failed (${response.status}).`;
         // Business/auth failures are deterministic across both services.
@@ -71,7 +86,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
         ? new Error(error.name === 'AbortError' ? 'Field tracking request timed out.' : error.message)
         : new Error('Field tracking request failed.');
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
     }
   }
   throw finalError ?? new Error('Field tracking backend is unavailable.');

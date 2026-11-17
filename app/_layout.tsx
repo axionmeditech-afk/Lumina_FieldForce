@@ -2,6 +2,7 @@ import { AppState } from "react-native";
 import { reconcileAttendanceGeofence, retryPendingAttendanceExit } from "@/lib/attendance-background";
 import { flushAttendanceQueue, getAttendanceStatus } from "@/lib/attendance-api";
 import { ensureAttendanceNotificationChannel } from "@/lib/attendance-notifications";
+import { requestMissingAppPermissions } from "@/lib/app-permissions";
 import { restoreFieldTrackingForActiveAttendance } from "@/lib/field-tracking/attendance-lifecycle";
 import React, { useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -28,10 +29,17 @@ function AppShell() {
   useEffect(() => {
     if (!userId) return;
     let running = false;
+    // One permission sequence per signed-in app launch. Already-granted
+    // permissions return immediately and never open another system prompt.
+    const permissionsReady = requestMissingAppPermissions().catch((error) => {
+      console.warn("Unable to complete startup permissions", error);
+      return null;
+    });
     const reconcile = (refreshSession = true) => {
       if (running || AppState.currentState !== "active") return;
       running = true;
       void (async () => {
+        await permissionsReady;
         await flushAttendanceQueue();
         if (refreshSession) {
           await reconcileAttendanceGeofence();

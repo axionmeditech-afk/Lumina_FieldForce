@@ -519,21 +519,35 @@ async function fetchJsonWithTimeout<T>(
   timeoutMs: number
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   try {
-    return await fetchJson<T>(path, {
+    const request = fetchJson<T>(path, {
       ...init,
       signal: controller.signal,
     });
+    const hardTimeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new Error(
+          `Backend did not respond within ${Math.ceil(timeoutMs / 1000)} seconds. Check your connection and retry.`
+        ));
+      }, timeoutMs);
+    });
+    // AbortController alone can leave a release APK waiting forever inside
+    // React Native fetch. Promise.race guarantees that attendance and the
+    // directions preflight always return control to the screen.
+    return await Promise.race([request, hardTimeout]);
   } catch (error) {
-    if (controller.signal.aborted) {
+    if (timedOut) {
       throw new Error(
         `Backend did not respond within ${Math.ceil(timeoutMs / 1000)} seconds. Check your connection and retry.`
       );
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 
