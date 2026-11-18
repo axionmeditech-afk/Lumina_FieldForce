@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { StyleSheet, Text, View, Pressable, ActivityIndicator, ScrollView } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -7,7 +7,7 @@ import { StatusDot } from '../components/Primitives';
 import { BottomSheet } from '../components/BottomSheet';
 import { useLiveRoute } from './useLiveRoute';
 import { formatDistance, formatDuration } from '../geo';
-import type { FieldSessionKpis, FieldTrackingDaySummary } from '../types';
+import type { FieldSessionKpis, FieldTrackingDaySummary, HaltRecord } from '../types';
 
 export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
   const {
@@ -18,6 +18,20 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
   const [selectingEmployee, setSelectingEmployee] = useState(true);
   const live = connectionState === 'live' && viewingLive;
   const selectedDateLabel = formatSelectedDate(selectedDate);
+  const routeHalts = useMemo<HaltRecord[]>(() => (kpis?.activity ?? [])
+    .filter((activity) => activity.type === 'halt')
+    .map((activity) => ({
+      id: activity.id,
+      latitude: activity.start.latitude,
+      longitude: activity.start.longitude,
+      status: activity.active ? 'ongoing' : 'completed',
+      startedAt: activity.startedAt,
+      endedAt: activity.endedAt,
+      durationSeconds: activity.endedAt
+        ? Math.max(0, (new Date(activity.endedAt).getTime() - new Date(activity.startedAt).getTime()) / 1000)
+        : Math.max(0, (Date.now() - new Date(activity.startedAt).getTime()) / 1000),
+      label: `${activity.start.latitude.toFixed(5)}, ${activity.start.longitude.toFixed(5)}`,
+    })), [kpis?.activity]);
 
   if (selectingEmployee) {
     return <EmployeePicker employees={employees} connectionState={connectionState} error={error} onOpenMenu={onOpenMenu} onRefresh={refresh} onSelect={(employeeId) => {
@@ -38,7 +52,8 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
           destination={null}
           waypoints={[]}
           progressPercent={0}
-          halts={[]}
+          halts={routeHalts}
+          interactiveHalts
           follow={viewingLive}
           previewRoute={!viewingLive && points.length > 1}
         />

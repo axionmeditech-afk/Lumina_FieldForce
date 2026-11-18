@@ -7,7 +7,8 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { getAttendanceStatus } from '@/lib/attendance-api';
 import { planFieldRoute, type FieldVisitAssignment } from '@/lib/field-tracking/api';
-import { distanceToRoute, formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
+import { formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
+import { buildRouteMetrics, headingDifference, projectOnRoute, remainingRoute } from '@/lib/field-tracking/navigation-geometry';
 import type { Coordinate, RoutePlan } from '@/lib/field-tracking/types';
 import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-navigation-lifecycle';
 
@@ -17,6 +18,7 @@ type StoredSession = {
   route: RoutePlan;
   position: Coordinate | null;
   heading: number | null;
+  speed: number | null;
   accuracy: number | null;
   status: NavigationStatus;
   updatedAt: string;
@@ -27,6 +29,10 @@ type NavigationProgress = {
   distanceToManeuver: number;
   remainingDistance: number;
   remainingDuration: number;
+  remainingRoute: Coordinate[];
+  snappedPosition: Coordinate | null;
+  routeHeading: number | null;
+  distanceFromRoute: number;
 };
 type NavigationContextValue = {
   session: StoredSession | null;
@@ -55,7 +61,12 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const spokenRef = useRef(new Set<string>());
   const offRouteSamplesRef = useRef(0);
+  const wrongWaySamplesRef = useRef(0);
+  const deviationStartedAtRef = useRef(0);
   const lastRerouteRef = useRef(0);
+  const navigationGenerationRef = useRef(0);
+  const voiceActiveRef = useRef(false);
+  const routeProgressRef = useRef<{ route: Coordinate[] | null; distance: number }>({ route: null, distance: 0 });
 
   const storageKey = userId ? `@lumina_visit_navigation:v1:${userId}` : null;
   const stopWatch = useCallback(() => {
@@ -65,6 +76,9 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
 
   useEffect(() => {
     stopWatch();
+    navigationGenerationRef.current += 1;
+    voiceActiveRef.current = false;
+    void Speech.stop();
     spokenRef.current.clear();
     offRouteSamplesRef.current = 0;
     setSession(null);
@@ -81,7 +95,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
           await AsyncStorage.removeItem(storageKey);
           return;
         }
-        setSession({ ...saved, accuracy: saved.accuracy ?? null });
+        setSession({ ...saved, speed: saved.speed ?? null, accuracy: saved.accuracy ?? null });
       } catch { void AsyncStorage.removeItem(storageKey); }
     }).finally(() => setHydrated(true));
   }, [storageKey, stopWatch]);
@@ -95,16 +109,26 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
   const progress = useMemo<NavigationProgress | null>(() => {
     if (!session || !session.route.coordinates.length) return null;
     const position = session.position;
-    const nearestIndex = position ? nearestRouteIndex(position, session.route.coordinates) : 0;
-    const maneuverIndex = session.route.maneuvers.findIndex((item) => item.beginShapeIndex > nearestIndex + 0.15);
+    const metrics = buildRouteMetrics(session.route.coordinates);
+    if (routeProgressRef.current.route !== session.route.coordinates) {
+      routeProgressRef.current = { route: session.route.coordinates, distance: 0 };
+    }
+    const projection = position
+      ? projectOnRoute(position, session.route.coordinates, metrics, routeProgressRef.current.distance)
+      : null;
+    if (projection && projection.distanceFromRouteMetres < 150) {
+      routeProgressRef.current.distance = Math.max(routeProgressRef.current.distance, projection.distanceAlongRouteMetres);
+    }
+    const shapePosition = projection?.shapePosition ?? 0;
+    const maneuverIndex = session.route.maneuvers.findIndex((item) => item.beginShapeIndex > shapePosition + 0.15);
     const selectedIndex = maneuverIndex >= 0 ? maneuverIndex : Math.max(0, session.route.maneuvers.length - 1);
     const maneuver = session.route.maneuvers[selectedIndex];
-    const total = Math.max(1, routeLength(session.route.coordinates));
-    const covered = position ? distanceAlongRoute(position, session.route.coordinates, nearestIndex) : 0;
+    const total = Math.max(1, metrics.totalMetres);
+    const covered = Math.min(total, routeProgressRef.current.distance);
     const scale = session.route.distanceMetres ? session.route.distanceMetres / total : 1;
     const remainingDistance = Math.max(0, Math.round((total - covered) * scale));
     const distanceToManeuver = maneuver
-      ? Math.max(0, Math.round(Math.max(0, routeDistanceBetween(session.route.coordinates, nearestIndex, maneuver.beginShapeIndex)) * scale))
+      ? Math.max(0, Math.round(((metrics.cumulativeMetres[Math.min(maneuver.beginShapeIndex, metrics.cumulativeMetres.length - 1)] ?? total) - covered) * scale))
       : 0;
     return {
       instruction: maneuver?.instruction || 'Continue on the route',
@@ -114,14 +138,33 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
       remainingDuration: session.route.distanceMetres && session.route.durationSeconds
         ? Math.round(session.route.durationSeconds * (remainingDistance / session.route.distanceMetres))
         : session.route.durationSeconds || 0,
+      remainingRoute: remainingRoute(session.route.coordinates, projection),
+      snappedPosition: projection && projection.distanceFromRouteMetres <= Math.max(45, Math.min(110, (session.accuracy ?? 25) * 1.7))
+        ? projection.coordinate
+        : null,
+      routeHeading: projection && projection.distanceFromRouteMetres <= Math.max(45, Math.min(110, (session.accuracy ?? 25) * 1.7))
+        ? projection.routeHeading
+        : null,
+      distanceFromRoute: projection?.distanceFromRouteMetres ?? Number.POSITIVE_INFINITY,
     };
   }, [session]);
 
+  const announce = useCallback((text: string) => {
+    if (!voiceActiveRef.current) return;
+    void Speech.speak(text, { language: 'en-IN', rate: 0.95, pitch: 1 });
+  }, []);
+
   const setPreview = useCallback(async (next: Omit<StoredSession, 'status' | 'updatedAt'>) => {
+    setBusy(false);
     stopWatch();
-    Speech.stop();
+    navigationGenerationRef.current += 1;
+    voiceActiveRef.current = false;
+    void Speech.stop();
     spokenRef.current.clear();
     offRouteSamplesRef.current = 0;
+    wrongWaySamplesRef.current = 0;
+    deviationStartedAtRef.current = 0;
+    routeProgressRef.current = { route: next.route.coordinates, distance: 0 };
     setSession({ ...next, status: 'preview', updatedAt: new Date().toISOString() });
   }, [stopWatch]);
 
@@ -140,6 +183,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
         ...current,
         position: { latitude: location.coords.latitude, longitude: location.coords.longitude },
         heading: Number.isFinite(location.coords.heading) ? location.coords.heading : null,
+        speed: Number.isFinite(location.coords.speed) ? location.coords.speed : null,
         accuracy: Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null,
         updatedAt: new Date().toISOString(),
       } : null),
@@ -169,22 +213,36 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
       // planning. Repeating the same 35-second request here made a successful
       // route look stuck in standalone builds.
       await startWatch();
+      navigationGenerationRef.current += 1;
+      voiceActiveRef.current = true;
       spokenRef.current.clear();
       offRouteSamplesRef.current = 0;
+      wrongWaySamplesRef.current = 0;
+      deviationStartedAtRef.current = 0;
+      routeProgressRef.current = { route: candidate.route.coordinates, distance: 0 };
       setSession({ ...candidate, status: 'active', updatedAt: new Date().toISOString() });
-      speak('Directions started. Follow the highlighted route.');
+      announce('Directions started. Follow the highlighted route.');
     } finally { setBusy(false); }
-  }, [session, startWatch]);
+  }, [announce, session, startWatch]);
 
-  const stop = useCallback((announce = false) => {
+  const stop = useCallback((_announce = false) => {
+    setBusy(false);
+    voiceActiveRef.current = false;
+    navigationGenerationRef.current += 1;
+    void Speech.stop();
     stopWatch();
+    offRouteSamplesRef.current = 0;
+    wrongWaySamplesRef.current = 0;
+    deviationStartedAtRef.current = 0;
     setSession((current) => current ? { ...current, status: 'preview', updatedAt: new Date().toISOString() } : null);
-    if (announce) speak('Directions stopped.'); else Speech.stop();
   }, [stopWatch]);
 
   const clear = useCallback(async () => {
+    setBusy(false);
     stopWatch();
-    Speech.stop();
+    voiceActiveRef.current = false;
+    navigationGenerationRef.current += 1;
+    void Speech.stop();
     setSession(null);
     if (storageKey) await AsyncStorage.removeItem(storageKey);
   }, [storageKey, stopWatch]);
@@ -205,30 +263,52 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     if (haversineMetres(session.position, session.visit) <= 100) {
       stopWatch();
       setSession((current) => current ? { ...current, status: 'arrived', updatedAt: new Date().toISOString() } : null);
-      speak(`You have reached ${session.visit.placeName}. Start the visit when ready.`);
+      announce(`You have reached ${session.visit.placeName}. Start the visit when ready.`);
       return;
     }
     if (progress.distanceToManeuver <= 180) {
       const spokenKey = String(progress.maneuverIndex);
       if (!spokenRef.current.has(spokenKey)) {
         spokenRef.current.add(spokenKey);
-        speak(`In ${Math.max(1, Math.round(progress.distanceToManeuver))} metres, ${progress.instruction}`);
+        announce(`In ${Math.max(1, Math.round(progress.distanceToManeuver))} metres, ${progress.instruction}`);
       }
     }
-    const offRoute = distanceToRoute(session.position, session.route.coordinates) > 50;
+    const rerouteThreshold = Math.max(45, Math.min(110, (session.accuracy ?? 25) * 1.7));
+    const offRoute = progress.distanceFromRoute > rerouteThreshold;
+    const heading = session.heading != null && session.heading >= 0 ? session.heading : null;
+    const moving = (session.speed ?? 0) >= 1.8;
+    const wrongWay = !offRoute && moving && heading != null && progress.routeHeading != null
+      && headingDifference(heading, progress.routeHeading) >= 125;
     offRouteSamplesRef.current = offRoute ? offRouteSamplesRef.current + 1 : 0;
-    if (offRouteSamplesRef.current < 3 || busy || Date.now() - lastRerouteRef.current < 15_000) return;
+    wrongWaySamplesRef.current = wrongWay ? wrongWaySamplesRef.current + 1 : 0;
+    const deviating = offRouteSamplesRef.current >= 3 || wrongWaySamplesRef.current >= 4;
+    if (!deviating) {
+      deviationStartedAtRef.current = 0;
+      return;
+    }
+    if (!deviationStartedAtRef.current) deviationStartedAtRef.current = Date.now();
+    if (Date.now() - deviationStartedAtRef.current < 5_000 || busy || Date.now() - lastRerouteRef.current < 15_000) return;
     lastRerouteRef.current = Date.now();
     offRouteSamplesRef.current = 0;
+    wrongWaySamplesRef.current = 0;
+    deviationStartedAtRef.current = 0;
+    const generation = navigationGenerationRef.current;
+    const assignmentId = session.visit.assignmentId;
     setBusy(true);
     void planFieldRoute(session.position, toPlace(session.visit), 'auto', session.visit.assignmentId).then((nextRoute) => {
       if (nextRoute.source !== 'unavailable' && nextRoute.coordinates.length >= 2) {
-        setSession((current) => current ? { ...current, route: nextRoute, updatedAt: new Date().toISOString() } : null);
+        setSession((current) => {
+          if (!current || current.status !== 'active' || current.visit.assignmentId !== assignmentId || navigationGenerationRef.current !== generation) return current;
+          routeProgressRef.current = { route: nextRoute.coordinates, distance: 0 };
+          return { ...current, route: nextRoute, updatedAt: new Date().toISOString() };
+        });
         spokenRef.current.clear();
-        speak('Route updated.');
+        if (navigationGenerationRef.current === generation) announce('Route updated.');
       }
-    }).catch(() => undefined).finally(() => setBusy(false));
-  }, [busy, progress, session, stopWatch]);
+    }).catch(() => undefined).finally(() => {
+      if (navigationGenerationRef.current === generation) setBusy(false);
+    });
+  }, [announce, busy, progress, session, stopWatch]);
 
   const value = useMemo<NavigationContextValue>(() => ({
     session, progress, busy, expandNonce, screenExpanded,
@@ -285,12 +365,7 @@ export function VisitNavigationMiniCard() {
 function toPlace(visit: FieldVisitAssignment) {
   return { placeId: visit.placeId, name: visit.placeName, address: visit.placeAddress, latitude: visit.latitude, longitude: visit.longitude, primaryType: null };
 }
-function routeLength(route: Coordinate[]) { return route.reduce((sum, point, index) => index ? sum + haversineMetres(route[index - 1]!, point) : 0, 0); }
-function nearestRouteIndex(position: Coordinate, route: Coordinate[]) { let best = 0; let distance = Number.POSITIVE_INFINITY; route.forEach((point, index) => { const next = haversineMetres(position, point); if (next < distance) { best = index; distance = next; } }); return best; }
-function distanceAlongRoute(position: Coordinate, route: Coordinate[], index: number) { return routeDistanceBetween(route, 0, index) + haversineMetres(position, route[Math.min(index, route.length - 1)]!); }
-function routeDistanceBetween(route: Coordinate[], from: number, to: number) { let total = 0; for (let index = Math.max(1, from + 1); index <= Math.min(to, route.length - 1); index += 1) total += haversineMetres(route[index - 1]!, route[index]!); return total; }
 function turnIcon(instruction: string): keyof typeof Ionicons.glyphMap { const text = instruction.toLowerCase(); if (text.includes('left') || text.includes('u-turn')) return 'return-down-back'; if (text.includes('right')) return 'return-down-forward'; if (text.includes('roundabout')) return 'sync'; return 'arrow-up'; }
-function speak(text: string) { void Speech.speak(text, { language: 'en-IN', rate: 0.95, pitch: 1 }); }
 function clamp(value: number, minimum: number, maximum: number) { return Math.min(maximum, Math.max(minimum, value)); }
 
 const FLOATING_CARD_WIDTH = 286;

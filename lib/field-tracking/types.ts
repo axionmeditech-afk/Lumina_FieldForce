@@ -78,6 +78,10 @@ export type HaltRecord = {
   latitude: number;
   longitude: number;
   status: 'ongoing' | 'completed';
+  startedAt?: string;
+  endedAt?: string | null;
+  durationSeconds?: number;
+  label?: string | null;
 };
 
 export type LiveConnectionState = 'connecting' | 'waiting' | 'live' | 'recovering' | 'offline';

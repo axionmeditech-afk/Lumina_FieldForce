@@ -199,12 +199,13 @@ export default function FieldVisitsScreen() {
   };
 
   const stopDirections = useCallback((announce = false) => {
+    // Cancel native TTS before changing any navigation state. Async reroute or
+    // screen lifecycle work must never leave an old instruction speaking.
+    void Speech.stop();
     locationSubscriptionRef.current?.remove();
     locationSubscriptionRef.current = null;
     setNavigationActive(false);
     if (visitNavigation.session?.status === 'active') visitNavigation.stop(announce);
-    else if (announce) speak('Directions stopped.');
-    else Speech.stop();
   }, [visitNavigation]);
 
   // Do not stop a navigation session when this screen unmounts. The root
@@ -265,7 +266,14 @@ export default function FieldVisitsScreen() {
       setCurrentAccuracy(accuracy);
       setHeading(nextHeading);
       setRoute(planned);
-      await visitNavigation.start({ visit: selectedVisit, route: planned, position, heading: nextHeading, accuracy });
+      await visitNavigation.start({
+        visit: selectedVisit,
+        route: planned,
+        position,
+        heading: nextHeading,
+        speed: Number.isFinite(location.coords.speed) ? location.coords.speed : null,
+        accuracy,
+      });
       setArrived(false);
       setNavigationActive(true);
     } catch (error) {
@@ -412,7 +420,16 @@ export default function FieldVisitsScreen() {
   if (selectedVisit && mapOpen && !supervisor) {
     return (
       <View style={styles.mapScreen}>
-        <RouteMap points={mapPoints} plannedRoute={route.coordinates} destination={selectedVisit} previewRoute={!navigationActive} navigationActive={navigationActive} progressPercent={progressPercent} heading={heading ?? undefined} />
+        <RouteMap
+          points={mapPoints}
+          plannedRoute={navigationActive ? (visitNavigation.progress?.remainingRoute ?? route.coordinates) : route.coordinates}
+          destination={selectedVisit}
+          previewRoute={!navigationActive}
+          navigationActive={navigationActive}
+          progressPercent={navigationActive ? 0 : progressPercent}
+          snappedPosition={navigationActive ? visitNavigation.progress?.snappedPosition : null}
+          heading={navigationActive ? (visitNavigation.progress?.routeHeading ?? heading) : heading}
+        />
         <SafeAreaView style={styles.mapTop} edges={['top', 'left', 'right']}>
           <View style={styles.destinationHeader}>
             <Pressable onPress={() => setMapOpen(false)} style={styles.menuButton}>

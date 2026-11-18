@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ForwardRefExoticComponent, type RefAttributes } from 'react';
-import { Linking, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import WebView, { type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import type { Coordinate, HaltRecord, RoutePoint } from '../types';
 import { fieldTrackingConfig as appConfig } from '../config';
-import { haversineMetres } from '../geo';
+import { formatDuration, haversineMetres } from '../geo';
 
 type MapPayload = {
   plannedRoute: Coordinate[];
   travelledRoute: Coordinate[];
   destination: Coordinate | null;
-  halts: Pick<HaltRecord, 'id' | 'latitude' | 'longitude' | 'status'>[];
+  halts: HaltRecord[];
   waypoints: Coordinate[];
   position: Coordinate | null;
   start: Coordinate | null;
@@ -43,7 +43,8 @@ export function RouteMap({
   snappedPosition,
   navigationActive = false,
   previewRoute = false,
-  heading = null
+  heading = null,
+  interactiveHalts = false,
 }: {
   points: RoutePoint[];
   matchedRoute?: Coordinate[];
@@ -59,9 +60,14 @@ export function RouteMap({
   navigationActive?: boolean;
   previewRoute?: boolean;
   heading?: number | null;
+  interactiveHalts?: boolean;
 }) {
   const webRef = useRef<WebViewHandle>(null);
   const [rendererStatus, setRendererStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [selectedHalt, setSelectedHalt] = useState<HaltRecord | null>(null);
+  useEffect(() => {
+    setSelectedHalt((current) => current ? (halts.find((halt) => halt.id === current.id) ?? null) : null);
+  }, [halts]);
   const eligible = useMemo(() => points.filter((point) => point.routeEligible), [points]);
   const trusted = useMemo(
     () => points.filter((point) => point.routeEligible || point.rejectionReason === 'stationary_noise'),
@@ -96,7 +102,7 @@ export function RouteMap({
     plannedRoute: thinRoute(plannedRoute),
     travelledRoute: displayTravelRoute,
     destination: destination ?? null,
-    halts: halts.map(({ id, latitude, longitude, status }) => ({ id, latitude, longitude, status })),
+    halts: halts.map((halt) => ({ ...halt })),
     waypoints,
     position: mapPosition,
     start,
@@ -132,13 +138,37 @@ export function RouteMap({
         onLoadEnd={() => webRef.current?.postMessage(JSON.stringify({ type: 'map_state', payload }))}
         onMessage={(event: WebViewMessageEvent) => {
           if (event.nativeEvent.data === 'map_ready') setRendererStatus('ready');
-          if (event.nativeEvent.data === 'map_error') setRendererStatus('error');
+          else if (event.nativeEvent.data === 'map_error') setRendererStatus('error');
+          else if (interactiveHalts) {
+            try {
+              const message = JSON.parse(event.nativeEvent.data) as { type?: string; id?: string };
+              if (message.type === 'halt_select' && message.id) {
+                setSelectedHalt(halts.find((halt) => halt.id === message.id) ?? null);
+              }
+            } catch { /* Ignore non-JSON renderer messages. */ }
+          }
         }}
         style={styles.webview}
       />
       {rendererStatus !== 'ready' ? (
         <View pointerEvents="none" style={styles.statusPill}>
           <Text style={styles.statusText}>{rendererStatus === 'error' ? 'Map renderer is unavailable. Check internet connection.' : 'Loading field map...'}</Text>
+        </View>
+      ) : null}
+      {interactiveHalts && selectedHalt ? (
+        <View style={styles.haltCard}>
+          <View style={styles.haltCardHeader}>
+            <View style={styles.haltIcon}><Text style={styles.haltIconText}>H</Text></View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.haltTitle}>{selectedHalt.status === 'ongoing' ? 'Current halt' : 'Route halt'}</Text>
+              <Text style={styles.haltDuration}>{formatDuration(selectedHalt.durationSeconds ?? haltDuration(selectedHalt))}</Text>
+            </View>
+            <Pressable accessibilityLabel="Close halt details" onPress={() => setSelectedHalt(null)} style={styles.haltClose}>
+              <Text style={styles.haltCloseText}>×</Text>
+            </Pressable>
+          </View>
+          {selectedHalt.label ? <Text style={styles.haltLabel}>{selectedHalt.label}</Text> : null}
+          <Text style={styles.haltMeta}>{formatHaltTime(selectedHalt.startedAt)} – {selectedHalt.endedAt ? formatHaltTime(selectedHalt.endedAt) : 'Now'}</Text>
         </View>
       ) : null}
       <View pointerEvents="box-none" style={styles.attribution}>
@@ -238,7 +268,7 @@ html,body,#map{width:100%;height:100%;margin:0;overflow:hidden;background:#e9eef
 .current{width:44px;height:44px;border:0;border-radius:50%;background:rgba(47,128,237,.14);transform:translate(-50%,-50%) rotate(var(--marker-heading,0deg));box-shadow:0 0 0 1px rgba(47,128,237,.35),0 4px 14px rgba(12,36,80,.26)}
 .current:before{content:'';position:absolute;inset:6px;border-radius:50%;background:#fff;box-shadow:0 1px 5px rgba(12,36,80,.18)}
 .current:after{content:'';position:absolute;left:9px;top:7px;width:26px;height:30px;background:linear-gradient(145deg,#57a5ff 0%,#1d5fd1 68%,#17489f 100%);clip-path:polygon(50% 0%,96% 88%,50% 69%,4% 88%);filter:drop-shadow(0 1px 1px rgba(12,36,80,.24))}
-.halt{width:12px;height:12px;border-radius:50%;border:3px solid #fff;background:#f29900;box-shadow:0 2px 7px rgba(80,48,0,.3)}
+.halt{width:16px;height:16px;padding:0;border-radius:50%;border:3px solid #fff;background:#f29900;box-shadow:0 2px 7px rgba(80,48,0,.3);pointer-events:auto;cursor:pointer}
 .halt.active{background:#ea6d00}
 .waypoint{width:17px;height:17px;border-radius:50%;background:#ffffff;border:4px solid #286be6;box-shadow:0 2px 8px rgba(12,36,80,.28)}
 .destination{width:19px;height:19px;border-radius:50% 50% 50% 0;background:#e5484d;border:3px solid #fff;transform:translate(-50%,-85%) rotate(-45deg);box-shadow:0 2px 8px rgba(90,18,22,.35)}
@@ -333,6 +363,11 @@ function marker(point,className,heading){
   if(className==='current')style+=';--marker-heading:'+(Number.isFinite(heading)?heading:0)+'deg';
   return'<div class="pin '+className+'" style="'+style+'"></div>'
 }
+function haltMarker(halt){
+  if(!valid(halt))return '';
+  var p=screen(halt);
+  return'<button type="button" class="pin halt '+(halt.status==='ongoing'?'active':'')+'" data-halt-id="'+String(halt.id).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" aria-label="Open halt details" style="left:'+p.x+'px;top:'+p.y+'px"></button>'
+}
 function renderLayers(){
   if(!state)return;
   var planned=points(state.plannedRoute),trail=points(state.travelledRoute),position=state.position,svg='';
@@ -345,7 +380,7 @@ function renderLayers(){
   routes.setAttribute('width',viewport().w);routes.setAttribute('height',viewport().h);routes.innerHTML=svg;
   var html=marker(state.start,'start');
   (state.waypoints||[]).forEach(function(stop){html+=marker(stop,'waypoint')});
-  (state.halts||[]).forEach(function(halt){html+=marker(halt,'halt '+(halt.status==='ongoing'?'active':''))});
+  (state.halts||[]).forEach(function(halt){html+=haltMarker(halt)});
   html+=marker(state.destination,'destination')+marker(position,'current',state.heading);
   markers.innerHTML=html
 }
@@ -477,6 +512,7 @@ root.addEventListener('pointercancel',releasePointer);
 document.getElementById('plus').onclick=function(){following=false;manualBearing=cam.bearing;target={lat:cam.lat,lon:cam.lon,zoom:clamp(cam.zoom+1,3,19),bearing:cam.bearing};ensureAnimating()};
 document.getElementById('minus').onclick=function(){following=false;manualBearing=cam.bearing;target={lat:cam.lat,lon:cam.lon,zoom:clamp(cam.zoom-1,3,19),bearing:cam.bearing};ensureAnimating()};
 document.getElementById('locate').onclick=centerOnPosition;
+markers.addEventListener('click',function(event){var target=event.target.closest&&event.target.closest('[data-halt-id]');if(target)post(JSON.stringify({type:'halt_select',id:target.getAttribute('data-halt-id')}))});
 window.addEventListener('resize',function(){ensureAnimating()});
 document.addEventListener('message',function(event){receive(event.data)});
 window.addEventListener('message',function(event){receive(event.data)});
@@ -491,5 +527,28 @@ const styles = StyleSheet.create({
   statusPill: { position: 'absolute', top: 96, alignSelf: 'center', backgroundColor: 'rgba(255,255,255,0.94)', borderRadius: 99, paddingHorizontal: 13, paddingVertical: 8, elevation: 4 },
   statusText: { color: '#344054', fontSize: 11, fontWeight: '700' },
   attribution: { position: 'absolute', right: 7, bottom: 7, backgroundColor: 'rgba(255,255,255,0.84)', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 3 },
-  attributionText: { color: '#344054', fontSize: 9 }
+  attributionText: { color: '#344054', fontSize: 9 },
+  haltCard: { position: 'absolute', left: 14, right: 14, bottom: 34, borderRadius: 17, borderWidth: 1, borderColor: '#E5C981', backgroundColor: 'rgba(255,252,242,0.98)', padding: 13, elevation: 8, shadowColor: '#3D2A00', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: 5 } },
+  haltCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  haltIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: '#C47A00' },
+  haltIconText: { color: '#FFFFFF', fontSize: 13, fontWeight: '900' },
+  haltTitle: { color: '#4A3300', fontSize: 12, fontWeight: '900' },
+  haltDuration: { color: '#9A6200', fontSize: 16, fontWeight: '900', marginTop: 1 },
+  haltClose: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFF4D6' },
+  haltCloseText: { color: '#7A5200', fontSize: 24, lineHeight: 26 },
+  haltLabel: { color: '#5F4A1C', fontSize: 11, fontWeight: '700', marginTop: 9 },
+  haltMeta: { color: '#7A6A45', fontSize: 10, marginTop: 4 },
 });
+
+function haltDuration(halt: HaltRecord): number {
+  if (!halt.startedAt) return 0;
+  const start = new Date(halt.startedAt).getTime();
+  const end = halt.endedAt ? new Date(halt.endedAt).getTime() : Date.now();
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, (end - start) / 1000) : 0;
+}
+
+function formatHaltTime(value?: string | null): string {
+  if (!value) return 'Time unavailable';
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Time unavailable';
+}
