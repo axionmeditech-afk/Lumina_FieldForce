@@ -11,11 +11,13 @@ import {
   getAttendanceStatus,
   getUserGeofences,
   removeQueuedAttendanceAction,
+  isAutoCheckoutProtectedError,
 } from "./attendance-api";
 import { ensureAttendanceNotificationPermission, notifyAutoCheckoutPending, notifyAutoCheckoutSynced } from "./attendance-notifications";
 import { getVerifiedLocationEvidence } from "./location-service";
 import { evaluateAutoCheckoutExit, getEffectiveGeofenceRadiusMeters } from "./geofence";
 import type { AttendanceCheckPayload, AttendanceRecord, Geofence } from "./types";
+import { toMumbaiDateKey } from "./ist-time";
 
 const GEOFENCE_TASK = "BACKGROUND_ATTENDANCE_GEOFENCE_TASK";
 const LOCATION_WATCHDOG_TASK = "BACKGROUND_ATTENDANCE_LOCATION_WATCHDOG_TASK";
@@ -41,6 +43,7 @@ type Session = {
   pendingExitAt?: string;
   exitSamples?: ExitSample[];
   confirmedExit?: AttendanceCheckPayload;
+  autoCheckoutProtectedDate?: string;
   watchdogVersion?: number;
 };
 let running: Promise<void> | null = null;
@@ -319,6 +322,12 @@ async function clearPendingExit() {
 async function verifyExit(locations?: LocationObject[]) {
   let session = await readSession();
   if (!session) return;
+  const today = toMumbaiDateKey(new Date());
+  if (session.autoCheckoutProtectedDate === today) return;
+  if (session.autoCheckoutProtectedDate && session.autoCheckoutProtectedDate !== today) {
+    session = { ...session, autoCheckoutProtectedDate: undefined };
+    await saveSession(session);
+  }
   if (!session.pendingExit && !session.confirmedExit) return;
   if (!session.confirmedExit) {
     session = mergeOutsideSamples(session, locations);
@@ -361,9 +370,29 @@ async function verifyExit(locations?: LocationObject[]) {
   const newlyConfirmed = !session.confirmedExit;
   const payload = await enqueueAttendanceAction("checkout", evidencePayload);
   await saveSession({ ...session, confirmedExit: payload });
-  if (newlyConfirmed) await notifyAutoCheckoutPending({ detectedAt: payload.capturedAtClient!, distanceMeters: payload.geofenceDistanceMeters }).catch(console.warn);
+  if (newlyConfirmed && !token) await notifyAutoCheckoutPending({ detectedAt: payload.capturedAtClient!, distanceMeters: payload.geofenceDistanceMeters }).catch(console.warn);
   if (!token) return;
-  const record = await attendanceCheckOut(payload);
+  let record: AttendanceRecord;
+  try {
+    record = await attendanceCheckOut(payload);
+  } catch (error) {
+    if (!isAutoCheckoutProtectedError(error)) {
+      if (newlyConfirmed) {
+        await notifyAutoCheckoutPending({ detectedAt: payload.capturedAtClient!, distanceMeters: payload.geofenceDistanceMeters }).catch(console.warn);
+      }
+      throw error;
+    }
+    await removeQueuedAttendanceAction("checkout", requestId);
+    await saveSession({
+      ...session,
+      pendingExit: false,
+      pendingExitAt: undefined,
+      exitSamples: [],
+      confirmedExit: undefined,
+      autoCheckoutProtectedDate: error.protectedDate || today,
+    });
+    return;
+  }
   await addAttendance(record);
   await setCheckedIn(false);
   await removeQueuedAttendanceAction("checkout", requestId);
@@ -383,6 +412,7 @@ export async function retryPendingAttendanceExit(locations?: LocationObject[]) {
 async function handleLocationWatchdog(locations: LocationObject[]) {
   const session = await readSession();
   if (!session || locations.length === 0) return;
+  if (session.autoCheckoutProtectedDate === toMumbaiDateKey(new Date())) return;
   if (session.confirmedExit) { await verifyExit(); return; }
   const hasOutside = locations.some((location) => toExitSample(session.zone, location));
   const hasInside = locations.some((location) => {

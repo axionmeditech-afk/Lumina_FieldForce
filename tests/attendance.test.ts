@@ -69,9 +69,9 @@ test("background exit submits while stationary and survives offline restart with
     },
     "./attendance-api": {
       enqueueAttendanceAction: async (_: string, payload: any) => payload, removeQueuedAttendanceAction: async () => {},
+      isAutoCheckoutProtectedError: (error: any) => error?.code === "FIELD_VISIT_DAY_PROTECTED",
       attendanceCheckOut: async (payload: any) => {
         requests++; lastPayload = payload;
-        assert(pendingNotifications > 0, "notification must not wait for a network timeout");
         if (!networkWorks) throw new Error("Network unavailable");
         return { id: "checkout", type: "checkout" };
       },
@@ -162,6 +162,39 @@ test("queue retry keeps concurrent new events, uses one flush and updates local 
   assert.equal(notifications, 1);
 });
 
+test("scheduled visit protection removes queued auto-checkout without stopping attendance", async () => {
+  let queue: any[] = [];
+  let checkedIn = true;
+  let trackerStops = 0;
+  const api = await mobileModule("lib/attendance-api.ts", {
+    "@react-native-async-storage/async-storage": { getItem: async () => null, setItem: async () => {}, removeItem: async () => {} },
+    "expo-crypto": { randomUUID }, "expo-constants": {},
+    "@/lib/global-loading": { beginGlobalLoading: () => () => {} },
+    "./attendance-notifications": { notifyAutoCheckoutSynced: async () => {} },
+    "./field-tracking/attendance-lifecycle": { stopFieldTrackingForCheckOut: async () => { trackerStops++; } },
+    "@/lib/storage": {
+      getSettings: async () => ({ autoSync: "true" }), getApiToken: async () => "token",
+      getCurrentUser: async () => ({ id: "employee" }), getAttendanceQueue: async () => structuredClone(queue),
+      setAttendanceQueue: async (items: any[]) => { queue = structuredClone(items); },
+      addAttendance: async () => {}, setCheckedIn: async (value: boolean) => { checkedIn = value; },
+    },
+  }, { fetch: async () => new Response(JSON.stringify({
+    code: "FIELD_VISIT_DAY_PROTECTED",
+    message: "A field visit is assigned today.",
+    attendanceActive: true,
+    protectedDate: "2026-11-18",
+    visitCount: 1,
+  }), { status: 409, headers: { "content-type": "application/json" } }) });
+  await api.enqueueAttendanceAction("checkout", {
+    userId: "employee", actionSource: "geofence_exit", requestId: "protected-exit-event",
+    capturedAtClient: "2026-11-18T06:00:00.000Z",
+  });
+  await api.flushAttendanceQueue();
+  assert.equal(queue.length, 0, "protected geofence evidence must not retry into a later checkout");
+  assert.equal(checkedIn, true, "attendance must remain active on the scheduled visit date");
+  assert.equal(trackerStops, 0, "field tracking must continue when auto-checkout is suppressed");
+});
+
 test("geofenced attendance accepts valid evidence, rejects invalid evidence, and allows checkout", async () => {
   const app = express();
   app.use(express.json());
@@ -172,6 +205,7 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
   let zones = [office];
   let databaseEnabled = false;
   let rejectDatabaseWrite = false;
+  let fieldVisitProtected = false;
   registerAttendanceActionRoutes(app, {
     requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
       req.auth = { sub: "employee", deviceId: "device", role: "salesperson", email: "employee@example.test" } as typeof req.auth;
@@ -198,6 +232,7 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
     resolveGeofenceStatus,
     randomUUID, insertAttendanceInMySql: async (record: AttendanceRecord) => { if (rejectDatabaseWrite) throw new Error("Simulated DB outage"); records.push(record); }, broadcastAttendanceUpdate: () => {},
     resolveDolibarrConfigForUser: async () => null, syncAttendanceWithDolibarr: async () => {},
+    hasFieldVisitAutoCheckoutProtection: async () => ({ protected: fieldVisitProtected, visitCount: fieldVisitProtected ? 2 : 0 }),
   });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -248,6 +283,10 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
     records.at(-1)!.timestamp = new Date(Date.now() - 4 * 3600000).toISOString();
     const detectedAt = new Date(Date.now() - 3 * 3600000).toISOString();
     zones = [];
+    fieldVisitProtected = true;
+    assert.equal(await post("checkout", { ...automatic, capturedAtClient: detectedAt }), 409, "a scheduled field-visit day must suppress geofence auto-checkout");
+    assert.equal(records.at(-1)!.type, "checkin", "suppressed auto-checkout must leave attendance active");
+    fieldVisitProtected = false;
     assert.equal(await post("checkout", { ...automatic, capturedAtClient: detectedAt }), 201);
     const afterExitCount = records.length;
     assert.equal(records.at(-1)!.timestamp, detectedAt);

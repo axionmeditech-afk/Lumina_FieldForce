@@ -125,12 +125,16 @@ async function startNativeTask(): Promise<void> {
     accuracy: Location.Accuracy.High,
     timeInterval: fieldTrackingConfig.captureTimeMs,
     distanceInterval: fieldTrackingConfig.captureDistanceM,
+    // Let Android batch short bursts instead of waking JS for every fix. The
+    // route still retains 5-second/8-metre fidelity while using less battery.
+    deferredUpdatesInterval: 10_000,
+    deferredUpdatesDistance: fieldTrackingConfig.captureDistanceM,
     activityType: Location.ActivityType.OtherNavigation,
     pausesUpdatesAutomatically: false,
     showsBackgroundLocationIndicator: true,
     foregroundService: {
-      notificationTitle: 'Attendance auto-checkout active',
-      notificationBody: 'Lumina is watching your office boundary during this active check-in.',
+      notificationTitle: 'Lumina field tracking active',
+      notificationBody: 'Your verified work route is recording while attendance is active.',
       notificationColor: '#1769D2',
       killServiceOnDestroy: false,
     },

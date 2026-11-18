@@ -2,6 +2,7 @@ import { MAX_AUTO_CHECKOUT_ACCURACY_METERS, evaluateAutoCheckoutExit } from "@/l
 import { createHash, randomUUID } from "node:crypto";
 import type { Express } from "express";
 import type { AttendanceRecord } from "@/lib/types";
+import { toMumbaiDateKey } from "@/lib/ist-time";
 import { withAttendanceLock } from "../services/attendance-lock";
 
 export type AttendanceActionRouteDeps = Record<string, any>;
@@ -131,6 +132,20 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             }
             if (capturedAt.getTime() < Date.parse(active.timestamp)) {
               reject("Checkout evidence predates the active check-in."); return;
+            }
+            const exitDate = toMumbaiDateKey(capturedAt);
+            const protection = deps.hasFieldVisitAutoCheckoutProtection
+              ? await deps.hasFieldVisitAutoCheckoutProtection(payload.userId, exitDate, active.companyId || companyId)
+              : { protected: false, visitCount: 0 };
+            if (protection.protected) {
+              res.status(409).json({
+                code: "FIELD_VISIT_DAY_PROTECTED",
+                message: `${protection.visitCount} field visit${protection.visitCount === 1 ? " is" : "s are"} assigned for ${exitDate}. Attendance remains checked in while outside the office.`,
+                attendanceActive: true,
+                protectedDate: exitDate,
+                visitCount: protection.visitCount,
+              });
+              return;
             }
           }
           if (type === "checkin" && !zone.insideConfirmed) {

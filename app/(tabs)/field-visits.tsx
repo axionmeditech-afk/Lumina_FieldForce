@@ -31,6 +31,7 @@ import { RouteMap } from '@/lib/field-tracking/components/RouteMap';
 import { formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
 import type { PlaceSearchResult, RoutePlan } from '@/lib/field-tracking/types';
 import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-navigation-lifecycle';
+import { formatMumbaiDateKey, getMumbaiDateKeyByOffset, toMumbaiDateKey } from '@/lib/ist-time';
 
 const EMPTY_ROUTE: RoutePlan = {
   source: 'unavailable', distanceMetres: null, durationSeconds: null, coordinates: [], maneuvers: [],
@@ -54,6 +55,8 @@ export default function FieldVisitsScreen() {
   const [selectedPlace, setSelectedPlace] = useState<PlaceSearchResult | null>(null);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
+  const [scheduledDate, setScheduledDate] = useState(() => defaultVisitDate());
+  const [scheduledTime, setScheduledTime] = useState(() => defaultVisitTime());
   const [saving, setSaving] = useState(false);
   const [selectedVisit, setSelectedVisit] = useState<FieldVisitAssignment | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -149,16 +152,30 @@ export default function FieldVisitsScreen() {
       Alert.alert('Choose employee and place', 'Select the field employee and an exact search result first.');
       return;
     }
+    if (!isValidVisitDate(scheduledDate) || scheduledDate < getMumbaiDateKeyByOffset(0)) {
+      Alert.alert('Choose visit date', 'Enter a valid current or future date as YYYY-MM-DD.');
+      return;
+    }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(scheduledTime)) {
+      Alert.alert('Choose visit time', 'Enter time in 24-hour HH:MM format, for example 14:30.');
+      return;
+    }
     setSaving(true);
     try {
-      await createFieldVisitAssignment({ employeeId: selectedEmployeeId, place: selectedPlace, notes });
+      await createFieldVisitAssignment({
+        employeeId: selectedEmployeeId,
+        place: selectedPlace,
+        scheduledDate,
+        scheduledTime,
+        notes,
+      });
       setSelectedPlace(null);
       setSelectedEmployeeId(null);
       setQuery('');
       setResults([]);
       setNotes('');
       await reload(true);
-      Alert.alert('Visit assigned', 'It is now at the end of this employee’s visit queue.');
+      Alert.alert('Visit assigned', `Scheduled for ${formatVisitSchedule(scheduledDate, scheduledTime)}.`);
     } catch (error) {
       Alert.alert('Could not assign visit', humanize(error));
     } finally {
@@ -372,6 +389,8 @@ export default function FieldVisitsScreen() {
     }).catch(() => undefined).finally(() => setRerouting(false));
   }, [currentPosition, navigationActive, projection?.distanceFromRouteMeters, rerouting, route.coordinates.length, selectedVisit, visitNavigation.session]);
 
+  const selectedVisitScheduledToday = selectedVisit?.scheduledDate === toMumbaiDateKey(new Date());
+
   if (selectedVisit && mapOpen && !supervisor) {
     return (
       <View style={styles.mapScreen}>
@@ -395,6 +414,8 @@ export default function FieldVisitsScreen() {
               <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.arrivedIcon]}><Ionicons name="location" size={24} color="#16835B" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>You have reached {selectedVisit.placeName}</Text><Text style={styles.previewRouteMeta}>Start visit when you are ready to begin the assigned work.</Text></View></View>
             ) : route.distanceMetres != null ? (
               <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Best road route ready</Text><Text style={styles.routeMetric}>{formatDistance(route.distanceMetres)} · {formatDuration(route.durationSeconds || 0)}</Text><Text style={styles.previewRouteMeta}>{previewArrival ? `Arrive by ${formatArrival(previewArrival)}` : 'Arrival time calculating'} · Voice guidance ready</Text></View></View>
+            ) : !selectedVisitScheduledToday ? (
+              <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="calendar" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Scheduled for {formatVisitSchedule(selectedVisit.scheduledDate, selectedVisit.scheduledTime)}</Text><Text style={styles.previewRouteMeta}>Directions become available on the assigned visit date.</Text></View></View>
             ) : checkedIn ? (
               <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Ready for directions</Text><Text style={styles.previewRouteMeta}>The road route will be calculated only after you tap Start directions.</Text></View></View>
             ) : <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="lock-closed" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Check-in required</Text><Text style={styles.previewRouteMeta}>Complete attendance check-in before starting directions.</Text></View></View>}
@@ -407,8 +428,8 @@ export default function FieldVisitsScreen() {
             {visitActionBusy ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="briefcase" size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>Start visit</Text>
           </Pressable> : navigationActive ? <Pressable onPress={() => stopDirections(true)} style={styles.stopDirectionsButton}>
             <Ionicons name="stop-circle" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>{rerouting ? 'Rerouting…' : 'Stop directions'}</Text>
-          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing} style={[styles.directionsButton, (routing || !checkedIn) && styles.disabledButton]}>
-            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
+          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || !checkedIn || !selectedVisitScheduledToday} style={[styles.directionsButton, (routing || !checkedIn || !selectedVisitScheduledToday) && styles.disabledButton]}>
+            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn && selectedVisitScheduledToday ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{!selectedVisitScheduledToday ? 'Available on visit date' : checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
           </Pressable>
           }
         </SafeAreaView>
@@ -454,6 +475,48 @@ export default function FieldVisitsScreen() {
               })}
             </ScrollView>
             {!employees.length && !loading ? <Text style={styles.note}>No field employee is available in this workspace.</Text> : null}
+            <Text style={styles.label}>Visit date and time (IST)</Text>
+            <View style={styles.schedulePresetRow}>
+              {[
+                { label: 'Today', value: getMumbaiDateKeyByOffset(0) },
+                { label: 'Tomorrow', value: getMumbaiDateKeyByOffset(1) },
+              ].map((preset) => (
+                <Pressable
+                  key={preset.value}
+                  onPress={() => setScheduledDate(preset.value)}
+                  style={[styles.schedulePreset, scheduledDate === preset.value && styles.schedulePresetSelected]}
+                >
+                  <Text style={[styles.schedulePresetText, scheduledDate === preset.value && styles.schedulePresetTextSelected]}>{preset.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <View style={styles.scheduleInputRow}>
+              <View style={styles.scheduleInputBlock}>
+                <Text style={styles.scheduleInputLabel}>Date</Text>
+                <TextInput
+                  value={scheduledDate}
+                  onChangeText={setScheduledDate}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor="#7B8798"
+                  maxLength={10}
+                  autoCapitalize="none"
+                  style={styles.scheduleInput}
+                />
+              </View>
+              <View style={styles.scheduleTimeBlock}>
+                <Text style={styles.scheduleInputLabel}>Time</Text>
+                <TextInput
+                  value={scheduledTime}
+                  onChangeText={setScheduledTime}
+                  placeholder="HH:MM"
+                  placeholderTextColor="#7B8798"
+                  maxLength={5}
+                  keyboardType="numbers-and-punctuation"
+                  style={styles.scheduleInput}
+                />
+              </View>
+            </View>
+            <Text style={styles.scheduleHelp}>Same-date assigned visits keep attendance active after the employee leaves the office geofence.</Text>
             <TextInput value={notes} onChangeText={setNotes} placeholder="Optional visit note" placeholderTextColor="#7B8798" multiline style={[styles.input, styles.notesInput]} />
             <Pressable onPress={() => void assignVisit()} disabled={saving} style={[styles.assignButton, saving && styles.dimmed]}>
               {saving ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="send" size={18} color="#FFFFFF" />}
@@ -471,6 +534,7 @@ export default function FieldVisitsScreen() {
             <View style={{ flex: 1 }}>
               <Text style={styles.visitTitle}>{visit.placeName}</Text>
               <Text style={styles.visitAddress}>{visit.placeAddress}</Text>
+              <Text style={styles.visitSchedule}>{formatVisitSchedule(visit.scheduledDate, visit.scheduledTime)}</Text>
               {visit.status === 'in_progress' ? <Text style={styles.visitInProgress}>Visit in progress</Text> : null}
               {supervisor ? <Text style={styles.visitMeta}>For: {employeeById.get(visit.employeeId)?.name || visit.employeeId}</Text> : null}
               {visit.notes ? <Text style={styles.visitMeta}>Note: {visit.notes}</Text> : null}
@@ -486,6 +550,32 @@ export default function FieldVisitsScreen() {
 function humanize(error: unknown) {
   const message = error instanceof Error ? error.message : 'Please try again.';
   return message.replace(/_/g, ' ');
+}
+
+function defaultVisitDate(): string {
+  return toMumbaiDateKey(new Date(Date.now() + 60 * 60_000));
+}
+
+function defaultVisitTime(): string {
+  const shifted = new Date(Date.now() + (5 * 60 + 30) * 60_000 + 60 * 60_000);
+  const roundedMinutes = Math.ceil(shifted.getUTCMinutes() / 15) * 15;
+  shifted.setUTCMinutes(roundedMinutes, 0, 0);
+  return `${String(shifted.getUTCHours()).padStart(2, '0')}:${String(shifted.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+function isValidVisitDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00+05:30`);
+  return Number.isFinite(parsed.getTime()) && toMumbaiDateKey(parsed) === value;
+}
+
+function formatVisitSchedule(date: string, time: string): string {
+  const match = /^(\d{2}):(\d{2})/.exec(time);
+  if (!match) return formatMumbaiDateKey(date);
+  const hour = Number(match[1]);
+  const minute = match[2];
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  return `${formatMumbaiDateKey(date)} · ${hour % 12 || 12}:${minute} ${suffix} IST`;
 }
 
 type RouteMetrics = { cumulativeMeters: number[]; totalMeters: number };
@@ -577,8 +667,10 @@ const styles = StyleSheet.create({
   searchRow: { flexDirection: 'row', gap: 8 }, input: { flex: 1, minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 13, color: '#111827', backgroundColor: '#FBFCFE', fontSize: 13 }, searchButton: { width: 48, height: 48, borderRadius: 14, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1769D2' },
   placeRow: { flexDirection: 'row', gap: 10, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#E6ECF4' }, placeName: { color: '#152238', fontSize: 13, fontWeight: '800' }, placeAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 2 }, selectedText: { color: '#1769D2', fontSize: 12, fontWeight: '700', marginTop: 12 },
   label: { color: '#475569', fontSize: 11, fontWeight: '800', marginTop: 15, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }, employeeRow: { gap: 8, paddingRight: 8 }, employeeChip: { borderRadius: 16, borderWidth: 1, borderColor: '#D6E0ED', paddingHorizontal: 11, paddingVertical: 9, backgroundColor: '#F7F9FC' }, employeeChipSelected: { backgroundColor: '#1769D2', borderColor: '#1769D2' }, employeeChipText: { color: '#475569', fontSize: 12, fontWeight: '700' }, employeeChipTextSelected: { color: '#FFFFFF' },
+  schedulePresetRow: { flexDirection: 'row', gap: 8, marginBottom: 10 }, schedulePreset: { minHeight: 34, borderRadius: 13, borderWidth: 1, borderColor: '#D6E0ED', paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F7F9FC' }, schedulePresetSelected: { borderColor: '#1769D2', backgroundColor: '#EAF1FF' }, schedulePresetText: { color: '#64748B', fontSize: 11, fontWeight: '800' }, schedulePresetTextSelected: { color: '#1769D2' },
+  scheduleInputRow: { flexDirection: 'row', gap: 9 }, scheduleInputBlock: { flex: 1.45 }, scheduleTimeBlock: { flex: 1 }, scheduleInputLabel: { color: '#64748B', fontSize: 10, fontWeight: '800', marginBottom: 5 }, scheduleInput: { minHeight: 46, borderRadius: 13, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 12, color: '#111827', backgroundColor: '#FBFCFE', fontSize: 13, fontWeight: '700' }, scheduleHelp: { color: '#64748B', fontSize: 10, lineHeight: 15, marginTop: 7 },
   notesInput: { marginTop: 14, minHeight: 60, paddingTop: 12, textAlignVertical: 'top' }, assignButton: { height: 48, borderRadius: 15, marginTop: 12, backgroundColor: '#1769D2', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }, assignButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' }, dimmed: { opacity: .6 }, disabledButton: { opacity: .72, backgroundColor: '#7B8798' }, note: { color: '#9A6200', fontSize: 11, marginTop: 10 },
   sectionTitle: { color: '#10233F', fontSize: 16, fontWeight: '900', marginBottom: 10 }, empty: { borderWidth: 1, borderStyle: 'dashed', borderColor: '#D6E0ED', borderRadius: 18, alignItems: 'center', padding: 28, backgroundColor: '#FAFBFD' }, emptyTitle: { color: '#334155', fontSize: 14, fontWeight: '800', marginTop: 8 }, emptyBody: { color: '#64748B', fontSize: 12, textAlign: 'center', lineHeight: 18, marginTop: 4 },
-  visitCard: { minHeight: 82, borderRadius: 18, padding: 13, marginBottom: 9, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', flexDirection: 'row', alignItems: 'center', gap: 11 }, visitCardActive: { borderColor: '#73C8A5', backgroundColor: '#F2FCF7' }, orderBubble: { width: 29, height: 29, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, orderText: { color: '#1769D2', fontSize: 12, fontWeight: '900' }, visitTitle: { color: '#152238', fontSize: 13, fontWeight: '900' }, visitAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 3 }, visitMeta: { color: '#475569', fontSize: 10, lineHeight: 15, marginTop: 4 }, visitInProgress: { color: '#16835B', fontSize: 10, fontWeight: '900', marginTop: 5, textTransform: 'uppercase', letterSpacing: .45 },
+  visitCard: { minHeight: 82, borderRadius: 18, padding: 13, marginBottom: 9, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', flexDirection: 'row', alignItems: 'center', gap: 11 }, visitCardActive: { borderColor: '#73C8A5', backgroundColor: '#F2FCF7' }, orderBubble: { width: 29, height: 29, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, orderText: { color: '#1769D2', fontSize: 12, fontWeight: '900' }, visitTitle: { color: '#152238', fontSize: 13, fontWeight: '900' }, visitAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 3 }, visitSchedule: { color: '#1769D2', fontSize: 10, lineHeight: 15, fontWeight: '800', marginTop: 5 }, visitMeta: { color: '#475569', fontSize: 10, lineHeight: 15, marginTop: 4 }, visitInProgress: { color: '#16835B', fontSize: 10, fontWeight: '900', marginTop: 5, textTransform: 'uppercase', letterSpacing: .45 },
   mapTop: { position: 'absolute', top: 0, left: 0, right: 0, gap: 9, paddingHorizontal: 14, paddingTop: 8 }, destinationHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10 }, destinationCopy: { flex: 1, minHeight: 52, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 14, justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, destinationTitle: { color: '#152238', fontSize: 15, fontWeight: '900' }, destinationAddress: { color: '#64748B', fontSize: 11, marginTop: 3 }, routeCard: { width: '100%', minHeight: 74, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 15, paddingVertical: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, routeCardNavigating: { backgroundColor: '#1769D2', borderColor: '#1769D2', alignItems: 'stretch' }, maneuverRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 13 }, turnArrowShell: { width: 58, height: 58, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.14)' }, maneuverCopy: { flex: 1, minWidth: 0 }, routeMetric: { color: '#0B8C66', fontSize: 13, fontWeight: '900', marginTop: 5 }, routeMetricNavigating: { color: '#DCEBFF' }, directionInstruction: { color: '#FFFFFF', fontSize: 16, lineHeight: 21, fontWeight: '900' }, previewRouteRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 11 }, previewIconShell: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, arrivedIcon: { backgroundColor: '#E7F8EF' }, visitStartedIcon: { backgroundColor: '#E7F8EF' }, lockedIcon: { backgroundColor: '#FFF5D9' }, previewRouteTitle: { color: '#152238', fontSize: 14, fontWeight: '900' }, previewRouteMeta: { color: '#64748B', fontSize: 11, marginTop: 3, lineHeight: 16 }, mapBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 14 }, completeButton: { height: 52, borderRadius: 18, backgroundColor: '#16835B', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, directionsButton: { height: 52, borderRadius: 18, backgroundColor: '#1769D2', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, stopDirectionsButton: { height: 52, borderRadius: 18, backgroundColor: '#BE3F3A', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, completeButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
 });

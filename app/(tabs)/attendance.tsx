@@ -32,7 +32,7 @@ import {
 } from "@/lib/storage";
 import { getEmployees } from "@/lib/employee-data";
 import type { AppUser, AttendanceCheckPayload, AttendanceRecord, Employee, Geofence, GeofenceEvaluation } from "@/lib/types";
-import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, getCompanyProfilesRemote, removeQueuedAttendanceAction, type DolibarrUser } from "@/lib/attendance-api";
+import { getAttendanceStatus, getCompanyAttendanceMonth, attendanceCheckIn, attendanceCheckOut, enqueueAttendanceAction, flushAttendanceQueue, getApiBaseUrlCandidates, getUserGeofences, getUsersRemote, getCompanyAttendanceToday, getCompanyProfilesRemote, removeQueuedAttendanceAction, isAutoCheckoutProtectedError, type DolibarrUser } from "@/lib/attendance-api";
 import {
   ensureLocationServicesEnabled,
   getCurrentPositionWithTimeout,
@@ -46,7 +46,6 @@ import {
 import { verifyBiometricForAttendance } from "@/lib/biometric-attendance";
 import {
   ensureAttendanceNotificationPermission,
-  notifyAutoCheckoutPending,
   notifyAutoCheckoutSynced,
 } from "@/lib/attendance-notifications";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
@@ -958,6 +957,7 @@ function AttendanceScreenContent() {
   const autoCheckoutSamplesRef = useRef<AutoCheckoutClientSample[]>([]);
   const autoCheckoutFirstOutsideAtRef = useRef<number | null>(null);
   const autoCheckoutInFlightRef = useRef(false);
+  const autoCheckoutProtectedDateRef = useRef<string | null>(null);
   const [autoCheckoutStatus, setAutoCheckoutStatus] = useState<string | null>(null);
   const [approvalActionId, setApprovalActionId] = useState<string | null>(null);
   const [permissionLoading, setPermissionLoading] = useState(false);
@@ -1294,7 +1294,6 @@ function AttendanceScreenContent() {
           biometricFailureReason: null,
         };
         const queuedPayload = await enqueueAttendanceAction("checkout", payload);
-        void notifyAutoCheckoutPending({ detectedAt: queuedPayload.capturedAtClient!, distanceMeters: queuedPayload.geofenceDistanceMeters }).catch(console.warn);
         const record = await attendanceCheckOut(queuedPayload);
         await addAttendance(record);
         await setCheckedIn(false);
@@ -1310,6 +1309,14 @@ function AttendanceScreenContent() {
         void loadBaseData();
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } catch (error) {
+        if (isAutoCheckoutProtectedError(error)) {
+          autoCheckoutProtectedDateRef.current = error.protectedDate || toMumbaiDateKey(new Date());
+          await removeQueuedAttendanceAction("checkout", requestId).catch(() => undefined);
+          clearForegroundAutoCheckout(
+            `${error.visitCount || "A"} field visit${error.visitCount === 1 ? " is" : "s are"} assigned today. Attendance and tracking remain active outside the office.`,
+          );
+          return;
+        }
         setAutoCheckoutStatus(
           error instanceof Error
             ? `Auto-checkout queued. Will retry when connection/session is ready. ${error.message}`
@@ -1333,6 +1340,14 @@ function AttendanceScreenContent() {
       if (!active?.id) {
         setAutoCheckoutStatus("Auto-checkout is waiting for the latest check-in session.");
         return;
+      }
+      const today = toMumbaiDateKey(new Date());
+      if (autoCheckoutProtectedDateRef.current === today) {
+        setAutoCheckoutStatus("Field visits are assigned today. Auto-checkout is paused; attendance and tracking remain active.");
+        return;
+      }
+      if (autoCheckoutProtectedDateRef.current && autoCheckoutProtectedDateRef.current !== today) {
+        autoCheckoutProtectedDateRef.current = null;
       }
       const zone = geofences.find((item) => item.id === active.geofenceId) || null;
       if (!zone) {

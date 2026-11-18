@@ -37,7 +37,10 @@ import { registerAuthRoutes } from "@/server/routes/auth.routes";
 import { registerStateRoutes } from "@/server/routes/state.routes";
 import { registerAttendanceActionRoutes } from "@/server/routes/attendance-actions.routes";
 import { registerGeofenceRoutes } from "@/server/routes/geofences.routes";
-import { registerFieldTrackingRoutes } from "@/server/routes/field-tracking.routes";
+import {
+  getFieldVisitAutoCheckoutProtection,
+  registerFieldTrackingRoutes,
+} from "@/server/routes/field-tracking.routes";
 
 
 type AdminWsClientMeta = {
@@ -3349,6 +3352,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     resolveDolibarrConfigForUser,
     syncAttendanceWithDolibarr,
     insertNotificationInMySql,
+    hasFieldVisitAutoCheckoutProtection: async (userId: string, scheduledDate: string, companyId?: string | null) => {
+      if (!isMySqlStateEnabled()) return { protected: false, visitCount: 0 };
+      return getFieldVisitAutoCheckoutProtection(await getMySqlPool(), userId, scheduledDate, companyId);
+    },
   });
 
   registerAttendanceRoutes(app, {

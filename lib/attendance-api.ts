@@ -362,7 +362,32 @@ function buildBodyPreview(text: string): string {
 let cachedLastWorkingApiBase: string | null = null;
 
 class ApiHttpError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null = null,
+    readonly details: Record<string, unknown> | null = null,
+  ) { super(message); }
+}
+
+export class AutoCheckoutProtectedError extends Error {
+  readonly code = "FIELD_VISIT_DAY_PROTECTED" as const;
+
+  constructor(
+    message: string,
+    readonly protectedDate: string,
+    readonly visitCount: number,
+  ) {
+    super(message);
+    this.name = "AutoCheckoutProtectedError";
+  }
+}
+
+export function isAutoCheckoutProtectedError(error: unknown): error is AutoCheckoutProtectedError {
+  return error instanceof AutoCheckoutProtectedError || (
+    error instanceof Error &&
+    (error as { code?: unknown }).code === "FIELD_VISIT_DAY_PROTECTED"
+  );
 }
 
 type ApiRequestInit = RequestInit & {
@@ -453,7 +478,11 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
           );
           continue;
         }
-        throw new ApiHttpError(messageFromJson || text || `HTTP ${response.status}`, response.status);
+        const errorDetails = parsed && typeof parsed === "object"
+          ? parsed as Record<string, unknown>
+          : null;
+        const errorCode = typeof errorDetails?.code === "string" ? errorDetails.code : null;
+        throw new ApiHttpError(messageFromJson || text || `HTTP ${response.status}`, response.status, errorCode, errorDetails);
       }
       if (!isValid) {
         const preview = buildBodyPreview(text);
@@ -775,6 +804,14 @@ async function submitAttendanceAction(type: "checkin" | "checkout", payload: Att
     if (!automatic) await AsyncStorage.removeItem(key);
     return record;
   } catch (error) {
+    if (automatic && error instanceof ApiHttpError && error.code === "FIELD_VISIT_DAY_PROTECTED") {
+      if (payload.requestId) await removeQueuedAttendanceAction(type, payload.requestId);
+      throw new AutoCheckoutProtectedError(
+        error.message,
+        typeof error.details?.protectedDate === "string" ? error.details.protectedDate : "",
+        Math.max(0, Number(error.details?.visitCount || 0)),
+      );
+    }
     if (!automatic && error instanceof ApiHttpError && error.status >= 400 && error.status < 500) await AsyncStorage.removeItem(key);
     throw error;
   }
@@ -946,6 +983,11 @@ async function flushAttendanceQueueOnce(): Promise<void> {
       }
       if (entry.payload.requestId) await removeQueuedAttendanceAction(entry.type, entry.payload.requestId);
     } catch (error) {
+      if (isAutoCheckoutProtectedError(error)) {
+        // The server deliberately kept attendance open for a scheduled field
+        // visit. submitAttendanceAction already removed this stale exit item.
+        continue;
+      }
       await updateQueue(items => items.map(item => item.type === entry.type && item.payload.requestId === entry.payload.requestId
         ? { ...item, _retries: retries + 1 } : item));
       console.warn("Attendance sync pending", error instanceof Error ? error.message : error);

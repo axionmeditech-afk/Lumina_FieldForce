@@ -3,6 +3,7 @@ import type { Pool } from 'mysql2/promise';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import type { AttendanceRecord } from '@/lib/types';
+import { toMumbaiDateKey } from '@/lib/ist-time';
 import {
   computeRoute,
   getConfiguredRouteSource,
@@ -78,6 +79,13 @@ const visitEvidenceSchema = z.object({
   }).nullable().optional(),
 });
 
+const scheduledDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+  const parsed = new Date(`${value}T00:00:00+05:30`);
+  return Number.isFinite(parsed.getTime()) && toMumbaiDateKey(parsed) === value;
+}, 'Choose a valid visit date.');
+
+const scheduledTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Choose a valid 24-hour visit time.');
+
 const assignmentSchema = z.object({
   employeeId: z.string().trim().min(1).max(64),
   place: coordinateSchema.extend({
@@ -85,6 +93,8 @@ const assignmentSchema = z.object({
     name: z.string().trim().min(1).max(200),
     address: z.string().trim().max(500).default(''),
   }),
+  scheduledDate: scheduledDateSchema,
+  scheduledTime: scheduledTimeSchema,
   notes: z.string().trim().max(500).optional().default(''),
 });
 
@@ -162,7 +172,8 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         }
         const pool = await deps.getMySqlPool();
         const [rows] = await pool.execute<any[]>(
-          `SELECT id, company_id, place_id, place_name, place_address, latitude, longitude
+          `SELECT id, company_id, place_id, place_name, place_address, latitude, longitude,
+                  scheduled_date, scheduled_time
            FROM lff_place_assignments
            WHERE id=? AND employee_id=? AND status='pending' LIMIT 1`,
           [parsed.data.assignmentId, employeeId],
@@ -174,6 +185,10 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         }
         if (active.companyId && String(assignment.company_id) !== active.companyId) {
           res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'Check in to the visit workspace before starting directions.' });
+          return;
+        }
+        if (toSqlDateKey(assignment.scheduled_date) !== toMumbaiDateKey(new Date())) {
+          res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'Directions are available only on the assigned visit date.' });
           return;
         }
         destination = {
@@ -216,12 +231,14 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const pool = await deps.getMySqlPool();
     const [rows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-              latitude, longitude, queue_order, notes, status, created_at, started_at, completed_at,
+              latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, started_at, completed_at,
               arrival_latitude, arrival_longitude, arrival_accuracy,
               completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
        WHERE company_id=? ${supervisor ? '' : 'AND employee_id=?'}
-       ORDER BY CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, employee_id, queue_order, created_at DESC`,
+       ORDER BY scheduled_date ASC, scheduled_time ASC,
+                CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+                employee_id, queue_order, created_at DESC`,
       supervisor ? [companyId] : [companyId, employeeId],
     );
     res.json({ assignments: rows.map(mapAssignment) });
@@ -242,24 +259,30 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.status(403).json({ message: 'Select an authorised workspace first.' });
       return;
     }
+    const today = toMumbaiDateKey(new Date());
+    if (parsed.data.scheduledDate < today) {
+      res.status(400).json({ message: 'A field visit cannot be assigned in the past.' });
+      return;
+    }
     const pool = await deps.getMySqlPool();
     const [sequenceRows] = await pool.execute<any[]>(
       `SELECT COALESCE(MAX(queue_order), 0) AS last_order
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status IN ('pending','in_progress')`,
-      [companyId, parsed.data.employeeId],
+       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status IN ('pending','in_progress')`,
+      [companyId, parsed.data.employeeId, parsed.data.scheduledDate],
     );
     const queueOrder = Number(sequenceRows[0]?.last_order || 0) + 1;
     const id = randomUUID();
     await pool.execute(
       `INSERT INTO lff_place_assignments
         (id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-         latitude, longitude, queue_order, notes, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW(3), NOW(3))`,
+         latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW(3), NOW(3))`,
       [
         id, companyId, parsed.data.employeeId, String(req.auth?.sub || ''),
         parsed.data.place.placeId, parsed.data.place.name, parsed.data.place.address,
-        parsed.data.place.latitude, parsed.data.place.longitude, queueOrder, parsed.data.notes || null,
+        parsed.data.place.latitude, parsed.data.place.longitude, queueOrder,
+        parsed.data.scheduledDate, `${parsed.data.scheduledTime}:00`, parsed.data.notes || null,
       ],
     );
     res.status(201).json({
@@ -268,7 +291,8 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         assignedBy: String(req.auth?.sub || ''), placeId: parsed.data.place.placeId,
         placeName: parsed.data.place.name, placeAddress: parsed.data.place.address,
         latitude: parsed.data.place.latitude, longitude: parsed.data.place.longitude,
-        queueOrder, notes: parsed.data.notes || '', status: 'pending',
+        queueOrder, scheduledDate: parsed.data.scheduledDate, scheduledTime: parsed.data.scheduledTime,
+        notes: parsed.data.notes || '', status: 'pending',
         createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
         arrivalLocation: null, completionLocation: null,
       },
@@ -302,6 +326,11 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       if (active.companyId && String(assignment.company_id) !== active.companyId) {
         await connection.rollback();
         res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'This visit does not belong to your active check-in workspace.' });
+        return;
+      }
+      if (toSqlDateKey(assignment.scheduled_date) !== toMumbaiDateKey(new Date())) {
+        await connection.rollback();
+        res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'This visit can be started only on its assigned date.' });
         return;
       }
       const [activeVisitRows] = await connection.execute<any[]>(
@@ -338,7 +367,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       );
       const [updatedRows] = await connection.execute<any[]>(
         `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-                latitude, longitude, queue_order, notes, status, created_at, started_at, completed_at,
+                latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, started_at, completed_at,
                 arrival_latitude, arrival_longitude, arrival_accuracy,
                 completion_latitude, completion_longitude, completion_accuracy
          FROM lff_place_assignments WHERE id=? LIMIT 1`,
@@ -384,13 +413,13 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
     const [nextRows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-              latitude, longitude, queue_order, notes, status, created_at, started_at, completed_at,
+              latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, started_at, completed_at,
               arrival_latitude, arrival_longitude, arrival_accuracy,
               completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
-       WHERE employee_id=? AND company_id=? AND status='pending'
-       ORDER BY queue_order ASC, created_at ASC LIMIT 1`,
-      [employeeId, active.companyId || await deps.resolveRequestCompanyId(req)],
+       WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status='pending'
+       ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC LIMIT 1`,
+      [employeeId, active.companyId || await deps.resolveRequestCompanyId(req), toMumbaiDateKey(new Date())],
     );
     res.json({ ok: true, nextAssignment: nextRows[0] ? mapAssignment(nextRows[0]) : null });
   });
@@ -576,26 +605,23 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       [companyId, employeeId, bounds.start, bounds.end],
     );
     const points = rows.map(mapKpiPoint).filter(isValidKpiPoint);
-    const dates = [...new Set(points.map((point) => localDateKey(point.capturedAt, offsetMinutes)))];
+    const routeDates = points.map((point) => localDateKey(point.capturedAt, offsetMinutes));
     const [visitRows] = await pool.execute<any[]>(
-      `SELECT status, started_at, completed_at FROM lff_place_assignments
+      `SELECT status, scheduled_date FROM lff_place_assignments
        WHERE company_id=? AND employee_id=? AND status<>'cancelled'
-         AND ((started_at>=? AND started_at<?) OR (completed_at>=? AND completed_at<?))`,
-      [companyId, employeeId, bounds.start, bounds.end, bounds.start, bounds.end],
+         AND scheduled_date>=? AND scheduled_date<DATE_ADD(?, INTERVAL 1 MONTH)`,
+      [companyId, employeeId, `${month}-01`, `${month}-01`],
     );
     const visitCounts = new Map<string, { total: number; completed: number }>();
     for (const visit of visitRows) {
-      const startedAt = asDateMillis(visit.started_at);
-      const completedAt = asDateMillis(visit.completed_at);
-      const date = Number.isFinite(startedAt)
-        ? localDateKey(startedAt, offsetMinutes)
-        : Number.isFinite(completedAt) ? localDateKey(completedAt, offsetMinutes) : '';
+      const date = toSqlDateKey(visit.scheduled_date);
       if (!date) continue;
       const counts = visitCounts.get(date) ?? { total: 0, completed: 0 };
       counts.total += 1;
-      if (String(visit.status) === 'completed' && Number.isFinite(completedAt)) counts.completed += 1;
+      if (String(visit.status) === 'completed') counts.completed += 1;
       visitCounts.set(date, counts);
     }
+    const dates = [...new Set([...routeDates, ...visitCounts.keys()])];
     const days = dates.map((date) => {
       const summary = summarizeTrackingDay(points, date, offsetMinutes);
       const visits = visitCounts.get(date) ?? { total: 0, completed: 0 };
@@ -659,20 +685,15 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const points = rows.map(mapKpiPoint).filter(isValidKpiPoint);
     const summary = summarizeTrackingDay(points, date, offsetMinutes);
     const [visitRows] = await pool.execute<any[]>(
-      `SELECT status, created_at, started_at, completed_at, place_name, place_address, latitude, longitude
+      `SELECT status, scheduled_date, scheduled_time, created_at, started_at, completed_at,
+              place_name, place_address, latitude, longitude
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status<>'cancelled'
-       ORDER BY queue_order ASC, created_at ASC`,
-      [companyId, employeeId],
+       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status<>'cancelled'
+       ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC`,
+      [companyId, employeeId, date],
     );
     const today = localDateKey(Date.now(), offsetMinutes);
-    const dayVisits = visitRows.filter((visit) => {
-      const startedAt = asDateMillis(visit.started_at);
-      const completedAt = asDateMillis(visit.completed_at);
-      return (Number.isFinite(startedAt) && localDateKey(startedAt, offsetMinutes) === date)
-        || (Number.isFinite(completedAt) && localDateKey(completedAt, offsetMinutes) === date)
-        || (date === today && ['pending', 'in_progress'].includes(String(visit.status)));
-    });
+    const dayVisits = visitRows;
     const nextVisit = date === today
       ? dayVisits.find((visit) => ['pending', 'in_progress'].includes(String(visit.status)))
       : null;
@@ -994,6 +1015,8 @@ async function ensureTables(pool: Pool): Promise<void> {
           latitude DECIMAL(10,7) NOT NULL,
           longitude DECIMAL(10,7) NOT NULL,
           queue_order INT UNSIGNED NOT NULL,
+          scheduled_date DATE NOT NULL,
+          scheduled_time TIME NOT NULL,
           notes VARCHAR(500) NULL,
           status ENUM('pending','in_progress','completed','cancelled') NOT NULL DEFAULT 'pending',
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -1008,7 +1031,8 @@ async function ensureTables(pool: Pool): Promise<void> {
           completion_accuracy DECIMAL(8,2) NULL,
           PRIMARY KEY (id),
           KEY idx_lff_place_assignments_employee_queue (company_id, employee_id, status, queue_order),
-          KEY idx_lff_place_assignments_company_status (company_id, status)
+          KEY idx_lff_place_assignments_company_status (company_id, status),
+          KEY idx_lff_place_assignments_employee_schedule (company_id, employee_id, scheduled_date, status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       );
       // Add the visit lifecycle fields to databases created by earlier builds.
@@ -1016,13 +1040,38 @@ async function ensureTables(pool: Pool): Promise<void> {
         `ALTER TABLE lff_place_assignments
          MODIFY COLUMN status ENUM('pending','in_progress','completed','cancelled') NOT NULL DEFAULT 'pending'`,
       );
+      await ensureColumn(pool, 'lff_place_assignments', 'scheduled_date', 'DATE NULL AFTER queue_order');
+      await ensureColumn(pool, 'lff_place_assignments', 'scheduled_time', 'TIME NULL AFTER scheduled_date');
       await ensureColumn(pool, 'lff_place_assignments', 'started_at', 'DATETIME(3) NULL AFTER updated_at');
+      // Legacy assignments predate scheduling. Give them a deterministic local
+      // work date/time before enforcing the new non-null contract.
+      await pool.execute(
+        `UPDATE lff_place_assignments
+         SET scheduled_date=COALESCE(scheduled_date,
+               CASE WHEN status IN ('pending','in_progress')
+                    THEN DATE(CONVERT_TZ(UTC_TIMESTAMP(3), '+00:00', '+05:30'))
+                    ELSE DATE(CONVERT_TZ(COALESCE(started_at, completed_at, created_at), '+00:00', '+05:30')) END),
+             scheduled_time=COALESCE(scheduled_time,
+               TIME(CONVERT_TZ(COALESCE(started_at, created_at), '+00:00', '+05:30')))
+         WHERE scheduled_date IS NULL OR scheduled_time IS NULL`,
+      );
+      await pool.execute(
+        `ALTER TABLE lff_place_assignments
+         MODIFY COLUMN scheduled_date DATE NOT NULL,
+         MODIFY COLUMN scheduled_time TIME NOT NULL`,
+      );
       await ensureColumn(pool, 'lff_place_assignments', 'arrival_latitude', 'DECIMAL(10,7) NULL AFTER completed_at');
       await ensureColumn(pool, 'lff_place_assignments', 'arrival_longitude', 'DECIMAL(10,7) NULL AFTER arrival_latitude');
       await ensureColumn(pool, 'lff_place_assignments', 'arrival_accuracy', 'DECIMAL(8,2) NULL AFTER arrival_longitude');
       await ensureColumn(pool, 'lff_place_assignments', 'completion_latitude', 'DECIMAL(10,7) NULL AFTER arrival_accuracy');
       await ensureColumn(pool, 'lff_place_assignments', 'completion_longitude', 'DECIMAL(10,7) NULL AFTER completion_latitude');
       await ensureColumn(pool, 'lff_place_assignments', 'completion_accuracy', 'DECIMAL(8,2) NULL AFTER completion_longitude');
+      await ensureIndex(
+        pool,
+        'lff_place_assignments',
+        'idx_lff_place_assignments_employee_schedule',
+        '(company_id, employee_id, scheduled_date, status)',
+      );
     })().catch((error) => {
       tablePromise = null;
       throw error;
@@ -1040,6 +1089,38 @@ async function ensureColumn(pool: Pool, table: string, column: string, definitio
   if (!rows.length) await pool.execute(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
 }
 
+async function ensureIndex(pool: Pool, table: string, index: string, columns: string): Promise<void> {
+  const [rows] = await pool.execute<any[]>(
+    `SELECT 1 FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? LIMIT 1`,
+    [table, index],
+  );
+  if (!rows.length) await pool.execute(`CREATE INDEX \`${index}\` ON \`${table}\` ${columns}`);
+}
+
+export async function getFieldVisitAutoCheckoutProtection(
+  pool: Pool,
+  employeeId: string,
+  scheduledDate: string,
+  companyId?: string | null,
+): Promise<{ protected: boolean; visitCount: number }> {
+  if (!employeeId || !/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) {
+    return { protected: false, visitCount: 0 };
+  }
+  await ensureTables(pool);
+  const params: string[] = [employeeId, scheduledDate];
+  const companyFilter = companyId ? ' AND company_id=?' : '';
+  if (companyId) params.push(companyId);
+  const [rows] = await pool.execute<any[]>(
+    `SELECT COUNT(*) AS visit_count
+     FROM lff_place_assignments
+     WHERE employee_id=? AND scheduled_date=? AND status<>'cancelled'${companyFilter}`,
+    params,
+  );
+  const visitCount = Math.max(0, Number(rows[0]?.visit_count || 0));
+  return { protected: visitCount > 0, visitCount };
+}
+
 function mapAssignment(row: Record<string, unknown>) {
   return {
     assignmentId: String(row.id || ''),
@@ -1052,6 +1133,8 @@ function mapAssignment(row: Record<string, unknown>) {
     latitude: Number(row.latitude),
     longitude: Number(row.longitude),
     queueOrder: Number(row.queue_order || 0),
+    scheduledDate: toSqlDateKey(row.scheduled_date),
+    scheduledTime: toSqlTime(row.scheduled_time),
     notes: String(row.notes || ''),
     status: String(row.status || 'pending'),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
@@ -1068,6 +1151,17 @@ function mapAssignment(row: Record<string, unknown>) {
       accuracy: row.completion_accuracy == null ? null : Number(row.completion_accuracy),
     },
   };
+}
+
+function toSqlDateKey(value: unknown): string {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString().slice(0, 10);
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(String(value || ''));
+  return match?.[1] || '';
+}
+
+function toSqlTime(value: unknown): string {
+  const match = /^(\d{2}:\d{2})/.exec(String(value || ''));
+  return match?.[1] || '09:00';
 }
 
 async function probe(baseValue: string, path: string): Promise<boolean> {

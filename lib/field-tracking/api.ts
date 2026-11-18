@@ -17,6 +17,8 @@ export type FieldVisitAssignment = {
   latitude: number;
   longitude: number;
   queueOrder: number;
+  scheduledDate: string;
+  scheduledTime: string;
   notes: string;
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
   createdAt: string;
@@ -161,6 +163,8 @@ export async function getFieldVisitAssignments(): Promise<FieldVisitAssignment[]
 export function createFieldVisitAssignment(input: {
   employeeId: string;
   place: PlaceSearchResult;
+  scheduledDate: string;
+  scheduledTime: string;
   notes?: string;
 }): Promise<{ assignment: FieldVisitAssignment }> {
   return requestJson('/field-tracking/assignments', {
