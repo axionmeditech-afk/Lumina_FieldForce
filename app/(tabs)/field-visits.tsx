@@ -41,6 +41,7 @@ const isSupervisor = (role?: string | null) => ['admin', 'hr', 'manager'].includ
 
 export default function FieldVisitsScreen() {
   const { user, company } = useAuth();
+  const companyId = company?.id;
   const navigation = useNavigation();
   const isFocused = useIsFocused();
   const visitNavigation = useVisitNavigation();
@@ -70,6 +71,7 @@ export default function FieldVisitsScreen() {
   const [arrived, setArrived] = useState(false);
   const [rerouting, setRerouting] = useState(false);
   const [visitActionBusy, setVisitActionBusy] = useState(false);
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const locationSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
   const offRouteSamplesRef = useRef(0);
   const lastRerouteAtRef = useRef(0);
@@ -80,14 +82,19 @@ export default function FieldVisitsScreen() {
   useEffect(() => {
     const saved = visitNavigation.session;
     if (!saved) return;
-    setSelectedVisit(saved.visit);
-    setRoute(saved.route);
-    setCurrentPosition(saved.position);
-    setCurrentAccuracy(saved.accuracy);
-    setHeading(saved.heading);
-    setNavigationActive(saved.status === 'active');
-    setArrived(saved.status === 'arrived');
-  }, [visitNavigation.session?.updatedAt]);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setSelectedVisit(saved.visit);
+      setRoute(saved.route);
+      setCurrentPosition(saved.position);
+      setCurrentAccuracy(saved.accuracy);
+      setHeading(saved.heading);
+      setNavigationActive(saved.status === 'active');
+      setArrived(saved.status === 'arrived');
+    });
+    return () => { cancelled = true; };
+  }, [visitNavigation.session]);
 
   useEffect(() => subscribeToVisitNavigationCheckout(() => {
     setCheckedIn(false);
@@ -97,7 +104,8 @@ export default function FieldVisitsScreen() {
 
   useEffect(() => {
     if (!visitNavigation.expandNonce || !visitNavigation.session) return;
-    setMapOpen(true);
+    const timer = setTimeout(() => setMapOpen(true), 0);
+    return () => clearTimeout(timer);
   }, [visitNavigation.expandNonce, visitNavigation.session]);
 
   useEffect(() => {
@@ -106,11 +114,12 @@ export default function FieldVisitsScreen() {
   }, [mapOpen, visitNavigation.setScreenExpanded]);
 
   const reload = useCallback(async (quiet = false) => {
-    quiet ? setRefreshing(true) : setLoading(true);
+    if (quiet) setRefreshing(true);
+    else setLoading(true);
     try {
       const [nextAssignments, nextEmployees, attendance] = await Promise.all([
         getFieldVisitAssignments(),
-        supervisor ? getUsersRemote({ companyId: company?.id }) : Promise.resolve([]),
+        supervisor ? getUsersRemote({ companyId }) : Promise.resolve([]),
         supervisor ? Promise.resolve({ active: null }) : getAttendanceStatus().catch(() => ({ records: [], active: null })),
       ]);
       setAssignments(nextAssignments);
@@ -122,12 +131,18 @@ export default function FieldVisitsScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [company?.id, supervisor]);
+  }, [companyId, supervisor]);
 
   useEffect(() => {
     if (!isFocused) return;
-    void reload();
+    const timer = setTimeout(() => void reload(), 0);
+    return () => clearTimeout(timer);
   }, [isFocused, reload]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setClockNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const pending = useMemo(() => assignments.filter((item) => item.status === 'pending' || item.status === 'in_progress'), [assignments]);
   const employeeById = useMemo(() => new Map(employees.map((item: any) => [String(item.id), item])), [employees]);
@@ -336,7 +351,7 @@ export default function FieldVisitsScreen() {
     };
   }, [projection, route.distanceMetres, route.durationSeconds, route.maneuvers, routeMetrics]);
   const progressPercent = routeMetrics.totalMeters > 0 ? Math.max(0, Math.min(100, ((projection?.distanceAlongRouteMeters ?? 0) / routeMetrics.totalMeters) * 100)) : 0;
-  const previewArrival = route.durationSeconds ? new Date(Date.now() + route.durationSeconds * 1_000) : null;
+  const previewArrival = route.durationSeconds ? new Date(clockNow + route.durationSeconds * 1_000) : null;
   const mapPoints = useMemo(() => currentPosition ? [{
     pointId: 'visit-navigation-position', sessionId: 'visit-navigation', sequence: 1,
     latitude: currentPosition.latitude, longitude: currentPosition.longitude,
@@ -349,9 +364,12 @@ export default function FieldVisitsScreen() {
     if (!navigationActive || !selectedVisit || !currentPosition) return;
     const destinationDistance = haversineMetres(currentPosition, selectedVisit);
     if (destinationDistance > 100) return;
-    setArrived(true);
-    stopDirections();
-    speak(`You have reached ${selectedVisit.placeName}. Start the visit when ready.`);
+    const timer = setTimeout(() => {
+      setArrived(true);
+      stopDirections();
+      speak(`You have reached ${selectedVisit.placeName}. Start the visit when ready.`);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [currentPosition, navigationActive, selectedVisit, stopDirections, visitNavigation.session]);
 
   useEffect(() => {
