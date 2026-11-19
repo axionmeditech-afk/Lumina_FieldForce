@@ -6,7 +6,7 @@ import { router, usePathname } from 'expo-router';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { getAttendanceStatus } from '@/lib/attendance-api';
-import { planFieldRoute, type FieldVisitAssignment } from '@/lib/field-tracking/api';
+import { getFieldVisitAssignments, planFieldRoute, type FieldVisitAssignment } from '@/lib/field-tracking/api';
 import { formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
 import { buildRouteMetrics, headingDifference, projectOnRoute, remainingRoute } from '@/lib/field-tracking/navigation-geometry';
 import type { Coordinate, RoutePlan } from '@/lib/field-tracking/types';
@@ -248,6 +248,31 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
   }, [storageKey, stopWatch]);
 
   useEffect(() => subscribeToVisitNavigationCheckout(() => clear()), [clear]);
+
+  // A supervisor can cancel a pending or active visit. Revalidate the durable
+  // assignment while a route is open so a cancelled job also stops location,
+  // voice guidance and the floating navigator on the employee device.
+  useEffect(() => {
+    const assignmentId = session?.visit.assignmentId;
+    if (!assignmentId) return;
+    let disposed = false;
+    const verifyAssignment = async () => {
+      try {
+        const assignments = await getFieldVisitAssignments();
+        const active = assignments.some((item) => item.assignmentId === assignmentId && ['pending', 'in_progress'].includes(item.status));
+        if (!disposed && !active) await clear();
+      } catch {
+        // A transient network failure must not stop valid directions.
+      }
+    };
+    const initial = setTimeout(() => void verifyAssignment(), 2_000);
+    const timer = setInterval(() => void verifyAssignment(), 30_000);
+    return () => {
+      disposed = true;
+      clearTimeout(initial);
+      clearInterval(timer);
+    };
+  }, [clear, session?.visit.assignmentId]);
 
   useEffect(() => {
     if (session?.status !== 'active') return;

@@ -2,7 +2,11 @@ import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 import { getApiToken } from '@/lib/storage';
 import type { Coordinate, FieldSessionKpis, PlaceSearchResult, RoutePlan, RoutePoint, TrackingSession } from './types';
 
-type RequestOptions = RequestInit & { timeoutMs?: number; retryAcrossBases?: boolean };
+type RequestOptions = RequestInit & {
+  timeoutMs?: number;
+  retryAcrossBases?: boolean;
+  retryNotFoundAcrossBases?: boolean;
+};
 
 class NonRetryableFieldRequestError extends Error {}
 
@@ -35,7 +39,7 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   if (!token) throw new Error('Please sign in again to use field tracking.');
   const bases = await getApiBaseUrlCandidates();
   if (!bases.length) throw new Error('Backend is not configured.');
-  const { timeoutMs = 12_000, retryAcrossBases = false, ...requestInit } = options;
+  const { timeoutMs = 12_000, retryAcrossBases = false, retryNotFoundAcrossBases = false, ...requestInit } = options;
   const method = (requestInit.method || 'GET').toUpperCase();
   const candidates = ['GET', 'HEAD'].includes(method) || retryAcrossBases ? bases : bases.slice(0, 1);
   const deadline = Date.now() + timeoutMs;
@@ -73,6 +77,13 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
       const { response, body } = await Promise.race([request, hardTimeout]);
       if (!response.ok) {
         const message = body?.message || body?.error || `Field tracking request failed (${response.status}).`;
+        // During a rolling Render deploy one service can expose a newly added
+        // route a few minutes before the other. Explicitly opted-in requests
+        // may try the secondary service instead of surfacing a false 404.
+        if (response.status === 404 && retryNotFoundAcrossBases) {
+          finalError = new Error(message);
+          continue;
+        }
         // Business/auth failures are deterministic across both services.
         // Retry only transient gateway/server failures on the secondary host.
         if (response.status < 500 && response.status !== 408 && response.status !== 429) {
@@ -170,6 +181,14 @@ export function createFieldVisitAssignment(input: {
   return requestJson('/field-tracking/assignments', {
     method: 'POST',
     body: JSON.stringify(input),
+  });
+}
+
+export function deleteFieldVisitAssignment(assignmentId: string): Promise<{ ok: boolean; assignmentId: string; status: 'cancelled' }> {
+  return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}`, {
+    method: 'DELETE',
+    retryAcrossBases: true,
+    retryNotFoundAcrossBases: true,
   });
 }
 

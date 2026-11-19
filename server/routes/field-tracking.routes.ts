@@ -346,6 +346,71 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     res.json({ ...eligibility, scheduledDate });
   });
 
+  app.delete('/api/field-tracking/assignments/:assignmentId', deps.requireAuth, requireStore, async (req, res) => {
+    if (!['admin', 'hr', 'manager'].includes(req.auth?.role || '')) {
+      res.status(403).json({ message: 'Supervisor access is required to delete an assigned visit.' });
+      return;
+    }
+    const assignmentId = String(req.params.assignmentId || '').trim();
+    const companyId = await deps.resolveRequestCompanyId(req);
+    if (!assignmentId || !companyId) {
+      res.status(400).json({ message: 'A valid visit assignment is required.' });
+      return;
+    }
+    const pool = await deps.getMySqlPool();
+    const [rows] = await pool.execute<any[]>(
+      `SELECT id, employee_id, place_name, scheduled_date, scheduled_time, status
+       FROM lff_place_assignments
+       WHERE id=? AND company_id=? LIMIT 1`,
+      [assignmentId, companyId],
+    );
+    const assignment = rows[0];
+    if (!assignment || !['pending', 'in_progress'].includes(String(assignment.status))) {
+      res.status(404).json({ message: 'This active assigned visit was not found or can no longer be deleted.' });
+      return;
+    }
+    const [result] = await pool.execute<any>(
+      `UPDATE lff_place_assignments
+       SET status='cancelled', updated_at=NOW(3)
+       WHERE id=? AND company_id=? AND status IN ('pending','in_progress')`,
+      [assignmentId, companyId],
+    );
+    if (!result.affectedRows) {
+      res.status(409).json({ message: 'The visit changed while it was being deleted. Refresh and try again.' });
+      return;
+    }
+    const employeeId = String(assignment.employee_id || '');
+    const alertTitle = 'Field visit cancelled';
+    const alertBody = `${String(assignment.place_name || 'Assigned visit')} has been removed from your visit queue.`;
+    if (deps.insertNotificationInMySql && employeeId) {
+      await deps.insertNotificationInMySql({
+        id: randomUUID(),
+        companyId,
+        title: alertTitle,
+        body: alertBody,
+        kind: 'alert',
+        audience: 'employee',
+        audienceUserIds: [employeeId],
+        createdById: String(req.auth?.sub || ''),
+        createdByName: 'FieldForce supervisor',
+        createdAt: new Date().toISOString(),
+        readByIds: [],
+      }).catch((error) => console.warn('[field-tracking] cancellation inbox alert failed', error));
+    }
+    res.json({ ok: true, assignmentId, status: 'cancelled' });
+    if (employeeId) {
+      void sendPushToUsers(pool, {
+        userIds: [employeeId],
+        companyId,
+        payload: {
+          title: alertTitle,
+          body: alertBody,
+          data: { screen: 'field-visits', kind: 'visit_cancelled', assignmentId },
+        },
+      }).catch((error) => console.warn('[field-tracking] cancellation push failed', error));
+    }
+  });
+
   app.post('/api/field-tracking/assignments/:assignmentId/start', deps.requireAuth, requireStore, async (req, res) => {
     const assignmentId = String(req.params.assignmentId || '').trim();
     const parsed = visitEvidenceSchema.safeParse(req.body);

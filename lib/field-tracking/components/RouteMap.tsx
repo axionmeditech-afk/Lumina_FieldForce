@@ -19,6 +19,8 @@ type MapPayload = {
   previewRoute: boolean;
   navigationActive: boolean;
   heading: number | null;
+  selectionEnabled: boolean;
+  initialCenter: Coordinate | null;
 };
 
 type WebViewHandle = { postMessage: (message: string) => void };
@@ -45,6 +47,9 @@ export function RouteMap({
   previewRoute = false,
   heading = null,
   interactiveHalts = false,
+  selectionEnabled = false,
+  initialCenter = null,
+  onMapPress,
 }: {
   points: RoutePoint[];
   matchedRoute?: Coordinate[];
@@ -61,6 +66,9 @@ export function RouteMap({
   previewRoute?: boolean;
   heading?: number | null;
   interactiveHalts?: boolean;
+  selectionEnabled?: boolean;
+  initialCenter?: Coordinate | null;
+  onMapPress?: (coordinate: Coordinate) => void;
 }) {
   const webRef = useRef<WebViewHandle>(null);
   const [rendererStatus, setRendererStatus] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -111,8 +119,10 @@ export function RouteMap({
     follow,
     previewRoute,
     navigationActive,
-    heading: heading != null && Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading : null
-  }), [plannedRoute, displayTravelRoute, destination, halts, waypoints, mapPosition, start, latest?.accuracy, progressPercent, follow, previewRoute, navigationActive, heading]);
+    heading: heading != null && Number.isFinite(heading) && heading >= 0 && heading <= 360 ? heading : null,
+    selectionEnabled,
+    initialCenter,
+  }), [plannedRoute, displayTravelRoute, destination, halts, waypoints, mapPosition, start, latest?.accuracy, progressPercent, follow, previewRoute, navigationActive, heading, selectionEnabled, initialCenter]);
 
   useEffect(() => {
     if (rendererStatus === 'ready') webRef.current?.postMessage(JSON.stringify({ type: 'map_state', payload }));
@@ -137,16 +147,22 @@ export function RouteMap({
         onError={() => setRendererStatus('error')}
         onLoadEnd={() => webRef.current?.postMessage(JSON.stringify({ type: 'map_state', payload }))}
         onMessage={(event: WebViewMessageEvent) => {
-          if (event.nativeEvent.data === 'map_ready') setRendererStatus('ready');
-          else if (event.nativeEvent.data === 'map_error') setRendererStatus('error');
-          else if (interactiveHalts) {
-            try {
-              const message = JSON.parse(event.nativeEvent.data) as { type?: string; id?: string };
-              if (message.type === 'halt_select' && message.id) {
-                setSelectedHalt(halts.find((halt) => halt.id === message.id) ?? null);
-              }
-            } catch { /* Ignore non-JSON renderer messages. */ }
+          if (event.nativeEvent.data === 'map_ready') {
+            setRendererStatus('ready');
+            return;
           }
+          if (event.nativeEvent.data === 'map_error') {
+            setRendererStatus('error');
+            return;
+          }
+          try {
+            const message = JSON.parse(event.nativeEvent.data) as { type?: string; id?: string; latitude?: number; longitude?: number };
+            if (selectionEnabled && message.type === 'map_press' && Number.isFinite(message.latitude) && Number.isFinite(message.longitude)) {
+              onMapPress?.({ latitude: Number(message.latitude), longitude: Number(message.longitude) });
+            } else if (interactiveHalts && message.type === 'halt_select' && message.id) {
+              setSelectedHalt(halts.find((halt) => halt.id === message.id) ?? null);
+            }
+          } catch { /* Ignore non-JSON renderer messages. */ }
         }}
         style={styles.webview}
       />
@@ -281,8 +297,8 @@ var tileUrl=${safeTileUrl},TILE=256;
 var root=document.getElementById('map'),scene=document.getElementById('scene'),tiles=document.getElementById('tiles'),routes=document.getElementById('routes'),markers=document.getElementById('markers');
 var target={lat:23.049,lon:72.55,zoom:13,bearing:0};
 var cam={lat:23.049,lon:72.55,zoom:13,bearing:0};
-var state=null,fittedPreview=false,lastPreviewKey='',following=true,manualBearing=null;
-var drag=null,pointers={},pinch=null,gesturing=false;
+var state=null,fittedPreview=false,lastPreviewKey='',lastSelectionKey='',lastInitialCenterKey='',following=true,manualBearing=null;
+var drag=null,pointers={},pinch=null,gesturing=false,tapCandidate=null;
 var tileNodes={},animating=false,lastTick=null;
 var EASE=7;
 function post(message){if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(message)}
@@ -416,7 +432,17 @@ function apply(next){
 
   var snapCamera=false;
 
-  if(state.previewRoute&&planned.length>1&&!fittedPreview){
+  var selectionKey=state.selectionEnabled&&valid(state.destination)?state.destination.latitude.toFixed(7)+':'+state.destination.longitude.toFixed(7):'';
+  var initialCenterKey=state.selectionEnabled&&valid(state.initialCenter)?state.initialCenter.latitude.toFixed(7)+':'+state.initialCenter.longitude.toFixed(7):'';
+  if(state.selectionEnabled&&selectionKey&&selectionKey!==lastSelectionKey){
+    target={lat:state.destination.latitude,lon:state.destination.longitude,zoom:Math.max(16,cam.zoom),bearing:0};
+    lastSelectionKey=selectionKey;snapCamera=true;following=false;fittedPreview=true
+  }else if(state.selectionEnabled&&!selectionKey&&initialCenterKey&&initialCenterKey!==lastInitialCenterKey){
+    target={lat:state.initialCenter.latitude,lon:state.initialCenter.longitude,zoom:15,bearing:0};
+    lastInitialCenterKey=initialCenterKey;snapCamera=true;following=false;fittedPreview=true
+  }
+
+  if(!state.selectionEnabled&&state.previewRoute&&planned.length>1&&!fittedPreview){
     if(valid(state.position)){target={lat:state.position.latitude,lon:state.position.longitude,zoom:17,bearing:0}}
     else{var fit=fitRouteTarget(planned);if(fit)target={lat:fit.lat,lon:fit.lon,zoom:fit.zoom,bearing:0}}
     fittedPreview=true;snapCamera=true
@@ -443,12 +469,14 @@ function apply(next){
 function receive(raw){try{var message=JSON.parse(raw);if(message.type==='map_state')apply(message.payload)}catch(_){}}
 
 function centerOnPosition(){
-  if(!state||!valid(state.position))return;
+  if(!state)return;
+  var focus=valid(state.position)?state.position:(state.selectionEnabled&&valid(state.initialCenter)?state.initialCenter:null);
+  if(!focus)return;
   following=true;manualBearing=null;
   var planned=points(state.plannedRoute),isPreview=state.previewRoute&&planned.length>1;
-  var targetZoom=state.navigationActive?18:(isPreview?17:16);
+  var targetZoom=state.navigationActive?18:(isPreview?17:(state.selectionEnabled?15:16));
   var targetBearing=state.navigationActive&&Number.isFinite(state.heading)?state.heading:0;
-  target={lat:state.position.latitude,lon:state.position.longitude,zoom:targetZoom,bearing:targetBearing};
+  target={lat:focus.latitude,lon:focus.longitude,zoom:targetZoom,bearing:targetBearing};
   ensureAnimating()
 }
 
@@ -475,6 +503,7 @@ root.addEventListener('pointerdown',function(event){
   if(event.target&&event.target.tagName==='BUTTON')return;
   event.preventDefault();
   pointers[event.pointerId]={x:event.clientX,y:event.clientY};
+  if(pointerList().length===1)tapCandidate={id:event.pointerId,x:event.clientX,y:event.clientY};else tapCandidate=null;
   root.setPointerCapture(event.pointerId);
   gesturing=true;ensureAnimating();
   if(pointerList().length===1)resetDragFromRemaining();else startPinch()
@@ -483,6 +512,7 @@ root.addEventListener('pointermove',function(event){
   if(!pointers[event.pointerId])return;
   event.preventDefault();
   pointers[event.pointerId]={x:event.clientX,y:event.clientY};
+  if(tapCandidate&&tapCandidate.id===event.pointerId&&pointDistance(tapCandidate,{x:event.clientX,y:event.clientY})>9)tapCandidate=null;
   var list=pointerList();
   if(list.length>=2){
     if(!pinch)startPinch();
@@ -504,8 +534,12 @@ root.addEventListener('pointermove',function(event){
   following=false;manualBearing=cam.bearing;fittedPreview=true
 });
 function releasePointer(event){
+  var shouldSelect=!!(tapCandidate&&tapCandidate.id===event.pointerId&&state&&state.selectionEnabled&&pointerList().length===1);
+  var selectedScreenPoint={x:event.clientX,y:event.clientY};
   delete pointers[event.pointerId];pinch=null;resetDragFromRemaining();
-  if(pointerList().length===0)gesturing=false
+  if(pointerList().length===0)gesturing=false;
+  if(shouldSelect){var selectedWorld=worldAt(selectedScreenPoint),selected=unproject(selectedWorld.x,selectedWorld.y,cam.zoom);post(JSON.stringify({type:'map_press',latitude:selected.lat,longitude:selected.lon}))}
+  tapCandidate=null
 }
 root.addEventListener('pointerup',releasePointer);
 root.addEventListener('pointercancel',releasePointer);

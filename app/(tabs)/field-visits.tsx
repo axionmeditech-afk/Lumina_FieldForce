@@ -21,6 +21,7 @@ import { getCurrentPositionWithTimeout, getLastKnownLocationSafe } from '@/lib/l
 import {
   completeFieldVisitAssignment,
   createFieldVisitAssignment,
+  deleteFieldVisitAssignment,
   getFieldVisitAssignments,
   planFieldRoute,
   searchFieldPlaces,
@@ -54,11 +55,18 @@ export default function FieldVisitsScreen() {
   const [results, setResults] = useState<PlaceSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [selectedPlace, setSelectedPlace] = useState<PlaceSearchResult | null>(null);
+  const [placePickerOpen, setPlacePickerOpen] = useState(false);
+  const [mapSearchQuery, setMapSearchQuery] = useState('');
+  const [mapSearchResults, setMapSearchResults] = useState<PlaceSearchResult[]>([]);
+  const [mapSearching, setMapSearching] = useState(false);
+  const [mapCandidate, setMapCandidate] = useState<PlaceSearchResult | null>(null);
+  const [mapInitialCenter, setMapInitialCenter] = useState<{ latitude: number; longitude: number } | null>(null);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
   const [scheduledDate, setScheduledDate] = useState(() => defaultVisitDate());
   const [scheduledTime, setScheduledTime] = useState(() => defaultVisitTime());
   const [saving, setSaving] = useState(false);
+  const [deletingVisitId, setDeletingVisitId] = useState<string | null>(null);
   const [selectedVisit, setSelectedVisit] = useState<FieldVisitAssignment | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
   const [route, setRoute] = useState<RoutePlan>(EMPTY_ROUTE);
@@ -162,6 +170,61 @@ export default function FieldVisitsScreen() {
     }
   };
 
+  const openPlacePicker = async () => {
+    setMapCandidate(selectedPlace);
+    setMapSearchQuery(selectedPlace?.name || query);
+    setMapSearchResults([]);
+    setMapInitialCenter(selectedPlace ? { latitude: selectedPlace.latitude, longitude: selectedPlace.longitude } : null);
+    setPlacePickerOpen(true);
+    if (selectedPlace) return;
+    const lastKnown = await getLastKnownLocationSafe({ requiredAccuracy: 500, maxAgeMs: 30 * 60_000 });
+    if (lastKnown) {
+      setMapInitialCenter({ latitude: lastKnown.coords.latitude, longitude: lastKnown.coords.longitude });
+    }
+  };
+
+  const searchPlacesOnMap = async () => {
+    const value = mapSearchQuery.trim();
+    if (value.length < 3) {
+      Alert.alert('Search a place', 'Enter at least 3 characters to search on the map.');
+      return;
+    }
+    setMapSearching(true);
+    try {
+      const bias = mapCandidate ?? mapInitialCenter ?? undefined;
+      setMapSearchResults(await searchFieldPlaces(value, bias));
+    } catch (error) {
+      Alert.alert('Place search unavailable', humanize(error));
+    } finally {
+      setMapSearching(false);
+    }
+  };
+
+  const selectMapCoordinate = useCallback((coordinate: { latitude: number; longitude: number }) => {
+    const latitude = Number(coordinate.latitude.toFixed(7));
+    const longitude = Number(coordinate.longitude.toFixed(7));
+    setMapCandidate({
+      placeId: `manual:${latitude},${longitude}`,
+      name: 'Custom map location',
+      address: `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`,
+      latitude,
+      longitude,
+      primaryType: 'manual_pin',
+    });
+    setMapSearchResults([]);
+  }, []);
+
+  const confirmMapPlace = () => {
+    if (!mapCandidate) {
+      Alert.alert('Select a location', 'Choose a search result or tap an exact point on the map first.');
+      return;
+    }
+    setSelectedPlace(mapCandidate);
+    setQuery(mapCandidate.name);
+    setResults([]);
+    setPlacePickerOpen(false);
+  };
+
   const assignVisit = async () => {
     if (!selectedEmployeeId || !selectedPlace) {
       Alert.alert('Choose employee and place', 'Select the field employee and an exact search result first.');
@@ -196,6 +259,29 @@ export default function FieldVisitsScreen() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const deleteVisit = (visit: FieldVisitAssignment) => {
+    Alert.alert(
+      'Delete assigned visit?',
+      `${visit.placeName} will be removed from the employee's active queue. This action remains recorded as cancelled for audit history.`,
+      [
+        { text: 'Keep visit', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            setDeletingVisitId(visit.assignmentId);
+            void deleteFieldVisitAssignment(visit.assignmentId).then(() => {
+              setAssignments((current) => current.filter((item) => item.assignmentId !== visit.assignmentId));
+              if (selectedVisit?.assignmentId === visit.assignmentId) setSelectedVisit(null);
+            }).catch((error) => {
+              Alert.alert('Could not delete visit', humanize(error));
+            }).finally(() => setDeletingVisitId(null));
+          },
+        },
+      ],
+    );
   };
 
   const stopDirections = useCallback((announce = false) => {
@@ -417,6 +503,86 @@ export default function FieldVisitsScreen() {
 
   const selectedVisitScheduledToday = selectedVisit?.scheduledDate === toMumbaiDateKey(new Date());
 
+  if (placePickerOpen && supervisor) {
+    return (
+      <View style={styles.mapScreen}>
+        <RouteMap
+          points={[]}
+          follow={false}
+          destination={mapCandidate}
+          selectionEnabled
+          initialCenter={mapInitialCenter}
+          onMapPress={selectMapCoordinate}
+        />
+        <SafeAreaView style={styles.placePickerTop} edges={['top', 'left', 'right']}>
+          <View style={styles.placePickerHeader}>
+            <Pressable accessibilityLabel="Close map search" onPress={() => setPlacePickerOpen(false)} style={styles.menuButton}>
+              <Ionicons name="arrow-back" size={22} color="#152238" />
+            </Pressable>
+            <View style={styles.placePickerSearchShell}>
+              <Ionicons name="search" size={19} color="#64748B" />
+              <TextInput
+                value={mapSearchQuery}
+                onChangeText={setMapSearchQuery}
+                placeholder="Search area, place or address"
+                placeholderTextColor="#7B8798"
+                returnKeyType="search"
+                onSubmitEditing={() => void searchPlacesOnMap()}
+                style={styles.placePickerInput}
+              />
+              <Pressable accessibilityLabel="Search map" onPress={() => void searchPlacesOnMap()} disabled={mapSearching} style={styles.placePickerSearchButton}>
+                {mapSearching ? <ActivityIndicator size="small" color="#FFFFFF" /> : <Ionicons name="arrow-forward" size={19} color="#FFFFFF" />}
+              </Pressable>
+            </View>
+          </View>
+          {mapSearchResults.length ? (
+            <View style={styles.mapResultPanel}>
+              <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                {mapSearchResults.map((place) => (
+                  <Pressable
+                    key={place.placeId}
+                    onPress={() => {
+                      setMapCandidate(place);
+                      setMapInitialCenter({ latitude: place.latitude, longitude: place.longitude });
+                      setMapSearchQuery(place.name);
+                      setMapSearchResults([]);
+                    }}
+                    style={styles.mapResultRow}
+                  >
+                    <Ionicons name="location-outline" size={20} color="#1769D2" />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.placeName}>{place.name}</Text>
+                      <Text style={styles.placeAddress} numberOfLines={2}>{place.address}</Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </View>
+          ) : null}
+          <View pointerEvents="none" style={styles.mapTapHint}>
+            <Ionicons name="hand-left-outline" size={16} color="#254D82" />
+            <Text style={styles.mapTapHintText}>Search above or tap anywhere on the map to drop the pin.</Text>
+          </View>
+        </SafeAreaView>
+        <SafeAreaView style={styles.placePickerBottom} edges={['bottom', 'left', 'right']}>
+          <View style={styles.placePickerSelection}>
+            <View style={[styles.placePickerPin, !mapCandidate && styles.placePickerPinEmpty]}>
+              <Ionicons name={mapCandidate ? 'location' : 'map-outline'} size={21} color={mapCandidate ? '#FFFFFF' : '#64748B'} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.placePickerSelectionTitle}>{mapCandidate?.name || 'No location selected'}</Text>
+              <Text style={styles.placePickerSelectionAddress} numberOfLines={2}>{mapCandidate?.address || 'Tap the map or choose a search result.'}</Text>
+            </View>
+          </View>
+          <Pressable onPress={confirmMapPlace} disabled={!mapCandidate} style={[styles.mapDoneButton, !mapCandidate && styles.disabledButton]}>
+            <Ionicons name="checkmark-circle" size={20} color="#FFFFFF" />
+            <Text style={styles.completeButtonText}>Done</Text>
+          </Pressable>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
   if (selectedVisit && mapOpen && !supervisor) {
     return (
       <View style={styles.mapScreen}>
@@ -495,6 +661,14 @@ export default function FieldVisitsScreen() {
                 {searching ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="search" size={20} color="#FFFFFF" />}
               </Pressable>
             </View>
+            <Pressable onPress={() => void openPlacePicker()} style={styles.searchByMapButton}>
+              <View style={styles.searchByMapIcon}><Ionicons name="map" size={19} color="#1769D2" /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.searchByMapTitle}>Search by map</Text>
+                <Text style={styles.searchByMapDetail}>Search visually or tap an exact point to place the visit pin.</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={19} color="#1769D2" />
+            </Pressable>
             {results.map((place) => (
               <Pressable key={place.placeId} onPress={() => { setSelectedPlace(place); setResults([]); setQuery(place.name); }} style={styles.placeRow}>
                 <Ionicons name="location-outline" size={20} color="#1769D2" />
@@ -574,7 +748,19 @@ export default function FieldVisitsScreen() {
               {supervisor ? <Text style={styles.visitMeta}>For: {employeeById.get(visit.employeeId)?.name || visit.employeeId}</Text> : null}
               {visit.notes ? <Text style={styles.visitMeta}>Note: {visit.notes}</Text> : null}
             </View>
-            {!supervisor ? <Ionicons name="navigate" size={21} color="#1769D2" /> : null}
+            {!supervisor ? <Ionicons name="navigate" size={21} color="#1769D2" /> : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Delete visit to ${visit.placeName}`}
+                onPress={() => deleteVisit(visit)}
+                disabled={deletingVisitId === visit.assignmentId}
+                style={({ pressed }) => [styles.deleteVisitButton, pressed && styles.deleteVisitButtonPressed, deletingVisitId === visit.assignmentId && styles.dimmed]}
+              >
+                {deletingVisitId === visit.assignmentId
+                  ? <ActivityIndicator size="small" color="#B42318" />
+                  : <Ionicons name="trash-outline" size={19} color="#B42318" />}
+              </Pressable>
+            )}
           </Pressable>
         ))}
       </ScrollView>
@@ -700,6 +886,10 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: 18, paddingBottom: 36 }, title: { color: '#10233F', fontSize: 27, fontWeight: '900' }, subtitle: { color: '#64748B', fontSize: 13, lineHeight: 20, marginTop: 7, marginBottom: 18 },
   card: { backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', borderRadius: 20, padding: 15, marginBottom: 22 }, cardTitle: { color: '#10233F', fontSize: 15, fontWeight: '900', marginBottom: 12 },
   searchRow: { flexDirection: 'row', gap: 8 }, input: { flex: 1, minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 13, color: '#111827', backgroundColor: '#FBFCFE', fontSize: 13 }, searchButton: { width: 48, height: 48, borderRadius: 14, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1769D2' },
+  searchByMapButton: { minHeight: 62, borderRadius: 15, borderWidth: 1, borderColor: '#CFE0FA', backgroundColor: '#F3F7FE', flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 11, paddingVertical: 9, marginTop: 9 },
+  searchByMapIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#E3EDFF' },
+  searchByMapTitle: { color: '#173A70', fontSize: 12, fontWeight: '900' },
+  searchByMapDetail: { color: '#64748B', fontSize: 10, lineHeight: 14, marginTop: 2 },
   placeRow: { flexDirection: 'row', gap: 10, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#E6ECF4' }, placeName: { color: '#152238', fontSize: 13, fontWeight: '800' }, placeAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 2 }, selectedText: { color: '#1769D2', fontSize: 12, fontWeight: '700', marginTop: 12 },
   label: { color: '#475569', fontSize: 11, fontWeight: '800', marginTop: 15, marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }, employeeRow: { gap: 8, paddingRight: 8 }, employeeChip: { borderRadius: 16, borderWidth: 1, borderColor: '#D6E0ED', paddingHorizontal: 11, paddingVertical: 9, backgroundColor: '#F7F9FC' }, employeeChipSelected: { backgroundColor: '#1769D2', borderColor: '#1769D2' }, employeeChipText: { color: '#475569', fontSize: 12, fontWeight: '700' }, employeeChipTextSelected: { color: '#FFFFFF' },
   schedulePresetRow: { flexDirection: 'row', gap: 8, marginBottom: 10 }, schedulePreset: { minHeight: 34, borderRadius: 13, borderWidth: 1, borderColor: '#D6E0ED', paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F7F9FC' }, schedulePresetSelected: { borderColor: '#1769D2', backgroundColor: '#EAF1FF' }, schedulePresetText: { color: '#64748B', fontSize: 11, fontWeight: '800' }, schedulePresetTextSelected: { color: '#1769D2' },
@@ -707,5 +897,23 @@ const styles = StyleSheet.create({
   notesInput: { marginTop: 14, minHeight: 60, paddingTop: 12, textAlignVertical: 'top' }, assignButton: { height: 48, borderRadius: 15, marginTop: 12, backgroundColor: '#1769D2', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }, assignButtonText: { color: '#FFFFFF', fontSize: 13, fontWeight: '800' }, dimmed: { opacity: .6 }, disabledButton: { opacity: .72, backgroundColor: '#7B8798' }, note: { color: '#9A6200', fontSize: 11, marginTop: 10 },
   sectionTitle: { color: '#10233F', fontSize: 16, fontWeight: '900', marginBottom: 10 }, empty: { borderWidth: 1, borderStyle: 'dashed', borderColor: '#D6E0ED', borderRadius: 18, alignItems: 'center', padding: 28, backgroundColor: '#FAFBFD' }, emptyTitle: { color: '#334155', fontSize: 14, fontWeight: '800', marginTop: 8 }, emptyBody: { color: '#64748B', fontSize: 12, textAlign: 'center', lineHeight: 18, marginTop: 4 },
   visitCard: { minHeight: 82, borderRadius: 18, padding: 13, marginBottom: 9, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: '#DCE3EC', flexDirection: 'row', alignItems: 'center', gap: 11 }, visitCardActive: { borderColor: '#73C8A5', backgroundColor: '#F2FCF7' }, orderBubble: { width: 29, height: 29, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, orderText: { color: '#1769D2', fontSize: 12, fontWeight: '900' }, visitTitle: { color: '#152238', fontSize: 13, fontWeight: '900' }, visitAddress: { color: '#64748B', fontSize: 11, lineHeight: 16, marginTop: 3 }, visitSchedule: { color: '#1769D2', fontSize: 10, lineHeight: 15, fontWeight: '800', marginTop: 5 }, visitMeta: { color: '#475569', fontSize: 10, lineHeight: 15, marginTop: 4 }, visitInProgress: { color: '#16835B', fontSize: 10, fontWeight: '900', marginTop: 5, textTransform: 'uppercase', letterSpacing: .45 },
+  deleteVisitButton: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFF1F0', borderWidth: 1, borderColor: '#F3C6C3' },
+  deleteVisitButtonPressed: { backgroundColor: '#FFE3E0', transform: [{ scale: .96 }] },
+  placePickerTop: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 13, paddingTop: 8 },
+  placePickerHeader: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+  placePickerSearchShell: { flex: 1, height: 52, borderRadius: 18, borderWidth: 1, borderColor: '#D4DDE9', backgroundColor: 'rgba(255,255,255,.98)', flexDirection: 'row', alignItems: 'center', paddingLeft: 13, paddingRight: 5, elevation: 6, shadowColor: '#10233F', shadowOpacity: .13, shadowRadius: 12, shadowOffset: { width: 0, height: 5 } },
+  placePickerInput: { flex: 1, height: 50, color: '#111827', fontSize: 13, paddingHorizontal: 9 },
+  placePickerSearchButton: { width: 41, height: 41, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1769D2' },
+  mapResultPanel: { maxHeight: 260, marginLeft: 57, marginTop: 7, borderRadius: 16, borderWidth: 1, borderColor: '#DCE3EC', backgroundColor: 'rgba(255,255,255,.99)', paddingHorizontal: 12, elevation: 8, shadowColor: '#10233F', shadowOpacity: .15, shadowRadius: 14, shadowOffset: { width: 0, height: 6 } },
+  mapResultRow: { minHeight: 62, flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#E6ECF4' },
+  mapTapHint: { alignSelf: 'center', maxWidth: 310, minHeight: 38, borderRadius: 14, backgroundColor: 'rgba(242,247,255,.96)', borderWidth: 1, borderColor: '#CFE0FA', flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 11, marginTop: 9, elevation: 3 },
+  mapTapHintText: { flex: 1, color: '#254D82', fontSize: 10, lineHeight: 14, fontWeight: '700' },
+  placePickerBottom: { position: 'absolute', left: 0, right: 0, bottom: 0, padding: 13, backgroundColor: 'rgba(245,248,252,.97)', borderTopWidth: 1, borderTopColor: '#DCE3EC' },
+  placePickerSelection: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 10 },
+  placePickerPin: { width: 40, height: 40, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1769D2' },
+  placePickerPinEmpty: { backgroundColor: '#E8EDF4' },
+  placePickerSelectionTitle: { color: '#152238', fontSize: 13, fontWeight: '900' },
+  placePickerSelectionAddress: { color: '#64748B', fontSize: 10, lineHeight: 14, marginTop: 2 },
+  mapDoneButton: { height: 50, borderRadius: 16, backgroundColor: '#1769D2', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
   mapTop: { position: 'absolute', top: 0, left: 0, right: 0, gap: 9, paddingHorizontal: 14, paddingTop: 8 }, destinationHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 10 }, destinationCopy: { flex: 1, minHeight: 52, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 14, justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, destinationTitle: { color: '#152238', fontSize: 15, fontWeight: '900' }, destinationAddress: { color: '#64748B', fontSize: 11, marginTop: 3 }, routeCard: { width: '100%', minHeight: 74, borderRadius: 18, borderWidth: 1, borderColor: '#DCE3EC', paddingHorizontal: 15, paddingVertical: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.97)' }, routeCardNavigating: { backgroundColor: '#1769D2', borderColor: '#1769D2', alignItems: 'stretch' }, maneuverRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 13 }, turnArrowShell: { width: 58, height: 58, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,.14)' }, maneuverCopy: { flex: 1, minWidth: 0 }, routeMetric: { color: '#0B8C66', fontSize: 13, fontWeight: '900', marginTop: 5 }, routeMetricNavigating: { color: '#DCEBFF' }, directionInstruction: { color: '#FFFFFF', fontSize: 16, lineHeight: 21, fontWeight: '900' }, previewRouteRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 11 }, previewIconShell: { width: 42, height: 42, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: '#EAF1FF' }, arrivedIcon: { backgroundColor: '#E7F8EF' }, visitStartedIcon: { backgroundColor: '#E7F8EF' }, lockedIcon: { backgroundColor: '#FFF5D9' }, previewRouteTitle: { color: '#152238', fontSize: 14, fontWeight: '900' }, previewRouteMeta: { color: '#64748B', fontSize: 11, marginTop: 3, lineHeight: 16 }, mapBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 14 }, completeButton: { height: 52, borderRadius: 18, backgroundColor: '#16835B', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, directionsButton: { height: 52, borderRadius: 18, backgroundColor: '#1769D2', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, stopDirectionsButton: { height: 52, borderRadius: 18, backgroundColor: '#BE3F3A', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }, completeButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
 });
