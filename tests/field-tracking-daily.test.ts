@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { summarizeTrackingDay } from '../server/routes/field-tracking.routes';
+import { summarizeTrackingDay, validateVisitEvidence } from '../server/routes/field-tracking.routes';
+import { evaluateVisitSchedulePolicy } from '../lib/field-tracking/visit-policy';
 
 type Point = Parameters<typeof summarizeTrackingDay>[0][number];
 
@@ -99,4 +100,39 @@ test('stationary evidence produces a verified halt without adding GPS jitter dis
   assert.equal(summary.haltCount, 1);
   assert.equal(summary.movingSeconds, 0);
   assert.equal(summary.distanceMetres, 0);
+});
+
+test('fixed employees receive only the bounded pre-visit remote check-in window', () => {
+  const beforeWindow = Date.parse('2026-11-19T13:59:00+05:30');
+  const insideWindow = Date.parse('2026-11-19T14:30:00+05:30');
+  const afterScheduledTime = Date.parse('2026-11-19T16:01:00+05:30');
+  const before = evaluateVisitSchedulePolicy('employee', '2026-11-19', '16:00', beforeWindow);
+  const inside = evaluateVisitSchedulePolicy('employee', '2026-11-19', '16:00', insideWindow);
+  const after = evaluateVisitSchedulePolicy('employee', '2026-11-19', '16:00', afterScheduledTime);
+  assert.equal(before.remoteCheckInAllowed, false);
+  assert.equal(before.directionsAllowed, false);
+  assert.equal(inside.remoteCheckInAllowed, true);
+  assert.equal(inside.directionsAllowed, true);
+  assert.equal(after.remoteCheckInAllowed, false);
+  assert.equal(after.directionsAllowed, true, 'office check-in must still allow the employee to perform a missed visit');
+});
+
+test('salespeople retain all-day remote eligibility for a same-day assigned visit', () => {
+  const morning = Date.parse('2026-11-19T07:00:00+05:30');
+  const policy = evaluateVisitSchedulePolicy('salesperson', '2026-11-19', '16:00', morning);
+  assert.equal(policy.remoteCheckInAllowed, true);
+  assert.equal(policy.directionsAllowed, true);
+});
+
+test('visit arrival and completion require stable fresh evidence fully inside the destination geofence', () => {
+  const now = Date.parse('2026-11-19T10:00:10.000Z');
+  const destination = { latitude: 23.0202, longitude: 72.5692 };
+  const valid = [
+    { ...destination, accuracy: 12, capturedAt: '2026-11-19T10:00:07.000Z', mocked: false },
+    { latitude: 23.02021, longitude: 72.56921, accuracy: 10, capturedAt: '2026-11-19T10:00:10.000Z', mocked: false },
+  ];
+  assert.equal(validateVisitEvidence(valid, destination, now).ok, true);
+  assert.equal(validateVisitEvidence(valid.map((sample) => ({ ...sample, latitude: 23.023 })), destination, now).ok, false);
+  assert.equal(validateVisitEvidence(valid.map((sample) => ({ ...sample, capturedAt: '2026-11-19T09:58:00.000Z' })), destination, now).ok, false);
+  assert.equal(validateVisitEvidence(valid.map((sample, index) => ({ ...sample, mocked: index === 1 })), destination, now).ok, false);
 });

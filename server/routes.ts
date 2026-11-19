@@ -3367,9 +3367,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!isMySqlStateEnabled()) return { protected: false, visitCount: 0 };
       return getFieldVisitAutoCheckoutProtection(await getMySqlPool(), userId, scheduledDate, companyId);
     },
-    getFieldVisitRemoteCheckInEligibility: async (userId: string, scheduledDate: string, companyId?: string | null) => {
-      if (!isMySqlStateEnabled() || !companyId) return { remoteCheckInAllowed: false, visitCount: 0 };
-      return getFieldVisitRemoteCheckInEligibility(await getMySqlPool(), userId, scheduledDate, companyId);
+    getFieldVisitRemoteCheckInEligibility: async (userId: string, scheduledDate: string, companyId?: string | null, role = "employee") => {
+      if (!isMySqlStateEnabled() || !companyId) return { remoteCheckInAllowed: false, visitCount: 0, reason: "no_active_visit", remoteCheckInOpensAt: null, remoteCheckInExpiresAt: null };
+      return getFieldVisitRemoteCheckInEligibility(await getMySqlPool(), userId, scheduledDate, companyId, role);
     },
   });
 

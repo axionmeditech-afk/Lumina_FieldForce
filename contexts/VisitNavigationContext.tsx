@@ -6,11 +6,13 @@ import { router, usePathname } from 'expo-router';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { PanResponder, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { getAttendanceStatus } from '@/lib/attendance-api';
-import { getFieldVisitAssignments, planFieldRoute, type FieldVisitAssignment } from '@/lib/field-tracking/api';
-import { formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
+import { confirmFieldVisitArrival, getFieldVisitAssignments, planFieldRoute, type FieldVisitAssignment } from '@/lib/field-tracking/api';
+import { formatDistance, formatDuration } from '@/lib/field-tracking/geo';
 import { buildRouteMetrics, headingDifference, projectOnRoute, remainingRoute } from '@/lib/field-tracking/navigation-geometry';
 import type { Coordinate, RoutePlan } from '@/lib/field-tracking/types';
 import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-navigation-lifecycle';
+import { appendVisitEvidence, isEvidenceInsideVisitGeofence, toVisitLocationEvidence } from '@/lib/field-tracking/visit-evidence';
+import type { VisitLocationEvidence } from '@/lib/field-tracking/visit-policy';
 
 type NavigationStatus = 'preview' | 'active' | 'arrived';
 type StoredSession = {
@@ -66,6 +68,8 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
   const lastRerouteRef = useRef(0);
   const navigationGenerationRef = useRef(0);
   const voiceActiveRef = useRef(false);
+  const arrivalEvidenceRef = useRef<VisitLocationEvidence[]>([]);
+  const arrivalVerificationRef = useRef(false);
   const routeProgressRef = useRef<{ route: Coordinate[] | null; distance: number }>({ route: null, distance: 0 });
 
   const storageKey = userId ? `@lumina_visit_navigation:v1:${userId}` : null;
@@ -81,6 +85,8 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     void Speech.stop();
     spokenRef.current.clear();
     offRouteSamplesRef.current = 0;
+    arrivalEvidenceRef.current = [];
+    arrivalVerificationRef.current = false;
     setSession(null);
     setHydrated(false);
     setScreenExpanded(false);
@@ -163,6 +169,8 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     spokenRef.current.clear();
     offRouteSamplesRef.current = 0;
     wrongWaySamplesRef.current = 0;
+    arrivalEvidenceRef.current = [];
+    arrivalVerificationRef.current = false;
     deviationStartedAtRef.current = 0;
     routeProgressRef.current = { route: next.route.coordinates, distance: 0 };
     setSession({ ...next, status: 'preview', updatedAt: new Date().toISOString() });
@@ -179,14 +187,18 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     let timeout: ReturnType<typeof setTimeout> | null = null;
     const watchPromise = Location.watchPositionAsync(
       { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3_000 },
-      (location) => setSession((current) => current ? {
-        ...current,
-        position: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-        heading: Number.isFinite(location.coords.heading) ? location.coords.heading : null,
-        speed: Number.isFinite(location.coords.speed) ? location.coords.speed : null,
-        accuracy: Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null,
-        updatedAt: new Date().toISOString(),
-      } : null),
+      (location) => {
+        const evidence = toVisitLocationEvidence(location);
+        if (evidence) arrivalEvidenceRef.current = appendVisitEvidence(arrivalEvidenceRef.current, evidence);
+        setSession((current) => current ? {
+          ...current,
+          position: { latitude: location.coords.latitude, longitude: location.coords.longitude },
+          heading: Number.isFinite(location.coords.heading) ? location.coords.heading : null,
+          speed: Number.isFinite(location.coords.speed) ? location.coords.speed : null,
+          accuracy: Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null,
+          updatedAt: new Date().toISOString(),
+        } : null);
+      },
     ).then((subscription) => {
       if (timedOut) subscription.remove();
       return subscription;
@@ -218,6 +230,8 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
       spokenRef.current.clear();
       offRouteSamplesRef.current = 0;
       wrongWaySamplesRef.current = 0;
+      arrivalEvidenceRef.current = [];
+      arrivalVerificationRef.current = false;
       deviationStartedAtRef.current = 0;
       routeProgressRef.current = { route: candidate.route.coordinates, distance: 0 };
       setSession({ ...candidate, status: 'active', updatedAt: new Date().toISOString() });
@@ -233,6 +247,8 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     stopWatch();
     offRouteSamplesRef.current = 0;
     wrongWaySamplesRef.current = 0;
+    arrivalEvidenceRef.current = [];
+    arrivalVerificationRef.current = false;
     deviationStartedAtRef.current = 0;
     setSession((current) => current ? { ...current, status: 'preview', updatedAt: new Date().toISOString() } : null);
   }, [stopWatch]);
@@ -243,6 +259,8 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     voiceActiveRef.current = false;
     navigationGenerationRef.current += 1;
     void Speech.stop();
+    arrivalEvidenceRef.current = [];
+    arrivalVerificationRef.current = false;
     setSession(null);
     if (storageKey) await AsyncStorage.removeItem(storageKey);
   }, [storageKey, stopWatch]);
@@ -285,10 +303,21 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
 
   useEffect(() => {
     if (!session || session.status !== 'active' || !session.position || !progress) return;
-    if (haversineMetres(session.position, session.visit) <= 100) {
-      stopWatch();
-      setSession((current) => current ? { ...current, status: 'arrived', updatedAt: new Date().toISOString() } : null);
-      announce(`You have reached ${session.visit.placeName}. Start the visit when ready.`);
+    const arrivalEvidence = arrivalEvidenceRef.current;
+    if (isEvidenceInsideVisitGeofence(arrivalEvidence, session.visit) && !arrivalVerificationRef.current) {
+      arrivalVerificationRef.current = true;
+      const assignmentId = session.visit.assignmentId;
+      void confirmFieldVisitArrival(assignmentId, { samples: arrivalEvidence }).then((result) => {
+        stopWatch();
+        setSession((current) => current && current.visit.assignmentId === assignmentId
+          ? { ...current, visit: result.assignment, status: 'arrived', updatedAt: new Date().toISOString() }
+          : current);
+        announce(`You have reached ${session.visit.placeName}. Start the visit when ready.`);
+        voiceActiveRef.current = false;
+      }).catch(() => {
+        // The server is authoritative for arrival. Keep navigating after a
+        // transient failure and retry when another stable GPS sample arrives.
+      }).finally(() => { arrivalVerificationRef.current = false; });
       return;
     }
     if (progress.distanceToManeuver <= 180) {

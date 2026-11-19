@@ -28,6 +28,8 @@ import {
   startFieldVisitAssignment,
   type FieldVisitAssignment,
 } from '@/lib/field-tracking/api';
+import { captureFreshVisitEvidence } from '@/lib/field-tracking/visit-evidence';
+import { evaluateVisitSchedulePolicy } from '@/lib/field-tracking/visit-policy';
 import { RouteMap } from '@/lib/field-tracking/components/RouteMap';
 import { formatDistance, formatDuration, haversineMetres } from '@/lib/field-tracking/geo';
 import type { PlaceSearchResult, RoutePlan } from '@/lib/field-tracking/types';
@@ -72,7 +74,6 @@ export default function FieldVisitsScreen() {
   const [route, setRoute] = useState<RoutePlan>(EMPTY_ROUTE);
   const [routing, setRouting] = useState(false);
   const [currentPosition, setCurrentPosition] = useState<{ latitude: number; longitude: number } | null>(null);
-  const [currentAccuracy, setCurrentAccuracy] = useState<number | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [checkedIn, setCheckedIn] = useState(false);
   const [navigationActive, setNavigationActive] = useState(false);
@@ -96,7 +97,6 @@ export default function FieldVisitsScreen() {
       setSelectedVisit(saved.visit);
       setRoute(saved.route);
       setCurrentPosition(saved.position);
-      setCurrentAccuracy(saved.accuracy);
       setHeading(saved.heading);
       setNavigationActive(saved.status === 'active');
       setArrived(saved.status === 'arrived');
@@ -306,9 +306,8 @@ export default function FieldVisitsScreen() {
     setSelectedVisit(visit);
     setRoute(EMPTY_ROUTE);
     setCurrentPosition(null);
-    setCurrentAccuracy(null);
     setHeading(null);
-    setArrived(false);
+    setArrived(Boolean(visit.arrivedAt));
     setRerouting(false);
     offRouteSamplesRef.current = 0;
     spokenRef.current.clear();
@@ -349,7 +348,6 @@ export default function FieldVisitsScreen() {
       }, 'auto', selectedVisit.assignmentId);
       if (planned.source === 'unavailable' || planned.coordinates.length < 2) throw new Error('No road route was found for this place.');
       setCurrentPosition(position);
-      setCurrentAccuracy(accuracy);
       setHeading(nextHeading);
       setRoute(planned);
       await visitNavigation.start({
@@ -371,13 +369,10 @@ export default function FieldVisitsScreen() {
   };
 
   const startVisit = async (visit: FieldVisitAssignment) => {
-    if (!currentPosition) {
-      Alert.alert('Current location required', 'Wait for a precise GPS fix before starting the visit.');
-      return;
-    }
     setVisitActionBusy(true);
     try {
-      const result = await startFieldVisitAssignment(visit.assignmentId, { ...currentPosition, accuracy: currentAccuracy });
+      const samples = await captureFreshVisitEvidence();
+      const result = await startFieldVisitAssignment(visit.assignmentId, { samples });
       stopDirections();
       await visitNavigation.clear();
       setSelectedVisit(result.assignment);
@@ -395,10 +390,8 @@ export default function FieldVisitsScreen() {
   const completeVisit = async (visit: FieldVisitAssignment) => {
     setVisitActionBusy(true);
     try {
-      const result = await completeFieldVisitAssignment(
-        visit.assignmentId,
-        currentPosition ? { ...currentPosition, accuracy: currentAccuracy } : undefined,
-      );
+      const samples = await captureFreshVisitEvidence();
+      const result = await completeFieldVisitAssignment(visit.assignmentId, { samples });
       stopDirections();
       await visitNavigation.clear();
       setSelectedVisit(null);
@@ -455,19 +448,6 @@ export default function FieldVisitsScreen() {
 
   useEffect(() => {
     if (visitNavigation.session) return;
-    if (!navigationActive || !selectedVisit || !currentPosition) return;
-    const destinationDistance = haversineMetres(currentPosition, selectedVisit);
-    if (destinationDistance > 100) return;
-    const timer = setTimeout(() => {
-      setArrived(true);
-      stopDirections();
-      speak(`You have reached ${selectedVisit.placeName}. Start the visit when ready.`);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [currentPosition, navigationActive, selectedVisit, stopDirections, visitNavigation.session]);
-
-  useEffect(() => {
-    if (visitNavigation.session) return;
     if (!navigationActive || !nextManeuver.maneuver) return;
     // Speak one precise prompt for each maneuver, rather than repeating the
     // same instruction at both the advance and immediate thresholds.
@@ -502,6 +482,13 @@ export default function FieldVisitsScreen() {
   }, [currentPosition, navigationActive, projection?.distanceFromRouteMeters, rerouting, route.coordinates.length, selectedVisit, visitNavigation.session]);
 
   const selectedVisitScheduledToday = selectedVisit?.scheduledDate === toMumbaiDateKey(new Date());
+  const selectedVisitSchedulePolicy = selectedVisit
+    ? evaluateVisitSchedulePolicy(user?.role, selectedVisit.scheduledDate, selectedVisit.scheduledTime, clockNow)
+    : null;
+  const selectedVisitDirectionsAllowed = Boolean(selectedVisitSchedulePolicy?.directionsAllowed);
+  const directionsOpenLabel = selectedVisitSchedulePolicy?.directionsAvailableAt
+    ? formatArrival(new Date(selectedVisitSchedulePolicy.directionsAvailableAt))
+    : null;
 
   if (placePickerOpen && supervisor) {
     return (
@@ -617,6 +604,8 @@ export default function FieldVisitsScreen() {
               <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Best road route ready</Text><Text style={styles.routeMetric}>{formatDistance(route.distanceMetres)} · {formatDuration(route.durationSeconds || 0)}</Text><Text style={styles.previewRouteMeta}>{previewArrival ? `Arrive by ${formatArrival(previewArrival)}` : 'Arrival time calculating'} · Voice guidance ready</Text></View></View>
             ) : !selectedVisitScheduledToday ? (
               <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="calendar" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Scheduled for {formatVisitSchedule(selectedVisit.scheduledDate, selectedVisit.scheduledTime)}</Text><Text style={styles.previewRouteMeta}>Directions become available on the assigned visit date.</Text></View></View>
+            ) : !selectedVisitDirectionsAllowed ? (
+              <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="time" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Directions open at {directionsOpenLabel || selectedVisit.scheduledTime}</Text><Text style={styles.previewRouteMeta}>Fixed-location employees receive a two-hour travel window before the scheduled visit.</Text></View></View>
             ) : checkedIn ? (
               <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Ready for directions</Text><Text style={styles.previewRouteMeta}>The road route will be calculated only after you tap Start directions.</Text></View></View>
             ) : <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="lock-closed" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Check-in required</Text><Text style={styles.previewRouteMeta}>Complete attendance check-in before starting directions.</Text></View></View>}
@@ -629,8 +618,8 @@ export default function FieldVisitsScreen() {
             {visitActionBusy ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="briefcase" size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>Start visit</Text>
           </Pressable> : navigationActive ? <Pressable onPress={() => stopDirections(true)} style={styles.stopDirectionsButton}>
             <Ionicons name="stop-circle" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>{rerouting ? 'Rerouting…' : 'Stop directions'}</Text>
-          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || !checkedIn || !selectedVisitScheduledToday} style={[styles.directionsButton, (routing || !checkedIn || !selectedVisitScheduledToday) && styles.disabledButton]}>
-            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn && selectedVisitScheduledToday ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{!selectedVisitScheduledToday ? 'Available on visit date' : checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
+          </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || !checkedIn || !selectedVisitDirectionsAllowed} style={[styles.directionsButton, (routing || !checkedIn || !selectedVisitDirectionsAllowed) && styles.disabledButton]}>
+            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn && selectedVisitDirectionsAllowed ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{!selectedVisitScheduledToday ? 'Available on visit date' : !selectedVisitDirectionsAllowed ? `Opens ${directionsOpenLabel || selectedVisit.scheduledTime}` : checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
           </Pressable>
           }
         </SafeAreaView>
@@ -807,7 +796,7 @@ type RouteProjection = {
   shapePosition: number;
 };
 
-function buildRouteMetrics(route: Array<{ latitude: number; longitude: number }>): RouteMetrics {
+function buildRouteMetrics(route: { latitude: number; longitude: number }[]): RouteMetrics {
   const cumulativeMeters = [0];
   let totalMeters = 0;
   for (let index = 1; index < route.length; index += 1) {
@@ -819,7 +808,7 @@ function buildRouteMetrics(route: Array<{ latitude: number; longitude: number }>
 
 function projectOnRoute(
   location: { latitude: number; longitude: number },
-  route: Array<{ latitude: number; longitude: number }>,
+  route: { latitude: number; longitude: number }[],
   metrics: RouteMetrics,
 ): RouteProjection | null {
   if (route.length < 2) return null;

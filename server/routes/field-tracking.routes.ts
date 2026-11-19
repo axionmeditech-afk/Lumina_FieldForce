@@ -14,6 +14,15 @@ import {
   searchPlaces,
 } from '@/server/services/field-geospatial';
 import { sendPushToUsers } from '@/server/services/push-notifications';
+import {
+  VISIT_GEOFENCE_RADIUS_METRES,
+  VISIT_MAX_ACCURACY_METRES,
+  VISIT_MIN_EVIDENCE_SAMPLES,
+  VISIT_MIN_SAMPLE_WINDOW_MS,
+  evaluateVisitSchedulePolicy,
+  isVisitEvidenceFresh,
+  type VisitLocationEvidence,
+} from '@/lib/field-tracking/visit-policy';
 
 type Deps = {
   requireAuth: (req: any, res: any, next: any) => void;
@@ -75,10 +84,14 @@ const routeSchema = z.object({
   assignmentId: z.string().uuid().optional(),
 });
 
+const visitLocationEvidenceSchema = coordinateSchema.extend({
+  accuracy: z.number().positive().max(VISIT_MAX_ACCURACY_METRES),
+  capturedAt: z.string().datetime(),
+  mocked: z.boolean().optional().default(false),
+});
+
 const visitEvidenceSchema = z.object({
-  location: coordinateSchema.extend({
-    accuracy: z.number().min(0).max(10_000).nullable().optional(),
-  }).nullable().optional(),
+  samples: z.array(visitLocationEvidenceSchema).min(VISIT_MIN_EVIDENCE_SAMPLES).max(5),
 });
 
 const scheduledDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
@@ -193,6 +206,19 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
           res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'Directions are available only on the assigned visit date.' });
           return;
         }
+        const schedulePolicy = evaluateVisitSchedulePolicy(
+          req.auth?.role,
+          toSqlDateKey(assignment.scheduled_date),
+          toSqlTime(assignment.scheduled_time),
+        );
+        if (!schedulePolicy.directionsAllowed) {
+          res.status(409).json({
+            code: 'VISIT_DIRECTIONS_NOT_OPEN',
+            message: `Directions open ${formatIstDateTime(schedulePolicy.directionsAvailableAt)}.`,
+            directionsAvailableAt: schedulePolicy.directionsAvailableAt,
+          });
+          return;
+        }
         destination = {
           placeId: String(assignment.place_id),
           name: String(assignment.place_name),
@@ -233,7 +259,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const pool = await deps.getMySqlPool();
     const [rows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-              latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, started_at, completed_at,
+              latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, arrived_at, started_at, completed_at,
               arrival_latitude, arrival_longitude, arrival_accuracy,
               completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
@@ -312,7 +338,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         latitude: parsed.data.place.latitude, longitude: parsed.data.place.longitude,
         queueOrder, scheduledDate: parsed.data.scheduledDate, scheduledTime: parsed.data.scheduledTime,
         notes: parsed.data.notes || '', status: 'pending',
-        createdAt: new Date().toISOString(), startedAt: null, completedAt: null,
+        createdAt: new Date().toISOString(), arrivedAt: null, startedAt: null, completedAt: null,
         arrivalLocation: null, completionLocation: null,
       },
     });
@@ -334,7 +360,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const companyId = await deps.resolveRequestCompanyId(req);
     const employeeId = String(req.auth?.sub || '').trim();
     if (!companyId || !employeeId || !['employee', 'salesperson'].includes(req.auth?.role || '')) {
-      res.json({ remoteCheckInAllowed: false, visitCount: 0, scheduledDate });
+      res.json({ remoteCheckInAllowed: false, visitCount: 0, scheduledDate, reason: 'not_eligible', remoteCheckInOpensAt: null, remoteCheckInExpiresAt: null });
       return;
     }
     const eligibility = await getFieldVisitRemoteCheckInEligibility(
@@ -342,6 +368,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       employeeId,
       scheduledDate,
       companyId,
+      req.auth?.role || 'employee',
     );
     res.json({ ...eligibility, scheduledDate });
   });
@@ -411,11 +438,58 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
   });
 
+  app.post('/api/field-tracking/assignments/:assignmentId/arrive', deps.requireAuth, requireStore, async (req, res) => {
+    const assignmentId = String(req.params.assignmentId || '').trim();
+    const parsed = visitEvidenceSchema.safeParse(req.body || {});
+    if (!assignmentId || !parsed.success) {
+      res.status(400).json({ message: 'Fresh, precise GPS evidence is required to confirm arrival.' });
+      return;
+    }
+    const employeeId = String(req.auth?.sub || '').trim();
+    const active = await requireActiveAttendance(employeeId, res, deps);
+    if (!active) return;
+    const pool = await deps.getMySqlPool();
+    const [rows] = await pool.execute<any[]>(
+      `SELECT * FROM lff_place_assignments WHERE id=? AND employee_id=? AND status='pending' LIMIT 1`,
+      [assignmentId, employeeId],
+    );
+    const assignment = rows[0];
+    if (!assignment) {
+      res.status(404).json({ message: 'This pending visit was not found for your account.' });
+      return;
+    }
+    if (active.companyId && String(assignment.company_id) !== active.companyId) {
+      res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'This visit does not belong to your active check-in workspace.' });
+      return;
+    }
+    const policy = evaluateVisitSchedulePolicy(req.auth?.role, toSqlDateKey(assignment.scheduled_date), toSqlTime(assignment.scheduled_time));
+    if (!policy.directionsAllowed) {
+      res.status(409).json({ code: 'VISIT_ARRIVAL_NOT_OPEN', message: `Arrival can be confirmed after ${formatIstDateTime(policy.directionsAvailableAt)}.` });
+      return;
+    }
+    const evidence = validateVisitEvidence(parsed.data.samples, assignment);
+    if (!evidence.ok) {
+      res.status(409).json({ code: evidence.code, message: evidence.message, distanceMetres: evidence.distanceMetres, radiusMetres: VISIT_GEOFENCE_RADIUS_METRES });
+      return;
+    }
+    await pool.execute(
+      `UPDATE lff_place_assignments
+       SET arrived_at=COALESCE(arrived_at, NOW(3)), arrival_latitude=?, arrival_longitude=?, arrival_accuracy=?, updated_at=NOW(3)
+       WHERE id=? AND employee_id=? AND status='pending'`,
+      [evidence.sample.latitude, evidence.sample.longitude, evidence.sample.accuracy, assignmentId, employeeId],
+    );
+    const [updatedRows] = await pool.execute<any[]>(
+      `SELECT * FROM lff_place_assignments WHERE id=? AND employee_id=? LIMIT 1`,
+      [assignmentId, employeeId],
+    );
+    res.json({ assignment: mapAssignment(updatedRows[0]), arrival: { distanceMetres: evidence.distanceMetres, radiusMetres: VISIT_GEOFENCE_RADIUS_METRES } });
+  });
+
   app.post('/api/field-tracking/assignments/:assignmentId/start', deps.requireAuth, requireStore, async (req, res) => {
     const assignmentId = String(req.params.assignmentId || '').trim();
     const parsed = visitEvidenceSchema.safeParse(req.body);
-    if (!assignmentId || !parsed.success || !parsed.data.location) {
-      res.status(400).json({ message: 'A visit and current location are required to start the visit.' });
+    if (!assignmentId || !parsed.success) {
+      res.status(400).json({ message: 'Fresh, precise GPS evidence is required to start the visit.' });
       return;
     }
     const employeeId = String(req.auth?.sub || '').trim();
@@ -445,6 +519,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'This visit can be started only on its assigned date.' });
         return;
       }
+      const schedulePolicy = evaluateVisitSchedulePolicy(req.auth?.role, toSqlDateKey(assignment.scheduled_date), toSqlTime(assignment.scheduled_time));
+      if (!schedulePolicy.directionsAllowed) {
+        await connection.rollback();
+        res.status(409).json({ code: 'VISIT_NOT_OPEN', message: `This visit can be started after ${formatIstDateTime(schedulePolicy.directionsAvailableAt)}.` });
+        return;
+      }
       const [activeVisitRows] = await connection.execute<any[]>(
         `SELECT id FROM lff_place_assignments
          WHERE employee_id=? AND status='in_progress' AND id<>? LIMIT 1 FOR UPDATE`,
@@ -455,31 +535,28 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         res.status(409).json({ code: 'VISIT_ALREADY_ACTIVE', message: 'Complete your active visit before starting another one.' });
         return;
       }
-      const location = parsed.data.location;
-      const distance = haversineMetres(
-        { latitude: location.latitude, longitude: location.longitude },
-        { latitude: Number(assignment.latitude), longitude: Number(assignment.longitude) },
-      );
-      const arrivalRadius = Math.max(100, Math.min(150, Number(location.accuracy || 0) * 2));
-      if (distance > arrivalRadius) {
+      const evidence = validateVisitEvidence(parsed.data.samples, assignment);
+      if (!evidence.ok) {
         await connection.rollback();
         res.status(409).json({
-          code: 'VISIT_LOCATION_REQUIRED',
-          message: `Move within ${Math.round(arrivalRadius)} metres of the assigned place to start this visit.`,
-          distanceMetres: Math.round(distance),
+          code: evidence.code,
+          message: evidence.message,
+          distanceMetres: evidence.distanceMetres,
+          radiusMetres: VISIT_GEOFENCE_RADIUS_METRES,
         });
         return;
       }
+      const location = evidence.sample;
       await connection.execute(
         `UPDATE lff_place_assignments
-         SET status='in_progress', started_at=NOW(3), arrival_latitude=?, arrival_longitude=?,
+         SET status='in_progress', arrived_at=COALESCE(arrived_at, NOW(3)), started_at=NOW(3), arrival_latitude=?, arrival_longitude=?,
              arrival_accuracy=?, updated_at=NOW(3)
          WHERE id=? AND employee_id=? AND status='pending'`,
         [location.latitude, location.longitude, location.accuracy ?? null, assignmentId, employeeId],
       );
       const [updatedRows] = await connection.execute<any[]>(
         `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-                latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, started_at, completed_at,
+                latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, arrived_at, started_at, completed_at,
                 arrival_latitude, arrival_longitude, arrival_accuracy,
                 completion_latitude, completion_longitude, completion_accuracy
          FROM lff_place_assignments WHERE id=? LIMIT 1`,
@@ -511,29 +588,58 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const active = await requireActiveAttendance(employeeId, res, deps);
     if (!active) return;
     const pool = await deps.getMySqlPool();
-    const location = parsed.data.location;
-    const [result] = await pool.execute<any>(
-      `UPDATE lff_place_assignments
-       SET status='completed', completed_at=NOW(3), completion_latitude=?, completion_longitude=?,
-           completion_accuracy=?, updated_at=NOW(3)
-       WHERE id=? AND employee_id=? AND status='in_progress'`,
-      [location?.latitude ?? null, location?.longitude ?? null, location?.accuracy ?? null, assignmentId, employeeId],
-    );
-    if (!result.affectedRows) {
-      res.status(404).json({ message: 'Start this visit before marking it complete.' });
-      return;
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [assignmentRows] = await connection.execute<any[]>(
+        `SELECT * FROM lff_place_assignments WHERE id=? AND employee_id=? LIMIT 1 FOR UPDATE`,
+        [assignmentId, employeeId],
+      );
+      const assignment = assignmentRows[0];
+      if (!assignment || String(assignment.status) !== 'in_progress') {
+        await connection.rollback();
+        res.status(404).json({ message: 'Start this visit before marking it complete.' });
+        return;
+      }
+      if (active.companyId && String(assignment.company_id) !== active.companyId) {
+        await connection.rollback();
+        res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'This visit does not belong to your active check-in workspace.' });
+        return;
+      }
+      const evidence = validateVisitEvidence(parsed.data.samples, assignment);
+      if (!evidence.ok) {
+        await connection.rollback();
+        res.status(409).json({ code: evidence.code, message: evidence.message, distanceMetres: evidence.distanceMetres, radiusMetres: VISIT_GEOFENCE_RADIUS_METRES });
+        return;
+      }
+      const location = evidence.sample;
+      const [result] = await connection.execute<any>(
+        `UPDATE lff_place_assignments
+         SET status='completed', completed_at=NOW(3), completion_latitude=?, completion_longitude=?,
+             completion_accuracy=?, updated_at=NOW(3)
+         WHERE id=? AND employee_id=? AND status='in_progress'`,
+        [location.latitude, location.longitude, location.accuracy, assignmentId, employeeId],
+      );
+      if (!result.affectedRows) {
+        await connection.rollback();
+        res.status(409).json({ message: 'The visit changed while completion was being verified. Refresh and retry.' });
+        return;
+      }
+      const [nextRows] = await connection.execute<any[]>(
+        `SELECT * FROM lff_place_assignments
+         WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status='pending'
+         ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC LIMIT 1`,
+        [employeeId, active.companyId || await deps.resolveRequestCompanyId(req), toMumbaiDateKey(new Date())],
+      );
+      await connection.commit();
+      res.json({ ok: true, nextAssignment: nextRows[0] ? mapAssignment(nextRows[0]) : null });
+    } catch (error) {
+      await connection.rollback().catch(() => undefined);
+      console.error('[field-tracking] complete visit failed', error);
+      res.status(503).json({ message: 'Could not securely complete this visit. Please retry.' });
+    } finally {
+      connection.release();
     }
-    const [nextRows] = await pool.execute<any[]>(
-      `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-              latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, started_at, completed_at,
-              arrival_latitude, arrival_longitude, arrival_accuracy,
-              completion_latitude, completion_longitude, completion_accuracy
-       FROM lff_place_assignments
-       WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status='pending'
-       ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC LIMIT 1`,
-      [employeeId, active.companyId || await deps.resolveRequestCompanyId(req), toMumbaiDateKey(new Date())],
-    );
-    res.json({ ok: true, nextAssignment: nextRows[0] ? mapAssignment(nextRows[0]) : null });
   });
 
   app.post('/api/field-tracking/locations/batch', deps.requireAuth, requireStore, async (req, res) => {
@@ -1130,6 +1236,7 @@ async function ensureTables(pool: Pool): Promise<void> {
           status ENUM('pending','in_progress','completed','cancelled') NOT NULL DEFAULT 'pending',
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+          arrived_at DATETIME(3) NULL,
           started_at DATETIME(3) NULL,
           completed_at DATETIME(3) NULL,
           arrival_latitude DECIMAL(10,7) NULL,
@@ -1151,6 +1258,7 @@ async function ensureTables(pool: Pool): Promise<void> {
       );
       await ensureColumn(pool, 'lff_place_assignments', 'scheduled_date', 'DATE NULL AFTER queue_order');
       await ensureColumn(pool, 'lff_place_assignments', 'scheduled_time', 'TIME NULL AFTER scheduled_date');
+      await ensureColumn(pool, 'lff_place_assignments', 'arrived_at', 'DATETIME(3) NULL AFTER updated_at');
       await ensureColumn(pool, 'lff_place_assignments', 'started_at', 'DATETIME(3) NULL AFTER updated_at');
       // Legacy assignments predate scheduling. Give them a deterministic local
       // work date/time before enforcing the new non-null contract.
@@ -1240,19 +1348,54 @@ export async function getFieldVisitRemoteCheckInEligibility(
   employeeId: string,
   scheduledDate: string,
   companyId: string,
-): Promise<{ remoteCheckInAllowed: boolean; visitCount: number }> {
+  role: string = 'employee',
+  nowMs = Date.now(),
+): Promise<{
+  remoteCheckInAllowed: boolean;
+  visitCount: number;
+  reason: 'available' | 'not_open' | 'remote_window_expired' | 'no_active_visit';
+  remoteCheckInOpensAt: string | null;
+  remoteCheckInExpiresAt: string | null;
+}> {
   if (!employeeId || !companyId || !/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) {
-    return { remoteCheckInAllowed: false, visitCount: 0 };
+    return { remoteCheckInAllowed: false, visitCount: 0, reason: 'no_active_visit', remoteCheckInOpensAt: null, remoteCheckInExpiresAt: null };
   }
   await ensureTables(pool);
   const [rows] = await pool.execute<any[]>(
-    `SELECT COUNT(*) AS visit_count
+    `SELECT scheduled_date, scheduled_time
      FROM lff_place_assignments
-     WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status<>'cancelled'`,
+     WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status IN ('pending','in_progress')
+     ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC`,
     [employeeId, companyId, scheduledDate],
   );
-  const visitCount = Math.max(0, Number(rows[0]?.visit_count || 0));
-  return { remoteCheckInAllowed: visitCount > 0, visitCount };
+  const visitCount = rows.length;
+  if (!visitCount) {
+    return { remoteCheckInAllowed: false, visitCount: 0, reason: 'no_active_visit', remoteCheckInOpensAt: null, remoteCheckInExpiresAt: null };
+  }
+  const policies = rows.map((row) => evaluateVisitSchedulePolicy(
+    role,
+    toSqlDateKey(row.scheduled_date),
+    toSqlTime(row.scheduled_time),
+    nowMs,
+  ));
+  const allowed = policies.find((policy) => policy.remoteCheckInAllowed);
+  if (allowed) {
+    return {
+      remoteCheckInAllowed: true,
+      visitCount,
+      reason: 'available',
+      remoteCheckInOpensAt: role === 'salesperson' ? null : allowed.directionsAvailableAt,
+      remoteCheckInExpiresAt: role === 'salesperson' ? null : allowed.scheduledAt,
+    };
+  }
+  const upcoming = policies.find((policy) => policy.reason === 'not_open');
+  return {
+    remoteCheckInAllowed: false,
+    visitCount,
+    reason: upcoming ? 'not_open' : 'remote_window_expired',
+    remoteCheckInOpensAt: upcoming?.directionsAvailableAt ?? null,
+    remoteCheckInExpiresAt: upcoming?.scheduledAt ?? policies.at(-1)?.scheduledAt ?? null,
+  };
 }
 
 function mapAssignment(row: Record<string, unknown>) {
@@ -1272,6 +1415,7 @@ function mapAssignment(row: Record<string, unknown>) {
     notes: String(row.notes || ''),
     status: String(row.status || 'pending'),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
+    arrivedAt: row.arrived_at instanceof Date ? row.arrived_at.toISOString() : row.arrived_at ? String(row.arrived_at) : null,
     startedAt: row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at ? String(row.started_at) : null,
     completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at ? String(row.completed_at) : null,
     arrivalLocation: row.arrival_latitude == null || row.arrival_longitude == null ? null : {
@@ -1296,6 +1440,61 @@ function toSqlDateKey(value: unknown): string {
 function toSqlTime(value: unknown): string {
   const match = /^(\d{2}:\d{2})/.exec(String(value || ''));
   return match?.[1] || '09:00';
+}
+
+function formatIstDateTime(value: string | null): string {
+  if (!value) return 'the assigned visit window';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'the assigned visit window';
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  }).format(date);
+}
+
+type VisitEvidenceResult =
+  | { ok: true; sample: VisitLocationEvidence; distanceMetres: number }
+  | { ok: false; code: string; message: string; distanceMetres: number | null };
+
+/**
+ * Require multiple recent, precise, non-mocked fixes whose complete accuracy
+ * circles fit inside the visit geofence. Expanding the geofence for weak GPS
+ * would let a distant employee appear to have arrived, so uncertainty makes
+ * this check stricter instead of more permissive.
+ */
+export function validateVisitEvidence(
+  samples: VisitLocationEvidence[],
+  destination: { latitude: unknown; longitude: unknown },
+  nowMs = Date.now(),
+): VisitEvidenceResult {
+  const ordered = [...samples].sort((left, right) => Date.parse(left.capturedAt) - Date.parse(right.capturedAt));
+  if (ordered.length < VISIT_MIN_EVIDENCE_SAMPLES || ordered.some((sample) => !isVisitEvidenceFresh(sample, nowMs))) {
+    return { ok: false, code: 'VISIT_GPS_STALE', message: 'Get a fresh GPS lock at the assigned destination and retry.', distanceMetres: null };
+  }
+  if (ordered.some((sample) => sample.mocked)) {
+    return { ok: false, code: 'VISIT_MOCK_LOCATION', message: 'Disable mock location before confirming this visit.', distanceMetres: null };
+  }
+  const sampleWindowMs = Date.parse(ordered.at(-1)!.capturedAt) - Date.parse(ordered[0].capturedAt);
+  if (sampleWindowMs < VISIT_MIN_SAMPLE_WINDOW_MS) {
+    return { ok: false, code: 'VISIT_GPS_UNSTABLE', message: 'Wait a few seconds for stable GPS verification and retry.', distanceMetres: null };
+  }
+  const target = { latitude: Number(destination.latitude), longitude: Number(destination.longitude) };
+  if (!Number.isFinite(target.latitude) || !Number.isFinite(target.longitude)) {
+    return { ok: false, code: 'VISIT_DESTINATION_INVALID', message: 'The assigned destination is invalid. Ask your supervisor to update it.', distanceMetres: null };
+  }
+  let latestDistance = 0;
+  for (const sample of ordered) {
+    const distance = haversineMetres(sample, target);
+    latestDistance = distance;
+    if (distance + sample.accuracy > VISIT_GEOFENCE_RADIUS_METRES) {
+      return {
+        ok: false,
+        code: 'VISIT_LOCATION_REQUIRED',
+        message: `Move securely inside the ${VISIT_GEOFENCE_RADIUS_METRES}-metre destination geofence and wait for precise GPS.`,
+        distanceMetres: Math.round(distance),
+      };
+    }
+  }
+  return { ok: true, sample: ordered.at(-1)!, distanceMetres: Math.round(latestDistance) };
 }
 
 async function probe(baseValue: string, path: string): Promise<boolean> {

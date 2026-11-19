@@ -39,7 +39,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           const zone = deps.resolveGeofenceStatus(payload, zones);
           const fieldVisitEligibility =
             type === "checkin" && ["employee", "salesperson"].includes(req.auth?.role || "") && companyId && deps.getFieldVisitRemoteCheckInEligibility
-              ? await deps.getFieldVisitRemoteCheckInEligibility(payload.userId, toMumbaiDateKey(new Date()), companyId)
+              ? await deps.getFieldVisitRemoteCheckInEligibility(payload.userId, toMumbaiDateKey(new Date()), companyId, req.auth?.role || "employee")
               : { remoteCheckInAllowed: false, visitCount: 0 };
           const remoteFieldCheckIn = Boolean(fieldVisitEligibility.remoteCheckInAllowed && !zone.insideConfirmed);
         await deps.prepareAttendance?.();
@@ -154,9 +154,14 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             }
           }
           if (type === "checkin" && !zone.insideConfirmed && !remoteFieldCheckIn) {
-            reject(!zones.length ? "Company office location is not configured. Ask admin to set attendance location."
+            const remoteWindowMessage = req.auth?.role === "employee" && fieldVisitEligibility.reason === "not_open" && fieldVisitEligibility.remoteCheckInOpensAt
+              ? `Remote field check-in opens at ${formatIstTime(fieldVisitEligibility.remoteCheckInOpensAt)}. Until then, check in inside your assigned office geofence.`
+              : req.auth?.role === "employee" && fieldVisitEligibility.reason === "remote_window_expired"
+                ? "The remote field check-in window has closed. Check in inside your assigned office geofence."
+                : null;
+            reject(remoteWindowMessage || (!zones.length ? "Company office location is not configured. Ask admin to set attendance location."
               : zone.inside ? "GPS is uncertain near the office boundary. Move further inside and retry."
-              : "Outside geofence. Check-in denied."); return;
+              : "Outside geofence. Check-in denied.")); return;
           }
           // Keep the real server time for overnight shifts; never backdate a checkout.
           const now = new Date().toISOString();
@@ -223,4 +228,14 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
       }
     });
   }
+}
+
+function formatIstTime(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "the scheduled travel window";
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }

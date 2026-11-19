@@ -1,6 +1,7 @@
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 import { getApiToken } from '@/lib/storage';
 import type { Coordinate, FieldSessionKpis, PlaceSearchResult, RoutePlan, RoutePoint, TrackingSession } from './types';
+import type { VisitLocationEvidence } from './visit-policy';
 
 type RequestOptions = RequestInit & {
   timeoutMs?: number;
@@ -26,13 +27,15 @@ export type FieldVisitAssignment = {
   notes: string;
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
   createdAt: string;
+  arrivedAt: string | null;
   startedAt: string | null;
   completedAt: string | null;
   arrivalLocation: (Coordinate & { accuracy: number | null }) | null;
   completionLocation: (Coordinate & { accuracy: number | null }) | null;
 };
 
-export type VisitEvidenceLocation = Coordinate & { accuracy?: number | null };
+export type VisitEvidenceLocation = VisitLocationEvidence;
+export type VisitEvidencePayload = { samples: VisitEvidenceLocation[] };
 
 async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const token = await getApiToken();
@@ -192,10 +195,17 @@ export function deleteFieldVisitAssignment(assignmentId: string): Promise<{ ok: 
   });
 }
 
-export function startFieldVisitAssignment(assignmentId: string, location: VisitEvidenceLocation): Promise<{ assignment: FieldVisitAssignment }> {
+export function confirmFieldVisitArrival(assignmentId: string, evidence: VisitEvidencePayload): Promise<{ assignment: FieldVisitAssignment; arrival: { distanceMetres: number; radiusMetres: number } }> {
+  return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/arrive`, {
+    method: 'POST',
+    body: JSON.stringify(evidence),
+  });
+}
+
+export function startFieldVisitAssignment(assignmentId: string, evidence: VisitEvidencePayload): Promise<{ assignment: FieldVisitAssignment }> {
   return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/start`, {
     method: 'POST',
-    body: JSON.stringify({ location }),
+    body: JSON.stringify(evidence),
   });
 }
 
@@ -203,15 +213,18 @@ export type FieldCheckInEligibility = {
   remoteCheckInAllowed: boolean;
   visitCount: number;
   scheduledDate: string;
+  reason?: 'available' | 'not_open' | 'remote_window_expired' | 'no_active_visit' | 'not_eligible';
+  remoteCheckInOpensAt?: string | null;
+  remoteCheckInExpiresAt?: string | null;
 };
 
 export function getFieldCheckInEligibility(): Promise<FieldCheckInEligibility> {
   return requestJson('/field-tracking/check-in-eligibility', { timeoutMs: 8_000 });
 }
 
-export function completeFieldVisitAssignment(assignmentId: string, location?: VisitEvidenceLocation): Promise<{ ok: boolean; nextAssignment: FieldVisitAssignment | null }> {
+export function completeFieldVisitAssignment(assignmentId: string, evidence: VisitEvidencePayload): Promise<{ ok: boolean; nextAssignment: FieldVisitAssignment | null }> {
   return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/complete`, {
     method: 'POST',
-    body: JSON.stringify({ location: location || null }),
+    body: JSON.stringify(evidence),
   });
 }

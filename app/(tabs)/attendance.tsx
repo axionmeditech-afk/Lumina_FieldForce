@@ -997,10 +997,22 @@ function AttendanceScreenContent() {
   const isSuperAdminAttendanceExempt = user ? isSystemAdministratorAccount(user) : false;
   const isEmployeeOfficeAttendance = true;
   const isOfficeGeofenceAttendance = true;
+  const remoteWindowOpensAt = fieldCheckInEligibility?.remoteCheckInOpensAt
+    ? Date.parse(fieldCheckInEligibility.remoteCheckInOpensAt)
+    : null;
+  const remoteWindowExpiresAt = fieldCheckInEligibility?.remoteCheckInExpiresAt
+    ? Date.parse(fieldCheckInEligibility.remoteCheckInExpiresAt)
+    : null;
+  const fixedEmployeeRemoteWindowOpen = user?.role === "employee"
+    && remoteWindowOpensAt != null && Number.isFinite(remoteWindowOpensAt)
+    && remoteWindowExpiresAt != null && Number.isFinite(remoteWindowExpiresAt)
+    && clockNowMs >= remoteWindowOpensAt && clockNowMs <= remoteWindowExpiresAt;
   const isFieldVisitRemoteCheckIn =
     (user?.role === "employee" || user?.role === "salesperson") &&
-    fieldCheckInEligibility?.remoteCheckInAllowed === true &&
-    fieldCheckInEligibility.scheduledDate === toMumbaiDateKey(new Date());
+    fieldCheckInEligibility?.scheduledDate === toMumbaiDateKey(new Date()) &&
+    (user?.role === "salesperson"
+      ? fieldCheckInEligibility?.remoteCheckInAllowed === true
+      : fixedEmployeeRemoteWindowOpen);
   const isAdminAttendanceManager = user?.role === "admin";
   const showAttendanceOfficeAdminPanel = isAdminAttendanceManager;
   const todayHeading = "Today's Log";
@@ -1009,6 +1021,14 @@ function AttendanceScreenContent() {
     const timer = setInterval(() => setClockNowMs(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!isFocused || !appActive || (user?.role !== "employee" && user?.role !== "salesperson")) return;
+    const timer = setInterval(() => {
+      void getFieldCheckInEligibility().then(setFieldCheckInEligibility).catch(() => undefined);
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [appActive, isFocused, user?.role]);
 
   const openAppSettings = useCallback(() => {
     void Linking.openSettings();
@@ -2083,6 +2103,13 @@ function AttendanceScreenContent() {
     !dataError &&
     selectedDate === toMumbaiDateKey(new Date()) &&
     (checkedInState ? locationReady : canCheckIn);
+  const fixedEmployeeVisitWindowMessage = user?.role === "employee" && (fieldCheckInEligibility?.visitCount || 0) > 0
+    ? remoteWindowOpensAt != null && clockNowMs < remoteWindowOpensAt
+      ? `Remote field check-in opens at ${new Date(remoteWindowOpensAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}; office geofence check-in remains available.`
+      : remoteWindowExpiresAt != null && clockNowMs > remoteWindowExpiresAt
+        ? "Remote field check-in window has closed; check in inside your assigned office geofence."
+        : null
+    : null;
 
   useEffect(() => {
     if (
@@ -2449,7 +2476,9 @@ function AttendanceScreenContent() {
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
           {isFieldVisitRemoteCheckIn
             ? `${fieldCheckInEligibility?.visitCount || 1} field visit(s) today · check in from your current location`
-            : isOfficeGeofenceAttendance
+            : fixedEmployeeVisitWindowMessage
+              ? fixedEmployeeVisitWindowMessage
+              : isOfficeGeofenceAttendance
               ? `${company?.name || "Company"} office check-in within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of assigned location`
             : `${company?.name || "Company"} secure geofenced attendance`}
         </Text>

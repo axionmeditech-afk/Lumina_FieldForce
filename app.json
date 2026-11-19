@@ -3,7 +3,7 @@
     "name": "Lumina FieldForce",
     "slug": "lumina-fieldforce",
     "owner": "appallakarthik",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "updates": {
       "enabled": false,
       "checkAutomatically": "NEVER",
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.luminafieldforce",
-      "versionCode": 10,
+      "versionCode": 11,
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
