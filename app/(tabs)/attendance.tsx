@@ -51,6 +51,7 @@ import {
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
 import { startAttendanceGeofence, stopAttendanceGeofence } from "@/lib/attendance-background";
 import { startFieldTrackingForCheckIn, stopFieldTrackingForCheckOut } from "@/lib/field-tracking/attendance-lifecycle";
+import { getFieldCheckInEligibility, type FieldCheckInEligibility } from "@/lib/field-tracking/api";
 import { getClientSecurityStatus } from "@/lib/security-client";
 import { canReviewAttendanceSignIns, isSalesRole } from "@/lib/role-access";
 import {
@@ -983,6 +984,7 @@ function AttendanceScreenContent() {
   const queuedLoadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rosterCacheRef = useRef<{ key: string; at: number; employees: Employee[] } | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
+  const [fieldCheckInEligibility, setFieldCheckInEligibility] = useState<FieldCheckInEligibility | null>(null);
   const [appActive, setAppActive] = useState(AppState.currentState === "active");
   const [clockNowMs, setClockNowMs] = useState(() => Date.now());
   useEffect(() => { const sub = AppState.addEventListener("change", state => setAppActive(state === "active")); return () => sub.remove(); }, []);
@@ -995,7 +997,10 @@ function AttendanceScreenContent() {
   const isSuperAdminAttendanceExempt = user ? isSystemAdministratorAccount(user) : false;
   const isEmployeeOfficeAttendance = true;
   const isOfficeGeofenceAttendance = true;
-  const isSalespersonFieldCheckIn = false;
+  const isFieldVisitRemoteCheckIn =
+    (user?.role === "employee" || user?.role === "salesperson") &&
+    fieldCheckInEligibility?.remoteCheckInAllowed === true &&
+    fieldCheckInEligibility.scheduledDate === toMumbaiDateKey(new Date());
   const isAdminAttendanceManager = user?.role === "admin";
   const showAttendanceOfficeAdminPanel = isAdminAttendanceManager;
   const todayHeading = "Today's Log";
@@ -1047,7 +1052,7 @@ function AttendanceScreenContent() {
       const rosterKey = `${activeUserId}:${includeAllWorkspaces ? attendanceCompanyIds.join("|") : companyId || ""}`;
       const cache = rosterCacheRef.current;
       const ROSTER_CACHE_TTL_MS = 120_000; // 2 minutes (was 5 min)
-      const [status, companyAttendance, employees] = await Promise.all([
+      const [status, companyAttendance, employees, checkInEligibility] = await Promise.all([
         getAttendanceStatus(selectedDate),
         isAdminAttendanceManager
           ? getCompanyAttendanceToday(undefined, selectedDate, true)
@@ -1064,6 +1069,13 @@ function AttendanceScreenContent() {
                 companyIds: attendanceCompanyIds,
               })
           : Promise.resolve([] as Employee[]),
+        user?.role === "employee" || user?.role === "salesperson"
+          ? getFieldCheckInEligibility().catch(() => ({
+              remoteCheckInAllowed: false,
+              visitCount: 0,
+              scheduledDate: toMumbaiDateKey(new Date()),
+            }))
+          : Promise.resolve(null),
       ]);
       if (requestId !== loadBaseDataRequestRef.current) return;
       const scopedRecords = activeCompanyId
@@ -1075,6 +1087,7 @@ function AttendanceScreenContent() {
       const scopedActive = status.active;
       rosterCacheRef.current = { key: rosterKey, at: cache?.key === rosterKey && cache.employees === employees ? cache.at : Date.now(), employees };
       setRecords(scopedRecords);
+      setFieldCheckInEligibility(checkInEligibility);
       if (scopedActive) await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkin`);
       else await AsyncStorage.removeItem(`@attendance_request:${activeUserId}:checkout`);
       activeAttendanceRef.current = scopedActive;
@@ -1349,6 +1362,10 @@ function AttendanceScreenContent() {
       if (autoCheckoutProtectedDateRef.current && autoCheckoutProtectedDateRef.current !== today) {
         autoCheckoutProtectedDateRef.current = null;
       }
+      if (!active.geofenceId && active.geofenceName === "Remote field-work start") {
+        setAutoCheckoutStatus("Field visit mode active. Live route tracking continues until you check out.");
+        return;
+      }
       const zone = geofences.find((item) => item.id === active.geofenceId) || null;
       if (!zone) {
         setAutoCheckoutStatus("Auto-checkout needs an assigned office geofence.");
@@ -1455,7 +1472,7 @@ function AttendanceScreenContent() {
       geofences,
       geofencesLoaded,
       isOfficeGeofenceAttendance,
-      isSalespersonFieldCheckIn,
+      isFieldVisitRemoteCheckIn,
       isSuperAdminAttendanceExempt,
       processForegroundAutoCheckout,
       rememberLatestLocation,
@@ -1838,11 +1855,17 @@ function AttendanceScreenContent() {
           postCaptureLocation.coords.longitude,
           postCaptureLocation.coords.accuracy ?? undefined
         );
-        if (type === "checkin" && (!geofences.length || !finalEvaluation.insideConfirmed || finalEvaluation.signalWeak)) {
+        const remoteFieldStart =
+          type === "checkin" &&
+          isFieldVisitRemoteCheckIn &&
+          !finalEvaluation.insideConfirmed;
+        if (type === "checkin" && !remoteFieldStart && (!geofences.length || !finalEvaluation.insideConfirmed || finalEvaluation.signalWeak)) {
           throw new Error("Move inside your assigned office geofence with a clear GPS signal to check in.");
         }
         if (isMockLocation(postCaptureLocation)) throw new Error("Disable mock location before marking attendance.");
-        const finalZoneName = finalEvaluation.activeZone?.name ?? "Unassigned Zone";
+        const finalZoneName = remoteFieldStart
+          ? "Remote field-work start"
+          : finalEvaluation.activeZone?.name ?? "Unassigned Zone";
 
         const security = await securityPromise;
         const capturedAtClient = new Date(postCaptureLocation.timestamp).toISOString();
@@ -1941,8 +1964,12 @@ function AttendanceScreenContent() {
               }
             }
             await ensureAttendanceNotificationPermission(true).catch(() => false);
-            const enabled = await startAttendanceGeofence(record, geofences, true).catch(() => false);
-            if (!enabled) {
+            const enabled = remoteFieldStart
+              ? true
+              : await startAttendanceGeofence(record, geofences, true).catch(() => false);
+            if (remoteFieldStart) {
+              setAutoCheckoutStatus("Field visit mode active. Live route tracking started from your current location.");
+            } else if (!enabled) {
               Alert.alert(
                 "Check-in saved",
                 "Auto-checkout needs Always/Background location permission. Enable it from Account or Android App Settings so the app can check out while locked."
@@ -1973,7 +2000,7 @@ function AttendanceScreenContent() {
       ensureAttendanceLocationPreflight,
       geofences,
       getFastAttendanceEvidence,
-      isSalespersonFieldCheckIn,
+      isFieldVisitRemoteCheckIn,
       isSuperAdminAttendanceExempt,
       clearForegroundAutoCheckout,
       loadBaseData,
@@ -2031,8 +2058,8 @@ function AttendanceScreenContent() {
     return `${Math.max(0, Math.floor(minutes / 60))}h ${Math.max(0, Math.floor(minutes % 60))}m`;
   }, [clockNowMs, records]);
 
-  const employeeHasOfficeZone = !isOfficeGeofenceAttendance || geofences.length > 0;
-  const employeeInsideOfficeZone = !isOfficeGeofenceAttendance || evaluation.insideConfirmed;
+  const employeeHasOfficeZone = isFieldVisitRemoteCheckIn || !isOfficeGeofenceAttendance || geofences.length > 0;
+  const employeeInsideOfficeZone = isFieldVisitRemoteCheckIn || !isOfficeGeofenceAttendance || evaluation.insideConfirmed;
   const bannerType: BannerType = (!geofencesLoaded || !locationReady)
     ? "loading"
     : evaluation.signalWeak
@@ -2042,9 +2069,11 @@ function AttendanceScreenContent() {
         ? "inside"
         : "boundary"
       : "outside";
-  const banner = getBannerConfig(bannerType, colors, isOfficeGeofenceAttendance, geofences.length > 0);
-  const zoneName = isSalespersonFieldCheckIn
-    ? "Office Geofence"
+  const banner = isFieldVisitRemoteCheckIn
+    ? { label: "Field visit check-in available", icon: "navigate-circle-outline", bg: colors.primary + "12", border: colors.primary + "44", text: colors.primary }
+    : getBannerConfig(bannerType, colors, isOfficeGeofenceAttendance, geofences.length > 0);
+  const zoneName = isFieldVisitRemoteCheckIn
+    ? "Field visit start"
     : evaluation.activeZone?.name ??
       geofences[0]?.name ??
       (isOfficeGeofenceAttendance ? "Office not configured" : "No zone");
@@ -2357,8 +2386,8 @@ function AttendanceScreenContent() {
           <View style={[styles.modalCard, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Enable Secure Attendance</Text>
             <Text style={[styles.modalText, { color: colors.textSecondary }]}>
-              {isSalespersonFieldCheckIn
-                ? "Tap Grant Permissions to allow location. Your location is used to verify attendance inside your assigned office."
+              {isFieldVisitRemoteCheckIn
+                ? "Tap Grant Permissions to allow location. Because you have a field visit today, secure check-in can begin from your current location after identity and GPS verification."
                 : isOfficeGeofenceAttendance
                   ? `Tap Grant Permissions to allow location. Check-in unlocks only within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of the company office.`
                 : "Tap Grant Permissions to allow location. Secure check-in uses face unlock, fingerprint, or device PIN/password verification and verifies your office location."}
@@ -2418,8 +2447,8 @@ function AttendanceScreenContent() {
 
         <Text style={[styles.title, { color: colors.text }]}>Secure Attendance</Text>
         <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
-          {isSalespersonFieldCheckIn
-            ? `${company?.name || "Company"} geofenced attendance`
+          {isFieldVisitRemoteCheckIn
+            ? `${fieldCheckInEligibility?.visitCount || 1} field visit(s) today · check in from your current location`
             : isOfficeGeofenceAttendance
               ? `${company?.name || "Company"} office check-in within ${OFFICE_ATTENDANCE_RADIUS_METERS}m of assigned location`
             : `${company?.name || "Company"} secure geofenced attendance`}
@@ -2661,8 +2690,8 @@ function AttendanceScreenContent() {
           <View style={{ flex: 1 }}>
             <Text style={[styles.bannerText, { color: banner.text }]}>{banner.label}</Text>
             <Text style={[styles.bannerSubText, { color: colors.textSecondary }]}>
-              {isSalespersonFieldCheckIn
-                ? "Location is verified when you mark attendance."
+              {isFieldVisitRemoteCheckIn
+                ? "Fresh GPS and identity verification remain mandatory. Live tracking begins after check-in; directions still start only when you tap Start directions."
                 : isOfficeGeofenceAttendance
                   ? employeeDistanceLabel
                     ? `Office distance: ${employeeDistanceLabel}. Last GPS: ${lastStoredLocationLabel ?? "saving..."}.`

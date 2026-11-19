@@ -37,6 +37,11 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
             role: req.auth?.role,
           });
           const zone = deps.resolveGeofenceStatus(payload, zones);
+          const fieldVisitEligibility =
+            type === "checkin" && ["employee", "salesperson"].includes(req.auth?.role || "") && companyId && deps.getFieldVisitRemoteCheckInEligibility
+              ? await deps.getFieldVisitRemoteCheckInEligibility(payload.userId, toMumbaiDateKey(new Date()), companyId)
+              : { remoteCheckInAllowed: false, visitCount: 0 };
+          const remoteFieldCheckIn = Boolean(fieldVisitEligibility.remoteCheckInAllowed && !zone.insideConfirmed);
         await deps.prepareAttendance?.();
         await (deps.withAttendanceLock || withAttendanceLock)(payload.userId, async () => {
           const database = deps.isMySqlStateEnabled();
@@ -148,7 +153,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
               return;
             }
           }
-          if (type === "checkin" && !zone.insideConfirmed) {
+          if (type === "checkin" && !zone.insideConfirmed && !remoteFieldCheckIn) {
             reject(!zones.length ? "Company office location is not configured. Ask admin to set attendance location."
               : zone.inside ? "GPS is uncertain near the office boundary. Move further inside and retry."
               : "Outside geofence. Check-in denied."); return;
@@ -156,20 +161,26 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           // Keep the real server time for overnight shifts; never backdate a checkout.
           const now = new Date().toISOString();
           const eventTimestamp = automatic && capturedAt ? capturedAt.toISOString() : now;
-          const notes = manualCheckoutFromDifferentDevice
+          let notes = manualCheckoutFromDifferentDevice
             ? [
                 payload.notes,
                 `Manual checkout allowed from replacement device. Check-in device=${active.deviceId}; checkout device=${payload.deviceId}.`,
               ].filter(Boolean).join(" | ")
             : payload.notes;
+          if (remoteFieldCheckIn) {
+            notes = [
+              notes,
+              `Remote field check-in authorised by ${fieldVisitEligibility.visitCount} scheduled visit(s).`,
+            ].filter(Boolean).join(" | ");
+          }
           const record: AttendanceRecord = {
             id: recordId, userId: payload.userId, userName: payload.userName,
             companyId: (type === "checkout" ? active.companyId : zone.activeZone?.companyId) || companyId || undefined,
             type, timestamp: eventTimestamp, timestampServer: now,
             location: { lat: payload.latitude, lng: payload.longitude },
-            geofenceId: type === "checkout" ? active.geofenceId : zone.activeZone?.id || null,
-            geofenceName: type === "checkout" ? active.geofenceName : zone.activeZone?.name || null,
-            deviceId: payload.deviceId, isInsideGeofence: zone.insideConfirmed,
+            geofenceId: type === "checkout" ? active.geofenceId : remoteFieldCheckIn ? null : zone.activeZone?.id || null,
+            geofenceName: type === "checkout" ? active.geofenceName : remoteFieldCheckIn ? "Remote field-work start" : zone.activeZone?.name || null,
+            deviceId: payload.deviceId, isInsideGeofence: remoteFieldCheckIn ? false : zone.insideConfirmed,
             notes, source: "mobile", approvalStatus: "approved",
           };
           // Durable persistence is the success boundary. Never fall back to memory on a DB failure.

@@ -2,7 +2,7 @@ import type { Express, Request } from 'express';
 import type { Pool } from 'mysql2/promise';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
-import type { AttendanceRecord } from '@/lib/types';
+import type { AppNotification, AttendanceRecord } from '@/lib/types';
 import { toMumbaiDateKey } from '@/lib/ist-time';
 import {
   computeRoute,
@@ -13,6 +13,7 @@ import {
   matchTrace,
   searchPlaces,
 } from '@/server/services/field-geospatial';
+import { sendPushToUsers } from '@/server/services/push-notifications';
 
 type Deps = {
   requireAuth: (req: any, res: any, next: any) => void;
@@ -21,6 +22,7 @@ type Deps = {
   resolveRequestCompanyId: (req: Request) => Promise<string | null>;
   getRequestUser: (req: Request) => { companyId?: string | null; companyIds?: string[] | null } | null;
   findActiveAttendance: (userId: string) => Promise<AttendanceRecord | null>;
+  insertNotificationInMySql?: (notification: AppNotification) => Promise<void>;
 };
 
 const pointSchema = z.object({
@@ -285,6 +287,23 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         parsed.data.scheduledDate, `${parsed.data.scheduledTime}:00`, parsed.data.notes || null,
       ],
     );
+    const alertTitle = 'New field visit assigned';
+    const alertBody = `${parsed.data.place.name} on ${parsed.data.scheduledDate} at ${parsed.data.scheduledTime}`;
+    if (deps.insertNotificationInMySql) {
+      await deps.insertNotificationInMySql({
+        id: randomUUID(),
+        companyId,
+        title: alertTitle,
+        body: alertBody,
+        kind: 'alert',
+        audience: 'employee',
+        audienceUserIds: [parsed.data.employeeId],
+        createdById: String(req.auth?.sub || ''),
+        createdByName: 'FieldForce supervisor',
+        createdAt: new Date().toISOString(),
+        readByIds: [],
+      }).catch((error) => console.warn('[field-tracking] assignment inbox alert failed', error));
+    }
     res.status(201).json({
       assignment: {
         assignmentId: id, companyId, employeeId: parsed.data.employeeId,
@@ -297,6 +316,34 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         arrivalLocation: null, completionLocation: null,
       },
     });
+    // Delivery is best effort after the assignment is durable. A temporary
+    // push-provider outage must never roll back or duplicate the field visit.
+    void sendPushToUsers(pool, {
+      userIds: [parsed.data.employeeId],
+      companyId,
+      payload: {
+        title: alertTitle,
+        body: alertBody,
+        data: { screen: 'field-visits', kind: 'visit_assigned', assignmentId: id },
+      },
+    }).catch((error) => console.warn('[field-tracking] assignment push failed', error));
+  });
+
+  app.get('/api/field-tracking/check-in-eligibility', deps.requireAuth, requireStore, async (req, res) => {
+    const scheduledDate = toMumbaiDateKey(new Date());
+    const companyId = await deps.resolveRequestCompanyId(req);
+    const employeeId = String(req.auth?.sub || '').trim();
+    if (!companyId || !employeeId || !['employee', 'salesperson'].includes(req.auth?.role || '')) {
+      res.json({ remoteCheckInAllowed: false, visitCount: 0, scheduledDate });
+      return;
+    }
+    const eligibility = await getFieldVisitRemoteCheckInEligibility(
+      await deps.getMySqlPool(),
+      employeeId,
+      scheduledDate,
+      companyId,
+    );
+    res.json({ ...eligibility, scheduledDate });
   });
 
   app.post('/api/field-tracking/assignments/:assignmentId/start', deps.requireAuth, requireStore, async (req, res) => {
@@ -597,7 +644,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const [rows] = await pool.execute<any[]>(
-      `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible
+      `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible, rejection_reason
        FROM lff_tracking_points
        WHERE company_id=? AND employee_id=? AND captured_at>=? AND captured_at<?
        ORDER BY captured_at ASC, session_id ASC, sequence_no ASC
@@ -675,7 +722,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const [rows] = await pool.execute<any[]>(
-      `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible
+      `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible, rejection_reason
        FROM lff_tracking_points
        WHERE company_id=? AND employee_id=? AND captured_at>=? AND captured_at<?
        ORDER BY captured_at ASC, session_id ASC, sequence_no ASC
@@ -815,30 +862,13 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
 
     const [pointRows] = await pool.execute<any[]>(
-      `SELECT sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible
+      `SELECT sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible, rejection_reason
        FROM lff_tracking_points
        WHERE session_id=?
        ORDER BY sequence_no ASC
        LIMIT 10000`,
       [sessionId],
     );
-    const [visitRows] = await pool.execute<any[]>(
-      `SELECT
-          COUNT(*) AS total_count,
-          SUM(status='completed') AS completed_count
-       FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status<>'cancelled'`,
-      [session.company_id, session.employee_id],
-    );
-    const [nextVisitRows] = await pool.execute<any[]>(
-      `SELECT place_name, place_address, latitude, longitude, status
-       FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status IN ('pending','in_progress')
-       ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END, queue_order ASC, created_at ASC
-       LIMIT 1`,
-      [session.company_id, session.employee_id],
-    );
-
     const allPoints = pointRows.map((row) => mapKpiPoint({ ...row, session_id: sessionId })).filter(isValidKpiPoint);
     const offsetMinutes = normalizeTimezoneOffset(req.query.tzOffsetMinutes);
     const requestedDate = String(req.query.date || '').trim();
@@ -846,6 +876,20 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
       ? requestedDate
       : localDateKey(latestPoint?.capturedAt ?? Date.now(), offsetMinutes);
+    const [visitRows] = await pool.execute<any[]>(
+      `SELECT COUNT(*) AS total_count, SUM(status='completed') AS completed_count
+       FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status<>'cancelled'`,
+      [session.company_id, session.employee_id, selectedDate],
+    );
+    const [nextVisitRows] = await pool.execute<any[]>(
+      `SELECT place_name, place_address, latitude, longitude, status
+       FROM lff_place_assignments
+       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status IN ('pending','in_progress')
+       ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END, scheduled_time ASC, queue_order ASC, created_at ASC
+       LIMIT 1`,
+      [session.company_id, session.employee_id, selectedDate],
+    );
     const points = allPoints.filter((point) => localDateKey(point.capturedAt, offsetMinutes) === selectedDate);
     const accepted = points.filter((point) => point.routeEligible && (point.accuracy == null || point.accuracy <= 80));
     const latest = accepted.at(-1) ?? null;
@@ -1121,6 +1165,31 @@ export async function getFieldVisitAutoCheckoutProtection(
   return { protected: visitCount > 0, visitCount };
 }
 
+/**
+ * An employee-facing user may begin a scheduled field-work day from their current
+ * location. The server, rather than the mobile client, owns this exception so
+ * an arbitrary employee cannot bypass the office attendance boundary.
+ */
+export async function getFieldVisitRemoteCheckInEligibility(
+  pool: Pool,
+  employeeId: string,
+  scheduledDate: string,
+  companyId: string,
+): Promise<{ remoteCheckInAllowed: boolean; visitCount: number }> {
+  if (!employeeId || !companyId || !/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) {
+    return { remoteCheckInAllowed: false, visitCount: 0 };
+  }
+  await ensureTables(pool);
+  const [rows] = await pool.execute<any[]>(
+    `SELECT COUNT(*) AS visit_count
+     FROM lff_place_assignments
+     WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status<>'cancelled'`,
+    [employeeId, companyId, scheduledDate],
+  );
+  const visitCount = Math.max(0, Number(rows[0]?.visit_count || 0));
+  return { remoteCheckInAllowed: visitCount > 0, visitCount };
+}
+
 function mapAssignment(row: Record<string, unknown>) {
   return {
     assignmentId: String(row.id || ''),
@@ -1194,6 +1263,7 @@ type KpiPoint = {
   speed: number | null;
   capturedAt: number;
   routeEligible: boolean;
+  rejectionReason: string | null;
 };
 
 type DailyTrackingSummary = {
@@ -1247,7 +1317,11 @@ export function summarizeTrackingDay(points: KpiPoint[], date: string, offsetMin
   const dayPoints = points
     .filter((point) => Number.isFinite(point.capturedAt) && localDateKey(point.capturedAt, offsetMinutes) === date)
     .sort((left, right) => left.capturedAt - right.capturedAt || left.sequence - right.sequence);
-  const accepted = dayPoints.filter((point) => point.routeEligible && (point.accuracy == null || point.accuracy <= 80));
+  // Route points describe travelled geometry. Stationary-noise points are not
+  // drawn on the map, but are valuable evidence that the device stayed at the
+  // same place. Keeping both sets separate prevents GPS jitter from inflating
+  // distance while still allowing accurate halt durations.
+  const accepted = dayPoints.filter(isTrackingEvidence);
   const bySession = new Map<string, KpiPoint[]>();
   for (const point of accepted) {
     const list = bySession.get(point.sessionId) ?? [];
@@ -1256,6 +1330,7 @@ export function summarizeTrackingDay(points: KpiPoint[], date: string, offsetMin
   }
 
   let shiftSeconds = 0;
+  let movingSeconds = 0;
   let haltSeconds = 0;
   let haltCount = 0;
   let activeHalt = false;
@@ -1266,30 +1341,33 @@ export function summarizeTrackingDay(points: KpiPoint[], date: string, offsetMin
     const first = sessionPoints[0];
     const last = sessionPoints.at(-1);
     if (!first || !last) continue;
-    const recentlyActive = date === today && now - last.capturedAt >= 0 && now - last.capturedAt <= 5 * 60_000;
-    const effectiveEnd = recentlyActive ? now : last.capturedAt;
-    shiftSeconds += Math.max(0, Math.floor((effectiveEnd - first.capturedAt) / 1000));
-    distanceMetres += gpsDistanceMetres(sessionPoints);
+    const recentlyActive = date === today && now - last.capturedAt >= 0 && now - last.capturedAt <= LIVE_POINT_FRESHNESS_MS;
     const derived = deriveFieldActivity(sessionPoints, recentlyActive ? now : last.capturedAt);
+    shiftSeconds += observedTrackingSeconds(sessionPoints, recentlyActive ? now : null);
+    movingSeconds += derived.movingSeconds;
+    distanceMetres += gpsDistanceMetres(sessionPoints);
     haltSeconds += derived.totalHaltSeconds;
     haltCount += derived.haltCount;
     activeHalt = activeHalt || derived.activeHalt;
     activity.push(...derived.events);
   }
   const boundedHaltSeconds = Math.min(shiftSeconds, Math.max(0, Math.round(haltSeconds)));
-  const movingSeconds = Math.max(0, shiftSeconds - boundedHaltSeconds);
+  const boundedMovingSeconds = Math.min(
+    Math.max(0, shiftSeconds - boundedHaltSeconds),
+    Math.max(0, Math.round(movingSeconds)),
+  );
   const latest = accepted.at(-1) ?? null;
   return {
     date,
     sessionCount: bySession.size,
     shiftSeconds,
-    movingSeconds,
+    movingSeconds: boundedMovingSeconds,
     haltSeconds: boundedHaltSeconds,
     haltCount,
     activeHalt,
     distanceMetres: Math.round(distanceMetres),
-    averageMovingSpeedKmh: movingSeconds >= 60 && distanceMetres > 0
-      ? Number(((distanceMetres / movingSeconds) * 3.6).toFixed(1))
+    averageMovingSpeedKmh: boundedMovingSeconds >= 60 && distanceMetres > 0
+      ? Number(((distanceMetres / boundedMovingSeconds) * 3.6).toFixed(1))
       : null,
     totalPoints: dayPoints.length,
     acceptedPoints: accepted.length,
@@ -1341,6 +1419,7 @@ function mapKpiPoint(row: Record<string, unknown>): KpiPoint {
     speed: row.speed == null ? null : Number(row.speed),
     capturedAt: asDateMillis(row.captured_at),
     routeEligible: Boolean(row.route_eligible),
+    rejectionReason: row.rejection_reason == null ? null : String(row.rejection_reason),
   };
 }
 
@@ -1362,15 +1441,63 @@ function haversineMetres(
   return 6_371_000 * 2 * Math.asin(Math.min(1, Math.sqrt(formula)));
 }
 
+const MAX_OBSERVED_GAP_SECONDS = 3 * 60;
+const LIVE_POINT_FRESHNESS_MS = 2 * 60_000;
+const MINIMUM_HALT_SECONDS = 3 * 60;
+
+function isTrackingEvidence(point: KpiPoint): boolean {
+  const usableAccuracy = point.accuracy == null || point.accuracy <= 80;
+  return usableAccuracy && (point.routeEligible || point.rejectionReason === 'stationary_noise');
+}
+
+function gpsNoiseGateMetres(left: KpiPoint, right: KpiPoint): number {
+  const leftAccuracy = Math.max(0, left.accuracy ?? 10);
+  const rightAccuracy = Math.max(0, right.accuracy ?? 10);
+  return Math.max(5, Math.min(25, Math.hypot(leftAccuracy, rightAccuracy) * 0.35));
+}
+
 function gpsDistanceMetres(points: KpiPoint[]): number {
   return points.reduce((total, point, index) => {
     if (index === 0) return total;
     const previous = points[index - 1]!;
     const elapsedSeconds = (point.capturedAt - previous.capturedAt) / 1000;
     // A long data gap cannot be represented by a straight line reliably.
-    if (elapsedSeconds <= 0 || elapsedSeconds > 15 * 60) return total;
-    return total + haversineMetres(previous, point);
+    if (elapsedSeconds <= 0 || elapsedSeconds > MAX_OBSERVED_GAP_SECONDS) return total;
+    // Two stationary evidence samples describe dwell time, not travel.
+    if (!previous.routeEligible && !point.routeEligible) return total;
+    const distance = haversineMetres(previous, point);
+    if (distance <= gpsNoiseGateMetres(previous, point)) return total;
+    if (distance / elapsedSeconds > 70) return total;
+    return total + distance;
   }, 0);
+}
+
+function observedTrackingSeconds(points: KpiPoint[], liveNow: number | null): number {
+  let seconds = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const elapsed = (points[index]!.capturedAt - points[index - 1]!.capturedAt) / 1000;
+    if (elapsed > 0 && elapsed <= MAX_OBSERVED_GAP_SECONDS) seconds += elapsed;
+  }
+  const last = points.at(-1);
+  if (last && liveNow != null) {
+    seconds += Math.max(0, Math.min(MAX_OBSERVED_GAP_SECONDS, (liveNow - last.capturedAt) / 1000));
+  }
+  return Math.round(seconds);
+}
+
+function splitContinuousPointRanges(points: KpiPoint[]): Array<{ start: number; end: number }> {
+  if (!points.length) return [];
+  const ranges: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const elapsed = (points[index]!.capturedAt - points[index - 1]!.capturedAt) / 1000;
+    if (elapsed <= 0 || elapsed > MAX_OBSERVED_GAP_SECONDS) {
+      ranges.push({ start, end: index - 1 });
+      start = index;
+    }
+  }
+  ranges.push({ start, end: points.length - 1 });
+  return ranges;
 }
 
 type FieldActivityEvent = {
@@ -1386,42 +1513,39 @@ type FieldActivityEvent = {
 
 function deriveFieldActivity(points: KpiPoint[], now: number): {
   totalHaltSeconds: number;
+  movingSeconds: number;
   haltCount: number;
   activeHalt: boolean;
   events: FieldActivityEvent[];
 } {
-  const minimumHaltSeconds = 3 * 60;
-  const haltRadiusMetres = 45;
   const haltRanges: { start: number; end: number; active: boolean; durationSeconds: number }[] = [];
 
-  for (let start = 0; start < points.length - 1;) {
-    let end = start;
-    let pathDistance = 0;
-    while (end + 1 < points.length) {
-      const current = points[end]!;
-      const next = points[end + 1]!;
-      const elapsed = (next.capturedAt - current.capturedAt) / 1000;
-      const nextDistanceFromAnchor = haversineMetres(points[start]!, next);
-      if (elapsed <= 0 || elapsed > 15 * 60 || nextDistanceFromAnchor > haltRadiusMetres) break;
-      pathDistance += haversineMetres(current, next);
-      end += 1;
-    }
+  for (const range of splitContinuousPointRanges(points)) {
+    for (let start = range.start; start < range.end;) {
+      let end = start;
+      const anchor = points[start]!;
+      while (end + 1 <= range.end) {
+        const next = points[end + 1]!;
+        const radius = Math.max(25, Math.min(50, Math.max(anchor.accuracy ?? 10, next.accuracy ?? 10) * 1.25));
+        if (haversineMetres(anchor, next) > radius) break;
+        end += 1;
+      }
 
-    const startedAt = points[start]!.capturedAt;
-    const endedAt = points[end]!.capturedAt;
-    const durationSeconds = Math.max(0, (endedAt - startedAt) / 1000);
-    const isLatestCluster = end === points.length - 1 && now - endedAt <= 5 * 60 * 1000;
-    // A small GPS drift inside the halt radius is expected; larger movement is not a halt.
-    if (end > start && durationSeconds >= minimumHaltSeconds && pathDistance <= haltRadiusMetres * 1.5) {
-      haltRanges.push({
-        start,
-        end,
-        active: isLatestCluster,
-        durationSeconds: isLatestCluster ? Math.max(durationSeconds, (now - startedAt) / 1000) : durationSeconds,
-      });
-      start = end + 1;
-    } else {
-      start += 1;
+      const startedAt = anchor.capturedAt;
+      const endedAt = points[end]!.capturedAt;
+      const durationSeconds = Math.max(0, (endedAt - startedAt) / 1000);
+      const isLatestCluster = end === points.length - 1 && now - endedAt >= 0 && now - endedAt <= LIVE_POINT_FRESHNESS_MS;
+      if (end > start && durationSeconds >= MINIMUM_HALT_SECONDS) {
+        haltRanges.push({
+          start,
+          end,
+          active: isLatestCluster,
+          durationSeconds: isLatestCluster ? Math.max(durationSeconds, (now - startedAt) / 1000) : durationSeconds,
+        });
+        start = end + 1;
+      } else {
+        start += 1;
+      }
     }
   }
 
@@ -1444,27 +1568,35 @@ function deriveFieldActivity(points: KpiPoint[], now: number): {
     });
   };
 
-  let cursor = 0;
-  haltRanges.forEach((halt) => {
-    addMovement(cursor, halt.start);
-    const from = points[halt.start]!;
-    const to = points[halt.end]!;
-    events.push({
-      id: `halt-${from.capturedAt}-${to.capturedAt}`,
-      type: 'halt',
-      startedAt: from.capturedAt,
-      endedAt: halt.active ? null : to.capturedAt,
-      distanceMetres: haversineMetres(from, to),
-      start: from,
-      end: to,
-      active: halt.active,
+  for (const range of splitContinuousPointRanges(points)) {
+    let cursor = range.start;
+    const rangeHalts = haltRanges.filter((halt) => halt.start >= range.start && halt.end <= range.end);
+    rangeHalts.forEach((halt) => {
+      addMovement(cursor, halt.start);
+      const from = points[halt.start]!;
+      const to = points[halt.end]!;
+      events.push({
+        id: `halt-${from.capturedAt}-${to.capturedAt}`,
+        type: 'halt',
+        startedAt: from.capturedAt,
+        endedAt: halt.active ? null : to.capturedAt,
+        distanceMetres: haversineMetres(from, to),
+        start: from,
+        end: to,
+        active: halt.active,
+      });
+      cursor = halt.end;
     });
-    cursor = halt.end;
-  });
-  addMovement(cursor, points.length - 1);
+    addMovement(cursor, range.end);
+  }
+
+  const movingSeconds = events
+    .filter((event) => event.type === 'movement')
+    .reduce((total, event) => total + Math.max(0, ((event.endedAt ?? event.startedAt) - event.startedAt) / 1000), 0);
 
   return {
     totalHaltSeconds: Math.round(haltRanges.reduce((total, halt) => total + halt.durationSeconds, 0)),
+    movingSeconds: Math.round(movingSeconds),
     haltCount: haltRanges.length,
     activeHalt: haltRanges.some((halt) => halt.active),
     events,

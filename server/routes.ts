@@ -39,8 +39,10 @@ import { registerAttendanceActionRoutes } from "@/server/routes/attendance-actio
 import { registerGeofenceRoutes } from "@/server/routes/geofences.routes";
 import {
   getFieldVisitAutoCheckoutProtection,
+  getFieldVisitRemoteCheckInEligibility,
   registerFieldTrackingRoutes,
 } from "@/server/routes/field-tracking.routes";
+import { registerPushNotificationRoutes } from "@/server/routes/push-notifications.routes";
 
 
 type AdminWsClientMeta = {
@@ -3324,6 +3326,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     resolveRequestCompanyId,
     getRequestUser,
     findActiveAttendance: findActiveAttendanceInMySql,
+    insertNotificationInMySql,
+  });
+
+  registerPushNotificationRoutes(app, {
+    requireAuth,
+    getMySqlPool,
+    isMySqlStateEnabled,
+    resolveRequestCompanyId,
+    insertNotificationInMySql,
   });
 
   registerAttendanceActionRoutes(app, {
@@ -3355,6 +3366,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     hasFieldVisitAutoCheckoutProtection: async (userId: string, scheduledDate: string, companyId?: string | null) => {
       if (!isMySqlStateEnabled()) return { protected: false, visitCount: 0 };
       return getFieldVisitAutoCheckoutProtection(await getMySqlPool(), userId, scheduledDate, companyId);
+    },
+    getFieldVisitRemoteCheckInEligibility: async (userId: string, scheduledDate: string, companyId?: string | null) => {
+      if (!isMySqlStateEnabled() || !companyId) return { remoteCheckInAllowed: false, visitCount: 0 };
+      return getFieldVisitRemoteCheckInEligibility(await getMySqlPool(), userId, scheduledDate, companyId);
     },
   });
 

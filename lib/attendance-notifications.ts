@@ -17,7 +17,7 @@ function isExpoGo(): boolean {
   return Constants.appOwnership === "expo" || Constants.expoGoConfig != null;
 }
 
-async function getNotificationsModule(): Promise<NotificationsModule | null> {
+export async function getNotificationsModule(): Promise<NotificationsModule | null> {
   if (Platform.OS === "web" || isExpoGo()) return null;
   if (notificationsModule !== undefined) return notificationsModule;
   try {

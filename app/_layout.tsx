@@ -6,7 +6,7 @@ import { requestMissingAppPermissions } from "@/lib/app-permissions";
 import { restoreFieldTrackingForActiveAttendance } from "@/lib/field-tracking/attendance-lifecycle";
 import React, { useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -16,6 +16,11 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ThemeProvider, useAppTheme } from "@/contexts/ThemeContext";
 import { VisitNavigationMiniCard, VisitNavigationProvider } from "@/contexts/VisitNavigationContext";
 import { retireLegacyLocationTracking } from "@/lib/retire-legacy-tracking";
+import {
+  ensureEmployeeNotificationChannel,
+  installEmployeeNotificationTapHandler,
+  registerEmployeePushNotifications,
+} from "@/lib/employee-notifications";
 import "@/lib/field-tracking/background-task";
 import { useFonts } from "expo-font";
 import { Inter_400Regular } from "@expo-google-fonts/inter/400Regular";
@@ -25,6 +30,7 @@ import { Inter_700Bold } from "@expo-google-fonts/inter/700Bold";
 SplashScreen.preventAutoHideAsync();
 function AppShell() {
   const { user } = useAuth();
+  const router = useRouter();
   const userId = user?.id || "";
   useEffect(() => {
     if (!userId) return;
@@ -55,6 +61,26 @@ function AppShell() {
   }, [user, userId]);
   const { colors, isDark } = useAppTheme();
   useEffect(() => { void ensureAttendanceNotificationChannel().catch(console.warn); }, []);
+  useEffect(() => { void ensureEmployeeNotificationChannel().catch(console.warn); }, []);
+  useEffect(() => {
+    if (!userId) return;
+    const register = () => { void registerEmployeePushNotifications(userId); };
+    register();
+    const appStateSubscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") register();
+    });
+    let cancelled = false;
+    let dispose: () => void = () => {};
+    void installEmployeeNotificationTapHandler((screen) => {
+      if (screen === "field-visits") router.push("/(tabs)/field-visits" as never);
+      else if (screen === "attendance") router.push("/(tabs)/attendance" as never);
+      else router.push("/(tabs)" as never);
+    }).then((cleanup) => {
+      if (cancelled) cleanup();
+      else dispose = cleanup;
+    });
+    return () => { cancelled = true; appStateSubscription.remove(); dispose(); };
+  }, [router, userId]);
   useEffect(() => { void retireLegacyLocationTracking().catch(console.warn); }, []);
   return <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.background }}>
     <VisitNavigationProvider userId={user?.id || null}>

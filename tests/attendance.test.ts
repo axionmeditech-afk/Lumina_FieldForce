@@ -206,9 +206,11 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
   let databaseEnabled = false;
   let rejectDatabaseWrite = false;
   let fieldVisitProtected = false;
+  let remoteFieldCheckInAllowed = false;
+  let authRole = "salesperson";
   registerAttendanceActionRoutes(app, {
     requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-      req.auth = { sub: "employee", deviceId: "device", role: "salesperson", email: "employee@example.test" } as typeof req.auth;
+      req.auth = { sub: "employee", deviceId: "device", role: authRole, email: "employee@example.test" } as typeof req.auth;
       next();
     },
     parseCheckPayload: (req: express.Request) => req.body,
@@ -233,6 +235,7 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
     randomUUID, insertAttendanceInMySql: async (record: AttendanceRecord) => { if (rejectDatabaseWrite) throw new Error("Simulated DB outage"); records.push(record); }, broadcastAttendanceUpdate: () => {},
     resolveDolibarrConfigForUser: async () => null, syncAttendanceWithDolibarr: async () => {},
     hasFieldVisitAutoCheckoutProtection: async () => ({ protected: fieldVisitProtected, visitCount: fieldVisitProtected ? 2 : 0 }),
+    getFieldVisitRemoteCheckInEligibility: async () => ({ remoteCheckInAllowed: remoteFieldCheckInAllowed, visitCount: remoteFieldCheckInAllowed ? 1 : 0 }),
   });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -253,6 +256,18 @@ test("geofenced attendance accepts valid evidence, rejects invalid evidence, and
     assert.equal(await post("checkin", { latitude: office.latitude + 1 }), 400);
     zones = [];
     assert.equal(await post("checkin"), 400);
+    remoteFieldCheckInAllowed = true;
+    authRole = "manager";
+    assert.equal(await post("checkin"), 400, "a supervisor cannot use an employee field-visit exception");
+    authRole = "employee";
+    assert.equal(await post("checkin"), 201, "an employee with today's assigned visit may check in remotely");
+    assert.equal(records.at(-1)?.geofenceId, null);
+    assert.equal(records.at(-1)?.geofenceName, "Remote field-work start");
+    assert.equal(records.at(-1)?.isInsideGeofence, false);
+    assert.match(records.at(-1)?.notes || "", /Remote field check-in authorised/);
+    assert.equal(await post("checkout"), 201);
+    records.length = 0;
+    remoteFieldCheckInAllowed = false;
     zones = [office];
     assert.equal(await post("checkin", { mockLocationDetected: true }), 400);
     assert.equal(await post("checkin", { locationAccuracyMeters: 200 }), 400);

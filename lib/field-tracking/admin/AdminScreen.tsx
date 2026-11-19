@@ -120,7 +120,7 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
           </SectionCard>
 
           <SectionCard title={`Field performance · ${selectedDateLabel}`}>
-            {kpis ? <FieldPerformanceKpis kpis={kpis} /> : (
+            {kpis ? <FieldPerformanceKpis kpis={kpis} dateLabel={selectedDateLabel} /> : (
               <LiveKpiPreview employee={employee} loading={kpiState === 'loading'} unavailable={kpiState === 'unavailable'} />
             )}
           </SectionCard>
@@ -300,7 +300,7 @@ function DailyCalendar({
   );
 }
 
-function FieldPerformanceKpis({ kpis }: { kpis: FieldSessionKpis }) {
+function FieldPerformanceKpis({ kpis, dateLabel }: { kpis: FieldSessionKpis; dateLabel: string }) {
   const nextVisit = kpis.nextVisit;
   const statusTitle = nextVisit
     ? nextVisit.status === 'arrived' ? `Arrived at ${nextVisit.name}` : `Heading to ${nextVisit.name}`
@@ -316,19 +316,26 @@ function FieldPerformanceKpis({ kpis }: { kpis: FieldSessionKpis }) {
         <Text style={styles.activityHeaderTitle}>{statusTitle}</Text>
         <Text style={styles.activityHeaderDetail}>{statusDetail}</Text>
       </View>
-      <Text style={styles.activityTitle}>Recent field activity</Text>
+      <View style={styles.dayScopeBanner}>
+        <View style={styles.dayScopeDot} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.dayScopeTitle}>{dateLabel} only</Text>
+          <Text style={styles.dayScopeDetail}>Offline GPS gaps and rejected jumps are excluded from every metric.</Text>
+        </View>
+      </View>
+      <Text style={styles.activityTitle}>Verified day timeline</Text>
       <View style={styles.activityTimeline}>
         {kpis.activity.length ? kpis.activity.map((activity) => (
           <ActivityRow key={activity.id} activity={activity} />
         )) : <Text style={styles.activityEmpty}>Movement history will appear after verified GPS points are received.</Text>}
       </View>
       <View style={styles.kpiGrid}>
-        <KpiCard label="Shift time" value={formatDuration(kpis.shiftSeconds)} />
+        <KpiCard label="Tracked time" value={formatDuration(kpis.shiftSeconds)} />
         <KpiCard label="Moving time" value={formatDuration(kpis.movingSeconds)} />
         <KpiCard label="Travelled" value={formatDistance(kpis.distanceMetres)} />
         <KpiCard label="Avg. speed" value={kpis.averageMovingSpeedKmh == null ? '—' : `${Math.round(kpis.averageMovingSpeedKmh)} km/h`} />
-        <KpiCard label="Total halt" value={haltValue} warning={kpis.activeHalt || kpis.haltSeconds >= 30 * 60} />
-        <KpiCard label="Halt count" value={`${kpis.haltCount}`} warning={kpis.activeHalt} />
+        <KpiCard label="Stopped time" value={haltValue} warning={kpis.activeHalt || kpis.haltSeconds >= 30 * 60} />
+        <KpiCard label="Verified halts" value={`${kpis.haltCount}`} warning={kpis.activeHalt} />
         <KpiCard label="Visits" value={`${kpis.visitCompleted}/${kpis.visitTotal} done`} />
         <KpiCard label="GPS quality" value={kpis.gpsAccuracyMetres == null ? 'Waiting' : `±${Math.round(kpis.gpsAccuracyMetres)} m`} />
       </View>
@@ -380,7 +387,7 @@ function ActivityRow({ activity }: { activity: FieldSessionKpis['activity'][numb
 }
 
 function KpiCard({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
-  return <View style={[styles.kpiCard, warning && styles.kpiCardWarning]}><Text style={styles.kpiLabel}>{label}</Text><Text style={[styles.kpiValue, warning && styles.kpiValueWarning]} numberOfLines={1}>{value}</Text></View>;
+  return <View style={[styles.kpiCard, warning && styles.kpiCardWarning]}><Text style={styles.kpiLabel}>{label}</Text><Text style={[styles.kpiValue, warning && styles.kpiValueWarning]} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.78}>{value}</Text></View>;
 }
 
 function formatAge(seconds: number | null): string {
@@ -474,6 +481,10 @@ const styles = StyleSheet.create({
   activityHeader: { borderLeftWidth: 3, borderLeftColor: '#1769D2', paddingLeft: 11, marginBottom: 14 },
   activityHeaderTitle: { color: '#111827', fontSize: 13, fontWeight: '900' },
   activityHeaderDetail: { color: '#64748B', fontSize: 10, lineHeight: 15, marginTop: 3 },
+  dayScopeBanner: { minHeight: 54, flexDirection: 'row', alignItems: 'flex-start', gap: 9, borderRadius: 13, borderWidth: 1, borderColor: '#CFE2FF', backgroundColor: '#F2F7FF', paddingHorizontal: 11, paddingVertical: 9, marginBottom: 14 },
+  dayScopeDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#1769D2', marginTop: 3 },
+  dayScopeTitle: { color: '#173A70', fontSize: 10, fontWeight: '900' },
+  dayScopeDetail: { color: '#60728D', fontSize: 9, lineHeight: 13, marginTop: 2 },
   activityTitle: { color: '#475569', fontSize: 10, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.55, marginBottom: 8 },
   activityTimeline: { borderRadius: 14, borderWidth: 1, borderColor: '#DCE3EC', backgroundColor: '#F8FAFD', paddingHorizontal: 12, paddingVertical: 4 },
   activityEmpty: { color: '#64748B', fontSize: 10, lineHeight: 15, paddingVertical: 12 },

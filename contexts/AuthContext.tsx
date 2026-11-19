@@ -22,6 +22,7 @@ import {
   logoutApiSession,
   submitAccessRequestToBackend,
 } from "@/lib/attendance-api";
+import { unregisterEmployeePushNotifications } from "@/lib/employee-notifications";
 
 
 interface SignupInput {
@@ -304,6 +305,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     try {
+      await unregisterEmployeePushNotifications().catch(console.warn);
       await logoutApiSession({ timeoutMs: isStandaloneRuntime ? 6000 : 1600 });
     } finally {
       await clearLocalSession();

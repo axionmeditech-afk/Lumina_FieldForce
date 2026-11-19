@@ -180,6 +180,16 @@ export function startFieldVisitAssignment(assignmentId: string, location: VisitE
   });
 }
 
+export type FieldCheckInEligibility = {
+  remoteCheckInAllowed: boolean;
+  visitCount: number;
+  scheduledDate: string;
+};
+
+export function getFieldCheckInEligibility(): Promise<FieldCheckInEligibility> {
+  return requestJson('/field-tracking/check-in-eligibility', { timeoutMs: 8_000 });
+}
+
 export function completeFieldVisitAssignment(assignmentId: string, location?: VisitEvidenceLocation): Promise<{ ok: boolean; nextAssignment: FieldVisitAssignment | null }> {
   return requestJson(`/field-tracking/assignments/${encodeURIComponent(assignmentId)}/complete`, {
     method: 'POST',
