@@ -11,7 +11,8 @@ import { formatDistance, formatDuration } from '@/lib/field-tracking/geo';
 import { buildRouteMetrics, headingDifference, projectOnRoute, remainingRoute } from '@/lib/field-tracking/navigation-geometry';
 import type { Coordinate, RoutePlan } from '@/lib/field-tracking/types';
 import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-navigation-lifecycle';
-import { appendVisitEvidence, isEvidenceInsideVisitGeofence, toVisitLocationEvidence } from '@/lib/field-tracking/visit-evidence';
+import { appendArrivalEvidence } from '@/lib/field-tracking/visit-evidence-core';
+import { isEvidenceInsideVisitGeofence, toVisitLocationEvidence } from '@/lib/field-tracking/visit-evidence';
 import type { VisitLocationEvidence } from '@/lib/field-tracking/visit-policy';
 
 type NavigationStatus = 'preview' | 'active' | 'arrived';
@@ -176,7 +177,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     setSession({ ...next, status: 'preview', updatedAt: new Date().toISOString() });
   }, [stopWatch]);
 
-  const startWatch = useCallback(async () => {
+  const startWatch = useCallback(async (visit: FieldVisitAssignment) => {
     let permission = await Location.getForegroundPermissionsAsync();
     if (permission.status !== 'granted' && permission.canAskAgain) {
       permission = await Location.requestForegroundPermissionsAsync();
@@ -189,7 +190,9 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
       { accuracy: Location.Accuracy.High, distanceInterval: 5, timeInterval: 3_000 },
       (location) => {
         const evidence = toVisitLocationEvidence(location);
-        if (evidence) arrivalEvidenceRef.current = appendVisitEvidence(arrivalEvidenceRef.current, evidence);
+        arrivalEvidenceRef.current = evidence
+          ? appendArrivalEvidence(arrivalEvidenceRef.current, evidence, visit)
+          : [];
         setSession((current) => current ? {
           ...current,
           position: { latitude: location.coords.latitude, longitude: location.coords.longitude },
@@ -224,7 +227,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
       // The visit screen checks server attendance immediately before route
       // planning. Repeating the same 35-second request here made a successful
       // route look stuck in standalone builds.
-      await startWatch();
+      await startWatch(candidate.visit);
       navigationGenerationRef.current += 1;
       voiceActiveRef.current = true;
       spokenRef.current.clear();
@@ -296,10 +299,10 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
     if (session?.status !== 'active') return;
     void getAttendanceStatus().then((attendance) => {
       if (!attendance.active) return clear();
-      return startWatch();
+      return startWatch(session.visit);
     }).catch(() => stop());
     return stopWatch;
-  }, [clear, session?.status, startWatch, stop, stopWatch]);
+  }, [clear, session?.status, session?.visit, startWatch, stop, stopWatch]);
 
   useEffect(() => {
     if (!session || session.status !== 'active' || !session.position || !progress) return;

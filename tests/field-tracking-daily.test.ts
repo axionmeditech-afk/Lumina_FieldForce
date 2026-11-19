@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { summarizeTrackingDay, validateVisitEvidence } from '../server/routes/field-tracking.routes';
 import { evaluateVisitSchedulePolicy } from '../lib/field-tracking/visit-policy';
+import { appendArrivalEvidence } from '../lib/field-tracking/visit-evidence-core';
 
 type Point = Parameters<typeof summarizeTrackingDay>[0][number];
 
@@ -135,4 +136,18 @@ test('visit arrival and completion require stable fresh evidence fully inside th
   assert.equal(validateVisitEvidence(valid.map((sample) => ({ ...sample, latitude: 23.023 })), destination, now).ok, false);
   assert.equal(validateVisitEvidence(valid.map((sample) => ({ ...sample, capturedAt: '2026-11-19T09:58:00.000Z' })), destination, now).ok, false);
   assert.equal(validateVisitEvidence(valid.map((sample, index) => ({ ...sample, mocked: index === 1 })), destination, now).ok, false);
+});
+
+test('arrival confirmation starts a fresh consecutive GPS window at the destination fence', () => {
+  const destination = { latitude: 23.0202, longitude: 72.5692 };
+  const now = Date.parse('2026-11-19T10:00:10.000Z');
+  const outside = { latitude: 23.025, longitude: 72.5692, accuracy: 8, capturedAt: '2026-11-19T10:00:04.000Z', mocked: false };
+  const firstInside = { ...destination, accuracy: 10, capturedAt: '2026-11-19T10:00:07.000Z', mocked: false };
+  const secondInside = { ...destination, accuracy: 10, capturedAt: '2026-11-19T10:00:10.000Z', mocked: false };
+  const afterEntry = appendArrivalEvidence([outside], firstInside, destination, now);
+  assert.deepEqual(afterEntry, [firstInside], 'outside route history must not delay server arrival verification');
+  const stableInside = appendArrivalEvidence(afterEntry, secondInside, destination, now);
+  assert.deepEqual(stableInside, [firstInside, secondInside]);
+  assert.equal(validateVisitEvidence(stableInside, destination, now).ok, true);
+  assert.deepEqual(appendArrivalEvidence(stableInside, outside, destination, now), [], 'an exit or GPS jump resets arrival evidence');
 });

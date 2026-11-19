@@ -1,5 +1,6 @@
 import * as Location from 'expo-location';
 import { haversineMetres } from './geo';
+import { appendArrivalEvidence as appendArrivalEvidenceCore } from './visit-evidence-core';
 import {
   VISIT_EVIDENCE_MAX_AGE_MS,
   VISIT_GEOFENCE_RADIUS_METRES,
@@ -33,6 +34,15 @@ export function appendVisitEvidence(
     .filter((sample) => nowMs - Date.parse(sample.capturedAt) <= VISIT_EVIDENCE_MAX_AGE_MS)
     .filter((sample) => sample.capturedAt !== next.capturedAt);
   return [...fresh, next].slice(-5);
+}
+
+export function appendArrivalEvidence(
+  current: VisitLocationEvidence[],
+  next: VisitLocationEvidence,
+  destination: Coordinate,
+  nowMs = Date.now(),
+): VisitLocationEvidence[] {
+  return appendArrivalEvidenceCore(current, next, destination, nowMs);
 }
 
 export function hasStableVisitEvidence(samples: VisitLocationEvidence[]): boolean {
