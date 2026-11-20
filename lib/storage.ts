@@ -479,8 +479,10 @@ async function fetchStateRemote<T>(key: string): Promise<T | null | undefined> {
         const text = await response.text();
         if (!response.ok) {
           if (response.status === 401 || response.status === 403) {
-            await setApiToken(null);
-            return undefined;
+            // Remote-state sync is best effort and may be talking to a stale
+            // secondary deployment. AuthContext validates /auth/me before the
+            // persisted token is ever removed.
+            continue;
           }
           if (response.status >= 500) continue;
           return undefined;
@@ -547,8 +549,7 @@ async function pushStateRemote<T>(key: string, value: T): Promise<boolean> {
         return true;
       }
       if (response.status === 401 || response.status === 403) {
-        await setApiToken(null);
-        return false;
+        continue;
       }
       if (response.status < 500) return false;
     } catch {
@@ -596,8 +597,7 @@ async function fetchCompaniesFromDb(): Promise<CompanyProfile[] | null> {
       });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          await setApiToken(null);
-          return null;
+          continue;
         }
         if (response.status >= 500) continue;
         return null;
@@ -637,8 +637,7 @@ async function mutateCompanyInDb(
       });
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          await setApiToken(null);
-          return null;
+          continue;
         }
         if (response.status >= 500) continue;
         throw new Error(await readCompanyApiError(response, "Company database operation failed."));

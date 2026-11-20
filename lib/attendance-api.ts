@@ -407,6 +407,7 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
   const headers = buildHeaders(token, init.headers);
   const networkFailures: string[] = [];
   const applicationFailures: string[] = [];
+  const authenticationFailures: Array<{ apiBase: string; message: string }> = [];
   const isAuthRoute = /^\/auth\/(login|token|register|access-request)\b/i.test(path);
   if (!token && !isAuthRoute && isProtectedApiPath(path)) {
     throw new ApiAuthRequiredError();
@@ -452,18 +453,20 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
           );
 
         if (isTokenError || isSessionInvalid) {
-          if (token && !isAuthRoute) {
-            await setApiToken(null);
-          }
-          if (isSessionInvalid) {
-            throw new ApiSessionInvalidError(
-              messageFromJson || "Session is no longer active. Please sign in again."
-            );
-          }
-          if (token) {
-            throw new Error("Session expired. Please log out and sign in again.");
-          }
-          throw new ApiAuthRequiredError();
+          // A release can have more than one API base for availability. Never
+          // destroy a valid local session because one Render service restarted,
+          // has a different JWT secret, or temporarily lost its DB connection.
+          // Only invalidate after every available backend definitively rejects
+          // the same token.
+          authenticationFailures.push({
+            apiBase,
+            message:
+              messageFromJson ||
+              (isTokenError
+                ? "Session token was rejected."
+                : "Session is no longer active. Please sign in again."),
+          });
+          continue;
         }
 
         const shouldTryNextBase =
@@ -508,6 +511,22 @@ async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T>
       }
       throw error instanceof Error ? error : new Error(message);
     }
+  }
+
+  if (
+    token &&
+    !isAuthRoute &&
+    authenticationFailures.length > 0 &&
+    authenticationFailures.length === apiBases.length
+  ) {
+    await setApiToken(null);
+    throw new ApiSessionInvalidError(
+      authenticationFailures[authenticationFailures.length - 1]?.message ||
+        "Session is no longer active. Please sign in again."
+    );
+  }
+  for (const failure of authenticationFailures) {
+    applicationFailures.push(`${failure.apiBase} -> Authentication: ${failure.message}`);
   }
 
   if (networkFailures.length > 0) {

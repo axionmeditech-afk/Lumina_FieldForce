@@ -87,43 +87,14 @@ workflows:
           xcode-project build-ipa \
             --workspace "$IOS_WORKSPACE" \
             --scheme "$IOS_SCHEME"
-      - name: Publish to App Store Connect manually
-        script: |
-          set -e
-          IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -n 1)
-          echo "Uploading $IPA_PATH using Fastlane to completely bypass altool..."
-          
-          mkdir -p fastlane
-          # Save the key to a file exactly as provided by Codemagic
-          echo "$APP_STORE_CONNECT_PRIVATE_KEY" > fastlane/AuthKey.p8
-          # If it has literal \n (escaped), replace them with actual newlines safely
-          perl -pi -e 's/\\n/\n/g' fastlane/AuthKey.p8
-          
-          cat <<'EOF' > fastlane/Fastfile
-          default_platform(:ios)
-          platform :ios do
-            lane :deploy do
-              app_store_connect_api_key(
-                key_id: ENV["APP_STORE_CONNECT_KEY_IDENTIFIER"],
-                issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
-                key_filepath: "fastlane/AuthKey.p8",
-                in_house: false
-              )
-              
-              upload_to_testflight(
-                ipa: ENV["IPA_PATH"],
-                app_identifier: "com.luminafieldforce",
-                apple_id: "6761368486",
-                skip_waiting_for_build_processing: true
-              )
-            end
-          end
-          EOF
-          
-          export IPA_PATH="$IPA_PATH"
-          fastlane ios deploy
     artifacts:
       - build/ios/ipa/*.ipa
       - /tmp/xcodebuild_logs/*.log
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        # Reuse the validated API key configured by the Lumina_fieldforce
+        # integration above. Codemagic uploads the generated IPA directly;
+        # no manually reconstructed .p8 file is required.
+        auth: integration

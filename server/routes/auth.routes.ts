@@ -1026,10 +1026,21 @@ export function registerAuthRoutes(app: Express, deps: AuthRouteDeps) {
       res.status(401).json({ message: "Not authenticated" });
       return;
     }
-    const activeSession =
-      typeof readActiveAuthSession === "function"
-        ? await readActiveAuthSession(userId).catch(() => null)
-        : null;
+    let activeSession = null;
+    try {
+      activeSession =
+        typeof readActiveAuthSession === "function"
+          ? await readActiveAuthSession(userId)
+          : null;
+    } catch (error) {
+      // A temporary database outage is not proof that the user's session was
+      // revoked. Returning 401 here made the mobile app erase its valid token
+      // while the active device row remained in MySQL, producing the confusing
+      // "already signed in" loop on the next login attempt.
+      console.error("Unable to verify active auth session", error);
+      res.status(503).json({ message: "Session verification is temporarily unavailable. Please retry." });
+      return;
+    }
     const tokenDeviceId = normalizeDeviceIdInput(req.auth?.deviceId);
     if (!activeSession || (tokenDeviceId && activeSession.deviceId !== tokenDeviceId)) {
       res.status(401).json({ message: "Session is no longer active. Please sign in again." });
