@@ -773,43 +773,13 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const selectedCompanyId = requestedCompanyId
       ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
       : await deps.resolveRequestCompanyId(req);
-    // When admin requests all companies, fetch every company that has
-    // attendance data today instead of restricting to the admin's own
-    // assigned company IDs. This mirrors the Team Attendance approach.
-    let companyIds: string[];
-    if (wantsAllCompanies) {
-      const pool = await deps.getMySqlPool();
-      const today = toMumbaiDateKey(new Date());
-      const todayStart = new Date(`${today}T00:00:00+05:30`);
-      const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
-      const [companyRows] = await pool.execute<any[]>(
-        `SELECT DISTINCT company_id FROM lff_attendance
-         WHERE \`timestamp\`>=? AND \`timestamp\`<?
-         AND company_id IS NOT NULL AND company_id<>''`,
-        [
-          todayStart.toISOString().slice(0, 19).replace('T', ' '),
-          tomorrowStart.toISOString().slice(0, 19).replace('T', ' '),
-        ],
-      );
-      const dbCompanyIds = companyRows.map((row) => String(row.company_id).trim()).filter(Boolean);
-      // Merge with admin's own company IDs to cover companies with no attendance yet
-      const adminIds = Array.from(getAuthorizedCompanyIds(req, deps));
-      companyIds = [...new Set([...dbCompanyIds, ...adminIds])];
-    } else {
-      companyIds = selectedCompanyId ? [selectedCompanyId] : [];
-    }
-    if (!companyIds.length) {
-      // For allCompanies mode with no data yet, still return empty list
-      // rather than 403 so the UI shows the empty state
-      if (wantsAllCompanies) {
-        res.set('Cache-Control', 'no-store').json({ employees: [] });
-        return;
-      }
+
+    if (!wantsAllCompanies && !selectedCompanyId) {
       res.status(403).json({ message: 'Workspace access is required for field history.' });
       return;
     }
+
     const pool = await deps.getMySqlPool();
-    const placeholders = companyIds.map(() => '?').join(',');
     const today = toMumbaiDateKey(new Date());
     const todayStart = new Date(`${today}T00:00:00+05:30`);
     const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
@@ -820,15 +790,24 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     // an old open tracking session must never make an employee appear checked
     // in on a later date. This is deliberately the same "latest event today"
     // rule used by the Team Attendance screen.
-    const [attendanceRows] = await pool.execute<any[]>(
-      `SELECT id AS attendance_id, company_id, user_id AS employee_id,
-              COALESCE(NULLIF(user_name, ''), user_id) AS employee_name,
-              type AS attendance_type, lat, lng, \`timestamp\`, timestamp_server
-       FROM lff_attendance
-       WHERE company_id IN (${placeholders}) AND \`timestamp\`>=? AND \`timestamp\`<?
-       ORDER BY \`timestamp\` ASC, timestamp_server ASC, id ASC`,
-      [...companyIds, todayStartSql, tomorrowStartSql],
-    );
+    const attendanceSql = wantsAllCompanies
+      ? `SELECT id AS attendance_id, company_id, user_id AS employee_id,
+                COALESCE(NULLIF(user_name, ''), user_id) AS employee_name,
+                type AS attendance_type, lat, lng, \`timestamp\`, timestamp_server
+         FROM lff_attendance
+         WHERE \`timestamp\`>=? AND \`timestamp\`<?
+         ORDER BY \`timestamp\` ASC, timestamp_server ASC, id ASC`
+      : `SELECT id AS attendance_id, company_id, user_id AS employee_id,
+                COALESCE(NULLIF(user_name, ''), user_id) AS employee_name,
+                type AS attendance_type, lat, lng, \`timestamp\`, timestamp_server
+         FROM lff_attendance
+         WHERE company_id=? AND \`timestamp\`>=? AND \`timestamp\`<?
+         ORDER BY \`timestamp\` ASC, timestamp_server ASC, id ASC`;
+    const attendanceParams = wantsAllCompanies
+      ? [todayStartSql, tomorrowStartSql]
+      : [selectedCompanyId, todayStartSql, tomorrowStartSql];
+
+    const [attendanceRows] = await pool.execute<any[]>(attendanceSql, attendanceParams);
     const identityKey = (companyId: unknown, employeeId: unknown) =>
       `${String(companyId || '').trim()}:${String(employeeId || '').trim().toLowerCase().replace(/^dolibarr_/, '')}`;
     const latestAttendance = new Map<string, any>();
@@ -843,26 +822,46 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
 
-    const [sessionRows] = await pool.execute<any[]>(
-      `SELECT s.id AS session_id, s.company_id, s.employee_id,
-              p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
-              p.battery, p.captured_at, p.sequence_no
-       FROM lff_tracking_sessions s
-       LEFT JOIN lff_tracking_points p ON p.point_id=(
-         SELECT p2.point_id FROM lff_tracking_points p2
-         WHERE p2.session_id=s.id AND (p2.route_eligible=1 OR p2.rejection_reason='stationary_noise')
-         ORDER BY p2.sequence_no DESC LIMIT 1
-       )
-       WHERE s.company_id IN (${placeholders}) AND s.status='active' AND s.started_at>=? AND s.started_at<? AND s.id=(
-         SELECT s2.id FROM lff_tracking_sessions s2
-         WHERE s2.company_id=s.company_id
-           AND s2.status='active'
-           AND REPLACE(LOWER(TRIM(s2.employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
-         ORDER BY s2.updated_at DESC, s2.started_at DESC LIMIT 1
-       )
-       ORDER BY p.captured_at DESC LIMIT 1000`,
-      [...companyIds, todayStartSql, tomorrowStartSql],
-    );
+    const sessionSql = wantsAllCompanies
+      ? `SELECT s.id AS session_id, s.company_id, s.employee_id,
+                p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
+                p.battery, p.captured_at, p.sequence_no
+         FROM lff_tracking_sessions s
+         LEFT JOIN lff_tracking_points p ON p.point_id=(
+           SELECT p2.point_id FROM lff_tracking_points p2
+           WHERE p2.session_id=s.id AND (p2.route_eligible=1 OR p2.rejection_reason='stationary_noise')
+           ORDER BY p2.sequence_no DESC LIMIT 1
+         )
+         WHERE s.status='active' AND s.started_at>=? AND s.started_at<? AND s.id=(
+           SELECT s2.id FROM lff_tracking_sessions s2
+           WHERE s2.company_id=s.company_id
+             AND s2.status='active'
+             AND REPLACE(LOWER(TRIM(s2.employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
+           ORDER BY s2.updated_at DESC, s2.started_at DESC LIMIT 1
+         )
+         ORDER BY p.captured_at DESC LIMIT 1000`
+      : `SELECT s.id AS session_id, s.company_id, s.employee_id,
+                p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
+                p.battery, p.captured_at, p.sequence_no
+         FROM lff_tracking_sessions s
+         LEFT JOIN lff_tracking_points p ON p.point_id=(
+           SELECT p2.point_id FROM lff_tracking_points p2
+           WHERE p2.session_id=s.id AND (p2.route_eligible=1 OR p2.rejection_reason='stationary_noise')
+           ORDER BY p2.sequence_no DESC LIMIT 1
+         )
+         WHERE s.company_id=? AND s.status='active' AND s.started_at>=? AND s.started_at<? AND s.id=(
+           SELECT s2.id FROM lff_tracking_sessions s2
+           WHERE s2.company_id=s.company_id
+             AND s2.status='active'
+             AND REPLACE(LOWER(TRIM(s2.employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
+           ORDER BY s2.updated_at DESC, s2.started_at DESC LIMIT 1
+         )
+         ORDER BY p.captured_at DESC LIMIT 1000`;
+    const sessionParams = wantsAllCompanies
+      ? [todayStartSql, tomorrowStartSql]
+      : [selectedCompanyId, todayStartSql, tomorrowStartSql];
+
+    const [sessionRows] = await pool.execute<any[]>(sessionSql, sessionParams);
     const sessionsByIdentity = new Map<string, any>();
     for (const row of sessionRows) sessionsByIdentity.set(identityKey(row.company_id, row.employee_id), row);
     const employees: any[] = [];
@@ -1258,6 +1257,7 @@ function getAuthorizedCompanyIds(req: Request, deps: Deps): Set<string> {
 async function resolveAuthorizedCompanyId(req: Request, requestedCompanyId: string, deps: Deps): Promise<string | null> {
   const normalized = requestedCompanyId.trim();
   if (!normalized) return null;
+  if (req.auth?.role === 'admin') return normalized;
   if (getAuthorizedCompanyIds(req, deps).has(normalized)) return normalized;
 
   // Some authenticated Dolibarr users are resolved on demand rather than being
