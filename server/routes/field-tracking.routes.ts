@@ -262,26 +262,29 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const requestedScope = requestedCompanyId
       ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
       : await deps.resolveRequestCompanyId(req);
-    const companyIds = wantsAllCompanies
-      ? Array.from(getAuthorizedCompanyIds(req, deps))
-      : requestedScope ? [requestedScope] : [];
-    if (!companyIds.length) {
+    if (!wantsAllCompanies && !requestedScope) {
       res.status(403).json({ message: 'Workspace access is required for visit assignments.' });
       return;
     }
     const pool = await deps.getMySqlPool();
-    const placeholders = companyIds.map(() => '?').join(',');
+    const scopeSql = wantsAllCompanies
+      ? ''
+      : `WHERE company_id=? ${supervisor ? '' : 'AND employee_id=?'}`;
+    const scopeParams = wantsAllCompanies
+      ? []
+      : supervisor ? [requestedScope] : [requestedScope, employeeId];
     const [rows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
               latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, arrived_at, started_at, completed_at,
               arrival_latitude, arrival_longitude, arrival_accuracy,
               completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
-       WHERE company_id IN (${placeholders}) ${supervisor ? '' : 'AND employee_id=?'}
+       ${scopeSql}
        ORDER BY scheduled_date ASC, scheduled_time ASC,
                 CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
-                employee_id, queue_order, created_at DESC`,
-      supervisor ? companyIds : [...companyIds, employeeId],
+                employee_id, queue_order, created_at DESC
+       LIMIT 2000`,
+      scopeParams,
     );
     res.json({ assignments: rows.map(mapAssignment) });
   });
