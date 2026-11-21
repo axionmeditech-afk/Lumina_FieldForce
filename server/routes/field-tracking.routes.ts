@@ -756,7 +756,10 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const pool = await deps.getMySqlPool();
     const [rows] = await pool.execute<any[]>(
       `SELECT s.id AS session_id, s.employee_id, s.status AS session_status,
+              CASE WHEN s.status='active' THEN 1 ELSE 0 END AS tracking_active,
               COALESCE(a.user_name, s.employee_id) AS employee_name,
+              a.type AS attendance_type,
+              CASE WHEN a.type='checkin' THEN 1 ELSE 0 END AS attendance_active,
               p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
               p.battery, p.captured_at, p.sequence_no
        FROM lff_tracking_sessions s
@@ -767,19 +770,79 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
        )
        LEFT JOIN lff_attendance a ON a.id=(
          SELECT a2.id FROM lff_attendance a2
-         WHERE a2.user_id=s.employee_id AND a2.type='checkin' AND a2.timestamp<=s.started_at
-         ORDER BY a2.timestamp DESC LIMIT 1
+         WHERE a2.company_id=s.company_id
+           AND REPLACE(LOWER(TRIM(a2.user_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
+         ORDER BY a2.timestamp DESC, a2.timestamp_server DESC, a2.id DESC LIMIT 1
        )
        WHERE s.company_id=? AND s.id=(
          SELECT s2.id FROM lff_tracking_sessions s2
-         WHERE s2.company_id=s.company_id AND s2.employee_id=s.employee_id
+         WHERE s2.company_id=s.company_id
+           AND REPLACE(LOWER(TRIM(s2.employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
          ORDER BY s2.updated_at DESC, s2.started_at DESC LIMIT 1
        )
-       ORDER BY (s.status='active') DESC, p.captured_at DESC
+       ORDER BY (s.status='active' AND a.type='checkin') DESC, p.captured_at DESC
        LIMIT 500`,
       [companyId],
     );
-    res.json({ employees: rows });
+    const [checkedInRows] = await pool.execute<any[]>(
+      `SELECT a.id AS attendance_id, a.user_id AS employee_id,
+              COALESCE(NULLIF(a.user_name, ''), a.user_id) AS employee_name,
+              a.lat AS latitude, a.lng AS longitude, a.timestamp AS captured_at
+       FROM lff_attendance a
+       WHERE a.company_id=? AND a.type='checkin' AND a.id=(
+         SELECT a2.id FROM lff_attendance a2
+         WHERE a2.company_id=a.company_id
+           AND REPLACE(LOWER(TRIM(a2.user_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(a.user_id)), 'dolibarr_', '')
+         ORDER BY a2.timestamp DESC, a2.timestamp_server DESC, a2.id DESC LIMIT 1
+       )
+       ORDER BY a.timestamp DESC
+       LIMIT 500`,
+      [companyId],
+    );
+    const identityKey = (value: unknown) => String(value || '').trim().toLowerCase().replace(/^dolibarr_/, '');
+    const employeesByIdentity = new Map<string, any>();
+    for (const row of rows) {
+      const key = identityKey(row.employee_id);
+      if (key) employeesByIdentity.set(key, row);
+    }
+    for (const attendance of checkedInRows) {
+      const key = identityKey(attendance.employee_id);
+      if (!key) continue;
+      const current = employeesByIdentity.get(key);
+      if (current?.session_status === 'active') {
+        current.attendance_type = 'checkin';
+        current.attendance_active = 1;
+        if (!current.employee_name) current.employee_name = attendance.employee_name;
+        continue;
+      }
+      // A check-in can reach the server before the first background GPS point.
+      // Keep the employee visible and use check-in evidence as a temporary map
+      // position until their tracking session begins syncing.
+      employeesByIdentity.set(key, {
+        session_id: `attendance:${attendance.attendance_id}`,
+        employee_id: attendance.employee_id,
+        employee_name: attendance.employee_name,
+        session_status: 'waiting',
+        tracking_active: 0,
+        attendance_type: 'checkin',
+        attendance_active: 1,
+        latitude: attendance.latitude,
+        longitude: attendance.longitude,
+        accuracy: null,
+        speed: null,
+        heading: null,
+        battery: null,
+        captured_at: attendance.captured_at,
+        sequence_no: 0,
+      });
+    }
+    const directoryRows = Array.from(employeesByIdentity.values()).sort((left, right) => {
+      const leftRank = left.attendance_active && left.tracking_active ? 0 : left.attendance_active ? 1 : 2;
+      const rightRank = right.attendance_active && right.tracking_active ? 0 : right.attendance_active ? 1 : 2;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return new Date(right.captured_at || 0).getTime() - new Date(left.captured_at || 0).getTime();
+    });
+    res.json({ employees: directoryRows });
   });
 
   app.get('/api/field-tracking/employees/:employeeId/calendar', deps.requireAuth, requireStore, async (req, res) => {
@@ -806,18 +869,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const pool = await deps.getMySqlPool();
-    const [employeeRows] = await pool.execute<any[]>(
-      `SELECT 1 FROM lff_tracking_sessions WHERE company_id=? AND employee_id=? LIMIT 1`,
-      [companyId, employeeId],
-    );
-    if (!employeeRows.length) {
-      res.status(404).json({ message: 'No field history was found for this employee.' });
-      return;
-    }
     const [rows] = await pool.execute<any[]>(
       `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible, rejection_reason
        FROM lff_tracking_points
-       WHERE company_id=? AND employee_id=? AND captured_at>=? AND captured_at<?
+       WHERE company_id=?
+         AND REPLACE(LOWER(TRIM(employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(?)), 'dolibarr_', '')
+         AND captured_at>=? AND captured_at<?
        ORDER BY captured_at ASC, session_id ASC, sequence_no ASC
        LIMIT 120000`,
       [companyId, employeeId, bounds.start, bounds.end],
@@ -826,7 +883,9 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const routeDates = points.map((point) => localDateKey(point.capturedAt, offsetMinutes));
     const [visitRows] = await pool.execute<any[]>(
       `SELECT status, scheduled_date FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND status<>'cancelled'
+       WHERE company_id=?
+         AND REPLACE(LOWER(TRIM(employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(?)), 'dolibarr_', '')
+         AND status<>'cancelled'
          AND scheduled_date>=? AND scheduled_date<DATE_ADD(?, INTERVAL 1 MONTH)`,
       [companyId, employeeId, `${month}-01`, `${month}-01`],
     );
@@ -884,18 +943,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const pool = await deps.getMySqlPool();
-    const [sessionRows] = await pool.execute<any[]>(
-      `SELECT id FROM lff_tracking_sessions WHERE company_id=? AND employee_id=? LIMIT 1`,
-      [companyId, employeeId],
-    );
-    if (!sessionRows.length) {
-      res.status(404).json({ message: 'No field history was found for this employee.' });
-      return;
-    }
     const [rows] = await pool.execute<any[]>(
       `SELECT session_id, sequence_no, latitude, longitude, accuracy, speed, captured_at, route_eligible, rejection_reason
        FROM lff_tracking_points
-       WHERE company_id=? AND employee_id=? AND captured_at>=? AND captured_at<?
+       WHERE company_id=?
+         AND REPLACE(LOWER(TRIM(employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(?)), 'dolibarr_', '')
+         AND captured_at>=? AND captured_at<?
        ORDER BY captured_at ASC, session_id ASC, sequence_no ASC
        LIMIT 30000`,
       [companyId, employeeId, bounds.start, bounds.end],
@@ -906,7 +959,9 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       `SELECT status, scheduled_date, scheduled_time, created_at, started_at, completed_at,
               place_name, place_address, latitude, longitude
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status<>'cancelled'
+       WHERE company_id=?
+         AND REPLACE(LOWER(TRIM(employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(?)), 'dolibarr_', '')
+         AND scheduled_date=? AND status<>'cancelled'
        ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC`,
       [companyId, employeeId, date],
     );

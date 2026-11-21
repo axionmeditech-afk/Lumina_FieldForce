@@ -100,8 +100,10 @@ export type LiveEmployee = {
   heading: number | null;
   battery: number | null;
   capturedAt: string;
-  status: 'live' | 'delayed' | 'stale' | 'offline';
-  sessionStatus: 'active' | 'completed';
+  status: 'live' | 'delayed' | 'stale' | 'waiting' | 'offline';
+  sessionStatus: 'active' | 'waiting' | 'completed';
+  attendanceActive: boolean;
+  trackingActive: boolean;
   offRoute: boolean;
 };
 

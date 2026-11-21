@@ -198,7 +198,8 @@ app.get("/api/users", requireAuth, async (req, res) => {
       let appUserRows: any[] = [];
       try {
         [appUserRows] = await conn.query(
-          `SELECT id, email, role, approval_status
+          `SELECT id, name, email, role, company_id, company_name, company_ids_json,
+                  department, branch, phone, join_date, manager_id, manager_name, approval_status
            FROM lff_users
            WHERE approval_status = 'approved'`
         );
@@ -371,6 +372,122 @@ app.get("/api/users", requireAuth, async (req, res) => {
         if (!assignedCompanyIds.length) continue;
         if (companyId && !assignedCompanyIds.includes(companyId)) continue;
         addRosterEntry(request);
+      }
+
+      // An approved app user is already a valid workspace member even when
+      // their account was provisioned by an administrator/import and has no
+      // matching access-request row. Do not silently drop those employees
+      // from visit assignment pickers.
+      for (const appUser of appUserRows || []) {
+        const id = normalizeWhitespace(String(appUser.id || ""));
+        const email = normalizeEmail(String(appUser.email || ""));
+        const name = normalizeWhitespace(String(appUser.name || "")) || email || id || "Employee";
+        const role = normalizeRole(String(appUser.role || "employee"));
+        if (!id || isLegacyDemoProfileName(name) || isLegacyDemoIdentity(email)) continue;
+
+        const assignedCompanyIds = normalizeCompanyIds([
+          ...parseAssignedEmployeeIds(appUser.company_ids_json),
+          appUser.company_id,
+        ]);
+        if (!assignedCompanyIds.length) continue;
+        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
+        const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
+        for (const assignedCompanyId of targetCompanyIds) {
+          const key = `${assignedCompanyId}:${email || id || name.toLowerCase()}`;
+          if (mappedByScope.has(key)) continue;
+          const company = companyById.get(assignedCompanyId);
+          const employeeCategory = role === "admin" ? null : isSalesRole(role) ? "on_field" : "fixed_location";
+          mappedByScope.set(key, {
+            id,
+            rowid: /^\d+$/.test(id) ? id : undefined,
+            user_id: id,
+            login: email ? email.split("@")[0] : id,
+            firstname: name.split(" ")[0] || name,
+            lastname: name.split(" ").slice(1).join(" "),
+            name,
+            email,
+            phone: normalizeWhitespace(String(appUser.phone || "")),
+            town: "",
+            address: "",
+            zip: "",
+            statut: 1,
+            status: 1,
+            companyId: assignedCompanyId,
+            companyName: company?.name || String(appUser.company_name || assignedCompanyId),
+            assignedCompanyIds,
+            admin: role === "admin" ? 1 : 0,
+            employee: role === "admin" ? 0 : 1,
+            employeeCategory,
+            employee_category: employeeCategory,
+            role,
+            department: normalizeWhitespace(String(appUser.department || "")) || normalizeDepartmentForRole(role, ""),
+            branch: normalizeWhitespace(String(appUser.branch || "")) || company?.primaryBranch || "Main Branch",
+            managerId: normalizeWhitespace(String(appUser.manager_id || "")) || undefined,
+            managerName: normalizeWhitespace(String(appUser.manager_name || "")) || undefined,
+          });
+        }
+      }
+
+      // Dolibarr users can authenticate directly without first creating an
+      // lff_access_requests/lff_users row. They still belong to the default
+      // workspace and must be assignable; otherwise the picker only shows the
+      // small subset that happened to use the app signup workflow.
+      for (const dolibarrUser of userRows || []) {
+        const rowId = normalizeWhitespace(String(dolibarrUser.id || dolibarrUser.rowid || ""));
+        const email = normalizeEmail(String(dolibarrUser.email || ""));
+        const login = normalizeWhitespace(String(dolibarrUser.login || ""));
+        const appUser = email ? appUserByEmail.get(email) || null : null;
+        const name = normalizeWhitespace(`${dolibarrUser.firstname || ""} ${dolibarrUser.lastname || ""}`) || login || email || rowId || "Employee";
+        if (!rowId || isLegacyDemoProfileName(name) || isLegacyDemoIdentity(email) || isLegacyDemoIdentity(login)) continue;
+
+        const assignedCompanyIds = normalizeCompanyIds([
+          ...parseAssignedEmployeeIds(appUser?.company_ids_json),
+          appUser?.company_id || DEFAULT_COMPANY_ID,
+        ]);
+        if (companyId && !assignedCompanyIds.includes(companyId)) continue;
+        const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
+        let role = appUser?.role ? normalizeRole(String(appUser.role)) : Number(dolibarrUser.admin || 0) === 1 ? "admin" : "employee";
+        if (!appUser?.role && String(dolibarrUser.employee_category || "").toLowerCase() === "on_field") {
+          role = "salesperson";
+        } else if (!appUser?.role && dolibarrUser.job) {
+          const job = String(dolibarrUser.job).toLowerCase();
+          if (job.includes("on field") || job.includes("sales")) role = "salesperson";
+          else if (job.includes("hr")) role = "hr";
+          else if (job.includes("manager") || job.includes("supervisor")) role = "manager";
+        }
+        const employeeCategory = role === "admin" ? null : isSalesRole(role) ? "on_field" : "fixed_location";
+        const id = normalizeWhitespace(String(appUser?.id || rowId));
+        for (const assignedCompanyId of targetCompanyIds) {
+          const key = `${assignedCompanyId}:${email || id || name.toLowerCase()}`;
+          if (mappedByScope.has(key)) continue;
+          const company = companyById.get(assignedCompanyId);
+          mappedByScope.set(key, {
+            id,
+            rowid: rowId,
+            user_id: id,
+            login,
+            firstname: normalizeWhitespace(String(dolibarrUser.firstname || "")) || name.split(" ")[0] || name,
+            lastname: normalizeWhitespace(String(dolibarrUser.lastname || "")) || name.split(" ").slice(1).join(" "),
+            name,
+            email,
+            phone: normalizeWhitespace(String(dolibarrUser.user_mobile || dolibarrUser.office_phone || "")),
+            town: "",
+            address: "",
+            zip: "",
+            statut: dolibarrUser.statut ?? 1,
+            status: dolibarrUser.statut ?? 1,
+            companyId: assignedCompanyId,
+            companyName: company?.name || (assignedCompanyId === requestUser?.companyId ? requestUser?.companyName : "") || assignedCompanyId,
+            assignedCompanyIds,
+            admin: role === "admin" ? 1 : 0,
+            employee: role === "admin" ? 0 : 1,
+            employeeCategory,
+            employee_category: employeeCategory,
+            role,
+            department: normalizeDepartmentForRole(role, String(dolibarrUser.job || "")),
+            branch: company?.primaryBranch || requestUser?.branch || "Main Branch",
+          });
+        }
       }
 
       res.json({ items: Array.from(mappedByScope.values()) });

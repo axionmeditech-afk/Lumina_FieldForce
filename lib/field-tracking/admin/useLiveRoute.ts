@@ -49,9 +49,16 @@ function mapEmployee(row: any): LiveEmployee {
   const words = name.trim().split(/\s+/).filter(Boolean);
   const capturedAt = row.captured_at ? new Date(row.captured_at).toISOString() : new Date(0).toISOString();
   const ageMs = Date.now() - new Date(capturedAt).getTime();
-  const sessionStatus = row.session_status === 'active' ? 'active' : 'completed';
-  const status: LiveEmployee['status'] = sessionStatus !== 'active'
-    ? 'offline'
+  const sessionStatus: LiveEmployee['sessionStatus'] = row.session_status === 'active'
+    ? 'active'
+    : row.session_status === 'waiting' ? 'waiting' : 'completed';
+  const attendanceActive = row.attendance_active === true
+    || Number(row.attendance_active) === 1
+    || String(row.attendance_type || '').toLowerCase() === 'checkin';
+  const trackingActive = sessionStatus === 'active' && row.tracking_active !== 0 && String(row.tracking_active) !== '0';
+  const status: LiveEmployee['status'] = attendanceActive && !trackingActive
+    ? 'waiting'
+    : !attendanceActive || !trackingActive ? 'offline'
     : ageMs <= 2 * 60_000 ? 'live'
       : ageMs <= 10 * 60_000 ? 'delayed' : 'stale';
   return {
@@ -70,11 +77,13 @@ function mapEmployee(row: any): LiveEmployee {
     capturedAt,
     status,
     sessionStatus,
+    attendanceActive,
+    trackingActive,
     offRoute: false,
   };
 }
 
-export function useLiveRoute() {
+export function useLiveRoute(companyId?: string | null) {
   const today = localDateKey();
   const [employee, setEmployee] = useState<LiveEmployee | null>(null);
   const [employees, setEmployees] = useState<LiveEmployee[]>([]);
@@ -108,7 +117,9 @@ export function useLiveRoute() {
       const bases = await getApiBaseUrlCandidates();
       if (!bases.length) throw new Error('Backend is not configured.');
       const base = bases[0]!;
-      const directory = await fetchJsonFast<{ employees: any[] }>(`${base}/field-tracking/employees`, token);
+      const encodedCompanyId = companyId ? encodeURIComponent(companyId) : '';
+      const companyQuery = encodedCompanyId ? `?companyId=${encodedCompanyId}` : '';
+      const directory = await fetchJsonFast<{ employees: any[] }>(`${base}/field-tracking/employees${companyQuery}`, token);
       const incomingEmployees = (directory.employees || []).map(mapEmployee);
       employeesRef.current = incomingEmployees;
       if (mountedRef.current) setEmployees(incomingEmployees);
@@ -146,8 +157,9 @@ export function useLiveRoute() {
       }
       const encodedEmployee = encodeURIComponent(selected.employeeId);
       const offset = encodeURIComponent(String(timezoneOffsetMinutes));
-      const calendarUrl = `${base}/field-tracking/employees/${encodedEmployee}/calendar?month=${encodeURIComponent(calendarMonthRef.current)}&tzOffsetMinutes=${offset}`;
-      const dailyUrl = `${base}/field-tracking/employees/${encodedEmployee}/daily?date=${encodeURIComponent(selectedDateRef.current)}&tzOffsetMinutes=${offset}`;
+      const companyParam = encodedCompanyId ? `&companyId=${encodedCompanyId}` : '';
+      const calendarUrl = `${base}/field-tracking/employees/${encodedEmployee}/calendar?month=${encodeURIComponent(calendarMonthRef.current)}&tzOffsetMinutes=${offset}${companyParam}`;
+      const dailyUrl = `${base}/field-tracking/employees/${encodedEmployee}/daily?date=${encodeURIComponent(selectedDateRef.current)}&tzOffsetMinutes=${offset}${companyParam}`;
       const [calendar, daily] = await Promise.all([
         fetchJsonFast<FieldTrackingCalendar>(calendarUrl, token, 10_000),
         fetchJsonFast<FieldTrackingDaily>(dailyUrl, token, 12_000),
@@ -172,7 +184,7 @@ export function useLiveRoute() {
     } finally {
       refreshingRef.current = false;
     }
-  }, []);
+  }, [companyId]);
 
   useEffect(() => {
     mountedRef.current = true;

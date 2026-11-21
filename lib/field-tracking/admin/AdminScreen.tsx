@@ -8,13 +8,15 @@ import { BottomSheet } from '../components/BottomSheet';
 import { useLiveRoute } from './useLiveRoute';
 import { formatDistance, formatDuration } from '../geo';
 import type { FieldSessionKpis, FieldTrackingDaySummary, HaltRecord } from '../types';
+import { useAuth } from '@/contexts/AuthContext';
 
 export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
+  const { company, user } = useAuth();
   const {
     employee, employees, points, connectionState, error, serverHealth, kpis, kpiState,
     refresh, selectEmployee, selectedDate, selectDate, calendarMonth, selectMonth,
     calendarDays, calendarState, viewingLive,
-  } = useLiveRoute();
+  } = useLiveRoute(company?.id ?? user?.companyId ?? null);
   const [selectingEmployee, setSelectingEmployee] = useState(true);
   const live = connectionState === 'live' && viewingLive;
   const selectedDateLabel = formatSelectedDate(selectedDate);
@@ -157,6 +159,8 @@ function EmployeePicker({
   onSelect: (employeeId: string) => void;
 }) {
   const loading = connectionState === 'connecting' || connectionState === 'recovering';
+  const checkedIn = employees.filter((item) => item.attendanceActive).length;
+  const activelyTracking = employees.filter((item) => item.trackingActive).length;
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <View style={styles.pickerScreen}>
@@ -175,7 +179,7 @@ function EmployeePicker({
         </View>
         <View style={styles.pickerStatusRow}>
           <StatusDot tone={connectionState === 'live' ? 'live' : connectionState === 'offline' ? 'danger' : 'warning'} />
-          <Text style={styles.pickerStatusText}>{connectionState === 'live' ? `${employees.length} employee${employees.length === 1 ? '' : 's'} with field history` : connectionState}</Text>
+          <Text style={styles.pickerStatusText}>{connectionState === 'live' ? `${checkedIn} checked in · ${activelyTracking} tracking now · ${employees.length} total` : connectionState}</Text>
           <Pressable onPress={onRefresh} style={styles.pickerRefresh}><Text style={styles.pickerRefreshText}>Refresh</Text></Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.pickerList} showsVerticalScrollIndicator={false}>
@@ -203,6 +207,8 @@ function EmployeePicker({
 
 function EmployeeRosterCard({ employee, selected, onPress }: { employee: any; selected: boolean; onPress: () => void }) {
   const isLive = employee.status === 'live';
+  const isCurrentlyTracking = employee.trackingActive;
+  const stateLabel = isLive ? 'LIVE' : employee.status === 'waiting' ? 'CHECKED IN' : employee.status === 'delayed' ? 'DELAYED' : employee.status === 'stale' ? 'STALE' : 'HISTORY';
   const speed = employee.speed == null || employee.speed < 0 ? '—' : `${Math.round(employee.speed * 3.6)} km/h`;
   const accuracy = employee.accuracy == null ? 'GPS —' : `GPS ±${Math.round(employee.accuracy)} m`;
   return (
@@ -211,10 +217,10 @@ function EmployeeRosterCard({ employee, selected, onPress }: { employee: any; se
       <View style={{ flex: 1, minWidth: 0 }}>
         <View style={styles.rosterNameRow}>
           <Text style={styles.rosterName} numberOfLines={1}>{employee.name}</Text>
-          <View style={[styles.rosterState, isLive ? styles.rosterStateLive : styles.rosterStateHistory]}><Text style={[styles.rosterStateText, isLive ? styles.rosterStateTextLive : styles.rosterStateTextHistory]}>{isLive ? 'LIVE' : 'HISTORY'}</Text></View>
+          <View style={[styles.rosterState, isLive ? styles.rosterStateLive : styles.rosterStateHistory]}><Text style={[styles.rosterStateText, isLive ? styles.rosterStateTextLive : styles.rosterStateTextHistory]}>{stateLabel}</Text></View>
         </View>
         <Text style={styles.rosterMeta} numberOfLines={1}>{accuracy} · {speed} · {employee.battery == null ? 'Battery —' : `${employee.battery}% battery`}</Text>
-        <Text style={styles.rosterMeta}>{employee.status === 'live' ? 'Live now · tap to open' : 'History available · tap to review'}</Text>
+        <Text style={styles.rosterMeta}>{isLive ? 'Live now · tap to open' : employee.status === 'waiting' ? 'Checked in · waiting for first GPS sync' : isCurrentlyTracking ? 'Tracking sync delayed · tap to inspect' : 'History available · tap to review'}</Text>
       </View>
     </Pressable>
   );

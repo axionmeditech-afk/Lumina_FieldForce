@@ -131,7 +131,10 @@ export default function FieldVisitsScreen() {
         supervisor ? Promise.resolve({ active: null }) : getAttendanceStatus().catch(() => ({ records: [], active: null })),
       ]);
       setAssignments(nextAssignments);
-      setEmployees(nextEmployees.filter((item: any) => item.id && !isSupervisor(item.role)));
+      // Any active non-admin workspace user can receive field work. Managers
+      // and HR may also need an assigned visit; supervisor status controls the
+      // screen permissions, not visit eligibility.
+      setEmployees(nextEmployees.filter((item: any) => item.id && item.role !== 'admin'));
       if (!supervisor) setCheckedIn(Boolean(attendance.active));
     } catch (error) {
       if (!quiet) Alert.alert('Visit queue unavailable', humanize(error));
