@@ -169,13 +169,18 @@ export function completeFieldSession(sessionId: string, endedAt: string): Promis
   });
 }
 
-export async function getFieldVisitAssignments(): Promise<FieldVisitAssignment[]> {
-  const result = await requestJson<{ assignments: FieldVisitAssignment[] }>('/field-tracking/assignments');
+export async function getFieldVisitAssignments(options?: { companyId?: string | null; allCompanies?: boolean }): Promise<FieldVisitAssignment[]> {
+  const params = new URLSearchParams();
+  if (options?.companyId) params.set('companyId', options.companyId);
+  if (options?.allCompanies) params.set('allCompanies', '1');
+  const query = params.toString();
+  const result = await requestJson<{ assignments: FieldVisitAssignment[] }>(`/field-tracking/assignments${query ? `?${query}` : ''}`);
   return result.assignments;
 }
 
 export function createFieldVisitAssignment(input: {
   employeeId: string;
+  companyId?: string;
   place: PlaceSearchResult;
   scheduledDate: string;
   scheduledTime: string;

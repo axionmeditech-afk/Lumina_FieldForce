@@ -103,6 +103,7 @@ const scheduledTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Choos
 
 const assignmentSchema = z.object({
   employeeId: z.string().trim().min(1).max(64),
+  companyId: z.string().trim().min(1).max(64).optional(),
   place: coordinateSchema.extend({
     placeId: z.string().trim().min(1).max(256),
     name: z.string().trim().min(1).max(200),
@@ -249,25 +250,38 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
   // lets an admin assign work before the employee checks in, and preserves the
   // visit queue across app restarts and devices.
   app.get('/api/field-tracking/assignments', deps.requireAuth, requireStore, async (req, res) => {
-    const companyId = await deps.resolveRequestCompanyId(req);
     const employeeId = String(req.auth?.sub || '').trim();
-    if (!companyId || !employeeId) {
+    if (!employeeId) {
       res.status(403).json({ message: 'Workspace access is required for visit assignments.' });
       return;
     }
     const supervisor = ['admin', 'hr', 'manager'].includes(req.auth?.role || '');
+    const wantsAllCompanies = req.auth?.role === 'admin'
+      && (req.query.allCompanies === '1' || req.query.allCompanies === 'true');
+    const requestedCompanyId = String(req.query.companyId || '').trim();
+    const requestedScope = requestedCompanyId
+      ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
+      : await deps.resolveRequestCompanyId(req);
+    const companyIds = wantsAllCompanies
+      ? Array.from(getAuthorizedCompanyIds(req, deps))
+      : requestedScope ? [requestedScope] : [];
+    if (!companyIds.length) {
+      res.status(403).json({ message: 'Workspace access is required for visit assignments.' });
+      return;
+    }
     const pool = await deps.getMySqlPool();
+    const placeholders = companyIds.map(() => '?').join(',');
     const [rows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
               latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, arrived_at, started_at, completed_at,
               arrival_latitude, arrival_longitude, arrival_accuracy,
               completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
-       WHERE company_id=? ${supervisor ? '' : 'AND employee_id=?'}
+       WHERE company_id IN (${placeholders}) ${supervisor ? '' : 'AND employee_id=?'}
        ORDER BY scheduled_date ASC, scheduled_time ASC,
                 CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
                 employee_id, queue_order, created_at DESC`,
-      supervisor ? [companyId] : [companyId, employeeId],
+      supervisor ? companyIds : [...companyIds, employeeId],
     );
     res.json({ assignments: rows.map(mapAssignment) });
   });
@@ -282,7 +296,9 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.status(400).json({ message: 'Invalid visit assignment.', issues: parsed.error.issues });
       return;
     }
-    const companyId = await deps.resolveRequestCompanyId(req);
+    const companyId = parsed.data.companyId
+      ? await resolveAuthorizedCompanyId(req, parsed.data.companyId, deps)
+      : await deps.resolveRequestCompanyId(req);
     if (!companyId) {
       res.status(403).json({ message: 'Select an authorised workspace first.' });
       return;
@@ -379,21 +395,27 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const assignmentId = String(req.params.assignmentId || '').trim();
-    const companyId = await deps.resolveRequestCompanyId(req);
-    if (!assignmentId || !companyId) {
+    if (!assignmentId) {
       res.status(400).json({ message: 'A valid visit assignment is required.' });
       return;
     }
     const pool = await deps.getMySqlPool();
     const [rows] = await pool.execute<any[]>(
-      `SELECT id, employee_id, place_name, scheduled_date, scheduled_time, status
+      `SELECT id, company_id, employee_id, place_name, scheduled_date, scheduled_time, status
        FROM lff_place_assignments
-       WHERE id=? AND company_id=? LIMIT 1`,
-      [assignmentId, companyId],
+       WHERE id=? LIMIT 1`,
+      [assignmentId],
     );
     const assignment = rows[0];
+    const companyId = assignment
+      ? await resolveAuthorizedCompanyId(req, String(assignment.company_id || ''), deps)
+      : null;
     if (!assignment || !['pending', 'in_progress'].includes(String(assignment.status))) {
       res.status(404).json({ message: 'This active assigned visit was not found or can no longer be deleted.' });
+      return;
+    }
+    if (!companyId) {
+      res.status(403).json({ message: 'You do not have access to this visit workspace.' });
       return;
     }
     const [result] = await pool.execute<any>(
@@ -745,21 +767,84 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.status(403).json({ message: 'Supervisor access is required.' });
       return;
     }
+    const wantsAllCompanies = req.auth?.role === 'admin'
+      && (req.query.allCompanies === '1' || req.query.allCompanies === 'true');
     const requestedCompanyId = String(req.query.companyId || '').trim();
-    const companyId = requestedCompanyId
+    const selectedCompanyId = requestedCompanyId
       ? await resolveAuthorizedCompanyId(req, requestedCompanyId, deps)
       : await deps.resolveRequestCompanyId(req);
-    if (!companyId) {
+    // When admin requests all companies, fetch every company that has
+    // attendance data today instead of restricting to the admin's own
+    // assigned company IDs. This mirrors the Team Attendance approach.
+    let companyIds: string[];
+    if (wantsAllCompanies) {
+      const pool = await deps.getMySqlPool();
+      const today = toMumbaiDateKey(new Date());
+      const todayStart = new Date(`${today}T00:00:00+05:30`);
+      const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+      const [companyRows] = await pool.execute<any[]>(
+        `SELECT DISTINCT company_id FROM lff_attendance
+         WHERE \`timestamp\`>=? AND \`timestamp\`<?
+         AND company_id IS NOT NULL AND company_id<>''`,
+        [
+          todayStart.toISOString().slice(0, 19).replace('T', ' '),
+          tomorrowStart.toISOString().slice(0, 19).replace('T', ' '),
+        ],
+      );
+      const dbCompanyIds = companyRows.map((row) => String(row.company_id).trim()).filter(Boolean);
+      // Merge with admin's own company IDs to cover companies with no attendance yet
+      const adminIds = Array.from(getAuthorizedCompanyIds(req, deps));
+      companyIds = [...new Set([...dbCompanyIds, ...adminIds])];
+    } else {
+      companyIds = selectedCompanyId ? [selectedCompanyId] : [];
+    }
+    if (!companyIds.length) {
+      // For allCompanies mode with no data yet, still return empty list
+      // rather than 403 so the UI shows the empty state
+      if (wantsAllCompanies) {
+        res.set('Cache-Control', 'no-store').json({ employees: [] });
+        return;
+      }
       res.status(403).json({ message: 'Workspace access is required for field history.' });
       return;
     }
     const pool = await deps.getMySqlPool();
-    const [rows] = await pool.execute<any[]>(
-      `SELECT s.id AS session_id, s.employee_id, s.status AS session_status,
-              CASE WHEN s.status='active' THEN 1 ELSE 0 END AS tracking_active,
-              COALESCE(a.user_name, s.employee_id) AS employee_name,
-              a.type AS attendance_type,
-              CASE WHEN a.type='checkin' THEN 1 ELSE 0 END AS attendance_active,
+    const placeholders = companyIds.map(() => '?').join(',');
+    const today = toMumbaiDateKey(new Date());
+    const todayStart = new Date(`${today}T00:00:00+05:30`);
+    const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+    const todayStartSql = todayStart.toISOString().slice(0, 19).replace('T', ' ');
+    const tomorrowStartSql = tomorrowStart.toISOString().slice(0, 19).replace('T', ' ');
+
+    // Attendance is the source of truth for this directory. In particular,
+    // an old open tracking session must never make an employee appear checked
+    // in on a later date. This is deliberately the same "latest event today"
+    // rule used by the Team Attendance screen.
+    const [attendanceRows] = await pool.execute<any[]>(
+      `SELECT id AS attendance_id, company_id, user_id AS employee_id,
+              COALESCE(NULLIF(user_name, ''), user_id) AS employee_name,
+              type AS attendance_type, lat, lng, \`timestamp\`, timestamp_server
+       FROM lff_attendance
+       WHERE company_id IN (${placeholders}) AND \`timestamp\`>=? AND \`timestamp\`<?
+       ORDER BY \`timestamp\` ASC, timestamp_server ASC, id ASC`,
+      [...companyIds, todayStartSql, tomorrowStartSql],
+    );
+    const identityKey = (companyId: unknown, employeeId: unknown) =>
+      `${String(companyId || '').trim()}:${String(employeeId || '').trim().toLowerCase().replace(/^dolibarr_/, '')}`;
+    const latestAttendance = new Map<string, any>();
+    for (const row of attendanceRows) {
+      const key = identityKey(row.company_id, row.employee_id);
+      if (key && !key.endsWith(':')) latestAttendance.set(key, row);
+    }
+    const checkedInRows = Array.from(latestAttendance.values())
+      .filter((row) => String(row.attendance_type || '').toLowerCase() === 'checkin');
+    if (!checkedInRows.length) {
+      res.set('Cache-Control', 'no-store').json({ employees: [] });
+      return;
+    }
+
+    const [sessionRows] = await pool.execute<any[]>(
+      `SELECT s.id AS session_id, s.company_id, s.employee_id,
               p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
               p.battery, p.captured_at, p.sequence_no
        FROM lff_tracking_sessions s
@@ -768,81 +853,47 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
          WHERE p2.session_id=s.id AND (p2.route_eligible=1 OR p2.rejection_reason='stationary_noise')
          ORDER BY p2.sequence_no DESC LIMIT 1
        )
-       LEFT JOIN lff_attendance a ON a.id=(
-         SELECT a2.id FROM lff_attendance a2
-         WHERE a2.company_id=s.company_id
-           AND REPLACE(LOWER(TRIM(a2.user_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
-         ORDER BY a2.timestamp DESC, a2.timestamp_server DESC, a2.id DESC LIMIT 1
-       )
-       WHERE s.company_id=? AND s.id=(
+       WHERE s.company_id IN (${placeholders}) AND s.status='active' AND s.started_at>=? AND s.started_at<? AND s.id=(
          SELECT s2.id FROM lff_tracking_sessions s2
          WHERE s2.company_id=s.company_id
+           AND s2.status='active'
            AND REPLACE(LOWER(TRIM(s2.employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(s.employee_id)), 'dolibarr_', '')
          ORDER BY s2.updated_at DESC, s2.started_at DESC LIMIT 1
        )
-       ORDER BY (s.status='active' AND a.type='checkin') DESC, p.captured_at DESC
-       LIMIT 500`,
-      [companyId],
+       ORDER BY p.captured_at DESC LIMIT 1000`,
+      [...companyIds, todayStartSql, tomorrowStartSql],
     );
-    const [checkedInRows] = await pool.execute<any[]>(
-      `SELECT a.id AS attendance_id, a.user_id AS employee_id,
-              COALESCE(NULLIF(a.user_name, ''), a.user_id) AS employee_name,
-              a.lat AS latitude, a.lng AS longitude, a.timestamp AS captured_at
-       FROM lff_attendance a
-       WHERE a.company_id=? AND a.type='checkin' AND a.id=(
-         SELECT a2.id FROM lff_attendance a2
-         WHERE a2.company_id=a.company_id
-           AND REPLACE(LOWER(TRIM(a2.user_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(a.user_id)), 'dolibarr_', '')
-         ORDER BY a2.timestamp DESC, a2.timestamp_server DESC, a2.id DESC LIMIT 1
-       )
-       ORDER BY a.timestamp DESC
-       LIMIT 500`,
-      [companyId],
-    );
-    const identityKey = (value: unknown) => String(value || '').trim().toLowerCase().replace(/^dolibarr_/, '');
-    const employeesByIdentity = new Map<string, any>();
-    for (const row of rows) {
-      const key = identityKey(row.employee_id);
-      if (key) employeesByIdentity.set(key, row);
-    }
+    const sessionsByIdentity = new Map<string, any>();
+    for (const row of sessionRows) sessionsByIdentity.set(identityKey(row.company_id, row.employee_id), row);
+    const employees: any[] = [];
     for (const attendance of checkedInRows) {
-      const key = identityKey(attendance.employee_id);
-      if (!key) continue;
-      const current = employeesByIdentity.get(key);
-      if (current?.session_status === 'active') {
-        current.attendance_type = 'checkin';
-        current.attendance_active = 1;
-        if (!current.employee_name) current.employee_name = attendance.employee_name;
-        continue;
-      }
-      // A check-in can reach the server before the first background GPS point.
-      // Keep the employee visible and use check-in evidence as a temporary map
-      // position until their tracking session begins syncing.
-      employeesByIdentity.set(key, {
-        session_id: `attendance:${attendance.attendance_id}`,
+      const session = sessionsByIdentity.get(identityKey(attendance.company_id, attendance.employee_id));
+      employees.push({
+        session_id: session?.session_id || `attendance:${attendance.attendance_id}`,
+        company_id: attendance.company_id,
         employee_id: attendance.employee_id,
         employee_name: attendance.employee_name,
-        session_status: 'waiting',
-        tracking_active: 0,
+        session_status: session ? 'active' : 'waiting',
+        tracking_active: session ? 1 : 0,
         attendance_type: 'checkin',
         attendance_active: 1,
-        latitude: attendance.latitude,
-        longitude: attendance.longitude,
-        accuracy: null,
-        speed: null,
-        heading: null,
-        battery: null,
-        captured_at: attendance.captured_at,
-        sequence_no: 0,
+        latitude: session?.latitude ?? attendance.lat,
+        longitude: session?.longitude ?? attendance.lng,
+        accuracy: session?.accuracy ?? null,
+        speed: session?.speed ?? null,
+        heading: session?.heading ?? null,
+        battery: session?.battery ?? null,
+        captured_at: session?.captured_at ?? attendance.timestamp,
+        sequence_no: session?.sequence_no ?? 0,
       });
     }
-    const directoryRows = Array.from(employeesByIdentity.values()).sort((left, right) => {
-      const leftRank = left.attendance_active && left.tracking_active ? 0 : left.attendance_active ? 1 : 2;
-      const rightRank = right.attendance_active && right.tracking_active ? 0 : right.attendance_active ? 1 : 2;
+    employees.sort((left, right) => {
+      const leftRank = left.tracking_active ? 0 : 1;
+      const rightRank = right.tracking_active ? 0 : 1;
       if (leftRank !== rightRank) return leftRank - rightRank;
       return new Date(right.captured_at || 0).getTime() - new Date(left.captured_at || 0).getTime();
     });
-    res.json({ employees: directoryRows });
+    res.set('Cache-Control', 'no-store').json({ employees });
   });
 
   app.get('/api/field-tracking/employees/:employeeId/calendar', deps.requireAuth, requireStore, async (req, res) => {

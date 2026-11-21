@@ -88,6 +88,7 @@ export type LiveConnectionState = 'connecting' | 'waiting' | 'live' | 'recoverin
 
 export type LiveEmployee = {
   employeeId: string;
+  companyId: string;
   sessionId: string;
   name: string;
   initials: string;

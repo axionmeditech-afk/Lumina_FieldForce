@@ -63,6 +63,7 @@ function mapEmployee(row: any): LiveEmployee {
       : ageMs <= 10 * 60_000 ? 'delayed' : 'stale';
   return {
     employeeId: String(row.employee_id),
+    companyId: String(row.company_id || ''),
     sessionId: String(row.session_id),
     name,
     initials: (words.length > 1 ? `${words[0]![0]}${words.at(-1)![0]}` : name.slice(0, 2)).toUpperCase(),
@@ -83,7 +84,7 @@ function mapEmployee(row: any): LiveEmployee {
   };
 }
 
-export function useLiveRoute(companyId?: string | null) {
+export function useLiveRoute(companyId?: string | null, allCompanies = false) {
   const today = localDateKey();
   const [employee, setEmployee] = useState<LiveEmployee | null>(null);
   const [employees, setEmployees] = useState<LiveEmployee[]>([]);
@@ -100,7 +101,7 @@ export function useLiveRoute(companyId?: string | null) {
   const mountedRef = useRef(true);
   const employeeRef = useRef<LiveEmployee | null>(null);
   const employeesRef = useRef<LiveEmployee[]>([]);
-  const selectedEmployeeIdRef = useRef<string | null>(null);
+  const selectedEmployeeKeyRef = useRef<string | null>(null);
   const selectedDateRef = useRef(today);
   const calendarMonthRef = useRef(today.slice(0, 7));
   const refreshingRef = useRef(false);
@@ -118,14 +119,16 @@ export function useLiveRoute(companyId?: string | null) {
       if (!bases.length) throw new Error('Backend is not configured.');
       const base = bases[0]!;
       const encodedCompanyId = companyId ? encodeURIComponent(companyId) : '';
-      const companyQuery = encodedCompanyId ? `?companyId=${encodedCompanyId}` : '';
+      const companyQuery = allCompanies
+        ? '?allCompanies=1'
+        : encodedCompanyId ? `?companyId=${encodedCompanyId}` : '';
       const directory = await fetchJsonFast<{ employees: any[] }>(`${base}/field-tracking/employees${companyQuery}`, token);
       const incomingEmployees = (directory.employees || []).map(mapEmployee);
       employeesRef.current = incomingEmployees;
       if (mountedRef.current) setEmployees(incomingEmployees);
       if (!incomingEmployees.length) {
         employeeRef.current = null;
-        selectedEmployeeIdRef.current = null;
+        selectedEmployeeKeyRef.current = null;
         if (mountedRef.current) {
           setEmployee(null);
           setPoints([]);
@@ -138,13 +141,14 @@ export function useLiveRoute(companyId?: string | null) {
         }
         return;
       }
-      const selected = (selectedEmployeeIdRef.current
-        ? incomingEmployees.find((item) => item.employeeId === selectedEmployeeIdRef.current)
+      const selected = (selectedEmployeeKeyRef.current
+        ? incomingEmployees.find((item) => `${item.companyId}:${item.employeeId}` === selectedEmployeeKeyRef.current)
         : null)
         ?? incomingEmployees.find((item) => item.sessionStatus === 'active')
         ?? incomingEmployees[0]!;
-      selectedEmployeeIdRef.current = selected.employeeId;
-      const employeeChanged = employeeRef.current?.employeeId !== selected.employeeId;
+      selectedEmployeeKeyRef.current = `${selected.companyId}:${selected.employeeId}`;
+      const employeeChanged = employeeRef.current?.employeeId !== selected.employeeId
+        || employeeRef.current?.companyId !== selected.companyId;
       employeeRef.current = selected;
       if (mountedRef.current) {
         setEmployee(selected);
@@ -157,14 +161,15 @@ export function useLiveRoute(companyId?: string | null) {
       }
       const encodedEmployee = encodeURIComponent(selected.employeeId);
       const offset = encodeURIComponent(String(timezoneOffsetMinutes));
-      const companyParam = encodedCompanyId ? `&companyId=${encodedCompanyId}` : '';
+      const selectedCompanyId = encodeURIComponent(selected.companyId || companyId || '');
+      const companyParam = selectedCompanyId ? `&companyId=${selectedCompanyId}` : '';
       const calendarUrl = `${base}/field-tracking/employees/${encodedEmployee}/calendar?month=${encodeURIComponent(calendarMonthRef.current)}&tzOffsetMinutes=${offset}${companyParam}`;
       const dailyUrl = `${base}/field-tracking/employees/${encodedEmployee}/daily?date=${encodeURIComponent(selectedDateRef.current)}&tzOffsetMinutes=${offset}${companyParam}`;
       const [calendar, daily] = await Promise.all([
         fetchJsonFast<FieldTrackingCalendar>(calendarUrl, token, 10_000),
         fetchJsonFast<FieldTrackingDaily>(dailyUrl, token, 12_000),
       ]);
-      if (mountedRef.current && selectedEmployeeIdRef.current === selected.employeeId) {
+      if (mountedRef.current && selectedEmployeeKeyRef.current === `${selected.companyId}:${selected.employeeId}`) {
         setCalendarDays(calendar.days);
         setCalendarState('ready');
         setPoints(daily.points);
@@ -184,7 +189,7 @@ export function useLiveRoute(companyId?: string | null) {
     } finally {
       refreshingRef.current = false;
     }
-  }, [companyId]);
+  }, [allCompanies, companyId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -197,10 +202,11 @@ export function useLiveRoute(companyId?: string | null) {
     };
   }, [refresh]);
 
-  const selectEmployee = useCallback((employeeId: string) => {
-    const selected = employeesRef.current.find((item) => item.employeeId === employeeId);
+  const selectEmployee = useCallback((employeeId: string, selectedCompanyId?: string) => {
+    const selected = employeesRef.current.find((item) => item.employeeId === employeeId
+      && (!selectedCompanyId || item.companyId === selectedCompanyId));
     if (!selected) return;
-    selectedEmployeeIdRef.current = employeeId;
+    selectedEmployeeKeyRef.current = `${selected.companyId}:${selected.employeeId}`;
     employeeRef.current = selected;
     const nextToday = localDateKey();
     selectedDateRef.current = nextToday;

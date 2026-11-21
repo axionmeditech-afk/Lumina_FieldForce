@@ -64,6 +64,7 @@ export default function FieldVisitsScreen() {
   const [mapCandidate, setMapCandidate] = useState<PlaceSearchResult | null>(null);
   const [mapInitialCenter, setMapInitialCenter] = useState<{ latitude: number; longitude: number } | null>(null);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(null);
+  const [selectedEmployeeCompanyId, setSelectedEmployeeCompanyId] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
   const [scheduledDate, setScheduledDate] = useState(() => defaultVisitDate());
   const [scheduledTime, setScheduledTime] = useState(() => defaultVisitTime());
@@ -126,8 +127,10 @@ export default function FieldVisitsScreen() {
     else setLoading(true);
     try {
       const [nextAssignments, nextEmployees, attendance] = await Promise.all([
-        getFieldVisitAssignments(),
-        supervisor ? getUsersRemote({ companyId }) : Promise.resolve([]),
+        getFieldVisitAssignments(user?.role === 'admin' ? { allCompanies: true } : { companyId }),
+        supervisor
+          ? getUsersRemote(user?.role === 'admin' ? { allCompanies: true } : { companyId })
+          : Promise.resolve([]),
         supervisor ? Promise.resolve({ active: null }) : getAttendanceStatus().catch(() => ({ records: [], active: null })),
       ]);
       setAssignments(nextAssignments);
@@ -142,7 +145,7 @@ export default function FieldVisitsScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [companyId, supervisor]);
+  }, [companyId, supervisor, user?.role]);
 
   useEffect(() => {
     if (!isFocused) return;
@@ -156,7 +159,7 @@ export default function FieldVisitsScreen() {
   }, []);
 
   const pending = useMemo(() => assignments.filter((item) => item.status === 'pending' || item.status === 'in_progress'), [assignments]);
-  const employeeById = useMemo(() => new Map(employees.map((item: any) => [String(item.id), item])), [employees]);
+  const employeeById = useMemo(() => new Map(employees.map((item: any) => [`${String(item.companyId || '')}:${String(item.id)}`, item])), [employees]);
 
   const searchPlaces = async () => {
     if (query.trim().length < 3) {
@@ -245,6 +248,7 @@ export default function FieldVisitsScreen() {
     try {
       await createFieldVisitAssignment({
         employeeId: selectedEmployeeId,
+        companyId: selectedEmployeeCompanyId || companyId,
         place: selectedPlace,
         scheduledDate,
         scheduledTime,
@@ -252,6 +256,7 @@ export default function FieldVisitsScreen() {
       });
       setSelectedPlace(null);
       setSelectedEmployeeId(null);
+      setSelectedEmployeeCompanyId(null);
       setQuery('');
       setResults([]);
       setNotes('');
@@ -671,8 +676,10 @@ export default function FieldVisitsScreen() {
             <Text style={styles.label}>Assign to</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.employeeRow}>
               {employees.map((employee: any) => {
-                const selected = selectedEmployeeId === String(employee.id);
-                return <Pressable key={String(employee.id)} onPress={() => setSelectedEmployeeId(String(employee.id))} style={[styles.employeeChip, selected && styles.employeeChipSelected]}><Text style={[styles.employeeChipText, selected && styles.employeeChipTextSelected]}>{employee.name || employee.login || 'Employee'}</Text></Pressable>;
+                const employeeId = String(employee.id);
+                const employeeCompanyId = String(employee.companyId || companyId || '');
+                const selected = selectedEmployeeId === employeeId && selectedEmployeeCompanyId === employeeCompanyId;
+                return <Pressable key={`${employeeCompanyId}:${employeeId}`} onPress={() => { setSelectedEmployeeId(employeeId); setSelectedEmployeeCompanyId(employeeCompanyId); }} style={[styles.employeeChip, selected && styles.employeeChipSelected]}><Text style={[styles.employeeChipText, selected && styles.employeeChipTextSelected]}>{employee.name || employee.login || 'Employee'}{user?.role === 'admin' && employee.companyName ? ` · ${employee.companyName}` : ''}</Text></Pressable>;
               })}
             </ScrollView>
             {!employees.length && !loading ? <Text style={styles.note}>No field employee is available in this workspace.</Text> : null}
@@ -737,7 +744,7 @@ export default function FieldVisitsScreen() {
               <Text style={styles.visitAddress}>{visit.placeAddress}</Text>
               <Text style={styles.visitSchedule}>{formatVisitSchedule(visit.scheduledDate, visit.scheduledTime)}</Text>
               {visit.status === 'in_progress' ? <Text style={styles.visitInProgress}>Visit in progress</Text> : null}
-              {supervisor ? <Text style={styles.visitMeta}>For: {employeeById.get(visit.employeeId)?.name || visit.employeeId}</Text> : null}
+              {supervisor ? <Text style={styles.visitMeta}>For: {employeeById.get(`${visit.companyId}:${visit.employeeId}`)?.name || visit.employeeId}</Text> : null}
               {visit.notes ? <Text style={styles.visitMeta}>Note: {visit.notes}</Text> : null}
             </View>
             {!supervisor ? <Ionicons name="navigate" size={21} color="#1769D2" /> : (

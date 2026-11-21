@@ -16,7 +16,7 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
     employee, employees, points, connectionState, error, serverHealth, kpis, kpiState,
     refresh, selectEmployee, selectedDate, selectDate, calendarMonth, selectMonth,
     calendarDays, calendarState, viewingLive,
-  } = useLiveRoute(company?.id ?? user?.companyId ?? null);
+  } = useLiveRoute(company?.id ?? user?.companyId ?? null, user?.role === 'admin');
   const [selectingEmployee, setSelectingEmployee] = useState(true);
   const live = connectionState === 'live' && viewingLive;
   const selectedDateLabel = formatSelectedDate(selectedDate);
@@ -36,8 +36,8 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
     })), [kpis?.activity]);
 
   if (selectingEmployee) {
-    return <EmployeePicker employees={employees} connectionState={connectionState} error={error} onOpenMenu={onOpenMenu} onRefresh={refresh} onSelect={(employeeId) => {
-      selectEmployee(employeeId);
+    return <EmployeePicker employees={employees} connectionState={connectionState} error={error} onOpenMenu={onOpenMenu} onRefresh={refresh} onSelect={(employeeId, companyId) => {
+      selectEmployee(employeeId, companyId);
       setSelectingEmployee(false);
     }} />;
   }
@@ -95,10 +95,10 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
               <View style={styles.rosterRows}>
                 {employees.map((item) => (
                   <EmployeeRosterCard
-                    key={`${item.employeeId}:${item.sessionId}`}
+                    key={`${item.companyId}:${item.employeeId}:${item.sessionId}`}
                     employee={item}
-                    selected={item.employeeId === employee?.employeeId && item.sessionId === employee?.sessionId}
-                    onPress={() => selectEmployee(item.employeeId)}
+                    selected={item.companyId === employee?.companyId && item.employeeId === employee?.employeeId && item.sessionId === employee?.sessionId}
+                    onPress={() => selectEmployee(item.employeeId, item.companyId)}
                   />
                 ))}
               </View>
@@ -156,7 +156,7 @@ function EmployeePicker({
   error: string | null;
   onOpenMenu: () => void;
   onRefresh: () => void;
-  onSelect: (employeeId: string) => void;
+  onSelect: (employeeId: string, companyId: string) => void;
 }) {
   const loading = connectionState === 'connecting' || connectionState === 'recovering';
   const checkedIn = employees.filter((item) => item.attendanceActive).length;
@@ -186,10 +186,10 @@ function EmployeePicker({
           {loading && !employees.length ? <ActivityIndicator color="#1769D2" style={styles.loader} /> : null}
           {employees.map((item) => (
             <EmployeeRosterCard
-              key={`${item.employeeId}:${item.sessionId}`}
+              key={`${item.companyId}:${item.employeeId}:${item.sessionId}`}
               employee={item}
               selected={false}
-              onPress={() => onSelect(item.employeeId)}
+              onPress={() => onSelect(item.employeeId, item.companyId)}
             />
           ))}
           {!loading && !employees.length ? (
