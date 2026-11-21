@@ -90,26 +90,6 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
           collapsedHeight={220}
           expandedRatio={0.84}
         >
-          <SectionCard title={`Field team · ${employees.length}`}>
-            {employees.length ? (
-              <View style={styles.rosterRows}>
-                {employees.map((item) => (
-                  <EmployeeRosterCard
-                    key={`${item.companyId}:${item.employeeId}:${item.sessionId}`}
-                    employee={item}
-                    selected={item.companyId === employee?.companyId && item.employeeId === employee?.employeeId && item.sessionId === employee?.sessionId}
-                    onPress={() => selectEmployee(item.employeeId, item.companyId)}
-                  />
-                ))}
-              </View>
-            ) : (
-              <View style={styles.rosterEmpty}>
-                <Text style={styles.rosterEmptyTitle}>No field devices are sharing a location</Text>
-                <Text style={styles.rosterEmptyBody}>When a field shift sends its first committed GPS point, it will appear here automatically.</Text>
-              </View>
-            )}
-          </SectionCard>
-
           <SectionCard title="Daily route calendar">
             <DailyCalendar
               month={calendarMonth}
