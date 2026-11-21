@@ -20,7 +20,7 @@ workflows:
       vars:
         BUNDLE_ID: "com.luminafieldforce"
         APP_STORE_APP_ID: "6761368486"
-        IOS_BUILD_NUMBER_BASE: "16"
+        IOS_BUILD_NUMBER_BASE: "17"
         APP_STORE_CONNECT_ALTOOL_ADDITIONAL_ARGUMENTS: "--apple-id 6761368486"
       node: 22.14.0
       xcode: latest
