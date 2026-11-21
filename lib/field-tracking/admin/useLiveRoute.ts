@@ -255,7 +255,9 @@ export function useLiveRoute(companyId?: string | null, allCompanies = false) {
     void refresh();
   }, [refresh]);
 
-  const viewingLive = selectedDate === today && employee?.sessionStatus === 'active' && employee.status === 'live';
+  // Today remains the live/last-known view while attendance is open. A delayed
+  // GPS feed must be shown as delayed/offline, not mislabeled as route history.
+  const viewingLive = selectedDate === today && Boolean(employee?.attendanceActive);
   const latest = [...points].reverse().find((point) => point.routeEligible || point.rejectionReason === 'stationary_noise') ?? null;
   return {
     employee,

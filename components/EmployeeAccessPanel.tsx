@@ -734,12 +734,20 @@ export function EmployeeAccessPanel() {
         const assigned = zone.assignedEmployeeIds || [];
         const isSaving = savingGeofenceId === zone.id;
         const zoneCompany = zone.companyId ? companyById.get(zone.companyId) : null;
-        const eligibleEmployees = managedEmployees.filter((employee) => {
+        // The all-company roster can contain one row per employee/workspace.
+        // A geofence assignment is identity-based, so render each employee
+        // only once and prefer the row that actually belongs to this zone.
+        const eligibleEmployeesById = new Map<string, (typeof managedEmployees)[number]>();
+        for (const employee of managedEmployees) {
           const employeeId = getEmployeeId(employee);
-          if (employeeId && assigned.includes(employeeId)) return true;
+          if (!employeeId) continue;
           const employeeCompanyIds = getEmployeeCompanyIds(employee, null);
-          return !zone.companyId || employeeCompanyIds.includes(zone.companyId);
-        });
+          const belongsToZone = !zone.companyId || employeeCompanyIds.includes(zone.companyId);
+          if (!belongsToZone && !assigned.includes(employeeId)) continue;
+          const existing = eligibleEmployeesById.get(employeeId);
+          if (!existing || belongsToZone) eligibleEmployeesById.set(employeeId, employee);
+        }
+        const eligibleEmployees = Array.from(eligibleEmployeesById.values());
         return (
           <View key={zone.id} style={[styles.requestCard, { borderColor: colors.borderLight, backgroundColor: colors.surface }]}>
             <View style={styles.requestTopRow}>

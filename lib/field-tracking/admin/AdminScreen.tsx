@@ -18,7 +18,17 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
     calendarDays, calendarState, viewingLive,
   } = useLiveRoute(company?.id ?? user?.companyId ?? null, user?.role === 'admin');
   const [selectingEmployee, setSelectingEmployee] = useState(true);
-  const live = connectionState === 'live' && viewingLive;
+  const live = connectionState === 'live' && viewingLive && employee?.status === 'live';
+  const currentTrackingLabel = employee?.status === 'live'
+    ? 'live'
+    : employee?.status === 'delayed' ? 'GPS delayed'
+      : employee?.status === 'stale' ? 'GPS offline'
+        : employee?.status === 'waiting' ? 'waiting for GPS' : 'offline';
+  const currentTrackingSubtitle = employee?.status === 'live'
+    ? 'Live field tracking'
+    : employee?.status === 'delayed' ? 'Live tracking · GPS delayed'
+      : employee?.status === 'stale' ? 'Last known location · GPS offline'
+        : employee?.status === 'waiting' ? 'Checked in · waiting for first GPS' : 'Location tracking offline';
   const selectedDateLabel = formatSelectedDate(selectedDate);
   const routeHalts = useMemo<HaltRecord[]>(() => (kpis?.activity ?? [])
     .filter((activity) => activity.type === 'halt')
@@ -65,7 +75,7 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
             <View style={styles.brandDot} />
             <View style={{ flex: 1 }}>
               <Text style={styles.mapPillTitle}>{employee?.name ?? 'Operations map'}</Text>
-              <Text style={styles.mapPillSubtitle}>{viewingLive ? 'Live field tracking' : `Route history · ${selectedDateLabel}`}</Text>
+              <Text style={styles.mapPillSubtitle}>{viewingLive ? currentTrackingSubtitle : `Route history · ${selectedDateLabel}`}</Text>
             </View>
             <Pressable onPress={() => setSelectingEmployee(true)} style={styles.changeButton}>
               <Text style={styles.changeButtonText}>Change</Text>
@@ -76,7 +86,7 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
         <View style={styles.mapInfoRow} pointerEvents="box-none">
           <View style={styles.infoPill}>
             <StatusDot tone={live ? 'live' : connectionState === 'offline' ? 'danger' : 'warning'} />
-            <Text style={styles.infoPillText}>{viewingLive ? 'live' : connectionState === 'offline' ? 'offline' : 'history'}</Text>
+            <Text style={styles.infoPillText}>{viewingLive ? currentTrackingLabel : connectionState === 'offline' ? 'offline' : 'history'}</Text>
           </View>
           <Pressable onPress={() => void refresh()} style={({ pressed }) => [styles.infoPill, pressed && { opacity: 0.82 }]}>
             <Text style={styles.infoPillMuted}>Refresh</Text>
@@ -85,8 +95,8 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
 
         <BottomSheet
           title={employee?.name ?? 'No active employee'}
-          subtitle={employee ? (viewingLive ? 'Live tracking' : selectedDateLabel) : 'Waiting for field history.'}
-          rightLabel={live ? 'Live' : viewingLive ? connectionState : 'History'}
+          subtitle={employee ? (viewingLive ? currentTrackingSubtitle : selectedDateLabel) : 'Waiting for field history.'}
+          rightLabel={live ? 'Live' : viewingLive ? currentTrackingLabel : 'History'}
           collapsedHeight={220}
           expandedRatio={0.84}
         >
@@ -140,7 +150,7 @@ function EmployeePicker({
 }) {
   const loading = connectionState === 'connecting' || connectionState === 'recovering';
   const checkedIn = employees.filter((item) => item.attendanceActive).length;
-  const activelyTracking = employees.filter((item) => item.trackingActive).length;
+  const activelyTracking = employees.filter((item) => item.status === 'live' || item.status === 'delayed').length;
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <View style={styles.pickerScreen}>
@@ -159,7 +169,7 @@ function EmployeePicker({
         </View>
         <View style={styles.pickerStatusRow}>
           <StatusDot tone={connectionState === 'live' ? 'live' : connectionState === 'offline' ? 'danger' : 'warning'} />
-          <Text style={styles.pickerStatusText}>{connectionState === 'live' ? `${checkedIn} checked in · ${activelyTracking} tracking now · ${employees.length} total` : connectionState}</Text>
+          <Text style={styles.pickerStatusText}>{connectionState === 'live' ? `${checkedIn} checked in · ${activelyTracking} reporting GPS` : connectionState}</Text>
           <Pressable onPress={onRefresh} style={styles.pickerRefresh}><Text style={styles.pickerRefreshText}>Refresh</Text></Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.pickerList} showsVerticalScrollIndicator={false}>
@@ -187,23 +197,43 @@ function EmployeePicker({
 
 function EmployeeRosterCard({ employee, selected, onPress }: { employee: any; selected: boolean; onPress: () => void }) {
   const isLive = employee.status === 'live';
-  const isCurrentlyTracking = employee.trackingActive;
-  const stateLabel = isLive ? 'LIVE' : employee.status === 'waiting' ? 'CHECKED IN' : employee.status === 'delayed' ? 'DELAYED' : employee.status === 'stale' ? 'STALE' : 'HISTORY';
+  const isGpsOffline = employee.status === 'stale' || employee.status === 'offline';
+  const lastGpsAge = formatLastGpsAge(employee.capturedAt);
+  const stateLabel = isLive ? 'LIVE' : employee.status === 'waiting' ? 'WAITING GPS' : employee.status === 'delayed' ? 'GPS DELAYED' : 'GPS OFFLINE';
   const speed = employee.speed == null || employee.speed < 0 ? '—' : `${Math.round(employee.speed * 3.6)} km/h`;
   const accuracy = employee.accuracy == null ? 'GPS —' : `GPS ±${Math.round(employee.accuracy)} m`;
+  const stateDetail = isLive
+    ? 'Location reporting now · tap to open'
+    : employee.status === 'waiting'
+      ? 'Checked in · waiting for first GPS sync'
+      : employee.status === 'delayed'
+        ? `Last GPS ${lastGpsAge} ago · updates delayed`
+        : `Last GPS ${lastGpsAge} ago · location is not reporting`;
   return (
     <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.rosterCard, selected && styles.rosterCardSelected, pressed && styles.rosterCardPressed]}>
       <View style={styles.rosterAvatar}><Text style={styles.rosterAvatarText}>{employee.initials}</Text></View>
       <View style={{ flex: 1, minWidth: 0 }}>
         <View style={styles.rosterNameRow}>
           <Text style={styles.rosterName} numberOfLines={1}>{employee.name}</Text>
-          <View style={[styles.rosterState, isLive ? styles.rosterStateLive : styles.rosterStateHistory]}><Text style={[styles.rosterStateText, isLive ? styles.rosterStateTextLive : styles.rosterStateTextHistory]}>{stateLabel}</Text></View>
+          <View style={[styles.rosterState, isLive ? styles.rosterStateLive : isGpsOffline ? styles.rosterStateOffline : styles.rosterStateHistory]}><Text style={[styles.rosterStateText, isLive ? styles.rosterStateTextLive : isGpsOffline ? styles.rosterStateTextOffline : styles.rosterStateTextHistory]}>{stateLabel}</Text></View>
         </View>
         <Text style={styles.rosterMeta} numberOfLines={1}>{accuracy} · {speed} · {employee.battery == null ? 'Battery —' : `${employee.battery}% battery`}</Text>
-        <Text style={styles.rosterMeta}>{isLive ? 'Live now · tap to open' : employee.status === 'waiting' ? 'Checked in · waiting for first GPS sync' : isCurrentlyTracking ? 'Tracking sync delayed · tap to inspect' : 'History available · tap to review'}</Text>
+        <Text style={styles.rosterMeta}>{stateDetail}</Text>
       </View>
     </Pressable>
   );
+}
+
+function formatLastGpsAge(value: string | null | undefined): string {
+  const timestamp = value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 'not received';
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
 function DailyCalendar({
@@ -434,9 +464,11 @@ const styles = StyleSheet.create({
   rosterState: { minHeight: 20, borderRadius: 10, paddingHorizontal: 7, alignItems: 'center', justifyContent: 'center' },
   rosterStateLive: { backgroundColor: '#E6F7EF' },
   rosterStateHistory: { backgroundColor: '#EEF2F7' },
+  rosterStateOffline: { backgroundColor: '#FDECEC' },
   rosterStateText: { fontSize: 9, fontWeight: '900' },
   rosterStateTextLive: { color: '#16794D' },
   rosterStateTextHistory: { color: '#526176' },
+  rosterStateTextOffline: { color: '#B42318' },
   rosterMeta: { color: '#64748B', fontSize: 10, lineHeight: 14, marginTop: 1 },
   rosterEmpty: { borderRadius: 14, borderWidth: 1, borderStyle: 'dashed', borderColor: '#DCE3EC', backgroundColor: '#F8FAFD', padding: 14 },
   rosterEmptyTitle: { color: '#111827', fontSize: 12, fontWeight: '800' },
