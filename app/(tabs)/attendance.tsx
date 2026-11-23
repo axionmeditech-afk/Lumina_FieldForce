@@ -2026,8 +2026,7 @@ function AttendanceScreenContent() {
       loadBaseData,
       openAppSettings,
       refreshLocation,
-      user?.id,
-      user?.name,
+      user,
     ]
   );
 

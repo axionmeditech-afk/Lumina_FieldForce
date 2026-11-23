@@ -312,11 +312,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       return;
     }
     const pool = await deps.getMySqlPool();
+    const employeeId = await resolveCanonicalEmployeeId(pool, parsed.data.employeeId);
     const [sequenceRows] = await pool.execute<any[]>(
       `SELECT COALESCE(MAX(queue_order), 0) AS last_order
        FROM lff_place_assignments
        WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status IN ('pending','in_progress')`,
-      [companyId, parsed.data.employeeId, parsed.data.scheduledDate],
+      [companyId, employeeId, parsed.data.scheduledDate],
     );
     const queueOrder = Number(sequenceRows[0]?.last_order || 0) + 1;
     const id = randomUUID();
@@ -326,7 +327,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
          latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW(3), NOW(3))`,
       [
-        id, companyId, parsed.data.employeeId, String(req.auth?.sub || ''),
+        id, companyId, employeeId, String(req.auth?.sub || ''),
         parsed.data.place.placeId, parsed.data.place.name, parsed.data.place.address,
         parsed.data.place.latitude, parsed.data.place.longitude, queueOrder,
         parsed.data.scheduledDate, `${parsed.data.scheduledTime}:00`, parsed.data.notes || null,
@@ -342,7 +343,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         body: alertBody,
         kind: 'alert',
         audience: 'employee',
-        audienceUserIds: [parsed.data.employeeId],
+        audienceUserIds: [employeeId],
         createdById: String(req.auth?.sub || ''),
         createdByName: 'FieldForce supervisor',
         createdAt: new Date().toISOString(),
@@ -351,7 +352,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     }
     res.status(201).json({
       assignment: {
-        assignmentId: id, companyId, employeeId: parsed.data.employeeId,
+        assignmentId: id, companyId, employeeId,
         assignedBy: String(req.auth?.sub || ''), placeId: parsed.data.place.placeId,
         placeName: parsed.data.place.name, placeAddress: parsed.data.place.address,
         latitude: parsed.data.place.latitude, longitude: parsed.data.place.longitude,
@@ -364,7 +365,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     // Delivery is best effort after the assignment is durable. A temporary
     // push-provider outage must never roll back or duplicate the field visit.
     void sendPushToUsers(pool, {
-      userIds: [parsed.data.employeeId],
+      userIds: [employeeId],
       companyId,
       payload: {
         title: alertTitle,
@@ -1257,6 +1258,29 @@ function getAuthorizedCompanyIds(req: Request, deps: Deps): Set<string> {
   );
 }
 
+export async function resolveCanonicalEmployeeId(pool: Pool, value: string): Promise<string> {
+  const original = String(value || '').trim();
+  const normalized = original.replace(/^dolibarr_/i, '');
+  if (!normalized) return original;
+  try {
+    const [rows] = await pool.execute<any[]>(
+      `SELECT CAST(u.rowid AS CHAR) AS employee_id
+       FROM nmy5_user u
+       LEFT JOIN lff_users app_user ON LOWER(TRIM(app_user.email))=LOWER(TRIM(u.email))
+       WHERE CAST(u.rowid AS CHAR)=? OR app_user.id=?
+       ORDER BY (CAST(u.rowid AS CHAR)=?) DESC
+       LIMIT 1`,
+      [normalized, original, normalized],
+    );
+    const canonical = String(rows[0]?.employee_id || '').trim();
+    return canonical || normalized;
+  } catch {
+    // lff_users is optional on older installations; numeric Dolibarr IDs are
+    // already canonical and non-numeric legacy IDs remain backward compatible.
+    return normalized;
+  }
+}
+
 async function resolveAuthorizedCompanyId(req: Request, requestedCompanyId: string, deps: Deps): Promise<string | null> {
   const normalized = requestedCompanyId.trim();
   if (!normalized) return null;
@@ -1398,6 +1422,19 @@ async function ensureTables(pool: Pool): Promise<void> {
         'idx_lff_place_assignments_employee_schedule',
         '(company_id, employee_id, scheduled_date, status)',
       );
+      try {
+        await pool.execute(
+          `UPDATE lff_place_assignments assignment
+           INNER JOIN lff_users legacy_user ON legacy_user.id=assignment.employee_id
+           INNER JOIN nmy5_user dolibarr_user ON LOWER(TRIM(dolibarr_user.email))=LOWER(TRIM(legacy_user.email))
+           SET assignment.employee_id=CAST(dolibarr_user.rowid AS CHAR)
+           WHERE assignment.employee_id<>CAST(dolibarr_user.rowid AS CHAR)`,
+        );
+      } catch (error) {
+        // lff_users is optional on older installations. New assignments are
+        // canonicalized independently, so a missing legacy table is harmless.
+        console.warn('[field-tracking] legacy assignment identity migration skipped', messageOf(error));
+      }
     })().catch((error) => {
       tablePromise = null;
       throw error;

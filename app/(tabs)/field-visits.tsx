@@ -45,10 +45,12 @@ const isSupervisor = (role?: string | null) => ['admin', 'hr', 'manager'].includ
 export default function FieldVisitsScreen() {
   const { user, company } = useAuth();
   const companyId = company?.id;
+  const userRole = user?.role;
   const navigation = useNavigation();
   const isFocused = useIsFocused();
   const visitNavigation = useVisitNavigation();
-  const supervisor = isSupervisor(user?.role);
+  const setVisitNavigationExpanded = visitNavigation.setScreenExpanded;
+  const supervisor = isSupervisor(userRole);
   const [assignments, setAssignments] = useState<FieldVisitAssignment[]>([]);
   const [employees, setEmployees] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -118,18 +120,18 @@ export default function FieldVisitsScreen() {
   }, [visitNavigation.expandNonce, visitNavigation.session]);
 
   useEffect(() => {
-    visitNavigation.setScreenExpanded(mapOpen);
-    return () => visitNavigation.setScreenExpanded(false);
-  }, [mapOpen, visitNavigation.setScreenExpanded]);
+    setVisitNavigationExpanded(mapOpen);
+    return () => setVisitNavigationExpanded(false);
+  }, [mapOpen, setVisitNavigationExpanded]);
 
   const reload = useCallback(async (quiet = false) => {
     if (quiet) setRefreshing(true);
     else setLoading(true);
     try {
       const [nextAssignments, nextEmployees, attendance] = await Promise.all([
-        getFieldVisitAssignments(user?.role === 'admin' ? { allCompanies: true } : { companyId }),
+        getFieldVisitAssignments(userRole === 'admin' ? { allCompanies: true } : { companyId }),
         supervisor
-          ? getUsersRemote(user?.role === 'admin' ? { allCompanies: true } : { companyId })
+          ? getUsersRemote(userRole === 'admin' ? { allCompanies: true } : { companyId })
           : Promise.resolve([]),
         supervisor ? Promise.resolve({ active: null }) : getAttendanceStatus().catch(() => ({ records: [], active: null })),
       ]);
@@ -145,7 +147,7 @@ export default function FieldVisitsScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [companyId, supervisor, user?.role]);
+  }, [companyId, supervisor, userRole]);
 
   useEffect(() => {
     if (!isFocused) return;
@@ -679,7 +681,7 @@ export default function FieldVisitsScreen() {
                 const employeeId = String(employee.id);
                 const employeeCompanyId = String(employee.companyId || companyId || '');
                 const selected = selectedEmployeeId === employeeId && selectedEmployeeCompanyId === employeeCompanyId;
-                return <Pressable key={`${employeeCompanyId}:${employeeId}`} onPress={() => { setSelectedEmployeeId(employeeId); setSelectedEmployeeCompanyId(employeeCompanyId); }} style={[styles.employeeChip, selected && styles.employeeChipSelected]}><Text style={[styles.employeeChipText, selected && styles.employeeChipTextSelected]}>{employee.name || employee.login || 'Employee'}{user?.role === 'admin' && employee.companyName ? ` · ${employee.companyName}` : ''}</Text></Pressable>;
+                return <Pressable key={`${employeeCompanyId}:${employeeId}`} onPress={() => { setSelectedEmployeeId(employeeId); setSelectedEmployeeCompanyId(employeeCompanyId); }} style={[styles.employeeChip, selected && styles.employeeChipSelected]}><Text style={[styles.employeeChipText, selected && styles.employeeChipTextSelected]}>{employee.name || employee.login || 'Employee'}{userRole === 'admin' && employee.companyName ? ` · ${employee.companyName}` : ''}</Text></Pressable>;
               })}
             </ScrollView>
             {!employees.length && !loading ? <Text style={styles.note}>No field employee is available in this workspace.</Text> : null}

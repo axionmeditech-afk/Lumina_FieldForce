@@ -293,7 +293,11 @@ app.get("/api/users", requireAuth, async (req, res) => {
         const employeeCategory =
           finalRole === "admin" ? null : isSalesRole(finalRole) ? "on_field" : "fixed_location";
         const rowid = normalizeWhitespace(String(dolibarrUser?.rowid || dolibarrUser?.id || ""));
-        const id = normalizeWhitespace(String(appUser?.id || rowid || `access_${request.id}`));
+        // Authentication tokens use the Dolibarr rowid as `sub`. Prefer that
+        // canonical identity whenever the roster row is backed by Dolibarr;
+        // using a legacy lff_users UUID here makes assigned visits invisible
+        // to the same employee after login.
+        const id = normalizeWhitespace(String(rowid || appUser?.id || `access_${request.id}`));
         const phone = normalizeWhitespace(options?.phone || String(dolibarrUser?.user_mobile || dolibarrUser?.office_phone || ""));
         const statut = options?.statut ?? dolibarrUser?.statut ?? 1;
         const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
@@ -378,12 +382,19 @@ app.get("/api/users", requireAuth, async (req, res) => {
       // their account was provisioned by an administrator/import and has no
       // matching access-request row. Do not silently drop those employees
       // from visit assignment pickers.
+      const dolibarrUserByEmail = new Map<string, any>();
+      for (const dolibarrUser of userRows || []) {
+        const emailKey = normalizeEmail(String(dolibarrUser.email || ""));
+        if (emailKey) dolibarrUserByEmail.set(emailKey, dolibarrUser);
+      }
       for (const appUser of appUserRows || []) {
         const id = normalizeWhitespace(String(appUser.id || ""));
         const email = normalizeEmail(String(appUser.email || ""));
+        const dolibarrUser = email ? dolibarrUserByEmail.get(email) || null : null;
+        const canonicalId = normalizeWhitespace(String(dolibarrUser?.id || dolibarrUser?.rowid || id));
         const name = normalizeWhitespace(String(appUser.name || "")) || email || id || "Employee";
         const role = normalizeRole(String(appUser.role || "employee"));
-        if (!id || isLegacyDemoProfileName(name) || isLegacyDemoIdentity(email)) continue;
+        if (!canonicalId || isLegacyDemoProfileName(name) || isLegacyDemoIdentity(email)) continue;
 
         const assignedCompanyIds = normalizeCompanyIds([
           ...parseAssignedEmployeeIds(appUser.company_ids_json),
@@ -393,15 +404,15 @@ app.get("/api/users", requireAuth, async (req, res) => {
         if (companyId && !assignedCompanyIds.includes(companyId)) continue;
         const targetCompanyIds = companyId ? [companyId] : assignedCompanyIds;
         for (const assignedCompanyId of targetCompanyIds) {
-          const key = `${assignedCompanyId}:${email || id || name.toLowerCase()}`;
+          const key = `${assignedCompanyId}:${email || canonicalId || name.toLowerCase()}`;
           if (mappedByScope.has(key)) continue;
           const company = companyById.get(assignedCompanyId);
           const employeeCategory = role === "admin" ? null : isSalesRole(role) ? "on_field" : "fixed_location";
           mappedByScope.set(key, {
-            id,
-            rowid: /^\d+$/.test(id) ? id : undefined,
-            user_id: id,
-            login: email ? email.split("@")[0] : id,
+            id: canonicalId,
+            rowid: normalizeWhitespace(String(dolibarrUser?.id || dolibarrUser?.rowid || "")) || (/^\d+$/.test(canonicalId) ? canonicalId : undefined),
+            user_id: canonicalId,
+            login: normalizeWhitespace(String(dolibarrUser?.login || "")) || (email ? email.split("@")[0] : canonicalId),
             firstname: name.split(" ")[0] || name,
             lastname: name.split(" ").slice(1).join(" "),
             name,
@@ -456,7 +467,7 @@ app.get("/api/users", requireAuth, async (req, res) => {
           else if (job.includes("manager") || job.includes("supervisor")) role = "manager";
         }
         const employeeCategory = role === "admin" ? null : isSalesRole(role) ? "on_field" : "fixed_location";
-        const id = normalizeWhitespace(String(appUser?.id || rowId));
+        const id = normalizeWhitespace(String(rowId || appUser?.id));
         for (const assignedCompanyId of targetCompanyIds) {
           const key = `${assignedCompanyId}:${email || id || name.toLowerCase()}`;
           if (mappedByScope.has(key)) continue;

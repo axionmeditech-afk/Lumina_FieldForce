@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import test from 'node:test';
 import express from 'express';
-import { registerFieldTrackingRoutes } from '../server/routes/field-tracking.routes';
+import { registerFieldTrackingRoutes, resolveCanonicalEmployeeId } from '../server/routes/field-tracking.routes';
 import type { AttendanceRecord } from '../lib/types';
 
 test('employee routing is rejected without check-in and without an assigned visit', async () => {
@@ -69,4 +69,22 @@ test('checkout lifecycle immediately notifies active visit navigation', async ()
   notifyVisitNavigationCheckout();
   await Promise.resolve();
   assert.equal(notifications, 1);
+});
+
+test('visit assignment identities resolve legacy app UUIDs to the authenticated Dolibarr user id', async () => {
+  const calls: unknown[][] = [];
+  const pool = {
+    execute: async (_sql: string, params: unknown[]) => {
+      calls.push(params);
+      return [[{ employee_id: '51' }], []];
+    },
+  } as any;
+
+  assert.equal(await resolveCanonicalEmployeeId(pool, 'legacy-app-user-id'), '51');
+  assert.deepEqual(calls[0], ['legacy-app-user-id', 'legacy-app-user-id', 'legacy-app-user-id']);
+
+  const oldInstallPool = {
+    execute: async () => { throw new Error('lff_users is missing'); },
+  } as any;
+  assert.equal(await resolveCanonicalEmployeeId(oldInstallPool, 'dolibarr_51'), '51');
 });

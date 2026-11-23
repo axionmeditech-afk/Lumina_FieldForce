@@ -9,14 +9,12 @@ import type {
 import { getFieldHealth } from '../api';
 import { getApiToken } from '@/lib/storage';
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
+import { toMumbaiDateKey } from '@/lib/ist-time';
 
-const timezoneOffsetMinutes = -new Date().getTimezoneOffset();
+const timezoneOffsetMinutes = 5 * 60 + 30;
 
 function localDateKey(date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return toMumbaiDateKey(date);
 }
 
 async function fetchJsonFast<T>(url: string, token: string, timeoutMs = 8_000): Promise<T> {
