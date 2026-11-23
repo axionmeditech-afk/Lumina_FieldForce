@@ -491,7 +491,9 @@ export default function FieldVisitsScreen() {
     }).catch(() => undefined).finally(() => setRerouting(false));
   }, [currentPosition, navigationActive, projection?.distanceFromRouteMeters, rerouting, route.coordinates.length, selectedVisit, visitNavigation.session]);
 
-  const selectedVisitScheduledToday = selectedVisit?.scheduledDate === toMumbaiDateKey(new Date());
+  const todayDateKey = toMumbaiDateKey(new Date());
+  const selectedVisitOverdue = Boolean(selectedVisit && selectedVisit.scheduledDate < todayDateKey);
+  const selectedVisitFuture = Boolean(selectedVisit && selectedVisit.scheduledDate > todayDateKey);
   const selectedVisitSchedulePolicy = selectedVisit
     ? evaluateVisitSchedulePolicy(user?.role, selectedVisit.scheduledDate, selectedVisit.scheduledTime, clockNow)
     : null;
@@ -612,13 +614,13 @@ export default function FieldVisitsScreen() {
               <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.arrivedIcon]}><Ionicons name="location" size={24} color="#16835B" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>You have reached {selectedVisit.placeName}</Text><Text style={styles.previewRouteMeta}>Start visit when you are ready to begin the assigned work.</Text></View></View>
             ) : route.distanceMetres != null ? (
               <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Best road route ready</Text><Text style={styles.routeMetric}>{formatDistance(route.distanceMetres)} · {formatDuration(route.durationSeconds || 0)}</Text><Text style={styles.previewRouteMeta}>{previewArrival ? `Arrive by ${formatArrival(previewArrival)}` : 'Arrival time calculating'} · Voice guidance ready</Text></View></View>
-            ) : !selectedVisitScheduledToday ? (
+            ) : selectedVisitFuture ? (
               <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="calendar" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Scheduled for {formatVisitSchedule(selectedVisit.scheduledDate, selectedVisit.scheduledTime)}</Text><Text style={styles.previewRouteMeta}>Directions become available on the assigned visit date.</Text></View></View>
             ) : !selectedVisitDirectionsAllowed ? (
               <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="time" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Directions open at {directionsOpenLabel || selectedVisit.scheduledTime}</Text><Text style={styles.previewRouteMeta}>Fixed-location employees receive a two-hour travel window before the scheduled visit.</Text></View></View>
             ) : checkedIn ? (
-              <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Ready for directions</Text><Text style={styles.previewRouteMeta}>The road route will be calculated only after you tap Start directions.</Text></View></View>
-            ) : <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="lock-closed" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Check-in required</Text><Text style={styles.previewRouteMeta}>Complete attendance check-in before starting directions.</Text></View></View>}
+              <View style={styles.previewRouteRow}><View style={styles.previewIconShell}><Ionicons name="navigate" size={24} color="#1769D2" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>{selectedVisitOverdue ? 'Overdue visit ready' : 'Ready for directions'}</Text><Text style={styles.previewRouteMeta}>{selectedVisitOverdue ? 'A fresh attendance check-in is active, so this pending visit can now be completed.' : 'The road route will be calculated only after you tap Start directions.'}</Text></View></View>
+            ) : <View style={styles.previewRouteRow}><View style={[styles.previewIconShell, styles.lockedIcon]}><Ionicons name="lock-closed" size={22} color="#9A6200" /></View><View style={styles.maneuverCopy}><Text style={styles.previewRouteTitle}>Check-in required</Text><Text style={styles.previewRouteMeta}>{selectedVisitOverdue ? 'An overdue visit does not bypass attendance. Check in today before starting directions.' : 'Complete attendance check-in before starting directions.'}</Text></View></View>}
           </View>
         </SafeAreaView>
         <SafeAreaView style={styles.mapBottom} edges={['bottom', 'left', 'right']}>
@@ -629,7 +631,7 @@ export default function FieldVisitsScreen() {
           </Pressable> : navigationActive ? <Pressable onPress={() => stopDirections(true)} style={styles.stopDirectionsButton}>
             <Ionicons name="stop-circle" size={20} color="#FFFFFF" /><Text style={styles.completeButtonText}>{rerouting ? 'Rerouting…' : 'Stop directions'}</Text>
           </Pressable> : <Pressable onPress={() => void startDirections()} disabled={routing || !checkedIn || !selectedVisitDirectionsAllowed} style={[styles.directionsButton, (routing || !checkedIn || !selectedVisitDirectionsAllowed) && styles.disabledButton]}>
-            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn && selectedVisitDirectionsAllowed ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{!selectedVisitScheduledToday ? 'Available on visit date' : !selectedVisitDirectionsAllowed ? `Opens ${directionsOpenLabel || selectedVisit.scheduledTime}` : checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
+            {routing ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name={checkedIn && selectedVisitDirectionsAllowed ? 'navigate' : 'lock-closed'} size={20} color="#FFFFFF" />}<Text style={styles.completeButtonText}>{selectedVisitFuture ? 'Available on visit date' : !selectedVisitDirectionsAllowed ? `Opens ${directionsOpenLabel || selectedVisit.scheduledTime}` : checkedIn ? 'Start directions' : 'Check in to start directions'}</Text>
           </Pressable>
           }
         </SafeAreaView>
@@ -744,7 +746,7 @@ export default function FieldVisitsScreen() {
             <View style={{ flex: 1 }}>
               <Text style={styles.visitTitle}>{visit.placeName}</Text>
               <Text style={styles.visitAddress}>{visit.placeAddress}</Text>
-              <Text style={styles.visitSchedule}>{formatVisitSchedule(visit.scheduledDate, visit.scheduledTime)}</Text>
+              <Text style={styles.visitSchedule}>{visit.scheduledDate < todayDateKey ? 'Overdue · ' : ''}{formatVisitSchedule(visit.scheduledDate, visit.scheduledTime)}</Text>
               {visit.status === 'in_progress' ? <Text style={styles.visitInProgress}>Visit in progress</Text> : null}
               {supervisor ? <Text style={styles.visitMeta}>For: {employeeById.get(`${visit.companyId}:${visit.employeeId}`)?.name || visit.employeeId}</Text> : null}
               {visit.notes ? <Text style={styles.visitMeta}>Note: {visit.notes}</Text> : null}

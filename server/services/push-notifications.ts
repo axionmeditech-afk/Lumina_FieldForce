@@ -122,6 +122,52 @@ export async function sendPushToCompany(pool: Pool, input: {
   return sendExpoPushTokens(pool, rows.map((row) => String(row.push_token || "")), input.payload);
 }
 
+/** Deliver operational alerts only to registered admins/HR/managers. */
+export async function sendPushToCompanySupervisors(pool: Pool, input: {
+  companyId: string;
+  payload: PushPayload;
+}): Promise<PushSendResult> {
+  await ensurePushDevicesTable(pool);
+  let rows: any[] = [];
+  try {
+    [rows] = await pool.execute<any[]>(
+      `SELECT DISTINCT pd.push_token
+       FROM lff_push_devices pd
+       LEFT JOIN lff_users direct_user ON direct_user.id=pd.user_id
+       LEFT JOIN nmy5_user dol_user
+         ON CAST(dol_user.rowid AS CHAR)=REPLACE(LOWER(pd.user_id), 'dolibarr_', '')
+       LEFT JOIN lff_users mapped_user ON LOWER(TRIM(mapped_user.email))=LOWER(TRIM(dol_user.email))
+       WHERE pd.active=1 AND pd.company_id=?
+         AND (
+           direct_user.role IN ('admin','hr','manager')
+           OR mapped_user.role IN ('admin','hr','manager')
+           OR dol_user.admin=1
+           OR LOWER(COALESCE(dol_user.job,'')) REGEXP 'manager|supervisor|human resources|(^|[^a-z])hr([^a-z]|$)'
+         )`,
+      [input.companyId],
+    );
+  } catch (error) {
+    // Older deployments may not have lff_users. Preserve direct Dolibarr admin
+    // delivery instead of turning an operational event into a request failure.
+    try {
+      [rows] = await pool.execute<any[]>(
+        `SELECT DISTINCT pd.push_token
+         FROM lff_push_devices pd
+         INNER JOIN nmy5_user dol_user
+           ON CAST(dol_user.rowid AS CHAR)=REPLACE(LOWER(pd.user_id), 'dolibarr_', '')
+         WHERE pd.active=1 AND pd.company_id=?
+           AND (dol_user.admin=1 OR LOWER(COALESCE(dol_user.job,'')) REGEXP 'manager|supervisor|human resources|(^|[^a-z])hr([^a-z]|$)')`,
+        [input.companyId],
+      );
+    } catch (fallbackError) {
+      console.warn('[push] supervisor recipient lookup failed', fallbackError instanceof Error ? fallbackError.message : fallbackError);
+      return { attempted: 0, delivered: 0, failed: 0 };
+    }
+    console.warn('[push] supervisor lookup used Dolibarr compatibility path', error instanceof Error ? error.message : error);
+  }
+  return sendExpoPushTokens(pool, rows.map((row) => String(row.push_token || '')), input.payload);
+}
+
 async function sendExpoPushTokens(pool: Pool, rawTokens: string[], payload: PushPayload): Promise<PushSendResult> {
   const tokens = [...new Set(rawTokens.filter(isExpoPushToken))];
   const result: PushSendResult = { attempted: tokens.length, delivered: 0, failed: 0 };

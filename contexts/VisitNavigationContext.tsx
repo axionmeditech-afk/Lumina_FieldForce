@@ -14,6 +14,7 @@ import { subscribeToVisitNavigationCheckout } from '@/lib/field-tracking/visit-n
 import { appendArrivalEvidence } from '@/lib/field-tracking/visit-evidence-core';
 import { isEvidenceInsideVisitGeofence, toVisitLocationEvidence } from '@/lib/field-tracking/visit-evidence';
 import type { VisitLocationEvidence } from '@/lib/field-tracking/visit-policy';
+import { notifyRouteUpdated, notifyVisitArrived, notifyVisitNavigationStarted } from '@/lib/employee-notifications';
 
 type NavigationStatus = 'preview' | 'active' | 'arrived';
 type StoredSession = {
@@ -239,6 +240,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
       routeProgressRef.current = { route: candidate.route.coordinates, distance: 0 };
       setSession({ ...candidate, status: 'active', updatedAt: new Date().toISOString() });
       announce('Directions started. Follow the highlighted route.');
+      void notifyVisitNavigationStarted(candidate.visit.assignmentId, candidate.visit.placeName).catch(() => undefined);
     } finally { setBusy(false); }
   }, [announce, session, startWatch]);
 
@@ -316,6 +318,7 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
           ? { ...current, visit: result.assignment, status: 'arrived', updatedAt: new Date().toISOString() }
           : current);
         announce(`You have reached ${session.visit.placeName}. Start the visit when ready.`);
+        void notifyVisitArrived(assignmentId, session.visit.placeName).catch(() => undefined);
         voiceActiveRef.current = false;
       }).catch(() => {
         // The server is authoritative for arrival. Keep navigating after a
@@ -361,6 +364,9 @@ export function VisitNavigationProvider({ userId, children }: { userId: string |
         });
         spokenRef.current.clear();
         if (navigationGenerationRef.current === generation) announce('Route updated.');
+        if (navigationGenerationRef.current === generation) {
+          void notifyRouteUpdated(assignmentId, session.visit.placeName).catch(() => undefined);
+        }
       }
     }).catch(() => undefined).finally(() => {
       if (navigationGenerationRef.current === generation) setBusy(false);

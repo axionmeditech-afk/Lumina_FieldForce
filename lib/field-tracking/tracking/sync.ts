@@ -32,6 +32,7 @@ async function runSync(employeeId?: string): Promise<{ uploaded: number; error: 
   const network = await NetInfo.fetch();
   if (!network.isConnected || network.isInternetReachable === false) {
     await setState('tracker_state', 'offline');
+    await setState('tracking_runtime_state', 'offline_buffering');
     return { uploaded: 0, error: 'offline' };
   }
   let uploaded = 0;
@@ -62,6 +63,7 @@ async function runSync(employeeId?: string): Promise<{ uploaded: number; error: 
   } catch (error) {
     const message = error instanceof Error ? error.message : 'field_sync_failed';
     await setState('last_sync_error', message);
+    await setState('tracking_runtime_state', 'sync_blocked');
     return { uploaded, error: message };
   }
 }

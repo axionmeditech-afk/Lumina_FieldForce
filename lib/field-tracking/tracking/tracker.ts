@@ -7,10 +7,12 @@ import {
   suspendAttendanceWatchdogForFieldTracking,
 } from '@/lib/attendance-background';
 import { fieldTrackingConfig } from '../config';
+import { LEGACY_FIELD_TRACKING_LOCATION_TASKS } from '../task-names';
 import type { TrackingSession } from '../types';
 import { persistFieldLocation, waitForFieldCaptures } from './capture';
 import { completeActiveSession, createSession, getActiveSession, setSessionCompanyIfMissing, setState } from './database';
 import { syncFieldOutbox } from './sync';
+import { maybeSendFieldHeartbeat } from './heartbeat';
 
 let foregroundSubscription: Location.LocationSubscription | null = null;
 let appStateSubscription: { remove: () => void } | null = null;
@@ -89,7 +91,13 @@ async function startForegroundWatcher(): Promise<void> {
     },
     (location) => {
       void persistFieldLocation(location)
-        .then(() => setState('tracker_state', 'tracking'))
+        .then(async (point) => {
+          await Promise.all([
+            setState('tracker_state', 'tracking'),
+            setState('last_tracker_error', ''),
+          ]);
+          await maybeSendFieldHeartbeat({ locations: [location], capturedPoint: point });
+        })
         .catch((error: unknown) => setState('last_tracker_error', error instanceof Error ? error.message : 'foreground_capture_failed'));
     },
     (message) => void setState('last_tracker_error', message || 'foreground_location_error'),
@@ -118,27 +126,42 @@ function stopSyncTimer() {
 }
 
 async function startNativeTask(): Promise<void> {
-  const started = await Location.hasStartedLocationUpdatesAsync(fieldTrackingConfig.locationTaskName).catch(() => false);
-  if (started) return;
+  // Establish ownership before checking registration. This also repairs an
+  // older build that accidentally restarted the attendance watchdog after the
+  // field task was already active.
   await suspendAttendanceWatchdogForFieldTracking();
-  await Location.startLocationUpdatesAsync(fieldTrackingConfig.locationTaskName, {
-    accuracy: Location.Accuracy.High,
-    timeInterval: fieldTrackingConfig.captureTimeMs,
-    distanceInterval: fieldTrackingConfig.captureDistanceM,
-    // Let Android batch short bursts instead of waking JS for every fix. The
-    // route still retains 5-second/8-metre fidelity while using less battery.
-    deferredUpdatesInterval: 10_000,
-    deferredUpdatesDistance: fieldTrackingConfig.captureDistanceM,
-    activityType: Location.ActivityType.OtherNavigation,
-    pausesUpdatesAutomatically: false,
-    showsBackgroundLocationIndicator: true,
-    foregroundService: {
-      notificationTitle: 'Lumina field tracking active',
-      notificationBody: 'Your verified work route is recording while attendance is active.',
-      notificationColor: '#1769D2',
-      killServiceOnDestroy: false,
-    },
-  });
+  try {
+    for (const taskName of LEGACY_FIELD_TRACKING_LOCATION_TASKS) {
+      if (await Location.hasStartedLocationUpdatesAsync(taskName).catch(() => false)) {
+        await Location.stopLocationUpdatesAsync(taskName).catch(() => undefined);
+      }
+    }
+    const started = await Location.hasStartedLocationUpdatesAsync(fieldTrackingConfig.locationTaskName).catch(() => false);
+    if (started) return;
+    await Location.startLocationUpdatesAsync(fieldTrackingConfig.locationTaskName, {
+      accuracy: Location.Accuracy.High,
+      timeInterval: fieldTrackingConfig.captureTimeMs,
+      distanceInterval: fieldTrackingConfig.captureDistanceM,
+      // Let Android batch short bursts instead of waking JS for every fix. The
+      // route still retains 5-second/8-metre fidelity while using less battery.
+      deferredUpdatesInterval: 10_000,
+      deferredUpdatesDistance: fieldTrackingConfig.captureDistanceM,
+      activityType: Location.ActivityType.OtherNavigation,
+      pausesUpdatesAutomatically: false,
+      showsBackgroundLocationIndicator: true,
+      foregroundService: {
+        notificationTitle: 'Attendance auto-checkout active',
+        notificationBody: 'Lumina is watching your office boundary during this active check-in.',
+        notificationColor: '#1769D2',
+        killServiceOnDestroy: false,
+      },
+    });
+  } catch (error) {
+    // Never leave attendance exit protection suspended when native field
+    // tracking could not take ownership of the location stream.
+    await resumeAttendanceWatchdogAfterFieldTracking().catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function restoreFieldTracker(employeeId?: string): Promise<void> {
@@ -147,10 +170,12 @@ export async function restoreFieldTracker(employeeId?: string): Promise<void> {
   const permissions = await readFieldPermissions();
   if (!permissions.locationServicesEnabled || !permissions.precisePermission) {
     await setState('tracker_state', 'degraded');
+    await setState('tracking_runtime_state', permissions.locationServicesEnabled ? 'permission_blocked' : 'gps_degraded');
     return;
   }
   if (permissions.backgroundCapable && !permissions.backgroundPermission) {
     await setState('tracker_state', 'degraded');
+    await setState('tracking_runtime_state', 'permission_blocked');
     await setState('last_tracker_error', 'background_location_required_allow_all_the_time');
     return;
   }
@@ -161,6 +186,7 @@ export async function restoreFieldTracker(employeeId?: string): Promise<void> {
   }
   startSyncTimer();
   await setState('tracker_state', 'tracking');
+  await setState('tracking_runtime_state', 'tracking');
 }
 
 export async function startFieldTracking(
@@ -181,6 +207,7 @@ export async function startFieldTracking(
     }
   }
   await setState('tracker_state', 'starting');
+  await setState('tracking_runtime_state', 'starting');
   await setState('last_tracker_error', '');
   const permissions = await requestPermissions();
   if (!permissions.locationServicesEnabled) throw new Error('Turn on device location and retry.');
@@ -207,7 +234,9 @@ export async function startFieldTracking(
     }
     startSyncTimer();
     await setState('tracker_state', 'tracking');
+    await setState('tracking_runtime_state', 'tracking');
     await syncFieldOutbox(employeeId, true);
+    await maybeSendFieldHeartbeat({ force: true });
     return session;
   } catch (error) {
     stopForegroundWatcher();
@@ -223,6 +252,7 @@ export async function stopFieldTracking(employeeId?: string): Promise<void> {
   const session = await getActiveSession(employeeId);
   if (!session) return;
   await setState('tracker_state', 'stopping');
+  await setState('tracking_runtime_state', 'stopping');
   await stopNativeTrackingProducer();
   await waitForFieldCaptures();
   const finalLocation = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }).catch(() => null);

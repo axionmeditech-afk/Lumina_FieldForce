@@ -1,6 +1,6 @@
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 import { getApiToken } from '@/lib/storage';
-import type { Coordinate, FieldSessionKpis, PlaceSearchResult, RoutePlan, RoutePoint, TrackingSession } from './types';
+import type { Coordinate, FieldSessionKpis, PlaceSearchResult, RoutePlan, RoutePoint, TrackingRuntimeState, TrackingSamplingProfile, TrackingSession } from './types';
 import type { VisitLocationEvidence } from './visit-policy';
 
 type RequestOptions = RequestInit & {
@@ -24,6 +24,7 @@ export type FieldVisitAssignment = {
   queueOrder: number;
   scheduledDate: string;
   scheduledTime: string;
+  executionDate: string | null;
   notes: string;
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
   createdAt: string;
@@ -176,6 +177,25 @@ export async function getFieldVisitAssignments(options?: { companyId?: string | 
   const query = params.toString();
   const result = await requestJson<{ assignments: FieldVisitAssignment[] }>(`/field-tracking/assignments${query ? `?${query}` : ''}`);
   return result.assignments;
+}
+
+export function sendFieldTrackingHeartbeat(input: {
+  sessionId: string;
+  companyId: string;
+  runtimeState: TrackingRuntimeState;
+  pendingPoints: number;
+  lastCapturedAt: string | null;
+  accuracy: number | null;
+  lastError: string | null;
+  samplingProfile: TrackingSamplingProfile;
+}): Promise<{ ok: boolean; receivedAt: string }> {
+  return requestJson('/field-tracking/heartbeat', {
+    method: 'POST',
+    timeoutMs: 8_000,
+    retryAcrossBases: true,
+    retryNotFoundAcrossBases: true,
+    body: JSON.stringify(input),
+  });
 }
 
 export function createFieldVisitAssignment(input: {

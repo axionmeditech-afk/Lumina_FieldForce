@@ -1,9 +1,11 @@
 import { Platform } from "react-native";
 import Constants from "expo-constants";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 type NotificationsModule = typeof import("expo-notifications");
 
 const ATTENDANCE_CHANNEL_ID = "attendance_auto_checkout";
+const CHECKIN_AVAILABLE_THROTTLE_PREFIX = "@lumina_checkin_available_v1:";
 
 let channelReady = false;
 let permissionAskedThisRun = false;
@@ -117,6 +119,27 @@ export async function notifyAutoCheckoutSynced(options: {
       data: { screen: "attendance", kind: "auto_checkout_synced" },
     },
     identifier: "attendance_auto_checkout",
+    trigger: Platform.OS === "android" ? { channelId: ATTENDANCE_CHANNEL_ID } : null,
+  });
+}
+
+export async function notifyCheckInAvailable(zoneId: string, zoneName: string): Promise<void> {
+  const notifications = await getNotificationsModule();
+  if (!notifications || !(await ensureAttendanceNotificationPermission(false))) return;
+  const throttleKey = `${CHECKIN_AVAILABLE_THROTTLE_PREFIX}${zoneId}`;
+  const now = Date.now();
+  const previous = Number(await AsyncStorage.getItem(throttleKey)) || 0;
+  if (now - previous < 30 * 60_000) return;
+  await AsyncStorage.setItem(throttleKey, String(now));
+  await notifications.scheduleNotificationAsync({
+    identifier: `attendance_checkin_available_${zoneId}`.slice(0, 100),
+    content: {
+      title: "You can check in now",
+      body: `You entered ${zoneName}. Open Attendance when you are ready to check in.`,
+      sound: "default",
+      priority: notifications.AndroidNotificationPriority.HIGH,
+      data: { screen: "attendance", kind: "checkin_available", zoneId },
+    },
     trigger: Platform.OS === "android" ? { channelId: ATTENDANCE_CHANNEL_ID } : null,
   });
 }

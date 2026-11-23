@@ -5,6 +5,7 @@ import { fieldTrackingConfig } from './config';
 import { persistFieldLocation } from './tracking/capture';
 import { setState } from './tracking/database';
 import { syncFieldOutbox } from './tracking/sync';
+import { maybeSendFieldHeartbeat } from './tracking/heartbeat';
 
 try {
   if (!TaskManager.isTaskDefined(fieldTrackingConfig.locationTaskName)) {
@@ -15,18 +16,26 @@ try {
       }
       const locations = (data as { locations?: Location.LocationObject[] }).locations ?? [];
       let captured = 0;
+      let latestCaptured: Awaited<ReturnType<typeof persistFieldLocation>> = null;
       for (const location of locations) {
         const point = await persistFieldLocation(location).catch((failure: unknown) => {
           void setState('last_tracker_error', failure instanceof Error ? failure.message : 'background_capture_failed');
           return null;
         });
-        if (point) captured += 1;
+        if (point) {
+          captured += 1;
+          latestCaptured = point;
+        }
       }
       await processAttendanceLocationBatch(locations).catch(() => undefined);
       if (captured) {
-        await setState('tracker_state', 'tracking').catch(() => undefined);
+        await Promise.all([
+          setState('tracker_state', 'tracking'),
+          setState('last_tracker_error', ''),
+        ]).catch(() => undefined);
         await syncFieldOutbox().catch(() => undefined);
       }
+      await maybeSendFieldHeartbeat({ locations, capturedPoint: latestCaptured }).catch(() => undefined);
     });
   }
 } catch (error) {

@@ -123,6 +123,36 @@ export function AdminScreen({ onOpenMenu }: { onOpenMenu: () => void }) {
             <View style={styles.healthRow}>
               <HealthChip label="API" value={serverHealth.apiReachable ? 'Ready' : 'Offline'} ready={serverHealth.apiReachable} />
               <HealthChip label="Live polling" value={connectionState} ready={connectionState === 'live'} warning={connectionState !== 'offline' && connectionState !== 'live'} />
+              <HealthChip
+                label="Tracking engine"
+                value={employee?.runtimeState?.replace(/_/g, ' ') || 'Waiting'}
+                ready={employee?.status === 'live'}
+                warning={employee?.status === 'delayed' || employee?.status === 'waiting'}
+              />
+              <HealthChip
+                label="Offline queue"
+                value={`${employee?.pendingPoints || 0} points`}
+                ready={!employee?.pendingPoints}
+                warning={Boolean(employee?.pendingPoints)}
+              />
+              <HealthChip
+                label="Heartbeat gap"
+                value={employee?.heartbeatGapSeconds == null ? 'Waiting' : employee.heartbeatGapSeconds <= 120 ? 'Healthy' : formatDuration(employee.heartbeatGapSeconds)}
+                ready={employee?.heartbeatGapSeconds != null && employee.heartbeatGapSeconds <= 120}
+                warning={employee?.heartbeatGapSeconds != null && employee.heartbeatGapSeconds > 120 && employee.heartbeatGapSeconds <= 300}
+              />
+              <HealthChip
+                label="Sampling"
+                value={employee?.samplingProfile || 'Waiting'}
+                ready={employee?.samplingProfile !== 'degraded' && Boolean(employee?.samplingProfile)}
+                warning={employee?.samplingProfile === 'degraded' || !employee?.samplingProfile}
+              />
+              <HealthChip
+                label="Recovered gaps"
+                value={employee?.gapCount ? `${employee.gapCount} · last ${formatDuration(employee.recoveredGapSeconds || 0)}` : 'None'}
+                ready={!employee?.gapCount}
+                warning={Boolean(employee?.gapCount)}
+              />
               <HealthChip label="Routing API" value={serverHealth.routerReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.routerReachable} />
               <HealthChip label="Geocoding API" value={serverHealth.geocoderReachable ? 'Ready' : 'Unavailable'} ready={serverHealth.geocoderReachable} />
             </View>
@@ -199,16 +229,19 @@ function EmployeeRosterCard({ employee, selected, onPress }: { employee: any; se
   const isLive = employee.status === 'live';
   const isGpsOffline = employee.status === 'stale' || employee.status === 'offline';
   const lastGpsAge = formatLastGpsAge(employee.capturedAt);
+  const lastHeartbeatAge = formatLastGpsAge(employee.heartbeatAt || employee.capturedAt);
   const stateLabel = isLive ? 'LIVE' : employee.status === 'waiting' ? 'WAITING GPS' : employee.status === 'delayed' ? 'GPS DELAYED' : 'GPS OFFLINE';
   const speed = employee.speed == null || employee.speed < 0 ? '—' : `${Math.round(employee.speed * 3.6)} km/h`;
   const accuracy = employee.accuracy == null ? 'GPS —' : `GPS ±${Math.round(employee.accuracy)} m`;
   const stateDetail = isLive
-    ? 'Location reporting now · tap to open'
+    ? employee.runtimeState === 'stationary'
+      ? `Tracker live · stationary · last GPS ${lastGpsAge} ago`
+      : 'Tracking engine reporting now · tap to open'
     : employee.status === 'waiting'
       ? 'Checked in · waiting for first GPS sync'
       : employee.status === 'delayed'
-        ? `Last GPS ${lastGpsAge} ago · updates delayed`
-        : `Last GPS ${lastGpsAge} ago · location is not reporting`;
+        ? `Engine heartbeat ${lastHeartbeatAge} ago · last GPS ${lastGpsAge} ago`
+        : `Engine heartbeat ${lastHeartbeatAge} ago · last GPS ${lastGpsAge} ago`;
   return (
     <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.rosterCard, selected && styles.rosterCardSelected, pressed && styles.rosterCardPressed]}>
       <View style={styles.rosterAvatar}><Text style={styles.rosterAvatarText}>{employee.initials}</Text></View>

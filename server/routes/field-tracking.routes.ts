@@ -13,7 +13,7 @@ import {
   matchTrace,
   searchPlaces,
 } from '@/server/services/field-geospatial';
-import { sendPushToUsers } from '@/server/services/push-notifications';
+import { sendPushToCompanySupervisors, sendPushToUsers } from '@/server/services/push-notifications';
 import {
   VISIT_GEOFENCE_RADIUS_METRES,
   VISIT_MAX_ACCURACY_METRES,
@@ -33,6 +33,44 @@ type Deps = {
   findActiveAttendance: (userId: string) => Promise<AttendanceRecord | null>;
   insertNotificationInMySql?: (notification: AppNotification) => Promise<void>;
 };
+
+async function notifyCompanySupervisors(
+  pool: Pool,
+  deps: Deps,
+  input: {
+    companyId: string;
+    employeeId: string;
+    employeeName: string;
+    title: string;
+    body: string;
+    kind: string;
+    data?: Record<string, string | number | boolean | null>;
+  },
+): Promise<void> {
+  if (deps.insertNotificationInMySql) {
+    await deps.insertNotificationInMySql({
+      id: randomUUID(),
+      companyId: input.companyId,
+      title: input.title,
+      body: input.body,
+      kind: 'alert',
+      audience: 'admin',
+      createdById: input.employeeId,
+      createdByName: input.employeeName,
+      createdAt: new Date().toISOString(),
+      readByIds: [],
+      audienceUserIds: [],
+    }).catch((error) => console.warn('[field-tracking] supervisor inbox alert failed', error));
+  }
+  await sendPushToCompanySupervisors(pool, {
+    companyId: input.companyId,
+    payload: {
+      title: input.title,
+      body: input.body,
+      data: { screen: 'field-tracking', kind: input.kind, employeeId: input.employeeId, ...(input.data || {}) },
+    },
+  }).catch((error) => console.warn('[field-tracking] supervisor push failed', error));
+}
 
 const pointSchema = z.object({
   pointId: z.string().uuid(),
@@ -66,6 +104,26 @@ const batchSchema = z.object({
       });
     }
   });
+});
+
+const heartbeatSchema = z.object({
+  sessionId: z.string().uuid(),
+  companyId: z.string().trim().min(1).max(64),
+  runtimeState: z.enum([
+    'starting',
+    'tracking',
+    'stationary',
+    'offline_buffering',
+    'gps_degraded',
+    'permission_blocked',
+    'sync_blocked',
+    'stopping',
+  ]),
+  pendingPoints: z.number().int().min(0).max(1_000_000),
+  lastCapturedAt: z.string().datetime().nullable(),
+  accuracy: z.number().min(0).max(10_000).nullable(),
+  lastError: z.string().trim().max(255).nullable(),
+  samplingProfile: z.enum(['navigation', 'moving', 'stationary', 'degraded']),
 });
 
 const coordinateSchema = z.object({
@@ -203,8 +261,8 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
           res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'Check in to the visit workspace before starting directions.' });
           return;
         }
-        if (toSqlDateKey(assignment.scheduled_date) !== toMumbaiDateKey(new Date())) {
-          res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'Directions are available only on the assigned visit date.' });
+        if (toSqlDateKey(assignment.scheduled_date) > toMumbaiDateKey(new Date())) {
+          res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'Directions become available on the assigned visit date.' });
           return;
         }
         const schedulePolicy = evaluateVisitSchedulePolicy(
@@ -219,6 +277,17 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
             directionsAvailableAt: schedulePolicy.directionsAvailableAt,
           });
           return;
+        }
+        if (toSqlDateKey(assignment.scheduled_date) < toMumbaiDateKey(new Date())) {
+          // Starting directions is the employee's explicit, authenticated
+          // activation of overdue work for today's checked-in shift. Preserve
+          // scheduled_date for audit; execution_date drives today's attendance
+          // protection and reporting.
+          await pool.execute(
+            `UPDATE lff_place_assignments SET execution_date=?, updated_at=NOW(3)
+             WHERE id=? AND employee_id=? AND status='pending'`,
+            [toMumbaiDateKey(new Date()), parsed.data.assignmentId, employeeId],
+          );
         }
         destination = {
           placeId: String(assignment.place_id),
@@ -275,7 +344,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       : supervisor ? [requestedScope] : [requestedScope, employeeId];
     const [rows] = await pool.execute<any[]>(
       `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-              latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, arrived_at, started_at, completed_at,
+              latitude, longitude, queue_order, scheduled_date, scheduled_time, execution_date, notes, status, created_at, arrived_at, started_at, completed_at,
               arrival_latitude, arrival_longitude, arrival_accuracy,
               completion_latitude, completion_longitude, completion_accuracy
        FROM lff_place_assignments
@@ -357,6 +426,7 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         placeName: parsed.data.place.name, placeAddress: parsed.data.place.address,
         latitude: parsed.data.place.latitude, longitude: parsed.data.place.longitude,
         queueOrder, scheduledDate: parsed.data.scheduledDate, scheduledTime: parsed.data.scheduledTime,
+        executionDate: null,
         notes: parsed.data.notes || '', status: 'pending',
         createdAt: new Date().toISOString(), arrivedAt: null, startedAt: null, completedAt: null,
         arrivalLocation: null, completionLocation: null,
@@ -498,17 +568,31 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       res.status(409).json({ code: evidence.code, message: evidence.message, distanceMetres: evidence.distanceMetres, radiusMetres: VISIT_GEOFENCE_RADIUS_METRES });
       return;
     }
+    const firstVerifiedArrival = !assignment.arrived_at;
     await pool.execute(
       `UPDATE lff_place_assignments
-       SET arrived_at=COALESCE(arrived_at, NOW(3)), arrival_latitude=?, arrival_longitude=?, arrival_accuracy=?, updated_at=NOW(3)
+       SET arrived_at=COALESCE(arrived_at, NOW(3)),
+           execution_date=CASE WHEN scheduled_date<? THEN ? ELSE execution_date END,
+           arrival_latitude=?, arrival_longitude=?, arrival_accuracy=?, updated_at=NOW(3)
        WHERE id=? AND employee_id=? AND status='pending'`,
-      [evidence.sample.latitude, evidence.sample.longitude, evidence.sample.accuracy, assignmentId, employeeId],
+      [toMumbaiDateKey(new Date()), toMumbaiDateKey(new Date()), evidence.sample.latitude, evidence.sample.longitude, evidence.sample.accuracy, assignmentId, employeeId],
     );
     const [updatedRows] = await pool.execute<any[]>(
       `SELECT * FROM lff_place_assignments WHERE id=? AND employee_id=? LIMIT 1`,
       [assignmentId, employeeId],
     );
     res.json({ assignment: mapAssignment(updatedRows[0]), arrival: { distanceMetres: evidence.distanceMetres, radiusMetres: VISIT_GEOFENCE_RADIUS_METRES } });
+    if (firstVerifiedArrival) {
+      void notifyCompanySupervisors(pool, deps, {
+        companyId: String(assignment.company_id),
+        employeeId,
+        employeeName: active.userName || employeeId,
+        title: 'Field visit arrival verified',
+        body: `${active.userName || employeeId} reached ${String(assignment.place_name || 'the assigned visit')}.`,
+        kind: 'visit_arrived',
+        data: { assignmentId },
+      });
+    }
   });
 
   app.post('/api/field-tracking/assignments/:assignmentId/start', deps.requireAuth, requireStore, async (req, res) => {
@@ -540,9 +624,9 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         res.status(403).json({ code: 'CHECK_IN_WORKSPACE_MISMATCH', message: 'This visit does not belong to your active check-in workspace.' });
         return;
       }
-      if (toSqlDateKey(assignment.scheduled_date) !== toMumbaiDateKey(new Date())) {
+      if (toSqlDateKey(assignment.scheduled_date) > toMumbaiDateKey(new Date())) {
         await connection.rollback();
-        res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'This visit can be started only on its assigned date.' });
+        res.status(409).json({ code: 'VISIT_NOT_SCHEDULED_TODAY', message: 'This visit becomes available on its assigned date.' });
         return;
       }
       const schedulePolicy = evaluateVisitSchedulePolicy(req.auth?.role, toSqlDateKey(assignment.scheduled_date), toSqlTime(assignment.scheduled_time));
@@ -575,14 +659,15 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       const location = evidence.sample;
       await connection.execute(
         `UPDATE lff_place_assignments
-         SET status='in_progress', arrived_at=COALESCE(arrived_at, NOW(3)), started_at=NOW(3), arrival_latitude=?, arrival_longitude=?,
+         SET status='in_progress', arrived_at=COALESCE(arrived_at, NOW(3)), started_at=NOW(3),
+             execution_date=CASE WHEN scheduled_date<? THEN ? ELSE execution_date END, arrival_latitude=?, arrival_longitude=?,
              arrival_accuracy=?, updated_at=NOW(3)
          WHERE id=? AND employee_id=? AND status='pending'`,
-        [location.latitude, location.longitude, location.accuracy ?? null, assignmentId, employeeId],
+        [toMumbaiDateKey(new Date()), toMumbaiDateKey(new Date()), location.latitude, location.longitude, location.accuracy ?? null, assignmentId, employeeId],
       );
       const [updatedRows] = await connection.execute<any[]>(
         `SELECT id, company_id, employee_id, assigned_by, place_id, place_name, place_address,
-                latitude, longitude, queue_order, scheduled_date, scheduled_time, notes, status, created_at, arrived_at, started_at, completed_at,
+                latitude, longitude, queue_order, scheduled_date, scheduled_time, execution_date, notes, status, created_at, arrived_at, started_at, completed_at,
                 arrival_latitude, arrival_longitude, arrival_accuracy,
                 completion_latitude, completion_longitude, completion_accuracy
          FROM lff_place_assignments WHERE id=? LIMIT 1`,
@@ -590,6 +675,15 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       );
       await connection.commit();
       res.json({ assignment: mapAssignment(updatedRows[0]) });
+      void notifyCompanySupervisors(pool, deps, {
+        companyId: String(assignment.company_id),
+        employeeId,
+        employeeName: active.userName || employeeId,
+        title: 'Field visit started',
+        body: `${active.userName || employeeId} started work at ${String(assignment.place_name || 'the assigned visit')}.`,
+        kind: 'visit_started',
+        data: { assignmentId },
+      });
     } catch (error) {
       await connection.rollback().catch(() => undefined);
       console.error('[field-tracking] start visit failed', error);
@@ -653,12 +747,22 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       }
       const [nextRows] = await connection.execute<any[]>(
         `SELECT * FROM lff_place_assignments
-         WHERE employee_id=? AND company_id=? AND scheduled_date=? AND status='pending'
-         ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC LIMIT 1`,
-        [employeeId, active.companyId || await deps.resolveRequestCompanyId(req), toMumbaiDateKey(new Date())],
+         WHERE employee_id=? AND company_id=? AND scheduled_date<=? AND status='pending'
+         ORDER BY CASE WHEN scheduled_date=? THEN 0 ELSE 1 END,
+                  scheduled_date ASC, scheduled_time ASC, queue_order ASC, created_at ASC LIMIT 1`,
+        [employeeId, active.companyId || await deps.resolveRequestCompanyId(req), toMumbaiDateKey(new Date()), toMumbaiDateKey(new Date())],
       );
       await connection.commit();
       res.json({ ok: true, nextAssignment: nextRows[0] ? mapAssignment(nextRows[0]) : null });
+      void notifyCompanySupervisors(pool, deps, {
+        companyId: String(assignment.company_id),
+        employeeId,
+        employeeName: active.userName || employeeId,
+        title: 'Field visit completed',
+        body: `${active.userName || employeeId} completed ${String(assignment.place_name || 'the assigned visit')}.`,
+        kind: 'visit_completed',
+        data: { assignmentId },
+      });
     } catch (error) {
       await connection.rollback().catch(() => undefined);
       console.error('[field-tracking] complete visit failed', error);
@@ -686,13 +790,20 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       await connection.beginTransaction();
       await connection.execute(
         `INSERT INTO lff_tracking_sessions
-          (id, company_id, employee_id, started_at, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'active', NOW(3), NOW(3))
-         ON DUPLICATE KEY UPDATE updated_at=NOW(3)`,
+          (id, company_id, employee_id, started_at, status, last_heartbeat_at,
+           runtime_state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'active', NOW(3), 'tracking', NOW(3), NOW(3))
+         ON DUPLICATE KEY UPDATE
+           last_gap_started_at=IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120, DATE_ADD(last_heartbeat_at, INTERVAL 45 SECOND), last_gap_started_at),
+           last_gap_seconds=IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120, TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3)), last_gap_seconds),
+           gap_count=gap_count+IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120,1,0),
+           last_heartbeat_at=NOW(3), runtime_state='tracking',
+           last_error=NULL, updated_at=NOW(3)`,
         [parsed.data.sessionId, companyId, employeeId, toSqlDate(parsed.data.sessionStartedAt)],
       );
       const [ownerRows] = await connection.execute<any[]>(
-        `SELECT employee_id, company_id FROM lff_tracking_sessions WHERE id=? LIMIT 1 FOR UPDATE`,
+        `SELECT employee_id, company_id, movement_metres_since_alert, last_movement_alert_at
+         FROM lff_tracking_sessions WHERE id=? LIMIT 1 FOR UPDATE`,
         [parsed.data.sessionId],
       );
       const owner = ownerRows[0];
@@ -704,6 +815,19 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
       const committedAt = new Date().toISOString();
       const accepted: { pointId: string }[] = [];
       const rejected: { pointId: string; reason: string }[] = [];
+      const insertedRoutePoints: Array<{ latitude: number; longitude: number; capturedAt: Date }> = [];
+      const [previousRows] = await connection.execute<any[]>(
+        `SELECT latitude, longitude, captured_at
+         FROM lff_tracking_points
+         WHERE session_id=? AND route_eligible=1
+         ORDER BY sequence_no DESC LIMIT 1`,
+        [parsed.data.sessionId],
+      );
+      const previousPoint = previousRows[0] ? {
+        latitude: Number(previousRows[0].latitude),
+        longitude: Number(previousRows[0].longitude),
+        capturedAt: previousRows[0].captured_at,
+      } : null;
       for (const point of parsed.data.points) {
         const [insertResult] = await connection.execute<any>(
           `INSERT IGNORE INTO lff_tracking_points
@@ -720,6 +844,11 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         );
         if (insertResult.affectedRows > 0) {
           accepted.push({ pointId: point.pointId });
+          if (point.routeEligible) insertedRoutePoints.push({
+            latitude: point.latitude,
+            longitude: point.longitude,
+            capturedAt: toSqlDate(point.capturedAt),
+          });
           continue;
         }
         const [existingRows] = await connection.execute<any[]>(
@@ -730,12 +859,49 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         if (String(existingRows[0]?.point_id || '') === point.pointId) accepted.push({ pointId: point.pointId });
         else rejected.push({ pointId: point.pointId, reason: 'sequence_conflict' });
       }
+      const movement = evaluateSignificantMovement({
+        accumulatedMetres: Number(owner.movement_metres_since_alert || 0),
+        lastAlertAt: owner.last_movement_alert_at || null,
+        previousPoint,
+        points: insertedRoutePoints,
+      });
+      const latestPoint = parsed.data.points.at(-1)!;
       await connection.execute(
-        `UPDATE lff_tracking_sessions SET updated_at=NOW(3) WHERE id=?`,
-        [parsed.data.sessionId],
+        `UPDATE lff_tracking_sessions
+         SET last_gap_started_at=IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120, DATE_ADD(last_heartbeat_at, INTERVAL 45 SECOND), last_gap_started_at),
+             last_gap_seconds=IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120, TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3)), last_gap_seconds),
+             gap_count=gap_count+IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120,1,0),
+             last_heartbeat_at=NOW(3), last_location_at=?, last_accuracy=?,
+             runtime_state=IF(?='stationary_noise', 'stationary', 'tracking'),
+             movement_metres_since_alert=?,
+             last_movement_alert_at=IF(?, NOW(3), last_movement_alert_at),
+             last_error=NULL, updated_at=NOW(3)
+         WHERE id=?`,
+        [
+          toSqlDate(latestPoint.capturedAt), latestPoint.accuracy, latestPoint.rejectionReason,
+          movement.accumulatedMetres, movement.shouldAlert ? 1 : 0, parsed.data.sessionId,
+        ],
       );
       await connection.commit();
       res.status(201).json({ accepted, rejected, committedAt });
+      if (movement.shouldAlert) {
+        const [nameRows] = await pool.execute<any[]>(
+          `SELECT COALESCE(NULLIF(user_name,''), ?) AS employee_name
+           FROM lff_attendance WHERE company_id=? AND user_id=?
+           ORDER BY \`timestamp\` DESC LIMIT 1`,
+          [employeeId, companyId, employeeId],
+        ).catch(() => [[]] as any);
+        const employeeName = String(nameRows[0]?.employee_name || employeeId);
+        void notifyCompanySupervisors(pool, deps, {
+          companyId,
+          employeeId,
+          employeeName,
+          title: 'Significant field movement detected',
+          body: `${employeeName} travelled about ${(movement.alertDistanceMetres / 1000).toFixed(1)} km since the previous movement alert.`,
+          kind: 'significant_movement',
+          data: { sessionId: parsed.data.sessionId, distanceMetres: movement.alertDistanceMetres },
+        });
+      }
     } catch (error) {
       await connection.rollback().catch(() => undefined);
       console.error('[field-tracking] batch commit failed', error);
@@ -743,6 +909,48 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     } finally {
       connection.release();
     }
+  });
+
+  app.post('/api/field-tracking/heartbeat', deps.requireAuth, requireStore, async (req, res) => {
+    const parsed = heartbeatSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: 'Invalid tracking heartbeat.', issues: parsed.error.issues });
+      return;
+    }
+    const employeeId = req.auth?.sub || '';
+    const companyId = await resolveAuthorizedCompanyId(req, parsed.data.companyId, deps);
+    if (!employeeId || !companyId) {
+      res.status(403).json({ message: 'Workspace access is required for field tracking.' });
+      return;
+    }
+    const pool = await deps.getMySqlPool();
+    const [result] = await pool.execute<any>(
+      `UPDATE lff_tracking_sessions
+       SET last_gap_started_at=IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120, DATE_ADD(last_heartbeat_at, INTERVAL 45 SECOND), last_gap_started_at),
+           last_gap_seconds=IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120, TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3)), last_gap_seconds),
+           gap_count=gap_count+IF(last_heartbeat_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,last_heartbeat_at,NOW(3))>120,1,0),
+           last_heartbeat_at=NOW(3),
+           last_location_at=COALESCE(?, last_location_at),
+           last_accuracy=COALESCE(?, last_accuracy),
+           runtime_state=?, pending_points=?, last_error=?, sampling_profile=?, updated_at=NOW(3)
+       WHERE id=? AND employee_id=? AND company_id=? AND status='active'`,
+      [
+        parsed.data.lastCapturedAt ? toSqlDate(parsed.data.lastCapturedAt) : null,
+        parsed.data.accuracy,
+        parsed.data.runtimeState,
+        parsed.data.pendingPoints,
+        parsed.data.lastError || null,
+        parsed.data.samplingProfile,
+        parsed.data.sessionId,
+        employeeId,
+        companyId,
+      ],
+    );
+    if (!result.affectedRows) {
+      res.status(404).json({ message: 'Active tracking session was not found.' });
+      return;
+    }
+    res.set('Cache-Control', 'no-store').json({ ok: true, receivedAt: new Date().toISOString() });
   });
 
   app.post('/api/field-tracking/sessions/:sessionId/complete', deps.requireAuth, requireStore, async (req, res) => {
@@ -828,6 +1036,8 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
 
     const sessionSql = wantsAllCompanies
       ? `SELECT s.id AS session_id, s.company_id, s.employee_id,
+                s.last_heartbeat_at, s.last_location_at, s.runtime_state, s.pending_points, s.last_error,
+                s.sampling_profile, s.last_gap_seconds, s.gap_count,
                 p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
                 p.battery, p.captured_at, p.sequence_no
          FROM lff_tracking_sessions s
@@ -845,6 +1055,8 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
          )
          ORDER BY p.captured_at DESC LIMIT 1000`
       : `SELECT s.id AS session_id, s.company_id, s.employee_id,
+                s.last_heartbeat_at, s.last_location_at, s.runtime_state, s.pending_points, s.last_error,
+                s.sampling_profile, s.last_gap_seconds, s.gap_count,
                 p.latitude, p.longitude, p.accuracy, p.speed, p.heading,
                 p.battery, p.captured_at, p.sequence_no
          FROM lff_tracking_sessions s
@@ -887,6 +1099,19 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
         heading: session?.heading ?? null,
         battery: session?.battery ?? null,
         captured_at: session?.captured_at ?? attendance.timestamp,
+        heartbeat_at: session?.last_heartbeat_at ?? null,
+        runtime_state: session?.runtime_state ?? null,
+        pending_points: session?.pending_points ?? 0,
+        runtime_error: session?.last_error ?? null,
+        sampling_profile: session?.sampling_profile ?? null,
+        heartbeat_gap_seconds: session?.last_heartbeat_at
+          ? Math.max(0, Math.floor((Date.now() - new Date(session.last_heartbeat_at).getTime()) / 1000))
+          : null,
+        location_gap_seconds: session?.last_location_at
+          ? Math.max(0, Math.floor((Date.now() - new Date(session.last_location_at).getTime()) / 1000))
+          : null,
+        recovered_gap_seconds: session?.last_gap_seconds ?? null,
+        gap_count: session?.gap_count ?? 0,
         sequence_no: session?.sequence_no ?? 0,
       });
     }
@@ -936,16 +1161,17 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const points = rows.map(mapKpiPoint).filter(isValidKpiPoint);
     const routeDates = points.map((point) => localDateKey(point.capturedAt, offsetMinutes));
     const [visitRows] = await pool.execute<any[]>(
-      `SELECT status, scheduled_date FROM lff_place_assignments
+      `SELECT status, scheduled_date, execution_date FROM lff_place_assignments
        WHERE company_id=?
          AND REPLACE(LOWER(TRIM(employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(?)), 'dolibarr_', '')
          AND status<>'cancelled'
-         AND scheduled_date>=? AND scheduled_date<DATE_ADD(?, INTERVAL 1 MONTH)`,
+         AND COALESCE(execution_date, scheduled_date)>=?
+         AND COALESCE(execution_date, scheduled_date)<DATE_ADD(?, INTERVAL 1 MONTH)`,
       [companyId, employeeId, `${month}-01`, `${month}-01`],
     );
     const visitCounts = new Map<string, { total: number; completed: number }>();
     for (const visit of visitRows) {
-      const date = toSqlDateKey(visit.scheduled_date);
+      const date = toSqlDateKey(visit.execution_date || visit.scheduled_date);
       if (!date) continue;
       const counts = visitCounts.get(date) ?? { total: 0, completed: 0 };
       counts.total += 1;
@@ -1010,12 +1236,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const points = rows.map(mapKpiPoint).filter(isValidKpiPoint);
     const summary = summarizeTrackingDay(points, date, offsetMinutes);
     const [visitRows] = await pool.execute<any[]>(
-      `SELECT status, scheduled_date, scheduled_time, created_at, started_at, completed_at,
+      `SELECT status, scheduled_date, scheduled_time, execution_date, created_at, started_at, completed_at,
               place_name, place_address, latitude, longitude
        FROM lff_place_assignments
        WHERE company_id=?
          AND REPLACE(LOWER(TRIM(employee_id)), 'dolibarr_', '')=REPLACE(LOWER(TRIM(?)), 'dolibarr_', '')
-         AND scheduled_date=? AND status<>'cancelled'
+         AND COALESCE(execution_date, scheduled_date)=? AND status<>'cancelled'
        ORDER BY scheduled_time ASC, queue_order ASC, created_at ASC`,
       [companyId, employeeId, date],
     );
@@ -1159,13 +1385,13 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const [visitRows] = await pool.execute<any[]>(
       `SELECT COUNT(*) AS total_count, SUM(status='completed') AS completed_count
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status<>'cancelled'`,
+       WHERE company_id=? AND employee_id=? AND COALESCE(execution_date, scheduled_date)=? AND status<>'cancelled'`,
       [session.company_id, session.employee_id, selectedDate],
     );
     const [nextVisitRows] = await pool.execute<any[]>(
       `SELECT place_name, place_address, latitude, longitude, status
        FROM lff_place_assignments
-       WHERE company_id=? AND employee_id=? AND scheduled_date=? AND status IN ('pending','in_progress')
+       WHERE company_id=? AND employee_id=? AND COALESCE(execution_date, scheduled_date)=? AND status IN ('pending','in_progress')
        ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END, scheduled_time ASC, queue_order ASC, created_at ASC
        LIMIT 1`,
       [session.company_id, session.employee_id, selectedDate],
@@ -1228,6 +1454,12 @@ export function registerFieldTrackingRoutes(app: Express, deps: Deps) {
     const [rows] = await pool.execute<any[]>(
       `SELECT s.id AS session_id, s.employee_id,
               COALESCE(a.user_name, s.employee_id) AS employee_name,
+              s.last_heartbeat_at AS heartbeat_at, s.last_location_at, s.runtime_state, s.pending_points,
+              s.last_error AS runtime_error, s.sampling_profile, s.last_gap_seconds,
+              s.gap_count,
+              TIMESTAMPDIFF(SECOND, s.last_heartbeat_at, NOW(3)) AS heartbeat_gap_seconds,
+              TIMESTAMPDIFF(SECOND, s.last_location_at, NOW(3)) AS location_gap_seconds,
+              s.last_gap_seconds AS recovered_gap_seconds,
               p.latitude, p.longitude, p.accuracy,
               p.speed, p.heading, p.captured_at, p.sequence_no
        FROM lff_tracking_sessions s
@@ -1318,6 +1550,18 @@ async function ensureTables(pool: Pool): Promise<void> {
           started_at DATETIME(3) NOT NULL,
           ended_at DATETIME(3) NULL,
           status ENUM('active','completed') NOT NULL DEFAULT 'active',
+          last_heartbeat_at DATETIME(3) NULL,
+          last_location_at DATETIME(3) NULL,
+          last_accuracy DECIMAL(8,2) NULL,
+          runtime_state VARCHAR(32) NOT NULL DEFAULT 'starting',
+          pending_points INT UNSIGNED NOT NULL DEFAULT 0,
+          last_error VARCHAR(255) NULL,
+          sampling_profile VARCHAR(24) NOT NULL DEFAULT 'moving',
+          last_gap_started_at DATETIME(3) NULL,
+          last_gap_seconds INT UNSIGNED NULL,
+          gap_count INT UNSIGNED NOT NULL DEFAULT 0,
+          movement_metres_since_alert DECIMAL(12,2) NOT NULL DEFAULT 0,
+          last_movement_alert_at DATETIME(3) NULL,
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
           PRIMARY KEY (id),
@@ -1351,6 +1595,18 @@ async function ensureTables(pool: Pool): Promise<void> {
             REFERENCES lff_tracking_sessions(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
       );
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_heartbeat_at', 'DATETIME(3) NULL AFTER status');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_location_at', 'DATETIME(3) NULL AFTER last_heartbeat_at');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_accuracy', 'DECIMAL(8,2) NULL AFTER last_location_at');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'runtime_state', "VARCHAR(32) NOT NULL DEFAULT 'starting' AFTER last_accuracy");
+      await ensureColumn(pool, 'lff_tracking_sessions', 'pending_points', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER runtime_state');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_error', 'VARCHAR(255) NULL AFTER pending_points');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'sampling_profile', "VARCHAR(24) NOT NULL DEFAULT 'moving' AFTER last_error");
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_gap_started_at', 'DATETIME(3) NULL AFTER sampling_profile');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_gap_seconds', 'INT UNSIGNED NULL AFTER last_gap_started_at');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'gap_count', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER last_gap_seconds');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'movement_metres_since_alert', 'DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER gap_count');
+      await ensureColumn(pool, 'lff_tracking_sessions', 'last_movement_alert_at', 'DATETIME(3) NULL AFTER movement_metres_since_alert');
       await pool.execute(
         `CREATE TABLE IF NOT EXISTS lff_place_assignments (
           id VARCHAR(64) NOT NULL,
@@ -1365,6 +1621,7 @@ async function ensureTables(pool: Pool): Promise<void> {
           queue_order INT UNSIGNED NOT NULL,
           scheduled_date DATE NOT NULL,
           scheduled_time TIME NOT NULL,
+          execution_date DATE NULL,
           notes VARCHAR(500) NULL,
           status ENUM('pending','in_progress','completed','cancelled') NOT NULL DEFAULT 'pending',
           created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -1391,6 +1648,7 @@ async function ensureTables(pool: Pool): Promise<void> {
       );
       await ensureColumn(pool, 'lff_place_assignments', 'scheduled_date', 'DATE NULL AFTER queue_order');
       await ensureColumn(pool, 'lff_place_assignments', 'scheduled_time', 'TIME NULL AFTER scheduled_date');
+      await ensureColumn(pool, 'lff_place_assignments', 'execution_date', 'DATE NULL AFTER scheduled_time');
       await ensureColumn(pool, 'lff_place_assignments', 'arrived_at', 'DATETIME(3) NULL AFTER updated_at');
       await ensureColumn(pool, 'lff_place_assignments', 'started_at', 'DATETIME(3) NULL AFTER updated_at');
       // Legacy assignments predate scheduling. Give them a deterministic local
@@ -1471,13 +1729,14 @@ export async function getFieldVisitAutoCheckoutProtection(
     return { protected: false, visitCount: 0 };
   }
   await ensureTables(pool);
-  const params: string[] = [employeeId, scheduledDate];
+  const params: string[] = [employeeId, scheduledDate, scheduledDate];
   const companyFilter = companyId ? ' AND company_id=?' : '';
   if (companyId) params.push(companyId);
   const [rows] = await pool.execute<any[]>(
     `SELECT COUNT(*) AS visit_count
      FROM lff_place_assignments
-     WHERE employee_id=? AND scheduled_date=? AND status<>'cancelled'${companyFilter}`,
+     WHERE employee_id=? AND (scheduled_date=? OR execution_date=?)
+       AND status IN ('pending','in_progress')${companyFilter}`,
     params,
   );
   const visitCount = Math.max(0, Number(rows[0]?.visit_count || 0));
@@ -1558,6 +1817,7 @@ function mapAssignment(row: Record<string, unknown>) {
     queueOrder: Number(row.queue_order || 0),
     scheduledDate: toSqlDateKey(row.scheduled_date),
     scheduledTime: toSqlTime(row.scheduled_time),
+    executionDate: row.execution_date ? toSqlDateKey(row.execution_date) : null,
     notes: String(row.notes || ''),
     status: String(row.status || 'pending'),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ''),
@@ -1849,6 +2109,38 @@ function haversineMetres(
   const formula = Math.sin(latitudeDelta / 2) ** 2
     + Math.cos(radians(from.latitude)) * Math.cos(radians(to.latitude)) * Math.sin(longitudeDelta / 2) ** 2;
   return 6_371_000 * 2 * Math.asin(Math.min(1, Math.sqrt(formula)));
+}
+
+const SIGNIFICANT_MOVEMENT_METRES = 1_000;
+const MOVEMENT_ALERT_COOLDOWN_MS = 30 * 60_000;
+
+export function evaluateSignificantMovement(input: {
+  accumulatedMetres: number;
+  lastAlertAt: Date | string | null;
+  previousPoint: { latitude: number; longitude: number; capturedAt: Date | string } | null;
+  points: Array<{ latitude: number; longitude: number; capturedAt: Date | string }>;
+  now?: number;
+}): { accumulatedMetres: number; shouldAlert: boolean; alertDistanceMetres: number } {
+  let accumulated = Math.max(0, Number(input.accumulatedMetres) || 0);
+  let previous = input.previousPoint;
+  for (const point of input.points) {
+    if (previous) {
+      const elapsedSeconds = (new Date(point.capturedAt).getTime() - new Date(previous.capturedAt).getTime()) / 1000;
+      const distance = haversineMetres(previous, point);
+      if (elapsedSeconds > 0 && elapsedSeconds <= 3 * 60 && distance >= 5 && distance <= 5_000 && distance / elapsedSeconds <= 70) {
+        accumulated += distance;
+      }
+    }
+    previous = point;
+  }
+  const lastAlertMs = input.lastAlertAt ? new Date(input.lastAlertAt).getTime() : Number.NaN;
+  const cooldownReady = !Number.isFinite(lastAlertMs) || (input.now ?? Date.now()) - lastAlertMs >= MOVEMENT_ALERT_COOLDOWN_MS;
+  const shouldAlert = accumulated >= SIGNIFICANT_MOVEMENT_METRES && cooldownReady;
+  return {
+    accumulatedMetres: shouldAlert ? 0 : accumulated,
+    shouldAlert,
+    alertDistanceMetres: shouldAlert ? Math.round(accumulated) : 0,
+  };
 }
 
 const MAX_OBSERVED_GAP_SECONDS = 3 * 60;

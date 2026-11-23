@@ -2661,6 +2661,34 @@ async function insertNotificationInMySql(notification: AppNotification): Promise
   );
 }
 
+async function insertNotificationIfAbsentInMySql(notification: AppNotification): Promise<boolean> {
+  if (!isMySqlStateEnabled()) {
+    throw new Error("MySQL notifications storage is not configured.");
+  }
+  await ensureNotificationsTableInMySql();
+  const conn = await getMySqlPool();
+  const [result] = await conn.execute<any>(
+    `INSERT IGNORE INTO lff_notifications (
+      id, company_id, title, body, kind, audience, created_by_id, created_by_name,
+      created_at, read_by_user_ids_json, audience_user_ids_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      notification.id,
+      notification.companyId ?? null,
+      notification.title,
+      notification.body,
+      notification.kind,
+      notification.audience,
+      notification.createdById,
+      notification.createdByName,
+      notification.createdAt.slice(0, 19).replace("T", " "),
+      JSON.stringify(notification.readByIds || []),
+      JSON.stringify(notification.audienceUserIds || []),
+    ],
+  );
+  return Number(result.affectedRows || 0) === 1;
+}
+
 async function removeDuplicateAccessRequestNotifications(notification: AppNotification): Promise<void> {
   if (!isMySqlStateEnabled()) return;
   await ensureNotificationsTableInMySql();
@@ -3338,6 +3366,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   registerAttendanceActionRoutes(app, {
+    getMySqlPool,
     getGeofenceById,
     withAttendanceLock, getAttendanceByIdFromMySql, getRequestUser, normalizeCompanyIds, prepareAttendance: ensureAttendanceTable,
     requireAuth,
@@ -3363,6 +3392,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     resolveDolibarrConfigForUser,
     syncAttendanceWithDolibarr,
     insertNotificationInMySql,
+    insertNotificationIfAbsentInMySql,
     hasFieldVisitAutoCheckoutProtection: async (userId: string, scheduledDate: string, companyId?: string | null) => {
       if (!isMySqlStateEnabled()) return { protected: false, visitCount: 0 };
       return getFieldVisitAutoCheckoutProtection(await getMySqlPool(), userId, scheduledDate, companyId);

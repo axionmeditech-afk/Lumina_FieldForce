@@ -13,11 +13,12 @@ import {
   removeQueuedAttendanceAction,
   isAutoCheckoutProtectedError,
 } from "./attendance-api";
-import { ensureAttendanceNotificationPermission, notifyAutoCheckoutPending, notifyAutoCheckoutSynced } from "./attendance-notifications";
+import { ensureAttendanceNotificationPermission, notifyAutoCheckoutPending, notifyAutoCheckoutSynced, notifyCheckInAvailable } from "./attendance-notifications";
 import { getVerifiedLocationEvidence } from "./location-service";
 import { evaluateAutoCheckoutExit, getEffectiveGeofenceRadiusMeters } from "./geofence";
 import type { AttendanceCheckPayload, AttendanceRecord, Geofence } from "./types";
 import { toMumbaiDateKey } from "./ist-time";
+import { FIELD_TRACKING_LOCATION_TASK } from "./field-tracking/task-names";
 
 const GEOFENCE_TASK = "BACKGROUND_ATTENDANCE_GEOFENCE_TASK";
 const LOCATION_WATCHDOG_TASK = "BACKGROUND_ATTENDANCE_LOCATION_WATCHDOG_TASK";
@@ -27,6 +28,7 @@ const AUTO_CHECKOUT_MIN_SAMPLES = 2;
 const AUTO_CHECKOUT_MAX_SAMPLE_AGE_MS = 2 * 60_000;
 const WATCHDOG_VERSION = 2;
 const FIELD_TRACKING_SUSPENDED_KEY = "@attendance_background_watchdog_suspended_for_field_tracking";
+const CHECKIN_READINESS_KEY = "@attendance_checkin_readiness_geofences_v1";
 
 type ExitSample = {
   latitude: number;
@@ -102,6 +104,7 @@ export async function stopAttendanceGeofence() {
 
 async function stopAttendanceGeofenceInternal() {
   await AsyncStorage.removeItem(KEY);
+  await AsyncStorage.removeItem(CHECKIN_READINESS_KEY);
   try {
     if (await available() && await Location.hasStartedGeofencingAsync(GEOFENCE_TASK)) {
       await Location.stopGeofencingAsync(GEOFENCE_TASK);
@@ -150,6 +153,48 @@ async function startAttendanceLocationWatchdog(): Promise<void> {
   });
 }
 
+async function readCheckInReadinessZones(): Promise<Geofence[]> {
+  const raw = await AsyncStorage.getItem(CHECKIN_READINESS_KEY);
+  if (!raw) return [];
+  try {
+    const zones = JSON.parse(raw) as Geofence[];
+    return Array.isArray(zones)
+      ? zones.filter((zone) => zone?.id && zone?.isActive && isFiniteCoordinate(zone.latitude, zone.longitude))
+      : [];
+  } catch {
+    await AsyncStorage.removeItem(CHECKIN_READINESS_KEY);
+    return [];
+  }
+}
+
+/** Monitor assigned offices while checked out and prompt on a real entry transition. */
+export async function startCheckInReadinessGeofences(zones: Geofence[]): Promise<boolean> {
+  if (!await available() || !await ensureBackgroundLocationPermission(false)) return false;
+  const eligible = zones.filter((zone) => zone.isActive && isFiniteCoordinate(zone.latitude, zone.longitude)).slice(0, 20);
+  if (!eligible.length) {
+    await AsyncStorage.removeItem(CHECKIN_READINESS_KEY);
+    if (await Location.hasStartedGeofencingAsync(GEOFENCE_TASK).catch(() => false)) {
+      await Location.stopGeofencingAsync(GEOFENCE_TASK).catch(() => undefined);
+    }
+    return false;
+  }
+  await AsyncStorage.setItem(CHECKIN_READINESS_KEY, JSON.stringify(eligible));
+  await Location.startGeofencingAsync(GEOFENCE_TASK, eligible.map((zone) => ({
+    identifier: `checkin:${zone.id}`,
+    latitude: zone.latitude,
+    longitude: zone.longitude,
+    radius: getEffectiveGeofenceRadiusMeters(zone),
+    notifyOnEnter: true,
+    notifyOnExit: false,
+  })));
+  return true;
+}
+
+async function fieldTrackingOwnsLocationStream(): Promise<boolean> {
+  if (await AsyncStorage.getItem(FIELD_TRACKING_SUSPENDED_KEY) !== "1") return false;
+  return Location.hasStartedLocationUpdatesAsync(FIELD_TRACKING_LOCATION_TASK).catch(() => false);
+}
+
 // The field-route task owns the GPS stream during an active shift. Keep the
 // attendance geofence, but stop the duplicate watchdog to conserve battery.
 export async function suspendAttendanceWatchdogForFieldTracking(): Promise<void> {
@@ -184,11 +229,14 @@ async function startAttendanceGeofenceInternal(active: AttendanceRecord, zones: 
     if (requestPermission) await ensureAttendanceNotificationPermission(true).catch(console.warn);
     const zone = zones.find(item => item.id === active.geofenceId && item.isActive);
     if (!zone || !isFiniteCoordinate(zone.latitude, zone.longitude)) return false;
+    await AsyncStorage.removeItem(CHECKIN_READINESS_KEY);
+    const fieldTrackingOwnsLocation = await fieldTrackingOwnsLocationStream();
     const session = await readSession();
     const geofenceStarted = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK).catch(() => false);
     const watchdogStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_WATCHDOG_TASK).catch(() => false);
     if (session?.active.id === active.id && session.zone.updatedAt === zone.updatedAt &&
-        session.watchdogVersion === WATCHDOG_VERSION && geofenceStarted && watchdogStarted) return true;
+        session.watchdogVersion === WATCHDOG_VERSION && geofenceStarted &&
+        (fieldTrackingOwnsLocation ? !watchdogStarted : watchdogStarted)) return true;
     await AsyncStorage.setItem(KEY, JSON.stringify(
       session?.active.id === active.id ? { ...session, active, zone } : { active, zone }
     ));
@@ -198,7 +246,16 @@ async function startAttendanceGeofenceInternal(active: AttendanceRecord, zones: 
       identifier: `${active.id}:${margin}`, latitude: zone.latitude, longitude: zone.longitude,
       radius: getEffectiveGeofenceRadiusMeters(zone) + margin, notifyOnEnter: true, notifyOnExit: true,
     })));
-    await startAttendanceLocationWatchdog();
+    if (fieldTrackingOwnsLocation) {
+      // The field task feeds the same samples into processAttendanceLocationBatch.
+      // Keeping this second producer alive wastes battery and lets Expo select the
+      // wrong task's notification as the foreground service owner.
+      if (watchdogStarted) {
+        await Location.stopLocationUpdatesAsync(LOCATION_WATCHDOG_TASK).catch(() => undefined);
+      }
+    } else {
+      await startAttendanceLocationWatchdog();
+    }
     // Mark configured only after native registration succeeds; retry a partial start.
     const startedSession = await readSession();
     if (startedSession?.active.id === active.id) await saveSession({ ...startedSession, watchdogVersion: WATCHDOG_VERSION });
@@ -215,11 +272,13 @@ export async function getAttendanceGeofenceRuntimeStatus(): Promise<{
   geofenceStarted: boolean;
   locationWatchdogStarted: boolean;
   fullyEnabled: boolean;
+  locationProducer: "field_tracking" | "attendance_watchdog" | "none";
 }> {
   const runtimeAvailable = await available();
   const session = await readSession();
   let geofenceStarted = false;
   let locationWatchdogStarted = false;
+  const fieldTrackingOwnsLocation = await fieldTrackingOwnsLocationStream();
   if (runtimeAvailable) {
     geofenceStarted = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK).catch(() => false);
     locationWatchdogStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_WATCHDOG_TASK).catch(() => false);
@@ -229,7 +288,10 @@ export async function getAttendanceGeofenceRuntimeStatus(): Promise<{
     hasActiveSession: Boolean(session),
     geofenceStarted,
     locationWatchdogStarted,
-    fullyEnabled: Boolean(session && geofenceStarted && locationWatchdogStarted),
+    fullyEnabled: Boolean(session && geofenceStarted && (fieldTrackingOwnsLocation || locationWatchdogStarted)),
+    locationProducer: fieldTrackingOwnsLocation
+      ? "field_tracking"
+      : locationWatchdogStarted ? "attendance_watchdog" : "none",
   };
 }
 
@@ -398,6 +460,7 @@ async function verifyExit(locations?: LocationObject[]) {
   await removeQueuedAttendanceAction("checkout", requestId);
   await notifyAutoCheckoutSynced({ detectedAt: payload.capturedAtClient }).catch(() => undefined);
   await stopAttendanceGeofenceInternal();
+  await startCheckInReadinessGeofences([session.zone]).catch(() => false);
   await import("./field-tracking/attendance-lifecycle")
     .then(({ stopFieldTrackingForCheckOut }) => stopFieldTrackingForCheckOut(session.active.userId))
     .catch((error) => console.warn("Unable to stop field tracking after auto-checkout", error));
@@ -445,6 +508,12 @@ try {
     if (error || !data) return;
     const event = data as { eventType: Location.GeofencingEventType; region: Location.LocationRegion };
     const session = await readSession();
+    if (!session && event.region.identifier?.startsWith("checkin:") && event.eventType === Location.GeofencingEventType.Enter) {
+      const zoneId = event.region.identifier.slice("checkin:".length);
+      const zone = (await readCheckInReadinessZones()).find((item) => item.id === zoneId);
+      if (zone) await notifyCheckInAvailable(zone.id, zone.name || zone.locationLabel || "your office").catch(() => undefined);
+      return;
+    }
     if (!session || !event.region.identifier?.startsWith(`${session.active.id}:`)) return;
     if (event.eventType === Location.GeofencingEventType.Exit) {
       await markPendingExit();
@@ -470,8 +539,15 @@ export async function reconcileAttendanceGeofence() {
   if (!await available() || !await getApiToken()) return;
   await retryPendingAttendanceExit();
   const { active } = await getAttendanceStatus();
-  if (!active) { await stopAttendanceGeofence(); return; }
-  if (await AsyncStorage.getItem(FIELD_TRACKING_SUSPENDED_KEY) === "1") return;
+  if (!active) {
+    const user = await getCurrentUser();
+    if (!user) { await stopAttendanceGeofence(); return; }
+    await startCheckInReadinessGeofences(await getUserGeofences(user.id));
+    return;
+  }
+  // startAttendanceGeofence knows whether the field task currently owns the
+  // location stream. Always reconcile the persisted geofence session, but do
+  // not start a second watchdog while field tracking is active.
   await startAttendanceGeofence(active, await getUserGeofences(active.userId));
   await retryPendingAttendanceExit();
 }

@@ -11,7 +11,7 @@ export type VisitSchedulePolicy = {
   directionsAvailableAt: string | null;
   directionsAllowed: boolean;
   remoteCheckInAllowed: boolean;
-  reason: 'available' | 'not_today' | 'not_open' | 'remote_window_expired' | 'invalid_schedule';
+  reason: 'available' | 'overdue' | 'not_today' | 'not_open' | 'remote_window_expired' | 'invalid_schedule';
 };
 
 /**
@@ -20,8 +20,10 @@ export type VisitSchedulePolicy = {
  *
  * Fixed-location employees get a bounded travel window before the visit. If
  * they miss it, they must check in at their office geofence, but directions
- * remain available so the assigned work can still be completed. Salespeople
- * retain all-day remote eligibility for same-day assigned work.
+ * remain available so the assigned work can still be completed. Overdue work
+ * is also executable after a current check-in, while only a same-day visit can
+ * grant remote check-in. Salespeople retain all-day remote eligibility for
+ * same-day assigned work.
  */
 export function evaluateVisitSchedulePolicy(
   role: string | null | undefined,
@@ -49,7 +51,13 @@ export function evaluateVisitSchedulePolicy(
   const scheduledAt = new Date(scheduledAtMs).toISOString();
   const opensAtMs = scheduledAtMs - Math.max(15, Math.min(480, leadMinutes)) * 60_000;
   const directionsAvailableAt = new Date(opensAtMs).toISOString();
-  if (scheduledDate !== today) {
+  // A pending visit from an earlier day remains executable after a fresh
+  // attendance check-in. It never grants remote check-in or protects today's
+  // attendance from auto-checkout; those server queries remain date-exact.
+  if (scheduledDate < today) {
+    return { scheduledAt, directionsAvailableAt, directionsAllowed: true, remoteCheckInAllowed: false, reason: 'overdue' };
+  }
+  if (scheduledDate > today) {
     return { scheduledAt, directionsAvailableAt, directionsAllowed: false, remoteCheckInAllowed: false, reason: 'not_today' };
   }
   if (role === 'salesperson') {

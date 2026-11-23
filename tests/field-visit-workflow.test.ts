@@ -88,3 +88,59 @@ test('visit assignment identities resolve legacy app UUIDs to the authenticated 
   } as any;
   assert.equal(await resolveCanonicalEmployeeId(oldInstallPool, 'dolibarr_51'), '51');
 });
+
+test('tracking heartbeat updates liveness independently from route geometry', async () => {
+  const updates: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    execute: async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('UPDATE lff_tracking_sessions') && sql.includes('last_heartbeat_at=NOW(3)')) {
+        updates.push({ sql, params });
+        return [{ affectedRows: 1 }, []];
+      }
+      return [[], []];
+    },
+  } as any;
+  const app = express();
+  app.use(express.json());
+  registerFieldTrackingRoutes(app, {
+    requireAuth: (req: any, _res: any, next: any) => {
+      req.auth = { sub: 'employee-1', role: 'employee' };
+      next();
+    },
+    getMySqlPool: async () => pool,
+    isMySqlStateEnabled: () => true,
+    resolveRequestCompanyId: async () => 'company-1',
+    getRequestUser: () => ({ companyId: 'company-1', companyIds: ['company-1'] }),
+    findActiveAttendance: async () => null,
+  });
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/field-tracking/heartbeat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: '6b681a22-c011-4fe5-8203-708c563c0a9c',
+        companyId: 'company-1',
+        runtimeState: 'stationary',
+        pendingPoints: 3,
+        lastCapturedAt: '2026-11-23T06:00:00.000Z',
+        accuracy: 14,
+        lastError: null,
+        samplingProfile: 'stationary',
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).ok, true);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0]!.params[2], 'stationary');
+    assert.equal(updates[0]!.params[3], 3);
+    assert.equal(updates[0]!.params[5], 'stationary');
+    assert.match(updates[0]!.sql, /gap_count=gap_count\+IF/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

@@ -4,6 +4,7 @@ import type { Express } from "express";
 import type { AttendanceRecord } from "@/lib/types";
 import { toMumbaiDateKey } from "@/lib/ist-time";
 import { withAttendanceLock } from "../services/attendance-lock";
+import { sendPushToCompanySupervisors } from "../services/push-notifications";
 
 export type AttendanceActionRouteDeps = Record<string, any>;
 const AUTO_CHECKOUT_MAX_EVIDENCE_AGE_MS = 24 * 60 * 60 * 1000;
@@ -150,6 +151,16 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
                 protectedDate: exitDate,
                 visitCount: protection.visitCount,
               });
+              void notifySupervisorsOfOfficeExit(deps, {
+                idSeed: `protected-office-exit:${active.id}`,
+                companyId: active.companyId || companyId || "",
+                employeeId: payload.userId,
+                employeeName: payload.userName,
+                title: "Employee left office for field work",
+                body: `${payload.userName} left the office geofence with ${protection.visitCount} field visit${protection.visitCount === 1 ? "" : "s"} assigned. Attendance remains active.`,
+                kind: "office_exit_field_work",
+                activeAttendanceId: active.id,
+              });
               return;
             }
           }
@@ -193,7 +204,7 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
           else await deps.storage.createAttendance(record);
           res.status(201).json(record);
           try { deps.broadcastAttendanceUpdate(record); } catch { /* already committed */ }
-          if (automatic && deps.insertNotificationInMySql) {
+          if (automatic) {
             const activeZone = zones.find((item: any) => item.id === active?.geofenceId) ||
               (active?.geofenceId && deps.getGeofenceById ? await deps.getGeofenceById(active.geofenceId) : null);
             const exitDecision = activeZone
@@ -201,20 +212,17 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
               : null;
             if (exitDecision && exitDecision.outside) {
               const distance = Math.round(exitDecision.distanceMeters);
-              const notifId = deps.randomUUID ? deps.randomUUID() : randomUUID();
-              await deps.insertNotificationInMySql({
-                id: notifId,
-                companyId: active?.companyId || companyId || undefined,
-                title: "Auto-Checkout Alert",
-                body: `${record.userName} was auto-checked out, detected ${distance}m away from the office.`,
-                kind: "alert",
-                audience: "admin",
-                createdById: record.userId,
-                createdByName: record.userName,
-                createdAt: now,
-                readByIds: [],
-                audienceUserIds: []
-              }).catch((e: any) => console.error("Failed to insert auto-checkout notif", e));
+              void notifySupervisorsOfOfficeExit(deps, {
+                idSeed: `automatic-office-exit:${record.id}`,
+                companyId: active?.companyId || companyId || "",
+                employeeId: record.userId,
+                employeeName: record.userName,
+                title: "Automatic checkout completed",
+                body: `${record.userName} was automatically checked out after a verified office exit (${distance} m away).`,
+                kind: "automatic_checkout",
+                activeAttendanceId: active?.id || "",
+                distanceMetres: distance,
+              });
             }
           }
           void Promise.resolve().then(async () => {
@@ -227,6 +235,69 @@ export function registerAttendanceActionRoutes(app: Express, deps: AttendanceAct
         if (!res.headersSent) res.status(503).json({ message: "Attendance could not be confirmed. Please retry the same action when the server is available." });
       }
     });
+  }
+}
+
+async function notifySupervisorsOfOfficeExit(
+  deps: AttendanceActionRouteDeps,
+  event: {
+    idSeed: string;
+    companyId: string;
+    employeeId: string;
+    employeeName: string;
+    title: string;
+    body: string;
+    kind: string;
+    activeAttendanceId: string;
+    distanceMetres?: number;
+  },
+): Promise<void> {
+  if (!event.companyId || !deps.insertNotificationInMySql) return;
+  const notificationId = createHash("sha256").update(event.idSeed).digest("hex");
+  try {
+    // The deterministic ID is the cross-device/server retry dedupe boundary.
+    // A duplicate event therefore cannot generate another supervisor push.
+    const notification = {
+      id: notificationId,
+      companyId: event.companyId,
+      title: event.title,
+      body: event.body,
+      kind: "alert",
+      audience: "admin",
+      createdById: event.employeeId,
+      createdByName: event.employeeName,
+      createdAt: new Date().toISOString(),
+      readByIds: [],
+      audienceUserIds: [],
+    };
+    const inserted = deps.insertNotificationIfAbsentInMySql
+      ? await deps.insertNotificationIfAbsentInMySql(notification)
+      : (await deps.insertNotificationInMySql(notification), true);
+    if (!inserted) return;
+  } catch (error) {
+    // Duplicate notification IDs are expected when Android retries the same
+    // geofence transition; suppress both the duplicate inbox item and push.
+    console.warn("[attendance] supervisor office-exit notification skipped", error instanceof Error ? error.message : error);
+    return;
+  }
+  if (!deps.getMySqlPool) return;
+  try {
+    await sendPushToCompanySupervisors(await deps.getMySqlPool(), {
+      companyId: event.companyId,
+      payload: {
+        title: event.title,
+        body: event.body,
+        data: {
+          screen: "field-tracking",
+          kind: event.kind,
+          employeeId: event.employeeId,
+          activeAttendanceId: event.activeAttendanceId,
+          ...(Number.isFinite(event.distanceMetres) ? { distanceMetres: event.distanceMetres } : {}),
+        },
+      },
+    });
+  } catch (error) {
+    console.warn("[attendance] supervisor office-exit push failed", error instanceof Error ? error.message : error);
   }
 }
 

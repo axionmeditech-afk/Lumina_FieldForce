@@ -10,6 +10,7 @@ import { getApiToken, getOrCreateDeviceId } from "@/lib/storage";
 
 const EMPLOYEE_ALERTS_CHANNEL = "employee_alerts";
 const PUSH_REGISTRATION_KEY = "@lumina_employee_push_registration_v1";
+const LOCAL_EVENT_THROTTLE_PREFIX = "@lumina_local_notification_v1:";
 
 type StoredRegistration = {
   token: string;
@@ -62,6 +63,81 @@ export async function ensureEmployeeNotificationChannel(): Promise<void> {
     lightColor: "#2563EB",
     lockscreenVisibility: notifications.AndroidNotificationVisibility.PUBLIC,
     sound: "default",
+  });
+}
+
+type LocalEmployeeEvent = {
+  key: string;
+  title: string;
+  body: string;
+  screen: "field-visits" | "field-tracking" | "attendance" | "notifications";
+  kind: string;
+  assignmentId?: string;
+  minimumIntervalMs?: number;
+  sound?: boolean;
+};
+
+async function notifyLocalEmployeeEvent(event: LocalEmployeeEvent): Promise<void> {
+  const notifications = await getNotificationsModule();
+  if (!notifications || !(await ensureAttendanceNotificationPermission(false))) return;
+  await ensureEmployeeNotificationChannel();
+  const throttleKey = `${LOCAL_EVENT_THROTTLE_PREFIX}${event.key}`;
+  const previous = Number(await AsyncStorage.getItem(throttleKey)) || 0;
+  const now = Date.now();
+  if (now - previous < (event.minimumIntervalMs ?? 60_000)) return;
+  await AsyncStorage.setItem(throttleKey, String(now));
+  await notifications.scheduleNotificationAsync({
+    identifier: `lumina_${event.key}`.slice(0, 100),
+    content: {
+      title: event.title,
+      body: event.body,
+      sound: event.sound === false ? undefined : "default",
+      priority: notifications.AndroidNotificationPriority.HIGH,
+      data: {
+        screen: event.screen,
+        kind: event.kind,
+        ...(event.assignmentId ? { assignmentId: event.assignmentId } : {}),
+      },
+    },
+    trigger: Platform.OS === "android" ? { channelId: EMPLOYEE_ALERTS_CHANNEL } : null,
+  });
+}
+
+export function notifyVisitNavigationStarted(assignmentId: string, placeName: string): Promise<void> {
+  return notifyLocalEmployeeEvent({
+    key: `navigation_started_${assignmentId}`,
+    title: "Directions active",
+    body: `Navigation to ${placeName} is running. Lumina will alert you after verified arrival.`,
+    screen: "field-visits",
+    kind: "navigation_started",
+    assignmentId,
+    minimumIntervalMs: 5 * 60_000,
+    sound: false,
+  });
+}
+
+export function notifyVisitArrived(assignmentId: string, placeName: string): Promise<void> {
+  return notifyLocalEmployeeEvent({
+    key: `visit_arrived_${assignmentId}`,
+    title: `Reached ${placeName}`,
+    body: "Your location was verified inside the visit geofence. Start the visit when ready.",
+    screen: "field-visits",
+    kind: "visit_arrived",
+    assignmentId,
+    minimumIntervalMs: 24 * 60 * 60_000,
+  });
+}
+
+export function notifyRouteUpdated(assignmentId: string, placeName: string): Promise<void> {
+  return notifyLocalEmployeeEvent({
+    key: `route_updated_${assignmentId}`,
+    title: "Route updated",
+    body: `A new route to ${placeName} is ready after the detected deviation.`,
+    screen: "field-visits",
+    kind: "route_updated",
+    assignmentId,
+    minimumIntervalMs: 10 * 60_000,
+    sound: false,
   });
 }
 
@@ -120,13 +196,13 @@ export async function unregisterEmployeePushNotifications(): Promise<void> {
 }
 
 export async function installEmployeeNotificationTapHandler(
-  navigate: (screen: "field-visits" | "attendance" | "notifications") => void,
+  navigate: (screen: "field-visits" | "field-tracking" | "attendance" | "notifications") => void,
 ): Promise<() => void> {
   const notifications = await getNotificationsModule();
   if (!notifications) return () => undefined;
   const open = (data: Record<string, unknown>) => {
     const screen = String(data.screen || "notifications");
-    if (screen === "field-visits" || screen === "attendance" || screen === "notifications") {
+    if (screen === "field-visits" || screen === "field-tracking" || screen === "attendance" || screen === "notifications") {
       navigate(screen);
     }
   };

@@ -12,6 +12,7 @@ import { useAppTheme } from "@/contexts/ThemeContext";
 import { getAttendanceStatus, getUserGeofences } from "@/lib/attendance-api";
 import { getAttendanceGeofenceRuntimeStatus, startAttendanceGeofence } from "@/lib/attendance-background";
 import { getLocationPermissionSnapshot, requestLocationPermissionBundle } from "@/lib/location-service";
+import { TrackingHealthSetup } from "@/components/TrackingHealthSetup";
 
 function formatRole(role?: string | null): string {
   if (!role) return "Employee";
@@ -399,6 +400,8 @@ export default function Account() {
           </Pressable>
         </View>
         )}
+
+        {!isAdmin ? <TrackingHealthSetup /> : null}
 
         {isAdmin ? (
           <>

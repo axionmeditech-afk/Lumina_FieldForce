@@ -10,6 +10,7 @@ import { getFieldHealth } from '../api';
 import { getApiToken } from '@/lib/storage';
 import { getApiBaseUrlCandidates } from '@/lib/attendance-api';
 import { toMumbaiDateKey } from '@/lib/ist-time';
+import { deriveLiveTrackingStatus } from '../live-health';
 
 const timezoneOffsetMinutes = 5 * 60 + 30;
 
@@ -46,7 +47,10 @@ function mapEmployee(row: any): LiveEmployee {
   const name = String(row.employee_name || row.employee_id || 'Employee');
   const words = name.trim().split(/\s+/).filter(Boolean);
   const capturedAt = row.captured_at ? new Date(row.captured_at).toISOString() : new Date(0).toISOString();
-  const ageMs = Date.now() - new Date(capturedAt).getTime();
+  const heartbeatAt = row.heartbeat_at ? new Date(row.heartbeat_at).toISOString() : null;
+  // A stationary employee may correctly produce no route geometry. Liveness is
+  // therefore driven by the explicit engine heartbeat, with the last GPS point
+  // retained only as a compatibility fallback for pre-heartbeat deployments.
   const sessionStatus: LiveEmployee['sessionStatus'] = row.session_status === 'active'
     ? 'active'
     : row.session_status === 'waiting' ? 'waiting' : 'completed';
@@ -54,11 +58,12 @@ function mapEmployee(row: any): LiveEmployee {
     || Number(row.attendance_active) === 1
     || String(row.attendance_type || '').toLowerCase() === 'checkin';
   const trackingActive = sessionStatus === 'active' && row.tracking_active !== 0 && String(row.tracking_active) !== '0';
-  const status: LiveEmployee['status'] = attendanceActive && !trackingActive
-    ? 'waiting'
-    : !attendanceActive || !trackingActive ? 'offline'
-    : ageMs <= 2 * 60_000 ? 'live'
-      : ageMs <= 10 * 60_000 ? 'delayed' : 'stale';
+  const status = deriveLiveTrackingStatus({
+    attendanceActive,
+    trackingActive,
+    heartbeatAt,
+    capturedAt,
+  });
   return {
     employeeId: String(row.employee_id),
     companyId: String(row.company_id || ''),
@@ -74,6 +79,19 @@ function mapEmployee(row: any): LiveEmployee {
     heading: row.heading == null ? null : Number(row.heading),
     battery: row.battery == null ? null : Number(row.battery),
     capturedAt,
+    heartbeatAt,
+    runtimeState: row.runtime_state || null,
+    pendingPoints: Math.max(0, Number(row.pending_points || 0)),
+    runtimeError: row.runtime_error || null,
+    samplingProfile: row.sampling_profile || null,
+    heartbeatGapSeconds: row.heartbeat_gap_seconds == null
+      ? (heartbeatAt ? Math.max(0, Math.floor((Date.now() - Date.parse(heartbeatAt)) / 1000)) : null)
+      : Math.max(0, Number(row.heartbeat_gap_seconds)),
+    locationGapSeconds: row.location_gap_seconds == null
+      ? (capturedAt ? Math.max(0, Math.floor((Date.now() - Date.parse(capturedAt)) / 1000)) : null)
+      : Math.max(0, Number(row.location_gap_seconds)),
+    recoveredGapSeconds: row.recovered_gap_seconds == null ? null : Math.max(0, Number(row.recovered_gap_seconds)),
+    gapCount: Math.max(0, Number(row.gap_count || 0)),
     status,
     sessionStatus,
     attendanceActive,

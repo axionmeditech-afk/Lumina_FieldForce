@@ -49,7 +49,7 @@ import {
   notifyAutoCheckoutSynced,
 } from "@/lib/attendance-notifications";
 import { toMumbaiDateKey, formatMumbaiDateKey, getMumbaiDateKeyByOffset } from "@/lib/ist-time";
-import { startAttendanceGeofence, stopAttendanceGeofence } from "@/lib/attendance-background";
+import { reconcileAttendanceGeofence, startAttendanceGeofence, stopAttendanceGeofence } from "@/lib/attendance-background";
 import { startFieldTrackingForCheckIn, stopFieldTrackingForCheckOut } from "@/lib/field-tracking/attendance-lifecycle";
 import { getFieldCheckInEligibility, type FieldCheckInEligibility } from "@/lib/field-tracking/api";
 import { getClientSecurityStatus } from "@/lib/security-client";
@@ -1339,6 +1339,7 @@ function AttendanceScreenContent() {
         await stopFieldTrackingForCheckOut(active.userId).catch((error) =>
           console.warn("Unable to stop field tracking after foreground auto-checkout", error),
         );
+        void reconcileAttendanceGeofence().catch(console.warn);
         void loadBaseData();
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } catch (error) {
@@ -1965,6 +1966,7 @@ function AttendanceScreenContent() {
           await stopFieldTrackingForCheckOut(user.id).catch((error) =>
             console.warn("Unable to stop field tracking after checkout", error),
           );
+          void reconcileAttendanceGeofence().catch(console.warn);
         } else {
           activeAttendanceRef.current = record;
           clearForegroundAutoCheckout("Auto-checkout armed while you are checked in.");

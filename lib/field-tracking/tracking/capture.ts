@@ -2,7 +2,8 @@ import * as Crypto from 'expo-crypto';
 import type * as Location from 'expo-location';
 import type { RoutePoint } from '../types';
 import { classifyLocation } from './filter';
-import { getActiveSession, getLastEligiblePoint, getLastPoint, insertPointWithNextSequence } from './database';
+import { getActiveSession, getLastEligiblePoint, getLastPoint, insertPointWithNextSequence, setState } from './database';
+import { deriveAdaptiveSamplingDecision } from './adaptive-sampling';
 
 let captureChain: Promise<RoutePoint | null> = Promise.resolve(null);
 const listeners = new Set<() => void>();
@@ -31,10 +32,10 @@ async function persistInternal(location: Location.LocationObject): Promise<Route
   const previous = await getLastEligiblePoint(session.id);
   const classification = classifyLocation(location, previous);
   const timestamp = Number.isFinite(location.timestamp) ? location.timestamp : Date.now();
-  if (classification.rejectionReason === 'stationary_noise') {
-    const last = await getLastPoint(session.id);
-    if (last?.rejectionReason === 'stationary_noise' && timestamp - Date.parse(last.capturedAt) < 30_000) return null;
-  }
+  const last = await getLastPoint(session.id);
+  const sampling = deriveAdaptiveSamplingDecision(location, last);
+  await setState('tracking_sampling_profile', sampling.profile);
+  if (!sampling.retain) return null;
   const point = await insertPointWithNextSequence({
     pointId: Crypto.randomUUID(),
     sessionId: session.id,

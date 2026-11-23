@@ -28,6 +28,18 @@ export type TrackingSession = {
 
 export type TrackerState = 'stopped' | 'starting' | 'tracking' | 'offline' | 'degraded' | 'stopping';
 
+export type TrackingRuntimeState =
+  | 'starting'
+  | 'tracking'
+  | 'stationary'
+  | 'offline_buffering'
+  | 'gps_degraded'
+  | 'permission_blocked'
+  | 'sync_blocked'
+  | 'stopping';
+
+export type TrackingSamplingProfile = 'navigation' | 'moving' | 'stationary' | 'degraded';
+
 export type TrackerSnapshot = {
   state: TrackerState;
   session: TrackingSession | null;
@@ -101,6 +113,15 @@ export type LiveEmployee = {
   heading: number | null;
   battery: number | null;
   capturedAt: string;
+  heartbeatAt: string | null;
+  runtimeState: TrackingRuntimeState | null;
+  pendingPoints: number;
+  runtimeError: string | null;
+  samplingProfile: TrackingSamplingProfile | null;
+  heartbeatGapSeconds: number | null;
+  locationGapSeconds: number | null;
+  recoveredGapSeconds: number | null;
+  gapCount: number;
   status: 'live' | 'delayed' | 'stale' | 'waiting' | 'offline';
   sessionStatus: 'active' | 'waiting' | 'completed';
   attendanceActive: boolean;

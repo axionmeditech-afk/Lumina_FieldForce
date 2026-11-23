@@ -73,6 +73,7 @@ function AppShell() {
     let dispose: () => void = () => {};
     void installEmployeeNotificationTapHandler((screen) => {
       if (screen === "field-visits") router.push("/(tabs)/field-visits" as never);
+      else if (screen === "field-tracking") router.push("/(tabs)/field-tracking" as never);
       else if (screen === "attendance") router.push("/(tabs)/attendance" as never);
       else router.push("/(tabs)" as never);
     }).then((cleanup) => {

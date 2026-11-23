@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { summarizeTrackingDay, validateVisitEvidence } from '../server/routes/field-tracking.routes';
+import { evaluateSignificantMovement, summarizeTrackingDay, validateVisitEvidence } from '../server/routes/field-tracking.routes';
 import { evaluateVisitSchedulePolicy } from '../lib/field-tracking/visit-policy';
 import { appendArrivalEvidence } from '../lib/field-tracking/visit-evidence-core';
 
@@ -103,6 +103,29 @@ test('stationary evidence produces a verified halt without adding GPS jitter dis
   assert.equal(summary.distanceMetres, 0);
 });
 
+test('supervisor movement alerts require one kilometre and enforce a thirty-minute cooldown', () => {
+  const previousPoint = { latitude: 23.02, longitude: 72.56, capturedAt: '2026-11-23T04:00:00.000Z' };
+  const substantial = evaluateSignificantMovement({
+    accumulatedMetres: 800,
+    lastAlertAt: null,
+    previousPoint,
+    points: [{ latitude: 23.022, longitude: 72.562, capturedAt: '2026-11-23T04:02:00.000Z' }],
+    now: Date.parse('2026-11-23T04:02:00.000Z'),
+  });
+  assert.equal(substantial.shouldAlert, true);
+  assert.equal(substantial.accumulatedMetres, 0);
+
+  const throttled = evaluateSignificantMovement({
+    accumulatedMetres: 1_100,
+    lastAlertAt: '2026-11-23T04:00:00.000Z',
+    previousPoint,
+    points: [],
+    now: Date.parse('2026-11-23T04:10:00.000Z'),
+  });
+  assert.equal(throttled.shouldAlert, false);
+  assert.equal(throttled.accumulatedMetres, 1_100);
+});
+
 test('fixed employees receive only the bounded pre-visit remote check-in window', () => {
   const beforeWindow = Date.parse('2026-11-19T13:59:00+05:30');
   const insideWindow = Date.parse('2026-11-19T14:30:00+05:30');
@@ -123,6 +146,19 @@ test('salespeople retain all-day remote eligibility for a same-day assigned visi
   const policy = evaluateVisitSchedulePolicy('salesperson', '2026-11-19', '16:00', morning);
   assert.equal(policy.remoteCheckInAllowed, true);
   assert.equal(policy.directionsAllowed, true);
+});
+
+test('overdue visits remain executable but never bypass current-day attendance', () => {
+  const now = Date.parse('2026-11-20T10:00:00+05:30');
+  const overdue = evaluateVisitSchedulePolicy('salesperson', '2026-11-19', '16:00', now);
+  assert.equal(overdue.reason, 'overdue');
+  assert.equal(overdue.directionsAllowed, true);
+  assert.equal(overdue.remoteCheckInAllowed, false);
+
+  const future = evaluateVisitSchedulePolicy('salesperson', '2026-11-21', '16:00', now);
+  assert.equal(future.reason, 'not_today');
+  assert.equal(future.directionsAllowed, false);
+  assert.equal(future.remoteCheckInAllowed, false);
 });
 
 test('visit arrival and completion require stable fresh evidence fully inside the destination geofence', () => {

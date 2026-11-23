@@ -24,7 +24,7 @@
     "lint:fix": "expo lint --fix",
     "typecheck": "tsc --noEmit",
     "test:attendance": "tsx --test tests/attendance.test.ts",
-    "test:field-tracking": "tsx --test tests/field-tracking-daily.test.ts tests/field-visit-workflow.test.ts tests/field-geospatial.test.ts tests/navigation-geometry.test.ts"
+    "test:field-tracking": "tsx --test tests/field-tracking-daily.test.ts tests/field-tracking-live-health.test.ts tests/field-tracking-adaptive-sampling.test.ts tests/field-visit-workflow.test.ts tests/field-geospatial.test.ts tests/navigation-geometry.test.ts"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
